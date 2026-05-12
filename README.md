@@ -8,6 +8,7 @@ This version is intentionally safe:
 
 - Runs in **Robinhood Manual Mode / Paper Mode** by default.
 - Does **not** place Robinhood trades.
+- Can import a local Robinhood portfolio PDF into a local snapshot file.
 - Uses a local portfolio snapshot file when available.
 - Blocks orders that fail basic risk rules.
 - Requires typing `CONFIRM` before a paper order can be submitted.
@@ -21,13 +22,40 @@ Live broker trading is intentionally out of scope for Robinhood because Robinhoo
 1. Open this project in PyCharm.
 2. Make sure your interpreter is the project virtual environment.
 3. Pull the latest code from GitHub.
-4. Run:
+4. Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+5. Run:
 
 ```bash
 python -m app.main
 ```
 
-No third-party packages are required for v0.2.
+## Import Robinhood PDF
+
+The app can import a local Robinhood PDF snapshot, such as a Google Drive for Desktop path:
+
+```text
+I:\My Drive\Updated Port.pdf
+```
+
+Use the app button:
+
+```text
+Import Robinhood PDF
+```
+
+Then choose the PDF file from the file picker. The app will:
+
+1. Read the PDF locally.
+2. Extract cash and stock positions when text is available.
+3. Write `data/portfolio_snapshot.csv`.
+4. Reload the dashboard.
+
+This uses local PDF text extraction through `pypdf`. If Robinhood exports an image-only PDF, the import may fail; use the CSV snapshot fallback in that case.
 
 ## Portfolio snapshot workflow
 
