@@ -1,2 +1,1 @@
-# v0.1 uses only Python standard library.
-# Future broker integrations may add dependencies here.
+pypdf>=5.0.0
