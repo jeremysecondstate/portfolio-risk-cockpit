@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 from app.brokers.paper import PaperBroker
 from app.core.order_checklist import build_manual_order_checklist
 from app.core.order_models import OrderRequest, OrderSide, OrderType, TimeInForce
 from app.core.position_sizing import calculate_position_size
+from app.core.robinhood_pdf_import import import_robinhood_pdf_to_snapshot
 
 
 class PortfolioRiskCockpitApp(tk.Tk):
@@ -88,7 +89,8 @@ class PortfolioRiskCockpitApp(tk.Tk):
 
         snapshot_buttons = ttk.Frame(summary)
         snapshot_buttons.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(10, 0))
-        ttk.Button(snapshot_buttons, text="Reload Snapshot", command=self.reload_snapshot).pack(side=tk.LEFT)
+        ttk.Button(snapshot_buttons, text="Import Robinhood PDF", command=self.import_robinhood_pdf).pack(side=tk.LEFT)
+        ttk.Button(snapshot_buttons, text="Reload Snapshot", command=self.reload_snapshot).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(snapshot_buttons, text="Refresh View", command=self.refresh_portfolio).pack(side=tk.LEFT, padx=(8, 0))
 
         positions_frame = ttk.LabelFrame(parent, text="Positions", style="Card.TLabelframe")
@@ -197,6 +199,28 @@ class PortfolioRiskCockpitApp(tk.Tk):
             stop_price=optional_float(self.stop_price_var.get()),
             time_in_force=TimeInForce(self.time_in_force_var.get()),
             confirmation_text=self.confirmation_var.get(),
+        )
+
+    def import_robinhood_pdf(self) -> None:
+        pdf_path = filedialog.askopenfilename(
+            title="Select Robinhood portfolio PDF",
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+        )
+        if not pdf_path:
+            return
+
+        try:
+            result = import_robinhood_pdf_to_snapshot(pdf_path)
+            self.broker.reload_portfolio_snapshot()
+        except Exception as exc:
+            messagebox.showerror("PDF import failed", str(exc))
+            return
+
+        self.refresh_portfolio()
+        messagebox.showinfo(
+            "PDF import complete",
+            f"Imported {result.positions_count} positions and ${result.cash:,.2f} cash.\n"
+            f"Snapshot written to {result.output_path}",
         )
 
     def reload_snapshot(self) -> None:
