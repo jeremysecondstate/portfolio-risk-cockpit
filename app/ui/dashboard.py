@@ -143,6 +143,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
         button_bar = ttk.Frame(ticket)
         button_bar.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         ttk.Button(button_bar, text="Preview Risk", command=self.preview_order, style="Accent.TButton").pack(side=tk.LEFT)
+        ttk.Button(button_bar, text="Schwab Preview", command=self.show_schwab_preview_status).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Position Size", command=self.show_position_size).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Order Checklist", command=self.show_manual_checklist).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Submit Paper Order", command=self.submit_order).pack(side=tk.RIGHT)
@@ -168,6 +169,17 @@ class PortfolioRiskCockpitApp(tk.Tk):
             wraplength=430,
             style="Subtle.TLabel",
         ).pack(anchor=tk.W)
+
+    def show_schwab_preview_status(self) -> None:
+        self._set_preview_text(
+            "SCHWAB PREVIEW\n"
+            "==============\n\n"
+            "Status: previewOrder is verified in the terminal script.\n\n"
+            "Current safe test command:\n\n"
+            "  python scripts/schwab_preview_order_test.py\n\n"
+            "Next chunk: wire this button to Schwab previewOrder so the response appears here.\n\n"
+            "Live Schwab order submission remains disabled."
+        )
 
     def _grid_row(
         self,
