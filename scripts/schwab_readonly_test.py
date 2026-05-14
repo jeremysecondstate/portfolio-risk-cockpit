@@ -19,12 +19,16 @@ Usage:
 By default, printed output is redacted so account numbers and hash values are
 not accidentally shared. Set SCHWAB_DEBUG_FULL_JSON=true in .env only when you
 need the complete raw response locally.
+
+Set SCHWAB_WRITE_SNAPSHOT=true in .env to write a local dashboard snapshot to
+DATA/portfolio_snapshot.csv from the read-only account response.
 """
 
 from __future__ import annotations
 
 import base64
 import copy
+import csv
 import json
 import os
 import secrets
@@ -47,6 +51,10 @@ SENSITIVE_KEYS = {
     "id_token",
     "token",
 }
+
+
+def env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "y"}
 
 
 def require_env(name: str) -> str:
@@ -144,6 +152,47 @@ def exchange_code_for_token(
     return request_json("POST", TOKEN_URL, headers=headers, data=data)
 
 
+def write_dashboard_snapshot(accounts: Any, repo_root: Path) -> Path:
+    if not isinstance(accounts, list) or not accounts:
+        raise ValueError("Cannot write snapshot: accounts response was empty or unexpected.")
+
+    securities_account = accounts[0].get("securitiesAccount", {})
+    balances = securities_account.get("currentBalances", {})
+    positions = securities_account.get("positions", []) or []
+    cash = float(balances.get("cashBalance") or 0)
+
+    output_path = repo_root / "data" / "portfolio_snapshot.csv"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["type", "symbol", "quantity", "average_cost", "last_price", "notes"])
+        writer.writerow(["cash", "CASH", "", "", f"{cash:.2f}", "Schwab read-only cash balance"])
+
+        for position in positions:
+            instrument = position.get("instrument", {})
+            symbol = str(instrument.get("symbol") or "").strip().upper()
+            quantity = float(position.get("longQuantity") or 0)
+            if not symbol or quantity <= 0:
+                continue
+
+            average_cost = float(position.get("averagePrice") or position.get("averageLongPrice") or 0)
+            market_value = float(position.get("marketValue") or 0)
+            last_price = market_value / quantity if quantity else 0
+            writer.writerow(
+                [
+                    "position",
+                    symbol,
+                    f"{quantity:g}",
+                    f"{average_cost:.4f}",
+                    f"{last_price:.4f}",
+                    "Schwab read-only import",
+                ]
+            )
+
+    return output_path
+
+
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
     load_dotenv(repo_root / ".env")
@@ -151,7 +200,8 @@ def main() -> int:
     client_id = require_env("SCHWAB_CLIENT_ID")
     client_secret = require_env("SCHWAB_CLIENT_SECRET")
     redirect_uri = require_env("SCHWAB_REDIRECT_URI")
-    full_json = os.environ.get("SCHWAB_DEBUG_FULL_JSON", "").lower() == "true"
+    full_json = env_flag("SCHWAB_DEBUG_FULL_JSON")
+    write_snapshot = env_flag("SCHWAB_WRITE_SNAPSHOT")
 
     state = secrets.token_urlsafe(24)
     auth_params = {
@@ -209,6 +259,13 @@ def main() -> int:
     )
     pretty_print("GET /accounts?fields=positions", accounts, full_json=full_json)
     print_account_summary(accounts)
+
+    if write_snapshot:
+        output_path = write_dashboard_snapshot(accounts, repo_root)
+        print(f"\nWrote local dashboard snapshot: {output_path}")
+        print("Open the cockpit and click Reload Snapshot to view the Schwab read-only import.")
+    else:
+        print("\nSnapshot writing skipped. Set SCHWAB_WRITE_SNAPSHOT=true in .env to enable it.")
 
     print("\nRead-only Schwab API smoke test complete.")
     return 0
