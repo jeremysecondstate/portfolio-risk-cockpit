@@ -170,15 +170,50 @@ class PortfolioRiskCockpitApp(tk.Tk):
             style="Subtle.TLabel",
         ).pack(anchor=tk.W)
 
+    def build_schwab_order_json_from_ui(self) -> dict:
+        order = self._parse_order()
+
+        schwab_order = {
+            "orderType": order.order_type.value.upper(),
+            "session": "NORMAL",
+            "duration": order.time_in_force.value.upper(),
+            "orderStrategyType": "SINGLE",
+            "orderLegCollection": [
+                {
+                    "instruction": order.side.value.upper(),
+                    "quantity": order.quantity,
+                    "instrument": {
+                        "symbol": order.symbol.strip().upper(),
+                        "assetType": "EQUITY",
+                    },
+                }
+            ],
+        }
+
+        if order.limit_price is not None:
+            schwab_order["price"] = f"{order.limit_price:.2f}"
+
+        if order.stop_price is not None:
+            schwab_order["stopPrice"] = f"{order.stop_price:.2f}"
+
+        return schwab_order
+
     def show_schwab_preview_status(self) -> None:
+        try:
+            schwab_order = self.build_schwab_order_json_from_ui()
+        except Exception as exc:
+            messagebox.showerror("Invalid Schwab preview ticket", str(exc))
+            return
+
+        import json
+
         self._set_preview_text(
-            "SCHWAB PREVIEW\n"
-            "==============\n\n"
-            "Status: previewOrder is verified in the terminal script.\n\n"
-            "Current safe test command:\n\n"
-            "  python scripts/schwab_preview_order_test.py\n\n"
-            "Next chunk: wire this button to Schwab previewOrder so the response appears here.\n\n"
-            "Live Schwab order submission remains disabled."
+            "SCHWAB PREVIEW ORDER JSON\n"
+            "=========================\n\n"
+            "This is the order JSON that will be sent to Schwab previewOrder in the next chunk.\n"
+            "No API call was made. No live order was placed.\n\n"
+            f"{json.dumps(schwab_order, indent=2)}\n\n"
+            "Next chunk: send this JSON to Schwab previewOrder and display Schwab's rejects/warnings here."
         )
 
     def _grid_row(
