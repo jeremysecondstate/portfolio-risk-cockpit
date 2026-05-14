@@ -156,6 +156,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
         button_bar.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         ttk.Button(button_bar, text="Preview Risk", command=self.preview_order, style="Accent.TButton").pack(side=tk.LEFT)
         ttk.Button(button_bar, text="Schwab Preview", command=self.run_schwab_preview).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(button_bar, text="Open Orders", command=self.load_schwab_open_orders).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Position Size", command=self.show_position_size).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Order Checklist", command=self.show_manual_checklist).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Submit Paper Order", command=self.submit_order).pack(side=tk.RIGHT)
@@ -401,6 +402,151 @@ class PortfolioRiskCockpitApp(tk.Tk):
             lines.extend(["Validation:", "- No validation messages returned.", ""])
 
         lines.append("No live order was placed. This was Schwab previewOrder only.")
+        return "\n".join(lines)
+
+    def load_schwab_open_orders(self) -> None:
+        try:
+            client_id = os.getenv("SCHWAB_CLIENT_ID")
+            client_secret = os.getenv("SCHWAB_CLIENT_SECRET")
+            redirect_uri = os.getenv("SCHWAB_REDIRECT_URI")
+
+            if not client_id or not client_secret or not redirect_uri:
+                raise RuntimeError(
+                    "Missing SCHWAB_CLIENT_ID / SCHWAB_CLIENT_SECRET / SCHWAB_REDIRECT_URI in .env"
+                )
+
+            state = secrets.token_urlsafe(24)
+
+            auth_url = (
+                    "https://api.schwabapi.com/v1/oauth/authorize?"
+                    + urllib.parse.urlencode(
+                {
+                    "response_type": "code",
+                    "client_id": client_id,
+                    "redirect_uri": redirect_uri,
+                    "scope": "readonly",
+                    "state": state,
+                }
+            )
+            )
+
+            webbrowser.open(auth_url)
+
+            auth_code = simpledialog.askstring(
+                "Schwab Authorization",
+                "After Schwab login redirects to your callback page,\n\npaste the authorization code here:",
+            )
+
+            if not auth_code:
+                return
+
+            token_response = requests.post(
+                "https://api.schwabapi.com/v1/oauth/token",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                data={
+                    "grant_type": "authorization_code",
+                    "code": auth_code,
+                    "redirect_uri": redirect_uri,
+                },
+                auth=(client_id, client_secret),
+                timeout=30,
+            )
+            token_response.raise_for_status()
+            access_token = token_response.json()["access_token"]
+
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+            }
+
+            account_response = requests.get(
+                "https://api.schwabapi.com/trader/v1/accounts/accountNumbers",
+                headers=headers,
+                timeout=30,
+            )
+            account_response.raise_for_status()
+
+            accounts = account_response.json()
+            if not accounts:
+                raise RuntimeError("No Schwab accounts returned.")
+
+            account_hash = accounts[0]["hashValue"]
+
+            orders_response = requests.get(
+                f"https://api.schwabapi.com/trader/v1/accounts/{account_hash}/orders",
+                headers=headers,
+                timeout=30,
+            )
+
+            orders_payload = orders_response.json()
+
+            self._set_preview_text(
+                self.format_schwab_open_orders_response(
+                    orders_response.status_code,
+                    orders_payload,
+                )
+            )
+
+        except Exception as exc:
+            messagebox.showerror("Load Schwab open orders failed", str(exc))
+
+    def format_schwab_open_orders_response(self, status_code: int, payload) -> str:
+        lines = [
+            "SCHWAB OPEN ORDERS",
+            "==================",
+            "",
+            f"HTTP Status: {status_code}",
+            "",
+        ]
+
+        if not payload:
+            lines.append("No open orders returned by Schwab.")
+            lines.append("")
+            lines.append("No order was submitted, replaced, or canceled.")
+            return "\n".join(lines)
+
+        if not isinstance(payload, list):
+            lines.append("Unexpected response shape:")
+            lines.append(str(payload))
+            lines.append("")
+            lines.append("No order was submitted, replaced, or canceled.")
+            return "\n".join(lines)
+
+        for index, order in enumerate(payload, start=1):
+            order_id = order.get("orderId", "UNKNOWN")
+            status = order.get("status", "UNKNOWN")
+            order_type = order.get("orderType", "UNKNOWN")
+            duration = order.get("duration", "UNKNOWN")
+            price = order.get("price")
+            quantity = order.get("quantity")
+
+            legs = order.get("orderLegCollection") or order.get("orderLegs") or []
+            first_leg = legs[0] if legs else {}
+            instrument = first_leg.get("instrument") or {}
+            symbol = (
+                    instrument.get("symbol")
+                    or first_leg.get("finalSymbol")
+                    or "UNKNOWN"
+            )
+            side = first_leg.get("instruction", "UNKNOWN")
+
+            lines.extend(
+                [
+                    f"Order {index}",
+                    "-" * 20,
+                    f"Order ID: {order_id}",
+                    f"Status: {status}",
+                    f"Symbol: {symbol}",
+                    f"Side: {side}",
+                    f"Type: {order_type}",
+                    f"Quantity: {quantity}",
+                    f"Price: {price}",
+                    f"Duration: {duration}",
+                    "",
+                ]
+            )
+
+        lines.append("No order was submitted, replaced, or canceled.")
         return "\n".join(lines)
 
     def _grid_row(
