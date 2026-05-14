@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox
 
 from app.brokers.paper import PaperBroker
 from app.core.order_checklist import build_manual_order_checklist
 from app.core.order_models import OrderRequest, OrderSide, OrderType, TimeInForce
 from app.core.position_sizing import calculate_position_size
-from app.core.robinhood_pdf_import import import_robinhood_pdf_to_snapshot
 
 
 class PortfolioRiskCockpitApp(tk.Tk):
@@ -21,12 +20,12 @@ class PortfolioRiskCockpitApp(tk.Tk):
         self.broker = PaperBroker()
         self.last_preview = None
 
-        self.symbol_var = tk.StringVar(value="AMD")
+        self.symbol_var = tk.StringVar(value="NVDA")
         self.side_var = tk.StringVar(value=OrderSide.BUY.value)
         self.order_type_var = tk.StringVar(value=OrderType.LIMIT.value)
         self.quantity_var = tk.StringVar(value="1")
-        self.estimated_price_var = tk.StringVar(value="450.45")
-        self.limit_price_var = tk.StringVar(value="450.00")
+        self.estimated_price_var = tk.StringVar(value="200.00")
+        self.limit_price_var = tk.StringVar(value="200.00")
         self.stop_price_var = tk.StringVar(value="")
         self.time_in_force_var = tk.StringVar(value=TimeInForce.DAY.value)
         self.confirmation_var = tk.StringVar(value="")
@@ -72,11 +71,11 @@ class PortfolioRiskCockpitApp(tk.Tk):
 
         right = ttk.Frame(header)
         right.pack(side=tk.RIGHT)
-        ttk.Label(right, text="ROBINHOOD MANUAL MODE", style="Mode.TLabel").pack(anchor=tk.E)
-        ttk.Label(right, text="Planning only — no live Robinhood orders", style="Subtle.TLabel").pack(anchor=tk.E)
+        ttk.Label(right, text="SCHWAB READ-ONLY SYNC", style="Mode.TLabel").pack(anchor=tk.E)
+        ttk.Label(right, text="Live Schwab orders disabled — paper planning only", style="Subtle.TLabel").pack(anchor=tk.E)
 
     def _build_portfolio_panel(self, parent: ttk.Frame) -> None:
-        summary = ttk.LabelFrame(parent, text="Account Snapshot", style="Card.TLabelframe")
+        summary = ttk.LabelFrame(parent, text="Schwab Account Snapshot", style="Card.TLabelframe")
         summary.pack(fill=tk.X)
         summary.columnconfigure((0, 1, 2), weight=1)
 
@@ -89,8 +88,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
 
         snapshot_buttons = ttk.Frame(summary)
         snapshot_buttons.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(10, 0))
-        ttk.Button(snapshot_buttons, text="Import Robinhood PDF", command=self.import_robinhood_pdf).pack(side=tk.LEFT)
-        ttk.Button(snapshot_buttons, text="Reload Snapshot", command=self.reload_snapshot).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(snapshot_buttons, text="Reload Schwab Snapshot", command=self.reload_snapshot).pack(side=tk.LEFT)
         ttk.Button(snapshot_buttons, text="Refresh View", command=self.refresh_portfolio).pack(side=tk.LEFT, padx=(8, 0))
 
         positions_frame = ttk.LabelFrame(parent, text="Positions", style="Card.TLabelframe")
@@ -116,8 +114,9 @@ class PortfolioRiskCockpitApp(tk.Tk):
         ttk.Label(
             help_box,
             text=(
-                "No margin. No live Robinhood API. Use this app to plan order size, stops, "
-                "limits, and checklist steps before manually entering trades."
+                "Schwab account sync is read-only. Live order placement is disabled until "
+                "previewOrder, typed confirmation, max-size checks, margin checks, and audit "
+                "logging are fully wired in."
             ),
             wraplength=640,
             style="Subtle.TLabel",
@@ -130,7 +129,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
         return value_label
 
     def _build_order_panel(self, parent: ttk.Frame) -> None:
-        ticket = ttk.LabelFrame(parent, text="Guarded Manual Order Planner", style="Card.TLabelframe")
+        ticket = ttk.LabelFrame(parent, text="Guarded Paper Order Planner", style="Card.TLabelframe")
         ticket.pack(fill=tk.X)
         ticket.columnconfigure(1, weight=1)
         ticket.columnconfigure(3, weight=1)
@@ -145,17 +144,17 @@ class PortfolioRiskCockpitApp(tk.Tk):
         button_bar.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         ttk.Button(button_bar, text="Preview Risk", command=self.preview_order, style="Accent.TButton").pack(side=tk.LEFT)
         ttk.Button(button_bar, text="Position Size", command=self.show_position_size).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(button_bar, text="Manual Checklist", command=self.show_manual_checklist).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(button_bar, text="Order Checklist", command=self.show_manual_checklist).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Submit Paper Order", command=self.submit_order).pack(side=tk.RIGHT)
 
-        results = ttk.LabelFrame(parent, text="Risk Preview + Manual Instructions", style="Card.TLabelframe")
+        results = ttk.LabelFrame(parent, text="Risk Preview + Instructions", style="Card.TLabelframe")
         results.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
 
         self.preview_text = tk.Text(results, height=21, wrap=tk.WORD, font=("Consolas", 10), padx=10, pady=10)
         self.preview_text.pack(fill=tk.BOTH, expand=True)
         self._set_preview_text(
             "Create an order and click Preview Risk.\n\n"
-            "Reminder: this app does not place Robinhood trades. It creates a safe manual plan."
+            "Reminder: live Schwab orders are disabled. This creates a safe paper plan."
         )
 
         explainer = ttk.LabelFrame(parent, text="Order Type Cheat Sheet", style="Card.TLabelframe")
@@ -199,28 +198,6 @@ class PortfolioRiskCockpitApp(tk.Tk):
             stop_price=optional_float(self.stop_price_var.get()),
             time_in_force=TimeInForce(self.time_in_force_var.get()),
             confirmation_text=self.confirmation_var.get(),
-        )
-
-    def import_robinhood_pdf(self) -> None:
-        pdf_path = filedialog.askopenfilename(
-            title="Select Robinhood portfolio PDF",
-            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
-        )
-        if not pdf_path:
-            return
-
-        try:
-            result = import_robinhood_pdf_to_snapshot(pdf_path)
-            self.broker.reload_portfolio_snapshot()
-        except Exception as exc:
-            messagebox.showerror("PDF import failed", str(exc))
-            return
-
-        self.refresh_portfolio()
-        messagebox.showinfo(
-            "PDF import complete",
-            f"Imported {result.positions_count} positions and ${result.cash:,.2f} cash.\n"
-            f"Snapshot written to {result.output_path}",
         )
 
     def reload_snapshot(self) -> None:
@@ -279,7 +256,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
             f"Estimated cash after: ${preview.estimated_cash_after:,.2f}",
             f"Estimated position value after: ${preview.estimated_position_value_after:,.2f}",
             "",
-            "Status: " + ("BLOCKED" if preview.blocked else "READY FOR MANUAL CHECKLIST"),
+            "Status: " + ("BLOCKED" if preview.blocked else "READY FOR PAPER CHECKLIST"),
             "",
             "Warnings:",
         ]
@@ -292,7 +269,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
             [
                 "",
                 "Next step:",
-                "Click Manual Checklist to generate a Robinhood entry checklist." if not preview.blocked else "Fix the warnings before planning the manual Robinhood trade.",
+                "Click Order Checklist to generate the paper-trade checklist." if not preview.blocked else "Fix the warnings before planning the trade.",
             ]
         )
         self._set_preview_text("\n".join(lines))
