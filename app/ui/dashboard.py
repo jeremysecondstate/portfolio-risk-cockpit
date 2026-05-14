@@ -1,4 +1,5 @@
 from __future__ import annotations
+from datetime import datetime, timedelta, timezone
 
 import json
 import os
@@ -472,9 +473,16 @@ class PortfolioRiskCockpitApp(tk.Tk):
 
             account_hash = accounts[0]["hashValue"]
 
+            to_time = datetime.now(timezone.utc)
+            from_time = to_time - timedelta(days=7)
+
             orders_response = requests.get(
                 f"https://api.schwabapi.com/trader/v1/accounts/{account_hash}/orders",
                 headers=headers,
+                params={
+                    "fromEnteredTime": from_time.isoformat(timespec="seconds"),
+                    "toEnteredTime": to_time.isoformat(timespec="seconds"),
+                },
                 timeout=30,
             )
 
