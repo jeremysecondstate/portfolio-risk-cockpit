@@ -157,7 +157,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
         button_bar.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         ttk.Button(button_bar, text="Preview Risk", command=self.preview_order, style="Accent.TButton").pack(side=tk.LEFT)
         ttk.Button(button_bar, text="Schwab Preview", command=self.run_schwab_preview).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(button_bar, text="Open Orders", command=self.load_schwab_open_orders).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(button_bar, text="Recent Orders", command=self.load_schwab_open_orders).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Position Size", command=self.show_position_size).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Order Checklist", command=self.show_manual_checklist).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Submit Paper Order", command=self.submit_order).pack(side=tk.RIGHT)
@@ -500,15 +500,16 @@ class PortfolioRiskCockpitApp(tk.Tk):
 
     def format_schwab_open_orders_response(self, status_code: int, payload) -> str:
         lines = [
-            "SCHWAB OPEN ORDERS",
-            "==================",
+            "SCHWAB RECENT ORDERS",
+            "====================",
             "",
+            "Showing recent Schwab orders for the selected date window.",
             f"HTTP Status: {status_code}",
             "",
         ]
 
         if not payload:
-            lines.append("No open orders returned by Schwab.")
+            lines.append("No recent orders returned by Schwab for this date window.")
             lines.append("")
             lines.append("No order was submitted, replaced, or canceled.")
             return "\n".join(lines)
