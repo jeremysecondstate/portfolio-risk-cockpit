@@ -317,14 +317,91 @@ class PortfolioRiskCockpitApp(tk.Tk):
             preview_payload = preview_response.json()
 
             self._set_preview_text(
-                "SCHWAB PREVIEW RESPONSE\n"
-                "=======================\n\n"
-                f"HTTP Status: {preview_response.status_code}\n\n"
-                f"{json.dumps(preview_payload, indent=2)}"
+                self.format_schwab_preview_response(preview_response.status_code, preview_payload)
             )
 
         except Exception as exc:
             messagebox.showerror("Schwab preview failed", str(exc))
+
+    def format_schwab_preview_response(self, status_code: int, payload: dict) -> str:
+        strategy = payload.get("orderStrategy", {}) or {}
+        balance = strategy.get("orderBalance", {}) or {}
+        legs = strategy.get("orderLegs", []) or []
+        first_leg = legs[0] if legs else {}
+        validation = payload.get("orderValidationResult", {}) or {}
+
+        status = strategy.get("status", "UNKNOWN")
+        order_type = strategy.get("orderType", "UNKNOWN")
+        duration = strategy.get("duration", "UNKNOWN")
+        session = strategy.get("session", "UNKNOWN")
+        price = strategy.get("price")
+        quantity = strategy.get("quantity")
+        order_value = balance.get("orderValue")
+        projected_available = balance.get("projectedAvailableFund")
+        projected_buying_power = balance.get("projectedBuyingPower")
+        projected_commission = balance.get("projectedCommission")
+
+        symbol = first_leg.get("finalSymbol") or (first_leg.get("instrument") or {}).get("symbol", "UNKNOWN")
+        side = first_leg.get("instruction", "UNKNOWN")
+        bid = first_leg.get("bidPrice")
+        ask = first_leg.get("askPrice")
+        last = first_leg.get("lastPrice")
+        mark = first_leg.get("markPrice")
+
+        lines = [
+            "SCHWAB PREVIEW RESULT",
+            "=====================",
+            "",
+            f"HTTP Status: {status_code}",
+            f"Schwab Status: {status}",
+            "",
+            "Order:",
+            f"- Symbol: {symbol}",
+            f"- Side: {side}",
+            f"- Type: {order_type}",
+            f"- Quantity: {quantity}",
+            f"- Limit price: ${price:,.2f}" if isinstance(price, (int, float)) else f"- Limit price: {price}",
+            f"- Duration: {duration}",
+            f"- Session: {session}",
+            "",
+            "Market snapshot:",
+            f"- Bid: ${bid:,.2f}" if isinstance(bid, (int, float)) else f"- Bid: {bid}",
+            f"- Ask: ${ask:,.2f}" if isinstance(ask, (int, float)) else f"- Ask: {ask}",
+            f"- Last: ${last:,.2f}" if isinstance(last, (int, float)) else f"- Last: {last}",
+            f"- Mark: ${mark:,.2f}" if isinstance(mark, (int, float)) else f"- Mark: {mark}",
+            "",
+            "Projected impact:",
+            f"- Order value: ${order_value:,.2f}" if isinstance(order_value,
+                                                                (int, float)) else f"- Order value: {order_value}",
+            f"- Available funds after: ${projected_available:,.2f}" if isinstance(projected_available, (int,
+                                                                                                        float)) else f"- Available funds after: {projected_available}",
+            f"- Buying power after: ${projected_buying_power:,.2f}" if isinstance(projected_buying_power, (int,
+                                                                                                           float)) else f"- Buying power after: {projected_buying_power}",
+            f"- Projected commission: ${projected_commission:,.2f}" if isinstance(projected_commission, (int,
+                                                                                                         float)) else f"- Projected commission: {projected_commission}",
+            "",
+        ]
+
+        for bucket in ["rejects", "warns", "alerts", "reviews", "accepts"]:
+            items = validation.get(bucket) or []
+            if not items:
+                continue
+
+            lines.append(f"{bucket.upper()}:")
+            for item in items:
+                message = item.get("activityMessage") or item.get("message") or str(item)
+                severity = item.get("originalSeverity")
+                if severity:
+                    lines.append(f"- [{severity}] {message}")
+                else:
+                    lines.append(f"- {message}")
+            lines.append("")
+
+        if not validation:
+            lines.extend(["Validation:", "- No validation messages returned.", ""])
+
+        lines.append("No live order was placed. This was Schwab previewOrder only.")
+        return "\n".join(lines)
 
     def _grid_row(
         self,
