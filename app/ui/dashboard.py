@@ -12,7 +12,7 @@ from app.core.position_sizing import calculate_position_size
 class PortfolioRiskCockpitApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Portfolio Risk Cockpit")
+        self.title("Schwab Trading Cockpit")
         self.geometry("1180x760")
         self.minsize(1060, 680)
 
@@ -67,11 +67,11 @@ class PortfolioRiskCockpitApp(tk.Tk):
     def _build_header(self, parent: ttk.Frame) -> None:
         header = ttk.Frame(parent)
         header.pack(fill=tk.X)
-        ttk.Label(header, text="Portfolio Risk Cockpit", style="Header.TLabel").pack(side=tk.LEFT)
+        ttk.Label(header, text="Schwab Trading Cockpit", style="Header.TLabel").pack(side=tk.LEFT)
 
         right = ttk.Frame(header)
         right.pack(side=tk.RIGHT)
-        ttk.Label(right, text="SCHWAB READ-ONLY SYNC", style="Mode.TLabel").pack(anchor=tk.E)
+        ttk.Label(right, text="SCHWAB TRADING COCKPIT", style="Mode.TLabel").pack(anchor=tk.E)
         ttk.Label(right, text="Live Schwab orders disabled — paper planning only", style="Subtle.TLabel").pack(anchor=tk.E)
 
     def _build_portfolio_panel(self, parent: ttk.Frame) -> None:
