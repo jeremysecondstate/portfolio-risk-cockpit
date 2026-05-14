@@ -5,20 +5,22 @@ from pathlib import Path
 
 from app.core.portfolio import Portfolio, Position, current_foundation_portfolio
 
-SNAPSHOT_PATH = Path("data/portfolio_snapshot.csv")
-SAMPLE_PATH = Path("templates/portfolio_snapshot.sample.csv")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SNAPSHOT_PATH = PROJECT_ROOT / "data" / "portfolio_snapshot.csv"
+SAMPLE_PATH = PROJECT_ROOT / "templates" / "portfolio_snapshot.sample.csv"
 
 
 def load_portfolio_snapshot(path: str | Path = SNAPSHOT_PATH) -> tuple[Portfolio, str]:
     """Load a local portfolio snapshot.
 
-    The app intentionally uses a local file instead of Robinhood credentials or
-    browser automation. If the snapshot does not exist yet, we return the seeded
-    foundation portfolio and tell the caller what happened.
+    The app intentionally uses a local CSV file instead of brokerage passwords
+    or browser automation. If the snapshot does not exist yet, we return the
+    seeded foundation portfolio and tell the caller what happened.
     """
     snapshot_path = Path(path)
     if not snapshot_path.exists():
-        return current_foundation_portfolio(), f"Seeded foundation portfolio; no {snapshot_path} found"
+        display_path = snapshot_path.relative_to(PROJECT_ROOT) if snapshot_path.is_absolute() else snapshot_path
+        return current_foundation_portfolio(), f"Seeded foundation portfolio; no {display_path} found"
 
     cash = 0.0
     positions: dict[str, Position] = {}
@@ -54,7 +56,8 @@ def load_portfolio_snapshot(path: str | Path = SNAPSHOT_PATH) -> tuple[Portfolio
                 last_price=float(row.get("last_price") or 0),
             )
 
-    return Portfolio(cash=round(cash, 2), positions=positions), f"Loaded {snapshot_path}"
+    display_path = snapshot_path.relative_to(PROJECT_ROOT) if snapshot_path.is_absolute() else snapshot_path
+    return Portfolio(cash=round(cash, 2), positions=positions), f"Loaded {display_path}"
 
 
 def write_sample_snapshot(path: str | Path = SAMPLE_PATH) -> Path:
