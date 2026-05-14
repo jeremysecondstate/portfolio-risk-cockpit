@@ -15,11 +15,16 @@ Usage:
     3. Open the printed authorization URL.
     4. After Schwab redirects to your callback page, copy only the code value.
     5. Paste the code into this script.
+
+By default, printed output is redacted so account numbers and hash values are
+not accidentally shared. Set SCHWAB_DEBUG_FULL_JSON=true in .env only when you
+need the complete raw response locally.
 """
 
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import os
 import secrets
@@ -34,6 +39,14 @@ from dotenv import load_dotenv
 AUTH_URL = "https://api.schwabapi.com/v1/oauth/authorize"
 TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
 TRADER_BASE_URL = "https://api.schwabapi.com/trader/v1"
+SENSITIVE_KEYS = {
+    "accountNumber",
+    "hashValue",
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "token",
+}
 
 
 def require_env(name: str) -> str:
@@ -49,9 +62,53 @@ def make_basic_auth_header(client_id: str, client_secret: str) -> str:
     return f"Basic {encoded}"
 
 
-def pretty_print(title: str, payload: Any) -> None:
+def mask_value(value: Any) -> Any:
+    text = str(value)
+    if len(text) <= 4:
+        return "****"
+    return f"***{text[-4:]}"
+
+
+def redact(payload: Any) -> Any:
+    data = copy.deepcopy(payload)
+    if isinstance(data, dict):
+        return {
+            key: mask_value(value) if key in SENSITIVE_KEYS else redact(value)
+            for key, value in data.items()
+        }
+    if isinstance(data, list):
+        return [redact(item) for item in data]
+    return data
+
+
+def pretty_print(title: str, payload: Any, *, full_json: bool = False) -> None:
     print(f"\n=== {title} ===")
-    print(json.dumps(payload, indent=2, sort_keys=True))
+    safe_payload = payload if full_json else redact(payload)
+    print(json.dumps(safe_payload, indent=2, sort_keys=True))
+
+
+def print_account_summary(accounts: Any) -> None:
+    print("\n=== Account summary ===")
+    if not isinstance(accounts, list):
+        print("Unexpected accounts payload shape; see JSON output above.")
+        return
+
+    for idx, account_wrapper in enumerate(accounts, start=1):
+        securities_account = account_wrapper.get("securitiesAccount", {})
+        balances = securities_account.get("currentBalances", {})
+        positions = securities_account.get("positions", []) or []
+        account_type = securities_account.get("type", "UNKNOWN")
+        print(f"Account {idx}: type={account_type}")
+        print(f"  liquidationValue: {balances.get('liquidationValue')}")
+        print(f"  cashBalance: {balances.get('cashBalance')}")
+        print(f"  availableFunds: {balances.get('availableFunds')}")
+        print("  positions:")
+        for position in positions:
+            instrument = position.get("instrument", {})
+            symbol = instrument.get("symbol", "UNKNOWN")
+            quantity = position.get("longQuantity", position.get("shortQuantity"))
+            market_value = position.get("marketValue")
+            print(f"    - {symbol}: quantity={quantity}, marketValue={market_value}")
 
 
 def request_json(method: str, url: str, **kwargs: Any) -> Any:
@@ -94,6 +151,7 @@ def main() -> int:
     client_id = require_env("SCHWAB_CLIENT_ID")
     client_secret = require_env("SCHWAB_CLIENT_SECRET")
     redirect_uri = require_env("SCHWAB_REDIRECT_URI")
+    full_json = os.environ.get("SCHWAB_DEBUG_FULL_JSON", "").lower() == "true"
 
     state = secrets.token_urlsafe(24)
     auth_params = {
@@ -108,7 +166,7 @@ def main() -> int:
     print("\nOpen this URL in your browser to connect Schwab:")
     print(authorization_url)
     print("\nAfter Schwab redirects to your callback page, copy the authorization code.")
-    print("Do not paste your client secret, access token, or refresh token anywhere public.")
+    print("Do not paste your client secret, access token, refresh token, authorization code, or account number anywhere public.")
 
     authorization_code = input("\nPaste Schwab authorization code here: ").strip()
     if not authorization_code:
@@ -124,7 +182,7 @@ def main() -> int:
 
     access_token = tokens.get("access_token")
     if not access_token:
-        pretty_print("Token response without access_token", tokens)
+        pretty_print("Token response without access_token", tokens, full_json=full_json)
         return 1
 
     print("\nToken exchange succeeded. Access token received.")
@@ -141,7 +199,7 @@ def main() -> int:
         f"{TRADER_BASE_URL}/accounts/accountNumbers",
         headers=api_headers,
     )
-    pretty_print("GET /accounts/accountNumbers", account_numbers)
+    pretty_print("GET /accounts/accountNumbers", account_numbers, full_json=full_json)
 
     accounts = request_json(
         "GET",
@@ -149,7 +207,8 @@ def main() -> int:
         headers=api_headers,
         params={"fields": "positions"},
     )
-    pretty_print("GET /accounts?fields=positions", accounts)
+    pretty_print("GET /accounts?fields=positions", accounts, full_json=full_json)
+    print_account_summary(accounts)
 
     print("\nRead-only Schwab API smoke test complete.")
     return 0
