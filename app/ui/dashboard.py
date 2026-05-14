@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+import json
+import os
+import secrets
+import urllib.parse
+import webbrowser
+
+import requests
+from dotenv import load_dotenv
+from tkinter import simpledialog
+
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -7,6 +17,8 @@ from app.brokers.paper import PaperBroker
 from app.core.order_checklist import build_manual_order_checklist
 from app.core.order_models import OrderRequest, OrderSide, OrderType, TimeInForce
 from app.core.position_sizing import calculate_position_size
+
+load_dotenv()
 
 
 class PortfolioRiskCockpitApp(tk.Tk):
@@ -143,7 +155,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
         button_bar = ttk.Frame(ticket)
         button_bar.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         ttk.Button(button_bar, text="Preview Risk", command=self.preview_order, style="Accent.TButton").pack(side=tk.LEFT)
-        ttk.Button(button_bar, text="Schwab Preview", command=self.show_schwab_preview_status).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(button_bar, text="Schwab Preview", command=self.run_schwab_preview).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Position Size", command=self.show_position_size).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Order Checklist", command=self.show_manual_checklist).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Submit Paper Order", command=self.submit_order).pack(side=tk.RIGHT)
@@ -215,6 +227,104 @@ class PortfolioRiskCockpitApp(tk.Tk):
             f"{json.dumps(schwab_order, indent=2)}\n\n"
             "Next chunk: send this JSON to Schwab previewOrder and display Schwab's rejects/warnings here."
         )
+
+    def run_schwab_preview(self) -> None:
+        try:
+            client_id = os.getenv("SCHWAB_CLIENT_ID")
+            client_secret = os.getenv("SCHWAB_CLIENT_SECRET")
+            redirect_uri = os.getenv("SCHWAB_REDIRECT_URI")
+
+            if not client_id or not client_secret or not redirect_uri:
+                raise RuntimeError(
+                    "Missing SCHWAB_CLIENT_ID / SCHWAB_CLIENT_SECRET / SCHWAB_REDIRECT_URI in .env"
+                )
+
+            state = secrets.token_urlsafe(24)
+
+            auth_url = (
+                    "https://api.schwabapi.com/v1/oauth/authorize?"
+                    + urllib.parse.urlencode(
+                {
+                    "response_type": "code",
+                    "client_id": client_id,
+                    "redirect_uri": redirect_uri,
+                    "scope": "readonly",
+                    "state": state,
+                }
+            )
+            )
+
+            webbrowser.open(auth_url)
+
+            auth_code = simpledialog.askstring(
+                "Schwab Authorization",
+                "After Schwab login redirects to your callback page,\n\npaste the authorization code here:",
+            )
+
+            if not auth_code:
+                return
+
+            token_response = requests.post(
+                "https://api.schwabapi.com/v1/oauth/token",
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                data={
+                    "grant_type": "authorization_code",
+                    "code": auth_code,
+                    "redirect_uri": redirect_uri,
+                },
+                auth=(client_id, client_secret),
+                timeout=30,
+            )
+
+            token_response.raise_for_status()
+
+            access_token = token_response.json()["access_token"]
+
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+            }
+
+            account_response = requests.get(
+                "https://api.schwabapi.com/trader/v1/accounts/accountNumbers",
+                headers=headers,
+                timeout=30,
+            )
+
+            account_response.raise_for_status()
+
+            accounts = account_response.json()
+
+            if not accounts:
+                raise RuntimeError("No Schwab accounts returned.")
+
+            account_hash = accounts[0]["hashValue"]
+
+            schwab_order = self.build_schwab_order_json_from_ui()
+
+            preview_response = requests.post(
+                f"https://api.schwabapi.com/trader/v1/accounts/{account_hash}/previewOrder",
+                headers={
+                    **headers,
+                    "Content-Type": "application/json",
+                },
+                json=schwab_order,
+                timeout=30,
+            )
+
+            preview_payload = preview_response.json()
+
+            self._set_preview_text(
+                "SCHWAB PREVIEW RESPONSE\n"
+                "=======================\n\n"
+                f"HTTP Status: {preview_response.status_code}\n\n"
+                f"{json.dumps(preview_payload, indent=2)}"
+            )
+
+        except Exception as exc:
+            messagebox.showerror("Schwab preview failed", str(exc))
 
     def _grid_row(
         self,
