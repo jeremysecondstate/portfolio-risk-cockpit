@@ -42,6 +42,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         self.cancel_order_id_var = tk.StringVar(value="")
         self.cancel_confirmation_var = tk.StringVar(value="")
         self.risk_percent_var = tk.StringVar(value="1.0")
+        self.schwab_status_var = tk.StringVar(value="Schwab session: not connected")
 
         self._build_layout()
         self.refresh_portfolio()
@@ -71,6 +72,14 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         ttk.Button(button_bar, text="Order Checklist", command=self.show_manual_checklist).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Submit Paper Order", command=self.submit_order).pack(side=tk.RIGHT)
 
+        ttk.Label(ticket, textvariable=self.schwab_status_var, style="Subtle.TLabel").grid(
+            row=7,
+            column=0,
+            columnspan=4,
+            sticky="w",
+            pady=(8, 0),
+        )
+
         results = ttk.LabelFrame(parent, text="Risk Preview + Instructions", style="Card.TLabelframe")
         results.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
 
@@ -96,10 +105,12 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
     def _authorize_schwab_session(self) -> SchwabSession | None:
         """Return the in-memory Schwab session or create one through the code flow."""
         if self.schwab_session and self.schwab_session.access_token:
+            self.schwab_status_var.set("Schwab session: connected for this app run")
             return self.schwab_session
 
         session = SchwabSession()
         auth_url, _state = session.build_authorization_url()
+        self.schwab_status_var.set("Schwab session: authorization required")
         webbrowser.open(auth_url)
 
         auth_code = simpledialog.askstring(
@@ -107,15 +118,18 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             "After Schwab login redirects to your callback page,\n\npaste the authorization code here:",
         )
         if not auth_code:
+            self.schwab_status_var.set("Schwab session: not connected")
             return None
 
         session.exchange_authorization_code(auth_code)
         self.schwab_session = session
+        self.schwab_status_var.set("Schwab session: connected for this app run")
         return session
 
     def reset_schwab_session(self) -> None:
         """Forget the in-memory Schwab token for this app run."""
         self.schwab_session = None
+        self.schwab_status_var.set("Schwab session: not connected")
         self._set_preview_text(
             "SCHWAB SESSION RESET\n"
             "====================\n\n"
@@ -131,9 +145,11 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
                 return
 
             status_code, preview_payload = session.preview_order(self.build_schwab_order_json_from_ui())
+            self.schwab_status_var.set("Schwab session: connected for this app run")
             self._set_preview_text(self.format_schwab_preview_response(status_code, preview_payload))
         except Exception as exc:
             self.schwab_session = None
+            self.schwab_status_var.set("Schwab session: not connected")
             messagebox.showerror("Schwab preview failed", str(exc))
 
     def load_schwab_open_orders(self) -> None:
@@ -148,9 +164,11 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
                 from_entered_time=from_time,
                 to_entered_time=to_time,
             )
+            self.schwab_status_var.set("Schwab session: connected for this app run")
             self._set_preview_text(self.format_schwab_open_orders_response(status_code, orders_payload))
         except Exception as exc:
             self.schwab_session = None
+            self.schwab_status_var.set("Schwab session: not connected")
             messagebox.showerror("Load Schwab recent orders failed", str(exc))
 
     def load_schwab_open_orders_only(self) -> None:
@@ -165,9 +183,11 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
                 from_entered_time=from_time,
                 to_entered_time=to_time,
             )
+            self.schwab_status_var.set("Schwab session: connected for this app run")
             self._set_preview_text(self.format_schwab_open_orders_only_response(status_code, orders_payload))
         except Exception as exc:
             self.schwab_session = None
+            self.schwab_status_var.set("Schwab session: not connected")
             messagebox.showerror("Load Schwab open orders failed", str(exc))
 
     def show_cancel_order_placeholder(self) -> None:
