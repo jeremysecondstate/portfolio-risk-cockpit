@@ -15,6 +15,7 @@ venv/
 
 # App data
 /data/*.csv
+/data/*tokens*.json
 !/data/.gitkeep
 
 # OS
