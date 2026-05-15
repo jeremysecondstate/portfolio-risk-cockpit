@@ -28,6 +28,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         self._configure_style()
         self.broker = PaperBroker()
         self.last_preview = None
+        self.schwab_session: SchwabSession | None = None
 
         self.symbol_var = tk.StringVar(value="NVDA")
         self.side_var = tk.StringVar(value=OrderSide.BUY.value)
@@ -64,6 +65,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         ttk.Button(button_bar, text="Schwab Preview", command=self.run_schwab_preview).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Recent Orders", command=self.load_schwab_open_orders).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Open Only", command=self.load_schwab_open_orders_only).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(button_bar, text="Reset Schwab Session", command=self.reset_schwab_session).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Cancel Order", command=self.show_cancel_order_placeholder).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Position Size", command=self.show_position_size).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Order Checklist", command=self.show_manual_checklist).pack(side=tk.LEFT, padx=(8, 0))
@@ -92,7 +94,10 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         ).pack(anchor=tk.W)
 
     def _authorize_schwab_session(self) -> SchwabSession | None:
-        """Create an authorized Schwab session using the existing copy/paste code flow."""
+        """Return the in-memory Schwab session or create one through the code flow."""
+        if self.schwab_session and self.schwab_session.access_token:
+            return self.schwab_session
+
         session = SchwabSession()
         auth_url, _state = session.build_authorization_url()
         webbrowser.open(auth_url)
@@ -105,7 +110,19 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             return None
 
         session.exchange_authorization_code(auth_code)
+        self.schwab_session = session
         return session
+
+    def reset_schwab_session(self) -> None:
+        """Forget the in-memory Schwab token for this app run."""
+        self.schwab_session = None
+        self._set_preview_text(
+            "SCHWAB SESSION RESET\n"
+            "====================\n\n"
+            "The in-memory Schwab session was cleared.\n"
+            "The next Schwab Preview, Recent Orders, or Open Only action will ask you to authorize again.\n\n"
+            "No order was submitted, replaced, or canceled."
+        )
 
     def run_schwab_preview(self) -> None:
         try:
@@ -116,6 +133,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             status_code, preview_payload = session.preview_order(self.build_schwab_order_json_from_ui())
             self._set_preview_text(self.format_schwab_preview_response(status_code, preview_payload))
         except Exception as exc:
+            self.schwab_session = None
             messagebox.showerror("Schwab preview failed", str(exc))
 
     def load_schwab_open_orders(self) -> None:
@@ -132,6 +150,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             )
             self._set_preview_text(self.format_schwab_open_orders_response(status_code, orders_payload))
         except Exception as exc:
+            self.schwab_session = None
             messagebox.showerror("Load Schwab recent orders failed", str(exc))
 
     def load_schwab_open_orders_only(self) -> None:
@@ -148,6 +167,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             )
             self._set_preview_text(self.format_schwab_open_orders_only_response(status_code, orders_payload))
         except Exception as exc:
+            self.schwab_session = None
             messagebox.showerror("Load Schwab open orders failed", str(exc))
 
     def show_cancel_order_placeholder(self) -> None:
