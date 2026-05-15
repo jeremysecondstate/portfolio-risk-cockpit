@@ -30,6 +30,8 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         self.last_preview = None
         self.schwab_session: SchwabSession | None = None
         self.last_schwab_preview_status: str | None = None
+        self.open_only_verified_this_session = False
+        self.cancel_verified_this_session = False
 
         self.symbol_var = tk.StringVar(value="NVDA")
         self.side_var = tk.StringVar(value=OrderSide.BUY.value)
@@ -45,6 +47,9 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         self.risk_percent_var = tk.StringVar(value="1.0")
         self.schwab_status_var = tk.StringVar(value="Schwab session: not connected")
         self.schwab_preview_status_var = tk.StringVar(value="Last Schwab preview: none")
+        self.schwab_verification_status_var = tk.StringVar(
+            value="Open Only verified: no · Cancel verified: no"
+        )
 
         self._build_layout()
         self.refresh_portfolio()
@@ -84,6 +89,13 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         )
         ttk.Label(ticket, textvariable=self.schwab_preview_status_var, style="Subtle.TLabel").grid(
             row=8,
+            column=0,
+            columnspan=4,
+            sticky="w",
+            pady=(2, 0),
+        )
+        ttk.Label(ticket, textvariable=self.schwab_verification_status_var, style="Subtle.TLabel").grid(
+            row=9,
             column=0,
             columnspan=4,
             sticky="w",
@@ -136,14 +148,26 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         self.schwab_status_var.set("Schwab session: connected for this app run")
         return session
 
+    def _update_verification_status(self) -> None:
+        open_value = "yes" if self.open_only_verified_this_session else "no"
+        cancel_value = "yes" if self.cancel_verified_this_session else "no"
+        self.schwab_verification_status_var.set(
+            f"Open Only verified: {open_value} · Cancel verified: {cancel_value}"
+        )
+
     def reset_schwab_session(self) -> None:
-        """Forget the in-memory Schwab token for this app run."""
+        """Forget the in-memory Schwab token and session-only safety checks."""
         self.schwab_session = None
+        self.last_schwab_preview_status = None
+        self.open_only_verified_this_session = False
+        self.cancel_verified_this_session = False
         self.schwab_status_var.set("Schwab session: not connected")
+        self.schwab_preview_status_var.set("Last Schwab preview: none")
+        self._update_verification_status()
         self._set_preview_text(
             "SCHWAB SESSION RESET\n"
             "====================\n\n"
-            "The in-memory Schwab session was cleared.\n"
+            "The in-memory Schwab session and session-only safety checks were cleared.\n"
             "The next Schwab Preview, Recent Orders, or Open Only action will ask you to authorize again.\n\n"
             "No order was submitted, replaced, or canceled."
         )
@@ -207,6 +231,9 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
                 to_entered_time=to_time,
             )
             self.schwab_status_var.set("Schwab session: connected for this app run")
+            if status_code == 200:
+                self.open_only_verified_this_session = True
+                self._update_verification_status()
             self._set_preview_text(self.format_schwab_open_orders_only_response(status_code, orders_payload))
         except Exception as exc:
             self.schwab_session = None
@@ -229,6 +256,8 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         symbol = order.symbol.strip().upper()
         preview_status = self.last_schwab_preview_status or "NONE"
         preview_gate = "PASS" if preview_status == "ACCEPTED" else "REQUIRED"
+        open_only_gate = "PASS" if self.open_only_verified_this_session else "REQUIRED"
+        cancel_gate = "PASS" if self.cancel_verified_this_session else "REQUIRED"
 
         limit_status = "PASS" if order_type == "LIMIT" else "BLOCKED"
         quantity_status = "REVIEW REQUIRED" if order.quantity > 0 else "BLOCKED"
@@ -247,14 +276,17 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             f"- Limit price: {order.limit_price}\n"
             f"- Time in force: {tif}\n\n"
             "Current Schwab readiness state:\n"
-            f"- Last Schwab preview status: {preview_status}\n\n"
+            f"- Last Schwab preview status: {preview_status}\n"
+            f"- Open Only verified this session: {open_only_gate}\n"
+            f"- Cancel verified this session: {cancel_gate}\n\n"
             "Safety gates required before any future live submit:\n"
             f"- LIMIT order only: {limit_status}\n"
             f"- Positive quantity: {quantity_status}\n"
             f"- Positive limit price: {price_status}\n"
             "- Schwab previewOrder must be run immediately before submit: REQUIRED\n"
             f"- Schwab previewOrder status must be ACCEPTED: {preview_gate}\n"
-            "- Open Only and Cancel Order must be verified in the current app session: REQUIRED\n"
+            f"- Open Only must be verified in the current app session: {open_only_gate}\n"
+            f"- Cancel Order must be verified in the current app session: {cancel_gate}\n"
             f"- Local .env must explicitly contain {env_gate}: REQUIRED\n"
             f"- User must type exact phrase: {confirm_phrase}: REQUIRED\n"
             "- Final warning dialog must be accepted: REQUIRED\n\n"
@@ -300,6 +332,9 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
 
             status_code, payload = session.cancel_order(order_id)
             self.schwab_status_var.set("Schwab session: connected for this app run")
+            if 200 <= status_code < 300:
+                self.cancel_verified_this_session = True
+                self._update_verification_status()
 
             self._set_preview_text(
                 "SCHWAB CANCEL ORDER RESULT\n"
