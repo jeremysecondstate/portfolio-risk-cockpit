@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tkinter as tk
 import webbrowser
 from datetime import datetime, timedelta, timezone
@@ -262,6 +263,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         limit_status = "PASS" if order_type == "LIMIT" else "BLOCKED"
         quantity_status = "REVIEW REQUIRED" if order.quantity > 0 else "BLOCKED"
         price_status = "REVIEW REQUIRED" if order.limit_price is not None and order.limit_price > 0 else "BLOCKED"
+        formatted_schwab_order = json.dumps(schwab_order, indent=2)
 
         self._set_preview_text(
             "LIVE SUBMIT SAFETY REVIEW\n"
@@ -291,7 +293,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             f"- User must type exact phrase: {confirm_phrase}: REQUIRED\n"
             "- Final warning dialog must be accepted: REQUIRED\n\n"
             "Schwab order JSON that would be previewed/submitted in a future live-submit phase:\n"
-            f"{schwab_order}\n\n"
+            f"{formatted_schwab_order}\n\n"
             "This screen is informational only. The live submit endpoint is not wired here."
         )
 
