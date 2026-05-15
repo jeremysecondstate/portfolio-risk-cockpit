@@ -9,6 +9,7 @@ from tkinter import messagebox, simpledialog, ttk
 from app.brokers.paper import PaperBroker
 from app.brokers.schwab.account_adapter import portfolio_from_schwab_account
 from app.brokers.schwab.session import SchwabSession
+from app.brokers.schwab.token_store import clear_token_payload
 from app.core.order_models import OrderSide, OrderType, TimeInForce
 from app.ui.dashboard import PortfolioRiskCockpitApp
 
@@ -129,12 +130,26 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         ).pack(anchor=tk.W)
 
     def _authorize_schwab_session(self) -> SchwabSession | None:
-        """Return the in-memory Schwab session or create one through the code flow."""
-        if self.schwab_session and self.schwab_session.access_token:
-            self.schwab_status_var.set("Schwab session: connected for this app run")
-            return self.schwab_session
+        """Return the Schwab session, using the local refresh token when possible."""
+        if self.schwab_session:
+            try:
+                self.schwab_session.ensure_access_token()
+                self.schwab_status_var.set("Schwab session: connected for this app run")
+                return self.schwab_session
+            except Exception:
+                self.schwab_session = None
 
         session = SchwabSession()
+        if session.has_cached_authorization():
+            try:
+                session.ensure_access_token()
+                self.schwab_session = session
+                self.schwab_status_var.set("Schwab session: connected from saved authorization")
+                return session
+            except Exception:
+                session.clear_cached_authorization()
+                self.schwab_status_var.set("Schwab session: saved authorization expired; login required")
+
         auth_url, _state = session.build_authorization_url()
         self.schwab_status_var.set("Schwab session: authorization required")
         webbrowser.open(auth_url)
@@ -149,7 +164,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
 
         session.exchange_authorization_code(auth_code)
         self.schwab_session = session
-        self.schwab_status_var.set("Schwab session: connected for this app run")
+        self.schwab_status_var.set("Schwab session: connected and saved for future app runs")
         return session
 
     def _sync_schwab_account_snapshot(self, session: SchwabSession) -> str:
@@ -171,7 +186,8 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         )
 
     def reset_schwab_session(self) -> None:
-        """Forget the in-memory Schwab token and session-only safety checks."""
+        """Forget the Schwab token cache and session-only safety checks."""
+        clear_token_payload()
         self.schwab_session = None
         self.last_schwab_preview_status = None
         self.open_only_verified_this_session = False
@@ -182,7 +198,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         self._set_preview_text(
             "SCHWAB SESSION RESET\n"
             "====================\n\n"
-            "The in-memory Schwab session and session-only safety checks were cleared.\n"
+            "The in-memory Schwab session, saved local token cache, and session-only safety checks were cleared.\n"
             "The next Schwab Preview, Recent Orders, or Open Only action will ask you to authorize again.\n\n"
             "No order was submitted, replaced, or canceled."
         )

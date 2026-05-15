@@ -10,6 +10,14 @@ from urllib.parse import urlencode
 import requests
 from dotenv import load_dotenv
 
+from app.brokers.schwab.token_store import (
+    access_token_is_fresh,
+    clear_token_payload,
+    load_token_payload,
+    refresh_token_is_available,
+    save_token_payload,
+)
+
 AUTH_URL = "https://api.schwabapi.com/v1/oauth/authorize"
 TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
 TRADER_BASE_URL = "https://api.schwabapi.com/trader/v1"
@@ -54,7 +62,35 @@ class SchwabSession:
     def __init__(self, config: SchwabConfig | None = None) -> None:
         self.config = config or SchwabConfig.from_env()
         self.access_token: str | None = None
+        self.refresh_token: str | None = None
         self.account_hash: str | None = None
+        self._hydrate_from_cache()
+
+    def _hydrate_from_cache(self) -> None:
+        cached_payload = load_token_payload()
+        if not cached_payload:
+            return
+
+        self.refresh_token = cached_payload.get("refresh_token")
+        if access_token_is_fresh(cached_payload):
+            self.access_token = cached_payload.get("access_token")
+            return
+
+        if refresh_token_is_available(cached_payload):
+            self.refresh_token = cached_payload.get("refresh_token")
+
+    def has_cached_authorization(self) -> bool:
+        """Return whether this session can likely authorize without browser login."""
+        return bool(self.access_token or self.refresh_token)
+
+    def ensure_access_token(self) -> None:
+        """Use a cached refresh token when possible instead of prompting the user."""
+        if self.access_token:
+            return
+        if self.refresh_token:
+            self.refresh_access_token()
+            return
+        raise RuntimeError("Schwab access token is not available yet.")
 
     def build_authorization_url(self) -> tuple[str, str]:
         state = secrets.token_urlsafe(24)
@@ -82,10 +118,38 @@ class SchwabSession:
         response.raise_for_status()
         payload = response.json()
         self.access_token = payload["access_token"]
+        self.refresh_token = payload.get("refresh_token")
+        save_token_payload(payload, previous_refresh_token=self.refresh_token)
+
+    def refresh_access_token(self) -> None:
+        if not self.refresh_token:
+            raise RuntimeError("Schwab refresh token is not available.")
+
+        response = requests.post(
+            TOKEN_URL,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": self.refresh_token,
+            },
+            auth=(self.config.client_id, self.config.client_secret),
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        previous_refresh_token = self.refresh_token
+        self.access_token = payload["access_token"]
+        self.refresh_token = payload.get("refresh_token") or previous_refresh_token
+        save_token_payload(payload, previous_refresh_token=previous_refresh_token)
+
+    def clear_cached_authorization(self) -> None:
+        self.access_token = None
+        self.refresh_token = None
+        self.account_hash = None
+        clear_token_payload()
 
     def _headers(self) -> dict[str, str]:
-        if not self.access_token:
-            raise RuntimeError("Schwab access token is not available yet.")
+        self.ensure_access_token()
         return {
             "Authorization": f"Bearer {self.access_token}",
             "Accept": "application/json",
