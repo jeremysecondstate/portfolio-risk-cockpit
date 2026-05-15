@@ -9,7 +9,6 @@ from app.core.order_models import OrderSide, OrderType, TimeInForce
 
 CANVAS = "#0f172a"
 SURFACE = "#111827"
-SURFACE_ALT = "#1f2937"
 PANEL = "#f8fafc"
 PANEL_ALT = "#eef2ff"
 BORDER = "#cbd5e1"
@@ -17,9 +16,7 @@ TEXT = "#0f172a"
 MUTED = "#64748b"
 ACCENT = "#2563eb"
 ACCENT_DARK = "#1d4ed8"
-SUCCESS = "#047857"
 DANGER = "#b91c1c"
-WARNING = "#b45309"
 INPUT = "#ffffff"
 
 
@@ -58,14 +55,11 @@ def _configure_style(self: tk.Tk) -> None:
     style.configure("Card.TLabelframe.Label", background=PANEL, foreground=TEXT, font=("Segoe UI", 11, "bold"))
 
     style.configure("Header.TLabel", background=SURFACE, foreground="#ffffff", font=("Segoe UI", 22, "bold"))
-    style.configure("HeroKicker.TLabel", background=SURFACE, foreground="#93c5fd", font=("Segoe UI", 9, "bold"))
     style.configure("HeroSubtle.TLabel", background=SURFACE, foreground="#cbd5e1")
     style.configure("Subtle.TLabel", background=PANEL, foreground=MUTED)
     style.configure("Mode.TLabel", background=SURFACE, foreground="#86efac", font=("Segoe UI", 10, "bold"))
-    style.configure("Danger.TLabel", background=PANEL, foreground=DANGER, font=("Segoe UI", 10, "bold"))
     style.configure("MetricTitle.TLabel", background=PANEL, foreground=MUTED, font=("Segoe UI", 9, "bold"))
     style.configure("MetricValue.TLabel", background=PANEL, foreground=TEXT, font=("Segoe UI", 18, "bold"))
-    style.configure("Section.TLabel", background=PANEL, foreground=TEXT, font=("Segoe UI", 10, "bold"))
     style.configure("Chip.TLabel", background=PANEL_ALT, foreground=ACCENT_DARK, font=("Segoe UI", 9, "bold"), padding=(8, 4))
 
     style.configure("TButton", padding=(10, 7), borderwidth=0)
@@ -82,22 +76,35 @@ def _configure_style(self: tk.Tk) -> None:
     style.map("Treeview", background=[("selected", "#dbeafe")], foreground=[("selected", TEXT)])
 
 
+def _make_paned(parent: tk.Widget, orient: str) -> tk.PanedWindow:
+    """Create a visible draggable splitter that still matches the cockpit theme."""
+    return tk.PanedWindow(
+        parent,
+        orient=orient,
+        bg=CANVAS,
+        bd=0,
+        sashwidth=8,
+        sashrelief=tk.FLAT,
+        sashpad=4,
+        showhandle=True,
+        opaqueresize=True,
+    )
+
+
 def _build_layout(self: tk.Tk) -> None:
     root = ttk.Frame(self, style="Canvas.TFrame", padding=18)
     root.pack(fill=tk.BOTH, expand=True)
 
     self._build_header(root)
 
-    body = ttk.Frame(root, style="Canvas.TFrame")
+    body = _make_paned(root, tk.HORIZONTAL)
     body.pack(fill=tk.BOTH, expand=True, pady=(16, 0))
-    body.columnconfigure(0, weight=3, uniform="cockpit")
-    body.columnconfigure(1, weight=2, uniform="cockpit")
-    body.rowconfigure(0, weight=1)
 
     left = ttk.Frame(body, style="Canvas.TFrame")
     right = ttk.Frame(body, style="Canvas.TFrame")
-    left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-    right.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+    body.add(left, minsize=560, stretch="always")
+    body.add(right, minsize=520, stretch="always")
+    self.after_idle(lambda: body.sash_place(0, max(600, int(self.winfo_width() * 0.60)), 0))
 
     self._build_portfolio_panel(left)
     self._build_order_panel(right)
@@ -124,8 +131,18 @@ def _build_header(self: tk.Tk, parent: ttk.Frame) -> None:
 
 
 def _build_portfolio_panel(self: tk.Tk, parent: ttk.Frame) -> None:
-    summary = ttk.LabelFrame(parent, text="Account Snapshot", style="Card.TLabelframe")
-    summary.pack(fill=tk.X)
+    stack = _make_paned(parent, tk.VERTICAL)
+    stack.pack(fill=tk.BOTH, expand=True)
+
+    summary_shell = ttk.Frame(stack, style="Canvas.TFrame")
+    positions_shell = ttk.Frame(stack, style="Canvas.TFrame")
+    safety_shell = ttk.Frame(stack, style="Canvas.TFrame")
+    stack.add(summary_shell, minsize=150, stretch="never")
+    stack.add(positions_shell, minsize=260, stretch="always")
+    stack.add(safety_shell, minsize=72, stretch="never")
+
+    summary = ttk.LabelFrame(summary_shell, text="Account Snapshot", style="Card.TLabelframe")
+    summary.pack(fill=tk.BOTH, expand=True)
     summary.columnconfigure((0, 1, 2), weight=1)
 
     self.cash_value_label = self._metric(summary, "Cash", 0)
@@ -140,14 +157,14 @@ def _build_portfolio_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     ttk.Button(snapshot_buttons, text="Reload Snapshot", command=self.reload_snapshot).pack(side=tk.LEFT)
     ttk.Button(snapshot_buttons, text="Refresh View", command=self.refresh_portfolio).pack(side=tk.LEFT, padx=(8, 0))
 
-    positions_frame = ttk.LabelFrame(parent, text="Positions", style="Card.TLabelframe")
-    positions_frame.pack(fill=tk.BOTH, expand=True, pady=(14, 0))
+    positions_frame = ttk.LabelFrame(positions_shell, text="Positions", style="Card.TLabelframe")
+    positions_frame.pack(fill=tk.BOTH, expand=True)
 
     table_wrap = ttk.Frame(positions_frame, style="Panel.TFrame")
     table_wrap.pack(fill=tk.BOTH, expand=True)
 
     columns = ("symbol", "qty", "avg_cost", "last", "value", "weight")
-    self.positions_table = ttk.Treeview(table_wrap, columns=columns, show="headings", height=16)
+    self.positions_table = ttk.Treeview(table_wrap, columns=columns, show="headings", height=14)
     for column, label, width in [
         ("symbol", "Symbol", 90),
         ("qty", "Qty", 92),
@@ -165,8 +182,8 @@ def _build_portfolio_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
     self.positions_table.configure(yscrollcommand=scrollbar.set)
 
-    help_box = ttk.LabelFrame(parent, text="Safety Rules", style="Card.TLabelframe")
-    help_box.pack(fill=tk.X, pady=(14, 0))
+    help_box = ttk.LabelFrame(safety_shell, text="Safety Rules", style="Card.TLabelframe")
+    help_box.pack(fill=tk.BOTH, expand=True)
     ttk.Label(
         help_box,
         text=(
@@ -188,8 +205,18 @@ def _metric(self: tk.Tk, parent: ttk.Frame, title: str, column: int) -> ttk.Labe
 
 
 def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
-    ticket = ttk.LabelFrame(parent, text="Order Planner", style="Card.TLabelframe")
-    ticket.pack(fill=tk.X)
+    stack = _make_paned(parent, tk.VERTICAL)
+    stack.pack(fill=tk.BOTH, expand=True)
+
+    ticket_shell = ttk.Frame(stack, style="Canvas.TFrame")
+    preview_shell = ttk.Frame(stack, style="Canvas.TFrame")
+    explainer_shell = ttk.Frame(stack, style="Canvas.TFrame")
+    stack.add(ticket_shell, minsize=285, stretch="never")
+    stack.add(preview_shell, minsize=220, stretch="always")
+    stack.add(explainer_shell, minsize=78, stretch="never")
+
+    ticket = ttk.LabelFrame(ticket_shell, text="Order Planner", style="Card.TLabelframe")
+    ticket.pack(fill=tk.BOTH, expand=True)
     ticket.columnconfigure(1, weight=1)
     ticket.columnconfigure(3, weight=1)
 
@@ -204,36 +231,46 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
 
     primary_actions = ttk.Frame(ticket, style="Panel.TFrame")
     primary_actions.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(16, 0))
-    ttk.Button(primary_actions, text="Preview Risk", command=self.preview_order, style="Accent.TButton").pack(side=tk.LEFT)
-    ttk.Button(primary_actions, text="Schwab Preview", command=self.run_schwab_preview).pack(side=tk.LEFT, padx=(8, 0))
-    ttk.Button(primary_actions, text="Submit Paper Order", command=self.submit_order).pack(side=tk.RIGHT)
+    primary_actions.columnconfigure((0, 1, 2), weight=1)
+    ttk.Button(primary_actions, text="Preview Risk", command=self.preview_order, style="Accent.TButton").grid(row=0, column=0, sticky="ew", padx=(0, 8))
+    ttk.Button(primary_actions, text="Schwab Preview", command=self.run_schwab_preview).grid(row=0, column=1, sticky="ew", padx=(0, 8))
+    ttk.Button(primary_actions, text="Submit Paper Order", command=self.submit_order).grid(row=0, column=2, sticky="ew")
 
     secondary_actions = ttk.Frame(ticket, style="Panel.TFrame")
     secondary_actions.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(8, 0))
-    for label, command in [
-        ("Recent Orders", self.load_schwab_open_orders),
-        ("Open Only", self.load_schwab_open_orders_only),
-        ("Reset Session", self.reset_schwab_session),
-        ("Live Safety", self.show_live_submit_safety_review),
-        ("Position Size", self.show_position_size),
-        ("Checklist", self.show_manual_checklist),
-    ]:
-        ttk.Button(secondary_actions, text=label, command=command).pack(side=tk.LEFT, padx=(0, 8), pady=(0, 6))
-    ttk.Button(secondary_actions, text="Cancel Order", command=self.show_cancel_order_placeholder, style="Danger.TButton").pack(side=tk.LEFT, padx=(0, 8), pady=(0, 6))
-    ttk.Button(secondary_actions, text="LIVE Submit", command=self.submit_live_schwab_order_guarded, style="Danger.TButton").pack(side=tk.LEFT, pady=(0, 6))
+    for column in range(4):
+        secondary_actions.columnconfigure(column, weight=1, uniform="actions")
+    for index, (label, command, style_name) in enumerate([
+        ("Recent Orders", self.load_schwab_open_orders, "TButton"),
+        ("Open Only", self.load_schwab_open_orders_only, "TButton"),
+        ("Reset Session", self.reset_schwab_session, "TButton"),
+        ("Live Safety", self.show_live_submit_safety_review, "TButton"),
+        ("Position Size", self.show_position_size, "TButton"),
+        ("Checklist", self.show_manual_checklist, "TButton"),
+        ("Cancel Order", self.show_cancel_order_placeholder, "Danger.TButton"),
+        ("LIVE Submit", self.submit_live_schwab_order_guarded, "Danger.TButton"),
+    ]):
+        ttk.Button(secondary_actions, text=label, command=command, style=style_name).grid(
+            row=index // 4,
+            column=index % 4,
+            sticky="ew",
+            padx=(0 if index % 4 == 0 else 6, 0),
+            pady=(0 if index < 4 else 6, 0),
+        )
 
     status_bar = ttk.Frame(ticket, style="Panel.TFrame")
     status_bar.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(8, 0))
-    ttk.Label(status_bar, textvariable=self.schwab_status_var, style="Chip.TLabel").pack(side=tk.LEFT, padx=(0, 6), pady=(4, 0))
-    ttk.Label(status_bar, textvariable=self.schwab_preview_status_var, style="Chip.TLabel").pack(side=tk.LEFT, padx=(0, 6), pady=(4, 0))
-    ttk.Label(status_bar, textvariable=self.schwab_verification_status_var, style="Chip.TLabel").pack(side=tk.LEFT, pady=(4, 0))
+    status_bar.columnconfigure((0, 1, 2), weight=1)
+    ttk.Label(status_bar, textvariable=self.schwab_status_var, style="Chip.TLabel").grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=(4, 0))
+    ttk.Label(status_bar, textvariable=self.schwab_preview_status_var, style="Chip.TLabel").grid(row=0, column=1, sticky="ew", padx=(0, 6), pady=(4, 0))
+    ttk.Label(status_bar, textvariable=self.schwab_verification_status_var, style="Chip.TLabel").grid(row=0, column=2, sticky="ew", pady=(4, 0))
 
-    results = ttk.LabelFrame(parent, text="Risk Preview + Instructions", style="Card.TLabelframe")
-    results.pack(fill=tk.BOTH, expand=True, pady=(14, 0))
+    results = ttk.LabelFrame(preview_shell, text="Risk Preview + Instructions", style="Card.TLabelframe")
+    results.pack(fill=tk.BOTH, expand=True)
 
     self.preview_text = tk.Text(
         results,
-        height=20,
+        height=18,
         wrap=tk.WORD,
         font=("Cascadia Mono", 10),
         padx=14,
@@ -248,11 +285,12 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     self.preview_text.pack(fill=tk.BOTH, expand=True)
     self._set_preview_text(
         "Create an order and click Preview Risk.\n\n"
+        "Tip: drag the splitters between panels to resize the cockpit for your workflow.\n\n"
         "Reminder: live Schwab orders require staged safety checks before anything can be submitted."
     )
 
-    explainer = ttk.LabelFrame(parent, text="Order Type Cheat Sheet", style="Card.TLabelframe")
-    explainer.pack(fill=tk.X, pady=(14, 0))
+    explainer = ttk.LabelFrame(explainer_shell, text="Order Type Cheat Sheet", style="Card.TLabelframe")
+    explainer.pack(fill=tk.BOTH, expand=True)
     ttk.Label(
         explainer,
         text=(
