@@ -159,6 +159,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
         ttk.Button(button_bar, text="Schwab Preview", command=self.run_schwab_preview).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Recent Orders", command=self.load_schwab_open_orders).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Open Only", command=self.load_schwab_open_orders_only).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(button_bar, text="Cancel Order", command=self.show_cancel_order_placeholder).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Position Size", command=self.show_position_size).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Order Checklist", command=self.show_manual_checklist).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Submit Paper Order", command=self.submit_order).pack(side=tk.RIGHT)
@@ -229,6 +230,23 @@ class PortfolioRiskCockpitApp(tk.Tk):
             "No API call was made. No live order was placed.\n\n"
             f"{json.dumps(schwab_order, indent=2)}\n\n"
             "Next chunk: send this JSON to Schwab previewOrder and display Schwab's rejects/warnings here."
+        )
+
+    def show_cancel_order_placeholder(self) -> None:
+        self._set_preview_text(
+            "SCHWAB CANCEL ORDER\n"
+            "===================\n\n"
+            "Status: placeholder only.\n\n"
+            "No cancel request was sent to Schwab.\n"
+            "No order was submitted, replaced, or canceled.\n\n"
+            "Future cancel workflow:\n"
+            "1. Load Open Only orders.\n"
+            "2. Select a known active/open order.\n"
+            "3. Confirm the order ID, symbol, side, quantity, price, and status.\n"
+            "4. Type a strict confirmation phrase.\n"
+            "5. Send Schwab DELETE /accounts/{accountHash}/orders/{orderId}.\n"
+            "6. Reload Open Only orders to verify the order is canceled.\n\n"
+            "Cancel support will only be wired after we have a safe active order to test."
         )
 
     def schwab_active_order_statuses(self) -> set[str]:
