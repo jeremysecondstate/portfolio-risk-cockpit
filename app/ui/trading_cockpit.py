@@ -66,7 +66,6 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         self._grid_row(ticket, 2, "Quantity", ttk.Entry(ticket, textvariable=self.quantity_var), "Est. price", ttk.Entry(ticket, textvariable=self.estimated_price_var))
         self._grid_row(ticket, 3, "Limit price", ttk.Entry(ticket, textvariable=self.limit_price_var), "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var))
         self._grid_row(ticket, 4, "Risk % cash", ttk.Entry(ticket, textvariable=self.risk_percent_var), "Type CONFIRM", ttk.Entry(ticket, textvariable=self.confirmation_var))
-        self._grid_row(ticket, 5, "Cancel order ID", ttk.Entry(ticket, textvariable=self.cancel_order_id_var), "Cancel confirm", ttk.Entry(ticket, textvariable=self.cancel_confirmation_var))
 
         button_bar = ttk.Frame(ticket)
         button_bar.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(14, 0))
@@ -76,6 +75,8 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         ttk.Button(button_bar, text="Open Only", command=self.load_schwab_open_orders_only).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Reset Schwab Session", command=self.reset_schwab_session).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Cancel Order", command=self.show_cancel_order_placeholder).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(ticket, text="Cancel order ID").grid(row=5, column=0, sticky="w", padx=(0, 8), pady=6)
+        ttk.Entry(ticket, textvariable=self.cancel_order_id_var).grid(row=5, column=1, columnspan=3, sticky="ew", pady=6)
         ttk.Button(button_bar, text="Live Safety", command=self.show_live_submit_safety_review).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="LIVE Submit", command=self.submit_live_schwab_order_guarded).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Position Size", command=self.show_position_size).pack(side=tk.LEFT, padx=(8, 0))
@@ -352,32 +353,8 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
 
     def show_cancel_order_placeholder(self) -> None:
         order_id = self.cancel_order_id_var.get().strip()
-        confirmation = self.cancel_confirmation_var.get().strip()
-
         if not order_id:
             messagebox.showerror("Cancel blocked", "Enter an active Schwab order ID first.")
-            return
-
-        if confirmation != "CANCEL SCHWAB ORDER":
-            self._set_preview_text(
-                "SCHWAB CANCEL ORDER\n"
-                "===================\n\n"
-                "Cancel blocked.\n\n"
-                f"Entered cancel order ID: {order_id}\n"
-                f"Entered cancel confirmation: {confirmation or '(none entered)'}\n\n"
-                "To cancel a Schwab order, type exactly:\n\n"
-                "  CANCEL SCHWAB ORDER\n\n"
-                "No cancel request was sent to Schwab.\n"
-                "No order was submitted, replaced, or canceled."
-            )
-            return
-
-        ok = messagebox.askyesno(
-            "Final Schwab cancel confirmation",
-            f"Send cancel request for Schwab order ID:\n\n{order_id}\n\n"
-            "Only continue if this order is currently open/active and you intend to cancel it.",
-        )
-        if not ok:
             return
 
         try:
