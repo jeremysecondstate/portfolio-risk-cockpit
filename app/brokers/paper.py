@@ -31,6 +31,11 @@ class PaperBroker(Broker):
     def get_portfolio(self) -> Portfolio:
         return self._portfolio
 
+    def set_portfolio(self, portfolio: Portfolio, source_message: str) -> None:
+        """Replace the simulator state with a freshly loaded planning portfolio."""
+        self._portfolio = portfolio
+        self.source_message = source_message
+
     def reload_portfolio_snapshot(self) -> None:
         self._portfolio, self.source_message = load_portfolio_snapshot()
 
