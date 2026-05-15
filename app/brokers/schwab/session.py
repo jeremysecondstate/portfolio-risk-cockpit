@@ -1,0 +1,136 @@
+from __future__ import annotations
+
+import os
+import secrets
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any
+from urllib.parse import urlencode
+
+import requests
+from dotenv import load_dotenv
+
+AUTH_URL = "https://api.schwabapi.com/v1/oauth/authorize"
+TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
+TRADER_BASE_URL = "https://api.schwabapi.com/trader/v1"
+
+
+@dataclass(frozen=True)
+class SchwabConfig:
+    client_id: str
+    client_secret: str
+    redirect_uri: str
+
+    @classmethod
+    def from_env(cls) -> "SchwabConfig":
+        load_dotenv()
+        client_id = os.getenv("SCHWAB_CLIENT_ID", "").strip()
+        client_secret = os.getenv("SCHWAB_CLIENT_SECRET", "").strip()
+        redirect_uri = os.getenv("SCHWAB_REDIRECT_URI", "").strip()
+
+        missing = [
+            name
+            for name, value in {
+                "SCHWAB_CLIENT_ID": client_id,
+                "SCHWAB_CLIENT_SECRET": client_secret,
+                "SCHWAB_REDIRECT_URI": redirect_uri,
+            }.items()
+            if not value
+        ]
+        if missing:
+            raise RuntimeError("Missing Schwab config: " + ", ".join(missing))
+
+        return cls(client_id=client_id, client_secret=client_secret, redirect_uri=redirect_uri)
+
+
+class SchwabSession:
+    """Small Schwab API session helper for the desktop cockpit.
+
+    This helper centralizes OAuth/token/account-hash plumbing so UI handlers do
+    not each duplicate the same request code. It intentionally exposes only
+    read/preview actions; live order submission is not implemented here.
+    """
+
+    def __init__(self, config: SchwabConfig | None = None) -> None:
+        self.config = config or SchwabConfig.from_env()
+        self.access_token: str | None = None
+        self.account_hash: str | None = None
+
+    def build_authorization_url(self) -> tuple[str, str]:
+        state = secrets.token_urlsafe(24)
+        params = {
+            "response_type": "code",
+            "client_id": self.config.client_id,
+            "redirect_uri": self.config.redirect_uri,
+            "scope": "readonly",
+            "state": state,
+        }
+        return f"{AUTH_URL}?{urlencode(params)}", state
+
+    def exchange_authorization_code(self, authorization_code: str) -> None:
+        response = requests.post(
+            TOKEN_URL,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            data={
+                "grant_type": "authorization_code",
+                "code": authorization_code.strip(),
+                "redirect_uri": self.config.redirect_uri,
+            },
+            auth=(self.config.client_id, self.config.client_secret),
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        self.access_token = payload["access_token"]
+
+    def _headers(self) -> dict[str, str]:
+        if not self.access_token:
+            raise RuntimeError("Schwab access token is not available yet.")
+        return {
+            "Authorization": f"Bearer {self.access_token}",
+            "Accept": "application/json",
+        }
+
+    def get_account_hash(self) -> str:
+        if self.account_hash:
+            return self.account_hash
+
+        response = requests.get(
+            f"{TRADER_BASE_URL}/accounts/accountNumbers",
+            headers=self._headers(),
+            timeout=30,
+        )
+        response.raise_for_status()
+        accounts = response.json()
+        if not accounts:
+            raise RuntimeError("No Schwab accounts returned.")
+
+        account_hash = accounts[0].get("hashValue")
+        if not account_hash:
+            raise RuntimeError("Schwab account hashValue was missing.")
+
+        self.account_hash = account_hash
+        return account_hash
+
+    def preview_order(self, order_payload: dict[str, Any]) -> tuple[int, Any]:
+        account_hash = self.get_account_hash()
+        response = requests.post(
+            f"{TRADER_BASE_URL}/accounts/{account_hash}/previewOrder",
+            headers={**self._headers(), "Content-Type": "application/json"},
+            json=order_payload,
+            timeout=30,
+        )
+        return response.status_code, response.json()
+
+    def get_orders(self, *, from_entered_time: datetime, to_entered_time: datetime) -> tuple[int, Any]:
+        account_hash = self.get_account_hash()
+        response = requests.get(
+            f"{TRADER_BASE_URL}/accounts/{account_hash}/orders",
+            headers=self._headers(),
+            params={
+                "fromEnteredTime": from_entered_time.astimezone(timezone.utc).isoformat(timespec="seconds"),
+                "toEnteredTime": to_entered_time.astimezone(timezone.utc).isoformat(timespec="seconds"),
+            },
+            timeout=30,
+        )
+        return response.status_code, response.json()
