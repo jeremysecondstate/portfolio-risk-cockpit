@@ -27,9 +27,14 @@ _NUMBER_KEYS_FOR_PRICE = (
     "markPrice",
 )
 
-_NUMBER_KEYS_FOR_AVERAGE_COST = (
+_PER_SHARE_COST_KEYS = (
     "averagePrice",
+    "averageLongPrice",
+    "averageShortPrice",
     "averageCost",
+)
+
+_TOTAL_COST_KEYS = (
     "averageCostBasis",
     "costBasis",
 )
@@ -98,9 +103,7 @@ def _position_from_schwab(raw_position: Any) -> Position | None:
     if last_price is None and market_value is not None:
         last_price = abs(market_value / quantity)
 
-    average_cost = _first_number(raw_position, _NUMBER_KEYS_FOR_AVERAGE_COST)
-    if average_cost is None:
-        average_cost = last_price or 0.0
+    average_cost = _average_cost(raw_position, quantity, last_price)
 
     return Position(
         symbol=symbol,
@@ -108,6 +111,18 @@ def _position_from_schwab(raw_position: Any) -> Position | None:
         average_cost=round(average_cost, 4),
         last_price=round(last_price or 0.0, 4),
     )
+
+
+def _average_cost(raw_position: dict[str, Any], quantity: float, fallback_price: float | None) -> float:
+    per_share_cost = _first_number(raw_position, _PER_SHARE_COST_KEYS)
+    if per_share_cost is not None:
+        return per_share_cost
+
+    total_cost = _first_number(raw_position, _TOTAL_COST_KEYS)
+    if total_cost is not None and abs(quantity) > 0.00000001:
+        return abs(total_cost / quantity)
+
+    return fallback_price or 0.0
 
 
 def _net_quantity(raw_position: dict[str, Any]) -> float:
