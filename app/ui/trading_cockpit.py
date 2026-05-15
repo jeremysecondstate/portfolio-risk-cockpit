@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk
+import webbrowser
+from datetime import datetime, timedelta, timezone
+from tkinter import messagebox, simpledialog, ttk
 
 from app.brokers.paper import PaperBroker
-from app.core.order_checklist import build_manual_order_checklist
+from app.brokers.schwab.session import SchwabSession
 from app.core.order_models import OrderSide, OrderType, TimeInForce
 from app.ui.dashboard import PortfolioRiskCockpitApp
 
@@ -88,6 +90,65 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             wraplength=430,
             style="Subtle.TLabel",
         ).pack(anchor=tk.W)
+
+    def _authorize_schwab_session(self) -> SchwabSession | None:
+        """Create an authorized Schwab session using the existing copy/paste code flow."""
+        session = SchwabSession()
+        auth_url, _state = session.build_authorization_url()
+        webbrowser.open(auth_url)
+
+        auth_code = simpledialog.askstring(
+            "Schwab Authorization",
+            "After Schwab login redirects to your callback page,\n\npaste the authorization code here:",
+        )
+        if not auth_code:
+            return None
+
+        session.exchange_authorization_code(auth_code)
+        return session
+
+    def run_schwab_preview(self) -> None:
+        try:
+            session = self._authorize_schwab_session()
+            if session is None:
+                return
+
+            status_code, preview_payload = session.preview_order(self.build_schwab_order_json_from_ui())
+            self._set_preview_text(self.format_schwab_preview_response(status_code, preview_payload))
+        except Exception as exc:
+            messagebox.showerror("Schwab preview failed", str(exc))
+
+    def load_schwab_open_orders(self) -> None:
+        try:
+            session = self._authorize_schwab_session()
+            if session is None:
+                return
+
+            to_time = datetime.now(timezone.utc)
+            from_time = to_time - timedelta(days=7)
+            status_code, orders_payload = session.get_orders(
+                from_entered_time=from_time,
+                to_entered_time=to_time,
+            )
+            self._set_preview_text(self.format_schwab_open_orders_response(status_code, orders_payload))
+        except Exception as exc:
+            messagebox.showerror("Load Schwab recent orders failed", str(exc))
+
+    def load_schwab_open_orders_only(self) -> None:
+        try:
+            session = self._authorize_schwab_session()
+            if session is None:
+                return
+
+            to_time = datetime.now(timezone.utc)
+            from_time = to_time - timedelta(days=7)
+            status_code, orders_payload = session.get_orders(
+                from_entered_time=from_time,
+                to_entered_time=to_time,
+            )
+            self._set_preview_text(self.format_schwab_open_orders_only_response(status_code, orders_payload))
+        except Exception as exc:
+            messagebox.showerror("Load Schwab open orders failed", str(exc))
 
     def show_cancel_order_placeholder(self) -> None:
         order_id = self.cancel_order_id_var.get().strip() or "(none entered)"
