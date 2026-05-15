@@ -10,10 +10,30 @@ class Position:
     quantity: float
     average_cost: float
     last_price: float
+    day_profit_loss: float | None = None
+    day_profit_loss_percent: float | None = None
+    open_profit_loss: float | None = None
+
+    @property
+    def cost_basis(self) -> float:
+        return round(abs(self.quantity) * self.average_cost, 2)
 
     @property
     def market_value(self) -> float:
         return round(self.quantity * self.last_price, 2)
+
+    @property
+    def unrealized_profit_loss(self) -> float:
+        if self.open_profit_loss is not None:
+            return round(self.open_profit_loss, 2)
+        return round(self.market_value - self.cost_basis, 2)
+
+    @property
+    def unrealized_profit_loss_percent(self) -> float | None:
+        cost_basis = self.cost_basis
+        if cost_basis <= 0:
+            return None
+        return round((self.unrealized_profit_loss / cost_basis) * 100, 2)
 
 
 @dataclass
@@ -28,6 +48,28 @@ class Portfolio:
     @property
     def total_value(self) -> float:
         return round(self.cash + self.positions_value, 2)
+
+    @property
+    def cost_basis(self) -> float:
+        return round(sum(position.cost_basis for position in self.positions.values()), 2)
+
+    @property
+    def unrealized_profit_loss(self) -> float:
+        return round(sum(position.unrealized_profit_loss for position in self.positions.values()), 2)
+
+    @property
+    def unrealized_profit_loss_percent(self) -> float | None:
+        cost_basis = self.cost_basis
+        if cost_basis <= 0:
+            return None
+        return round((self.unrealized_profit_loss / cost_basis) * 100, 2)
+
+    @property
+    def day_profit_loss(self) -> float | None:
+        values = [position.day_profit_loss for position in self.positions.values() if position.day_profit_loss is not None]
+        if not values:
+            return None
+        return round(sum(values), 2)
 
     def get_position(self, symbol: str) -> Position | None:
         return self.positions.get(symbol.strip().upper())
@@ -52,6 +94,9 @@ class Portfolio:
             raise ValueError(f"Cannot sell more {symbol} than the paper account owns.")
 
         existing.last_price = fill_price
+        existing.day_profit_loss = None
+        existing.day_profit_loss_percent = None
+        existing.open_profit_loss = None
         if new_quantity <= 0.00000001:
             del self.positions[symbol]
             return
