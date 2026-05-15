@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from app.ui.dashboard import PortfolioRiskCockpitApp
+from app.ui.trading_cockpit import SchwabTradingCockpitApp
 
 
 def main() -> None:
-    app = PortfolioRiskCockpitApp()
+    app = SchwabTradingCockpitApp()
     app.mainloop()
 
 
