@@ -48,7 +48,7 @@ class SchwabSession:
 
     This helper centralizes OAuth/token/account-hash plumbing so UI handlers do
     not each duplicate the same request code. It intentionally exposes only
-    read/preview actions; live order submission is not implemented here.
+    read/preview actions plus guarded live actions that the UI explicitly gates.
     """
 
     def __init__(self, config: SchwabConfig | None = None) -> None:
@@ -111,6 +111,17 @@ class SchwabSession:
 
         self.account_hash = account_hash
         return account_hash
+
+    def get_account(self, *, fields: str = "positions") -> tuple[int, Any]:
+        """Fetch the selected Schwab account, including positions by default."""
+        account_hash = self.get_account_hash()
+        response = requests.get(
+            f"{TRADER_BASE_URL}/accounts/{account_hash}",
+            headers=self._headers(),
+            params={"fields": fields} if fields else None,
+            timeout=30,
+        )
+        return response.status_code, response.json()
 
     def preview_order(self, order_payload: dict[str, Any]) -> tuple[int, Any]:
         account_hash = self.get_account_hash()
