@@ -35,6 +35,7 @@ def install_polished_cockpit_theme(app_cls: Type[tk.Tk]) -> None:
     app_cls._build_portfolio_panel = _build_portfolio_panel  # type: ignore[method-assign]
     app_cls._build_order_panel = _build_order_panel  # type: ignore[method-assign]
     app_cls._metric = _metric  # type: ignore[method-assign]
+    app_cls.refresh_portfolio = _refresh_portfolio  # type: ignore[method-assign]
     app_cls._grid_row = _grid_row  # type: ignore[method-assign]
     app_cls._set_preview_text = _set_preview_text  # type: ignore[method-assign]
 
@@ -143,17 +144,19 @@ def _build_portfolio_panel(self: tk.Tk, parent: ttk.Frame) -> None:
 
     summary = ttk.LabelFrame(summary_shell, text="Account Snapshot", style="Card.TLabelframe")
     summary.pack(fill=tk.BOTH, expand=True)
-    summary.columnconfigure((0, 1, 2), weight=1)
+    summary.columnconfigure((0, 1, 2, 3, 4), weight=1)
 
     self.cash_value_label = self._metric(summary, "Cash", 0)
     self.positions_value_label = self._metric(summary, "Positions", 1)
     self.total_value_label = self._metric(summary, "Total Value", 2)
+    self.unrealized_pnl_value_label = self._metric(summary, "Unrealized P&L", 3)
+    self.day_pnl_value_label = self._metric(summary, "Day P&L", 4)
 
     self.snapshot_source_label = ttk.Label(summary, text="Snapshot: --", style="Subtle.TLabel")
-    self.snapshot_source_label.grid(row=2, column=0, columnspan=3, sticky="w", pady=(14, 0))
+    self.snapshot_source_label.grid(row=2, column=0, columnspan=5, sticky="w", pady=(14, 0))
 
     snapshot_buttons = ttk.Frame(summary, style="Panel.TFrame")
-    snapshot_buttons.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(12, 0))
+    snapshot_buttons.grid(row=3, column=0, columnspan=5, sticky="ew", pady=(12, 0))
     ttk.Button(snapshot_buttons, text="Reload Snapshot", command=self.reload_snapshot).pack(side=tk.LEFT)
     ttk.Button(snapshot_buttons, text="Refresh View", command=self.refresh_portfolio).pack(side=tk.LEFT, padx=(8, 0))
 
@@ -162,25 +165,46 @@ def _build_portfolio_panel(self: tk.Tk, parent: ttk.Frame) -> None:
 
     table_wrap = ttk.Frame(positions_frame, style="Panel.TFrame")
     table_wrap.pack(fill=tk.BOTH, expand=True)
+    table_wrap.rowconfigure(0, weight=1)
+    table_wrap.columnconfigure(0, weight=1)
 
-    columns = ("symbol", "qty", "avg_cost", "last", "value", "weight")
+    columns = (
+        "symbol",
+        "qty",
+        "avg_cost",
+        "last",
+        "cost_basis",
+        "value",
+        "weight",
+        "pnl",
+        "pnl_pct",
+        "day_pnl",
+    )
     self.positions_table = ttk.Treeview(table_wrap, columns=columns, show="headings", height=14)
     for column, label, width in [
         ("symbol", "Symbol", 90),
         ("qty", "Qty", 92),
         ("avg_cost", "Avg Cost", 112),
         ("last", "Last", 112),
+        ("cost_basis", "Cost Basis", 118),
         ("value", "Value", 122),
         ("weight", "Weight", 88),
+        ("pnl", "P&L $", 112),
+        ("pnl_pct", "P&L %", 86),
+        ("day_pnl", "Day P&L", 112),
     ]:
         self.positions_table.heading(column, text=label)
-        self.positions_table.column(column, width=width, anchor=tk.E)
+        self.positions_table.column(column, width=width, anchor=tk.E, stretch=True)
     self.positions_table.column("symbol", anchor=tk.W)
-    self.positions_table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    self.positions_table.tag_configure("pnl_positive", foreground="#047857")
+    self.positions_table.tag_configure("pnl_negative", foreground=DANGER)
+    self.positions_table.grid(row=0, column=0, sticky="nsew")
 
-    scrollbar = ttk.Scrollbar(table_wrap, orient=tk.VERTICAL, command=self.positions_table.yview)
-    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-    self.positions_table.configure(yscrollcommand=scrollbar.set)
+    y_scrollbar = ttk.Scrollbar(table_wrap, orient=tk.VERTICAL, command=self.positions_table.yview)
+    y_scrollbar.grid(row=0, column=1, sticky="ns")
+    x_scrollbar = ttk.Scrollbar(table_wrap, orient=tk.HORIZONTAL, command=self.positions_table.xview)
+    x_scrollbar.grid(row=1, column=0, sticky="ew")
+    self.positions_table.configure(yscrollcommand=y_scrollbar.set, xscrollcommand=x_scrollbar.set)
 
     help_box = ttk.LabelFrame(safety_shell, text="Safety Rules", style="Card.TLabelframe")
     help_box.pack(fill=tk.BOTH, expand=True)
@@ -202,6 +226,56 @@ def _metric(self: tk.Tk, parent: ttk.Frame, title: str, column: int) -> ttk.Labe
     value_label = ttk.Label(card, text="--", style="MetricValue.TLabel")
     value_label.pack(anchor=tk.W, pady=(3, 0))
     return value_label
+
+
+def _refresh_portfolio(self: tk.Tk) -> None:
+    portfolio = self.broker.get_portfolio()
+    self.cash_value_label.configure(text=_format_money(portfolio.cash))
+    self.positions_value_label.configure(text=_format_money(portfolio.positions_value))
+    self.total_value_label.configure(text=_format_money(portfolio.total_value))
+    self.unrealized_pnl_value_label.configure(
+        text=f"{_format_money(portfolio.unrealized_profit_loss)} ({_format_percent(portfolio.unrealized_profit_loss_percent)})"
+    )
+    self.day_pnl_value_label.configure(text=_format_optional_money(portfolio.day_profit_loss))
+    self.snapshot_source_label.configure(text=f"Snapshot: {self.broker.source_message}")
+
+    for row_id in self.positions_table.get_children():
+        self.positions_table.delete(row_id)
+
+    total_value = max(portfolio.total_value, 0.01)
+    for symbol in sorted(portfolio.positions):
+        p = portfolio.positions[symbol]
+        weight = (p.market_value / total_value) * 100
+        row_tag = "pnl_positive" if p.unrealized_profit_loss >= 0 else "pnl_negative"
+        self.positions_table.insert(
+            "",
+            tk.END,
+            values=(
+                p.symbol,
+                f"{p.quantity:g}",
+                _format_money(p.average_cost),
+                _format_money(p.last_price),
+                _format_money(p.cost_basis),
+                _format_money(p.market_value),
+                f"{weight:.1f}%",
+                _format_money(p.unrealized_profit_loss),
+                _format_percent(p.unrealized_profit_loss_percent),
+                _format_optional_money(p.day_profit_loss),
+            ),
+            tags=(row_tag,),
+        )
+
+
+def _format_money(value: float) -> str:
+    return f"${value:,.2f}"
+
+
+def _format_optional_money(value: float | None) -> str:
+    return "--" if value is None else _format_money(value)
+
+
+def _format_percent(value: float | None) -> str:
+    return "--" if value is None else f"{value:.2f}%"
 
 
 def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:

@@ -39,6 +39,22 @@ _TOTAL_COST_KEYS = (
     "costBasis",
 )
 
+_OPEN_PNL_KEYS = (
+    "longOpenProfitLoss",
+    "shortOpenProfitLoss",
+    "openProfitLoss",
+)
+
+_DAY_PNL_KEYS = (
+    "currentDayProfitLoss",
+    "dayProfitLoss",
+)
+
+_DAY_PNL_PERCENT_KEYS = (
+    "currentDayProfitLossPercentage",
+    "dayProfitLossPercentage",
+)
+
 
 def portfolio_from_schwab_account(payload: Any) -> tuple[Portfolio, str]:
     """Convert a Schwab account response into the cockpit's Portfolio model.
@@ -110,6 +126,9 @@ def _position_from_schwab(raw_position: Any) -> Position | None:
         quantity=round(quantity, 8),
         average_cost=round(average_cost, 4),
         last_price=round(last_price or 0.0, 4),
+        day_profit_loss=_first_number(raw_position, _DAY_PNL_KEYS),
+        day_profit_loss_percent=_first_number(raw_position, _DAY_PNL_PERCENT_KEYS),
+        open_profit_loss=_open_profit_loss(raw_position),
     )
 
 
@@ -123,6 +142,14 @@ def _average_cost(raw_position: dict[str, Any], quantity: float, fallback_price:
         return abs(total_cost / quantity)
 
     return fallback_price or 0.0
+
+
+def _open_profit_loss(raw_position: dict[str, Any]) -> float | None:
+    long_pnl = _to_float(raw_position.get("longOpenProfitLoss"))
+    short_pnl = _to_float(raw_position.get("shortOpenProfitLoss"))
+    if long_pnl is not None or short_pnl is not None:
+        return round((long_pnl or 0.0) + (short_pnl or 0.0), 2)
+    return _first_number(raw_position, _OPEN_PNL_KEYS)
 
 
 def _net_quantity(raw_position: dict[str, Any]) -> float:
