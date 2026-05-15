@@ -267,6 +267,30 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         overall = "DISABLED — live submit endpoint is not wired"
         return overall, mechanical_label, broker_label, human_label
 
+    def _next_live_safety_action(
+        self,
+        *,
+        limit_status: str,
+        quantity_status: str,
+        price_status: str,
+        preview_gate: str,
+        open_only_gate: str,
+        cancel_gate: str,
+    ) -> str:
+        if limit_status != "PASS":
+            return "Set order type to LIMIT."
+        if quantity_status != "PASS":
+            return "Enter a positive quantity."
+        if price_status != "PASS":
+            return "Enter a positive limit price."
+        if preview_gate != "PASS":
+            return "Run Schwab Preview and confirm the Schwab status is ACCEPTED."
+        if open_only_gate != "PASS":
+            return "Click Open Only to verify Schwab order visibility in this app session."
+        if cancel_gate != "PASS":
+            return "Verify guarded Cancel Order with a safe active order in this app session."
+        return "All tracked app-session gates are green. Live submit remains disabled until explicit submit wiring is added."
+
     def show_live_submit_safety_review(self) -> None:
         try:
             order = self._parse_order()
@@ -297,12 +321,21 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             open_only_gate=open_only_gate,
             cancel_gate=cancel_gate,
         )
+        next_action = self._next_live_safety_action(
+            limit_status=limit_status,
+            quantity_status=quantity_status,
+            price_status=price_status,
+            preview_gate=preview_gate,
+            open_only_gate=open_only_gate,
+            cancel_gate=cancel_gate,
+        )
         formatted_schwab_order = json.dumps(schwab_order, indent=2)
 
         self._set_preview_text(
             "LIVE SUBMIT SAFETY REVIEW\n"
             "=========================\n\n"
             f"Overall live readiness: {overall}\n"
+            f"Next required action: {next_action}\n"
             f"Mechanical ticket gates: {mechanical_label}\n"
             f"Broker/session gates: {broker_label}\n"
             f"Human confirmation gates: {human_label}\n\n"
