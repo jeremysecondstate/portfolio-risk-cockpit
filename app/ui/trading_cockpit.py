@@ -191,23 +191,52 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             messagebox.showerror("Load Schwab open orders failed", str(exc))
 
     def show_cancel_order_placeholder(self) -> None:
-        order_id = self.cancel_order_id_var.get().strip() or "(none entered)"
-        confirmation = self.cancel_confirmation_var.get().strip() or "(none entered)"
+        order_id = self.cancel_order_id_var.get().strip()
+        confirmation = self.cancel_confirmation_var.get().strip()
 
-        self._set_preview_text(
-            "SCHWAB CANCEL ORDER\n"
-            "===================\n\n"
-            "Status: placeholder only.\n\n"
-            f"Entered cancel order ID: {order_id}\n"
-            f"Entered cancel confirmation: {confirmation}\n\n"
-            "No cancel request was sent to Schwab.\n"
-            "No order was submitted, replaced, or canceled.\n\n"
-            "Future cancel workflow:\n"
-            "1. Load Open Only orders.\n"
-            "2. Select or paste a known active/open order ID.\n"
-            "3. Confirm the order ID, symbol, side, quantity, price, and status.\n"
-            "4. Type a strict confirmation phrase.\n"
-            "5. Send Schwab DELETE /accounts/{accountHash}/orders/{orderId}.\n"
-            "6. Reload Open Only orders to verify the order is canceled.\n\n"
-            "Cancel support will only be wired after we have a safe active order to test."
+        if not order_id:
+            messagebox.showerror("Cancel blocked", "Enter an active Schwab order ID first.")
+            return
+
+        if confirmation != "CANCEL SCHWAB ORDER":
+            self._set_preview_text(
+                "SCHWAB CANCEL ORDER\n"
+                "===================\n\n"
+                "Cancel blocked.\n\n"
+                f"Entered cancel order ID: {order_id}\n"
+                f"Entered cancel confirmation: {confirmation or '(none entered)'}\n\n"
+                "To cancel a Schwab order, type exactly:\n\n"
+                "  CANCEL SCHWAB ORDER\n\n"
+                "No cancel request was sent to Schwab.\n"
+                "No order was submitted, replaced, or canceled."
+            )
+            return
+
+        ok = messagebox.askyesno(
+            "Final Schwab cancel confirmation",
+            f"Send cancel request for Schwab order ID:\n\n{order_id}\n\n"
+            "Only continue if this order is currently open/active and you intend to cancel it.",
         )
+        if not ok:
+            return
+
+        try:
+            session = self._authorize_schwab_session()
+            if session is None:
+                return
+
+            status_code, payload = session.cancel_order(order_id)
+            self.schwab_status_var.set("Schwab session: connected for this app run")
+
+            self._set_preview_text(
+                "SCHWAB CANCEL ORDER RESULT\n"
+                "==========================\n\n"
+                f"HTTP Status: {status_code}\n"
+                f"Order ID: {order_id}\n\n"
+                f"Response: {payload if payload is not None else '(empty response body)'}\n\n"
+                "Next step: click Open Only to verify the order is no longer active.\n\n"
+                "No order was submitted or replaced."
+            )
+
+        except Exception as exc:
+            messagebox.showerror("Schwab cancel failed", str(exc))

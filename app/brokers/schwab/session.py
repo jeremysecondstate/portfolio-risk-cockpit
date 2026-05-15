@@ -134,3 +134,30 @@ class SchwabSession:
             timeout=30,
         )
         return response.status_code, response.json()
+
+    def cancel_order(self, order_id: str) -> tuple[int, object]:
+        """Cancel a Schwab order by ID.
+
+        Schwab may return an empty body on successful cancel.
+        """
+        cleaned_order_id = str(order_id).strip()
+        if not cleaned_order_id:
+            raise ValueError("Order ID is required for cancel.")
+
+        account_hash = self.get_account_hash()
+
+        response = requests.delete(
+            f"{TRADER_BASE_URL}/accounts/{account_hash}/orders/{cleaned_order_id}",
+            headers=self._headers(),
+            timeout=30,
+        )
+
+        if not response.text:
+            payload = None
+        else:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = response.text
+
+        return response.status_code, payload
