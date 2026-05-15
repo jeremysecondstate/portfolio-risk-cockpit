@@ -15,8 +15,8 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
     """UI extension for the Schwab Trading Cockpit.
 
     This keeps the current Schwab preview/recent-orders/open-only functionality
-    from the base dashboard and adds a future cancel-order ID field. The cancel
-    button remains placeholder-only and does not call Schwab DELETE.
+    from the base dashboard and adds a future cancel-order ID field. Live order
+    submission remains disabled while the safety-review UI is staged.
     """
 
     def __init__(self) -> None:
@@ -68,6 +68,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         ttk.Button(button_bar, text="Open Only", command=self.load_schwab_open_orders_only).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Reset Schwab Session", command=self.reset_schwab_session).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Cancel Order", command=self.show_cancel_order_placeholder).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(button_bar, text="Live Safety", command=self.show_live_submit_safety_review).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Position Size", command=self.show_position_size).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Order Checklist", command=self.show_manual_checklist).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Submit Paper Order", command=self.submit_order).pack(side=tk.RIGHT)
@@ -189,6 +190,52 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             self.schwab_session = None
             self.schwab_status_var.set("Schwab session: not connected")
             messagebox.showerror("Load Schwab open orders failed", str(exc))
+
+    def show_live_submit_safety_review(self) -> None:
+        try:
+            order = self._parse_order()
+            schwab_order = self.build_schwab_order_json_from_ui()
+        except Exception as exc:
+            messagebox.showerror("Live safety review failed", str(exc))
+            return
+
+        env_gate = "SCHWAB_ENABLE_LIVE_ORDERS=true"
+        confirm_phrase = "PLACE LIVE SCHWAB ORDER"
+        order_type = order.order_type.value.upper()
+        tif = order.time_in_force.value.upper()
+        side = order.side.value.upper()
+        symbol = order.symbol.strip().upper()
+
+        limit_status = "PASS" if order_type == "LIMIT" else "BLOCKED"
+        quantity_status = "REVIEW REQUIRED" if order.quantity > 0 else "BLOCKED"
+        price_status = "REVIEW REQUIRED" if order.limit_price is not None and order.limit_price > 0 else "BLOCKED"
+
+        self._set_preview_text(
+            "LIVE SUBMIT SAFETY REVIEW\n"
+            "=========================\n\n"
+            "Status: LIVE SUBMIT DISABLED.\n"
+            "No order was submitted, replaced, or canceled.\n\n"
+            "Current ticket:\n"
+            f"- Symbol: {symbol}\n"
+            f"- Side: {side}\n"
+            f"- Type: {order_type}\n"
+            f"- Quantity: {order.quantity:g}\n"
+            f"- Limit price: {order.limit_price}\n"
+            f"- Time in force: {tif}\n\n"
+            "Safety gates required before any future live submit:\n"
+            f"- LIMIT order only: {limit_status}\n"
+            f"- Positive quantity: {quantity_status}\n"
+            f"- Positive limit price: {price_status}\n"
+            "- Schwab previewOrder must be run immediately before submit: REQUIRED\n"
+            "- Schwab previewOrder status must be ACCEPTED: REQUIRED\n"
+            "- Open Only and Cancel Order must be verified in the current app session: REQUIRED\n"
+            f"- Local .env must explicitly contain {env_gate}: REQUIRED\n"
+            f"- User must type exact phrase: {confirm_phrase}: REQUIRED\n"
+            "- Final warning dialog must be accepted: REQUIRED\n\n"
+            "Schwab order JSON that would be previewed/submitted in a future live-submit phase:\n"
+            f"{schwab_order}\n\n"
+            "This screen is informational only. The live submit endpoint is not wired here."
+        )
 
     def show_cancel_order_placeholder(self) -> None:
         order_id = self.cancel_order_id_var.get().strip()
