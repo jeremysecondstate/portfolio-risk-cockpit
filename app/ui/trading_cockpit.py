@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from tkinter import messagebox, simpledialog, ttk
 
 from app.brokers.paper import PaperBroker
+from app.brokers.schwab.account_adapter import portfolio_from_schwab_account
 from app.brokers.schwab.session import SchwabSession
 from app.core.order_models import OrderSide, OrderType, TimeInForce
 from app.ui.dashboard import PortfolioRiskCockpitApp
@@ -151,6 +152,17 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         self.schwab_status_var.set("Schwab session: connected for this app run")
         return session
 
+    def _sync_schwab_account_snapshot(self, session: SchwabSession) -> str:
+        """Load real Schwab balances/positions into the left portfolio panel."""
+        status_code, account_payload = session.get_account(fields="positions")
+        if status_code != 200:
+            raise RuntimeError(f"Schwab account fetch returned HTTP {status_code}: {account_payload}")
+
+        portfolio, source_message = portfolio_from_schwab_account(account_payload)
+        self.broker.set_portfolio(portfolio, source_message)
+        self.refresh_portfolio()
+        return source_message
+
     def _update_verification_status(self) -> None:
         open_value = "yes" if self.open_only_verified_this_session else "no"
         cancel_value = "yes" if self.cancel_verified_this_session else "no"
@@ -187,6 +199,12 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             if session is None:
                 return
 
+            account_sync_message = None
+            try:
+                account_sync_message = self._sync_schwab_account_snapshot(session)
+            except Exception as exc:
+                account_sync_message = f"Schwab account sync failed: {exc}"
+
             status_code, preview_payload = session.preview_order(self.build_schwab_order_json_from_ui())
             self.schwab_status_var.set("Schwab session: connected for this app run")
             if isinstance(preview_payload, dict):
@@ -194,7 +212,11 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             else:
                 self.last_schwab_preview_status = "UNKNOWN"
                 self.schwab_preview_status_var.set("Last Schwab preview: UNKNOWN")
-            self._set_preview_text(self.format_schwab_preview_response(status_code, preview_payload))
+
+            preview_text = self.format_schwab_preview_response(status_code, preview_payload)
+            if account_sync_message:
+                preview_text = f"ACCOUNT SNAPSHOT\n================\n{account_sync_message}\n\n" + preview_text
+            self._set_preview_text(preview_text)
         except Exception as exc:
             self.schwab_session = None
             self.last_schwab_preview_status = None
