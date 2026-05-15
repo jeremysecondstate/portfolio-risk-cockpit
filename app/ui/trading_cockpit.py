@@ -29,6 +29,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         self.broker = PaperBroker()
         self.last_preview = None
         self.schwab_session: SchwabSession | None = None
+        self.last_schwab_preview_status: str | None = None
 
         self.symbol_var = tk.StringVar(value="NVDA")
         self.side_var = tk.StringVar(value=OrderSide.BUY.value)
@@ -43,6 +44,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         self.cancel_confirmation_var = tk.StringVar(value="")
         self.risk_percent_var = tk.StringVar(value="1.0")
         self.schwab_status_var = tk.StringVar(value="Schwab session: not connected")
+        self.schwab_preview_status_var = tk.StringVar(value="Last Schwab preview: none")
 
         self._build_layout()
         self.refresh_portfolio()
@@ -79,6 +81,13 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             columnspan=4,
             sticky="w",
             pady=(8, 0),
+        )
+        ttk.Label(ticket, textvariable=self.schwab_preview_status_var, style="Subtle.TLabel").grid(
+            row=8,
+            column=0,
+            columnspan=4,
+            sticky="w",
+            pady=(2, 0),
         )
 
         results = ttk.LabelFrame(parent, text="Risk Preview + Instructions", style="Card.TLabelframe")
@@ -139,6 +148,12 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             "No order was submitted, replaced, or canceled."
         )
 
+    def _record_schwab_preview_status(self, preview_payload: dict) -> None:
+        strategy = preview_payload.get("orderStrategy", {}) or {}
+        status = str(strategy.get("status") or "UNKNOWN").upper()
+        self.last_schwab_preview_status = status
+        self.schwab_preview_status_var.set(f"Last Schwab preview: {status}")
+
     def run_schwab_preview(self) -> None:
         try:
             session = self._authorize_schwab_session()
@@ -147,10 +162,17 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
 
             status_code, preview_payload = session.preview_order(self.build_schwab_order_json_from_ui())
             self.schwab_status_var.set("Schwab session: connected for this app run")
+            if isinstance(preview_payload, dict):
+                self._record_schwab_preview_status(preview_payload)
+            else:
+                self.last_schwab_preview_status = "UNKNOWN"
+                self.schwab_preview_status_var.set("Last Schwab preview: UNKNOWN")
             self._set_preview_text(self.format_schwab_preview_response(status_code, preview_payload))
         except Exception as exc:
             self.schwab_session = None
+            self.last_schwab_preview_status = None
             self.schwab_status_var.set("Schwab session: not connected")
+            self.schwab_preview_status_var.set("Last Schwab preview: none")
             messagebox.showerror("Schwab preview failed", str(exc))
 
     def load_schwab_open_orders(self) -> None:
@@ -205,6 +227,8 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         tif = order.time_in_force.value.upper()
         side = order.side.value.upper()
         symbol = order.symbol.strip().upper()
+        preview_status = self.last_schwab_preview_status or "NONE"
+        preview_gate = "PASS" if preview_status == "ACCEPTED" else "REQUIRED"
 
         limit_status = "PASS" if order_type == "LIMIT" else "BLOCKED"
         quantity_status = "REVIEW REQUIRED" if order.quantity > 0 else "BLOCKED"
@@ -222,12 +246,14 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             f"- Quantity: {order.quantity:g}\n"
             f"- Limit price: {order.limit_price}\n"
             f"- Time in force: {tif}\n\n"
+            "Current Schwab readiness state:\n"
+            f"- Last Schwab preview status: {preview_status}\n\n"
             "Safety gates required before any future live submit:\n"
             f"- LIMIT order only: {limit_status}\n"
             f"- Positive quantity: {quantity_status}\n"
             f"- Positive limit price: {price_status}\n"
             "- Schwab previewOrder must be run immediately before submit: REQUIRED\n"
-            "- Schwab previewOrder status must be ACCEPTED: REQUIRED\n"
+            f"- Schwab previewOrder status must be ACCEPTED: {preview_gate}\n"
             "- Open Only and Cancel Order must be verified in the current app session: REQUIRED\n"
             f"- Local .env must explicitly contain {env_gate}: REQUIRED\n"
             f"- User must type exact phrase: {confirm_phrase}: REQUIRED\n"
