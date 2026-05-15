@@ -241,6 +241,32 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             self.schwab_status_var.set("Schwab session: not connected")
             messagebox.showerror("Load Schwab open orders failed", str(exc))
 
+    def _live_readiness_verdict(
+        self,
+        *,
+        limit_status: str,
+        quantity_status: str,
+        price_status: str,
+        preview_gate: str,
+        open_only_gate: str,
+        cancel_gate: str,
+    ) -> tuple[str, str, str, str]:
+        mechanical_ready = all(
+            status == "PASS"
+            for status in [limit_status, quantity_status, price_status]
+        )
+        broker_ready = all(
+            status == "PASS"
+            for status in [preview_gate, open_only_gate, cancel_gate]
+        )
+        human_ready = False
+
+        mechanical_label = "PASS" if mechanical_ready else "PARTIAL"
+        broker_label = "PASS" if broker_ready else "PARTIAL"
+        human_label = "REQUIRED" if not human_ready else "PASS"
+        overall = "DISABLED — live submit endpoint is not wired"
+        return overall, mechanical_label, broker_label, human_label
+
     def show_live_submit_safety_review(self) -> None:
         try:
             order = self._parse_order()
@@ -261,13 +287,25 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         cancel_gate = "PASS" if self.cancel_verified_this_session else "REQUIRED"
 
         limit_status = "PASS" if order_type == "LIMIT" else "BLOCKED"
-        quantity_status = "REVIEW REQUIRED" if order.quantity > 0 else "BLOCKED"
-        price_status = "REVIEW REQUIRED" if order.limit_price is not None and order.limit_price > 0 else "BLOCKED"
+        quantity_status = "PASS" if order.quantity > 0 else "BLOCKED"
+        price_status = "PASS" if order.limit_price is not None and order.limit_price > 0 else "BLOCKED"
+        overall, mechanical_label, broker_label, human_label = self._live_readiness_verdict(
+            limit_status=limit_status,
+            quantity_status=quantity_status,
+            price_status=price_status,
+            preview_gate=preview_gate,
+            open_only_gate=open_only_gate,
+            cancel_gate=cancel_gate,
+        )
         formatted_schwab_order = json.dumps(schwab_order, indent=2)
 
         self._set_preview_text(
             "LIVE SUBMIT SAFETY REVIEW\n"
             "=========================\n\n"
+            f"Overall live readiness: {overall}\n"
+            f"Mechanical ticket gates: {mechanical_label}\n"
+            f"Broker/session gates: {broker_label}\n"
+            f"Human confirmation gates: {human_label}\n\n"
             "Status: LIVE SUBMIT DISABLED.\n"
             "No order was submitted, replaced, or canceled.\n\n"
             "Current ticket:\n"
