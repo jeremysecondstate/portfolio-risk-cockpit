@@ -4,7 +4,9 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Type
 
+from app.analytics.risk_alerts import AlertSeverity, evaluate_portfolio_risk
 from app.core.order_models import OrderSide, OrderType, TimeInForce
+from app.core.portfolio import Portfolio
 
 
 CANVAS = "#0f172a"
@@ -137,10 +139,10 @@ def _build_portfolio_panel(self: tk.Tk, parent: ttk.Frame) -> None:
 
     summary_shell = ttk.Frame(stack, style="Canvas.TFrame")
     positions_shell = ttk.Frame(stack, style="Canvas.TFrame")
-    safety_shell = ttk.Frame(stack, style="Canvas.TFrame")
+    alerts_shell = ttk.Frame(stack, style="Canvas.TFrame")
     stack.add(summary_shell, minsize=150, stretch="never")
     stack.add(positions_shell, minsize=260, stretch="always")
-    stack.add(safety_shell, minsize=72, stretch="never")
+    stack.add(alerts_shell, minsize=120, stretch="never")
 
     summary = ttk.LabelFrame(summary_shell, text="Account Snapshot", style="Card.TLabelframe")
     summary.pack(fill=tk.BOTH, expand=True)
@@ -206,17 +208,22 @@ def _build_portfolio_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     x_scrollbar.grid(row=1, column=0, sticky="ew")
     self.positions_table.configure(yscrollcommand=y_scrollbar.set, xscrollcommand=x_scrollbar.set)
 
-    help_box = ttk.LabelFrame(safety_shell, text="Safety Rules", style="Card.TLabelframe")
-    help_box.pack(fill=tk.BOTH, expand=True)
-    ttk.Label(
-        help_box,
-        text=(
-            "Schwab sync is read-only until preview checks, typed confirmation, max-size checks, "
-            "margin checks, and audit logging are fully verified."
-        ),
-        wraplength=680,
-        style="Subtle.TLabel",
-    ).pack(anchor=tk.W)
+    alerts_box = ttk.LabelFrame(alerts_shell, text="Risk Alerts", style="Card.TLabelframe")
+    alerts_box.pack(fill=tk.BOTH, expand=True)
+    self.risk_alerts_text = tk.Text(
+        alerts_box,
+        height=5,
+        wrap=tk.WORD,
+        font=("Segoe UI", 10),
+        padx=10,
+        pady=8,
+        relief=tk.FLAT,
+        borderwidth=0,
+        background=INPUT,
+        foreground=TEXT,
+    )
+    self.risk_alerts_text.pack(fill=tk.BOTH, expand=True)
+    self.risk_alerts_text.configure(state=tk.DISABLED)
 
 
 def _metric(self: tk.Tk, parent: ttk.Frame, title: str, column: int) -> ttk.Label:
@@ -264,6 +271,32 @@ def _refresh_portfolio(self: tk.Tk) -> None:
             ),
             tags=(row_tag,),
         )
+
+    _update_risk_alerts(self, portfolio)
+
+
+def _update_risk_alerts(self: tk.Tk, portfolio: Portfolio) -> None:
+    if not hasattr(self, "risk_alerts_text"):
+        return
+
+    alerts = evaluate_portfolio_risk(portfolio)
+    lines = []
+    for alert in alerts:
+        symbol = f" [{alert.symbol}]" if alert.symbol else ""
+        lines.append(f"{_severity_prefix(alert.severity)}{symbol} {alert.title}: {alert.message}")
+
+    self.risk_alerts_text.configure(state=tk.NORMAL)
+    self.risk_alerts_text.delete("1.0", tk.END)
+    self.risk_alerts_text.insert(tk.END, "\n".join(lines))
+    self.risk_alerts_text.configure(state=tk.DISABLED)
+
+
+def _severity_prefix(severity: AlertSeverity) -> str:
+    if severity == AlertSeverity.CRITICAL:
+        return "CRITICAL"
+    if severity == AlertSeverity.WARNING:
+        return "WATCH"
+    return "INFO"
 
 
 def _format_money(value: float) -> str:
