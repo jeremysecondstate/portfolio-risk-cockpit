@@ -351,6 +351,7 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
         ("Recent Orders", self.load_schwab_open_orders, "TButton"),
         ("Open Only", self.load_schwab_open_orders_only, "TButton"),
         ("Reset Session", self.reset_schwab_session, "TButton"),
+        ("Tech Analysis", self.show_technical_analysis, "TButton"),
         ("Live Safety", self.show_live_submit_safety_review, "TButton"),
         ("Position Size", self.show_position_size, "TButton"),
         ("Checklist", self.show_manual_checklist, "TButton"),
