@@ -6,6 +6,7 @@ import webbrowser
 from datetime import datetime, timedelta, timezone
 from tkinter import messagebox, simpledialog, ttk
 
+from app.analytics.technical_analysis import analyze_candles, candles_from_price_history
 from app.brokers.paper import PaperBroker
 from app.brokers.schwab.account_adapter import portfolio_from_schwab_account
 from app.brokers.schwab.session import SchwabSession
@@ -79,6 +80,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         ttk.Button(button_bar, text="Cancel Order", command=self.show_cancel_order_placeholder).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Label(ticket, text="Cancel order ID").grid(row=5, column=0, sticky="w", padx=(0, 8), pady=6)
         ttk.Entry(ticket, textvariable=self.cancel_order_id_var).grid(row=5, column=1, columnspan=3, sticky="ew", pady=6)
+        ttk.Button(button_bar, text="Technical Analysis", command=self.show_technical_analysis).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Live Safety", command=self.show_live_submit_safety_review).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="LIVE Submit", command=self.submit_live_schwab_order_guarded).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Position Size", command=self.show_position_size).pack(side=tk.LEFT, padx=(8, 0))
@@ -239,6 +241,66 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             self.schwab_status_var.set("Schwab session: not connected")
             self.schwab_preview_status_var.set("Last Schwab preview: none")
             messagebox.showerror("Schwab preview failed", str(exc))
+
+    def show_technical_analysis(self) -> None:
+        symbol = self.symbol_var.get().strip().upper()
+        if not symbol:
+            messagebox.showerror("Technical analysis failed", "Enter a symbol first.")
+            return
+
+        try:
+            session = self._authorize_schwab_session()
+            if session is None:
+                return
+
+            status_code, payload = session.get_price_history(
+                symbol,
+                period_type="day",
+                period=10,
+                frequency_type="minute",
+                frequency=5,
+                need_extended_hours_data=False,
+            )
+            if status_code != 200:
+                raise RuntimeError(f"Schwab price history returned HTTP {status_code}: {payload}")
+
+            candles = candles_from_price_history(payload)
+            report = analyze_candles(symbol, candles)
+            self.schwab_status_var.set("Schwab session: connected for this app run")
+            self._set_preview_text(self.format_technical_analysis_report(report))
+        except Exception as exc:
+            messagebox.showerror("Technical analysis failed", str(exc))
+
+    def format_technical_analysis_report(self, report) -> str:
+        lines = [
+            f"TECHNICAL ANALYSIS — {report.symbol}",
+            "=" * (21 + len(report.symbol)),
+            "",
+            "Data window: 10 trading days of 5-minute candles from Schwab price history.",
+            f"Candles analyzed: {report.candle_count}",
+            f"Latest close: ${report.latest_close:,.2f}",
+            "",
+            "Indicator readings:",
+            f"- 20-period SMA: {_format_optional_number(report.sma_fast)}",
+            f"- 50-period SMA: {_format_optional_number(report.sma_slow)}",
+            f"- RSI(14): {_format_optional_number(report.rsi)}",
+            f"- MACD(12,26,9): {_format_optional_number(report.macd)}",
+            f"- MACD signal: {_format_optional_number(report.macd_signal)}",
+            f"- MACD histogram: {_format_optional_number(report.macd_histogram)}",
+            "",
+            "Interpretation:",
+        ]
+        lines.extend(f"- {line}" for line in report.lines)
+        lines.extend(
+            [
+                "",
+                "Notes:",
+                "- RSI is a momentum oscillator; 70+ is commonly treated as overbought and 30 or below as oversold.",
+                "- MACD compares short and long exponential moving averages; MACD above signal is bullish momentum, below signal is bearish momentum.",
+                "- Moving averages describe trend structure, not a guarantee. This is analysis, not a recommendation.",
+            ]
+        )
+        return "\n".join(lines)
 
     def load_schwab_open_orders(self) -> None:
         try:
@@ -527,3 +589,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
 
         except Exception as exc:
             messagebox.showerror("Live Schwab submit failed", str(exc))
+
+
+def _format_optional_number(value: float | None) -> str:
+    return "--" if value is None else f"{value:,.3f}"
