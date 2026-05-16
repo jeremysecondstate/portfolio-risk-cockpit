@@ -6,7 +6,7 @@ import webbrowser
 from datetime import datetime, timedelta, timezone
 from tkinter import messagebox, simpledialog, ttk
 
-from app.analytics.technical_analysis import analyze_candles, candles_from_price_history
+from app.analytics.technical_analysis import analyze_candles, candles_from_price_history, compare_timeframes
 from app.brokers.paper import PaperBroker
 from app.brokers.schwab.account_adapter import portfolio_from_schwab_account
 from app.brokers.schwab.session import SchwabSession
@@ -253,7 +253,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             if session is None:
                 return
 
-            status_code, payload = session.get_price_history(
+            intraday_status_code, intraday_payload = session.get_price_history(
                 symbol,
                 period_type="day",
                 period=10,
@@ -261,11 +261,23 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
                 frequency=5,
                 need_extended_hours_data=False,
             )
-            if status_code != 200:
-                raise RuntimeError(f"Schwab price history returned HTTP {status_code}: {payload}")
+            if intraday_status_code != 200:
+                raise RuntimeError(f"Schwab intraday price history returned HTTP {intraday_status_code}: {intraday_payload}")
 
-            candles = candles_from_price_history(payload)
-            report = analyze_candles(symbol, candles)
+            daily_status_code, daily_payload = session.get_price_history(
+                symbol,
+                period_type="year",
+                period=1,
+                frequency_type="daily",
+                frequency=1,
+                need_extended_hours_data=False,
+            )
+            if daily_status_code != 200:
+                raise RuntimeError(f"Schwab daily price history returned HTTP {daily_status_code}: {daily_payload}")
+
+            intraday_report = analyze_candles(symbol, candles_from_price_history(intraday_payload))
+            daily_report = analyze_candles(symbol, candles_from_price_history(daily_payload))
+            report = compare_timeframes(symbol, intraday_report, daily_report)
             self.schwab_status_var.set("Schwab session: connected for this app run")
             self._set_preview_text(self.format_technical_analysis_report(report))
         except Exception as exc:
@@ -273,34 +285,48 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
 
     def format_technical_analysis_report(self, report) -> str:
         lines = [
-            f"TECHNICAL ANALYSIS — {report.symbol}",
-            "=" * (21 + len(report.symbol)),
+            f"MULTI-TIMEFRAME TECHNICAL ANALYSIS — {report.symbol}",
+            "=" * (39 + len(report.symbol)),
             "",
-            "Data window: 10 trading days of 5-minute candles from Schwab price history.",
-            f"Candles analyzed: {report.candle_count}",
-            f"Latest close: ${report.latest_close:,.2f}",
+            "Timeframes:",
+            "- Intraday: 10 trading days of 5-minute Schwab candles for short-term momentum/timing.",
+            "- Daily: 1 year of 1-day Schwab candles for bigger-picture trend context.",
             "",
-            "Indicator readings:",
-            f"- 20-period SMA: {_format_optional_number(report.sma_fast)}",
-            f"- 50-period SMA: {_format_optional_number(report.sma_slow)}",
-            f"- RSI(14): {_format_optional_number(report.rsi)}",
-            f"- MACD(12,26,9): {_format_optional_number(report.macd)}",
-            f"- MACD signal: {_format_optional_number(report.macd_signal)}",
-            f"- MACD histogram: {_format_optional_number(report.macd_histogram)}",
-            "",
-            "Interpretation:",
         ]
-        lines.extend(f"- {line}" for line in report.lines)
+        self._append_single_timeframe_report(lines, "DAILY CONTEXT", report.daily)
+        lines.append("")
+        self._append_single_timeframe_report(lines, "INTRADAY TIMING", report.intraday)
+        lines.extend(["", "Timeframe comparison:"])
+        lines.extend(f"- {line}" for line in report.comparison_lines)
         lines.extend(
             [
                 "",
                 "Notes:",
                 "- RSI is a momentum oscillator; 70+ is commonly treated as overbought and 30 or below as oversold.",
                 "- MACD compares short and long exponential moving averages; MACD above signal is bullish momentum, below signal is bearish momentum.",
-                "- Moving averages describe trend structure, not a guarantee. This is analysis, not a recommendation.",
+                "- Daily candles are better for context. 5-minute candles are better for timing. This is analysis, not a recommendation.",
             ]
         )
         return "\n".join(lines)
+
+    def _append_single_timeframe_report(self, lines: list[str], heading: str, report) -> None:
+        lines.extend(
+            [
+                heading,
+                "-" * len(heading),
+                f"Candles analyzed: {report.candle_count}",
+                f"Latest close: ${report.latest_close:,.2f}",
+                f"Overall bias: {report.overall_bias.value}",
+                f"20-period SMA: {_format_optional_number(report.sma_fast)}",
+                f"50-period SMA: {_format_optional_number(report.sma_slow)}",
+                f"RSI(14): {_format_optional_number(report.rsi)}",
+                f"MACD(12,26,9): {_format_optional_number(report.macd)}",
+                f"MACD signal: {_format_optional_number(report.macd_signal)}",
+                f"MACD histogram: {_format_optional_number(report.macd_histogram)}",
+                "Interpretation:",
+            ]
+        )
+        lines.extend(f"- {line}" for line in report.lines)
 
     def load_schwab_open_orders(self) -> None:
         try:
