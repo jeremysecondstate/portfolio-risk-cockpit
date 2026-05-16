@@ -21,6 +21,7 @@ from app.brokers.schwab.token_store import (
 AUTH_URL = "https://api.schwabapi.com/v1/oauth/authorize"
 TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
 TRADER_BASE_URL = "https://api.schwabapi.com/trader/v1"
+MARKETDATA_BASE_URL = "https://api.schwabapi.com/marketdata/v1"
 
 
 @dataclass(frozen=True)
@@ -205,6 +206,36 @@ class SchwabSession:
             params={
                 "fromEnteredTime": from_entered_time.astimezone(timezone.utc).isoformat(timespec="seconds"),
                 "toEnteredTime": to_entered_time.astimezone(timezone.utc).isoformat(timespec="seconds"),
+            },
+            timeout=30,
+        )
+        return response.status_code, response.json()
+
+    def get_price_history(
+        self,
+        symbol: str,
+        *,
+        period_type: str = "day",
+        period: int = 10,
+        frequency_type: str = "minute",
+        frequency: int = 5,
+        need_extended_hours_data: bool = False,
+    ) -> tuple[int, Any]:
+        """Fetch Schwab market-data candles for a symbol."""
+        cleaned_symbol = symbol.strip().upper()
+        if not cleaned_symbol:
+            raise ValueError("Symbol is required for price history.")
+
+        response = requests.get(
+            f"{MARKETDATA_BASE_URL}/pricehistory",
+            headers=self._headers(),
+            params={
+                "symbol": cleaned_symbol,
+                "periodType": period_type,
+                "period": period,
+                "frequencyType": frequency_type,
+                "frequency": frequency,
+                "needExtendedHoursData": str(need_extended_hours_data).lower(),
             },
             timeout=30,
         )
