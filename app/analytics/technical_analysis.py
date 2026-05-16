@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
+
+
+class SignalBias(str, Enum):
+    BULLISH = "bullish"
+    BEARISH = "bearish"
+    MIXED = "mixed"
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
@@ -26,6 +34,18 @@ class TechnicalAnalysisReport:
     macd_signal: float | None
     macd_histogram: float | None
     lines: list[str]
+    trend_bias: SignalBias
+    rsi_bias: SignalBias
+    macd_bias: SignalBias
+    overall_bias: SignalBias
+
+
+@dataclass(frozen=True)
+class MultiTimeframeTechnicalReport:
+    symbol: str
+    intraday: TechnicalAnalysisReport
+    daily: TechnicalAnalysisReport
+    comparison_lines: list[str]
 
 
 def candles_from_price_history(payload: Any) -> list[Candle]:
@@ -68,6 +88,11 @@ def analyze_candles(symbol: str, candles: list[Candle]) -> TechnicalAnalysisRepo
     rsi_value = rsi(closes, 14)
     macd_line, signal_line, histogram = macd(closes)
 
+    trend_bias = classify_trend(latest_close, sma_fast, sma_slow)
+    rsi_bias = classify_rsi(rsi_value)
+    macd_bias = classify_macd(macd_line, signal_line, histogram)
+    overall_bias = combine_biases([trend_bias, rsi_bias, macd_bias])
+
     lines = [
         _trend_summary(latest_close, sma_fast, sma_slow),
         _rsi_summary(rsi_value),
@@ -85,7 +110,91 @@ def analyze_candles(symbol: str, candles: list[Candle]) -> TechnicalAnalysisRepo
         macd_signal=signal_line,
         macd_histogram=histogram,
         lines=lines,
+        trend_bias=trend_bias,
+        rsi_bias=rsi_bias,
+        macd_bias=macd_bias,
+        overall_bias=overall_bias,
     )
+
+
+def compare_timeframes(
+    symbol: str,
+    intraday: TechnicalAnalysisReport,
+    daily: TechnicalAnalysisReport,
+) -> MultiTimeframeTechnicalReport:
+    lines: list[str] = []
+
+    if daily.overall_bias == intraday.overall_bias and daily.overall_bias in {SignalBias.BULLISH, SignalBias.BEARISH}:
+        lines.append(
+            f"Alignment: Both daily and intraday reads lean {daily.overall_bias.value}. That is stronger confirmation than either timeframe alone."
+        )
+    elif daily.overall_bias == SignalBias.BULLISH and intraday.overall_bias == SignalBias.BEARISH:
+        lines.append(
+            "Alignment: Daily trend leans bullish, but intraday leans bearish. This can mean a short-term pullback inside a larger uptrend."
+        )
+    elif daily.overall_bias == SignalBias.BEARISH and intraday.overall_bias == SignalBias.BULLISH:
+        lines.append(
+            "Alignment: Daily trend leans bearish, but intraday leans bullish. This can mean a short-term bounce inside a weaker larger trend."
+        )
+    else:
+        lines.append(
+            f"Alignment: Mixed. Daily overall is {daily.overall_bias.value}; intraday overall is {intraday.overall_bias.value}."
+        )
+
+    lines.append(_compare_rsi(daily.rsi, intraday.rsi))
+    lines.append(_compare_macd(daily.macd_bias, intraday.macd_bias))
+    lines.append(
+        "Practical read: use the daily candle read for bigger-picture context and the 5-minute read for timing. Agreement matters more than one signal alone."
+    )
+
+    return MultiTimeframeTechnicalReport(
+        symbol=symbol.strip().upper(),
+        intraday=intraday,
+        daily=daily,
+        comparison_lines=lines,
+    )
+
+
+def classify_trend(latest_close: float, sma_fast: float | None, sma_slow: float | None) -> SignalBias:
+    if sma_fast is None or sma_slow is None:
+        return SignalBias.UNKNOWN
+    if latest_close > sma_fast > sma_slow:
+        return SignalBias.BULLISH
+    if latest_close < sma_fast < sma_slow:
+        return SignalBias.BEARISH
+    return SignalBias.MIXED
+
+
+def classify_rsi(rsi_value: float | None) -> SignalBias:
+    if rsi_value is None:
+        return SignalBias.UNKNOWN
+    if rsi_value >= 55:
+        return SignalBias.BULLISH
+    if rsi_value <= 45:
+        return SignalBias.BEARISH
+    return SignalBias.MIXED
+
+
+def classify_macd(macd_line: float | None, signal_line: float | None, histogram: float | None) -> SignalBias:
+    if macd_line is None or signal_line is None or histogram is None:
+        return SignalBias.UNKNOWN
+    if macd_line > signal_line and histogram > 0:
+        return SignalBias.BULLISH
+    if macd_line < signal_line and histogram < 0:
+        return SignalBias.BEARISH
+    return SignalBias.MIXED
+
+
+def combine_biases(biases: list[SignalBias]) -> SignalBias:
+    bullish = sum(1 for bias in biases if bias == SignalBias.BULLISH)
+    bearish = sum(1 for bias in biases if bias == SignalBias.BEARISH)
+    if bullish >= 2 and bullish > bearish:
+        return SignalBias.BULLISH
+    if bearish >= 2 and bearish > bullish:
+        return SignalBias.BEARISH
+    if bullish == 0 and bearish == 0:
+        return SignalBias.UNKNOWN
+    return SignalBias.MIXED
 
 
 def simple_moving_average(values: list[float], period: int) -> float | None:
@@ -212,3 +321,23 @@ def _macd_summary(macd_line: float | None, signal_line: float | None, histogram:
     if macd_line < signal_line and histogram < 0:
         return f"MACD: Bearish. MACD ({macd_line:.3f}) is below signal ({signal_line:.3f}); histogram is negative at {histogram:.3f}."
     return f"MACD: Mixed/transitioning. MACD is {macd_line:.3f}, signal is {signal_line:.3f}, histogram is {histogram:.3f}."
+
+
+def _compare_rsi(daily_rsi: float | None, intraday_rsi: float | None) -> str:
+    if daily_rsi is None or intraday_rsi is None:
+        return "RSI comparison: Not enough data on one timeframe."
+    if daily_rsi >= 55 and intraday_rsi <= 45:
+        return f"RSI comparison: Daily RSI is constructive ({daily_rsi:.1f}), while intraday RSI is weak ({intraday_rsi:.1f}). This suggests short-term pressure against a stronger longer-term backdrop."
+    if daily_rsi <= 45 and intraday_rsi >= 55:
+        return f"RSI comparison: Daily RSI is weak ({daily_rsi:.1f}), while intraday RSI is improving ({intraday_rsi:.1f}). This suggests a short-term bounce attempt inside a weaker longer-term backdrop."
+    return f"RSI comparison: Daily RSI is {daily_rsi:.1f}; intraday RSI is {intraday_rsi:.1f}."
+
+
+def _compare_macd(daily_bias: SignalBias, intraday_bias: SignalBias) -> str:
+    if daily_bias == intraday_bias and daily_bias in {SignalBias.BULLISH, SignalBias.BEARISH}:
+        return f"MACD comparison: Both timeframes are {daily_bias.value}, which confirms momentum direction."
+    if daily_bias == SignalBias.BULLISH and intraday_bias == SignalBias.BEARISH:
+        return "MACD comparison: Daily MACD is bullish, but intraday MACD is bearish. Short-term momentum is pushing against the larger read."
+    if daily_bias == SignalBias.BEARISH and intraday_bias == SignalBias.BULLISH:
+        return "MACD comparison: Daily MACD is bearish, but intraday MACD is bullish. Short-term momentum is trying to rebound against the larger read."
+    return f"MACD comparison: Daily MACD is {daily_bias.value}; intraday MACD is {intraday_bias.value}."
