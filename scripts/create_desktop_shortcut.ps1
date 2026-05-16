@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $launcherPath = Join-Path $repoRoot "scripts\run_cockpit.bat"
 $shortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "Portfolio Risk Cockpit.lnk"
 
