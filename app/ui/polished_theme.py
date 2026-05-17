@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 from typing import Type
 
 from app.analytics.risk_alerts import AlertSeverity, evaluate_portfolio_risk
@@ -38,6 +38,9 @@ def install_polished_cockpit_theme(app_cls: Type[tk.Tk]) -> None:
     app_cls._build_order_panel = _build_order_panel  # type: ignore[method-assign]
     app_cls._metric = _metric  # type: ignore[method-assign]
     app_cls.refresh_portfolio = _refresh_portfolio  # type: ignore[method-assign]
+    app_cls.connect_schwab = _connect_schwab  # type: ignore[method-assign]
+    app_cls.refresh_schwab_account = _refresh_schwab_account  # type: ignore[method-assign]
+    app_cls.run_schwab_preview = _run_schwab_preview  # type: ignore[method-assign]
     app_cls._grid_row = _grid_row  # type: ignore[method-assign]
     app_cls._set_preview_text = _set_preview_text  # type: ignore[method-assign]
 
@@ -299,6 +302,66 @@ def _severity_prefix(severity: AlertSeverity) -> str:
     return "INFO"
 
 
+def _connect_schwab(self: tk.Tk) -> None:
+    try:
+        session = self._authorize_schwab_session()
+        if session is None:
+            return
+        self.schwab_session = session
+        self.schwab_status_var.set("Schwab session: connected")
+        self._set_preview_text(
+            "SCHWAB CONNECTED\n"
+            "================\n\n"
+            "The cockpit is connected to Schwab.\n\n"
+            "Next steps:\n"
+            "- Click Refresh Account to load balances, positions, P&L, and risk alerts.\n"
+            "- Click Preview Order only when you want Schwab to validate the current ticket.\n\n"
+            "No order was previewed, submitted, replaced, or canceled."
+        )
+    except Exception as exc:
+        self.schwab_session = None
+        self.schwab_status_var.set("Schwab session: not connected")
+        messagebox.showerror("Schwab connect failed", str(exc))
+
+
+def _refresh_schwab_account(self: tk.Tk) -> None:
+    try:
+        session = self._authorize_schwab_session()
+        if session is None:
+            return
+        source_message = self._sync_schwab_account_snapshot(session)
+        self.schwab_status_var.set("Schwab session: connected")
+        self._set_preview_text(
+            "SCHWAB ACCOUNT REFRESHED\n"
+            "========================\n\n"
+            f"{source_message}\n\n"
+            "Balances, positions, P&L, and risk alerts were refreshed from Schwab.\n\n"
+            "No order was previewed, submitted, replaced, or canceled."
+        )
+    except Exception as exc:
+        messagebox.showerror("Schwab account refresh failed", str(exc))
+
+
+def _run_schwab_preview(self: tk.Tk) -> None:
+    try:
+        session = self._authorize_schwab_session()
+        if session is None:
+            return
+
+        status_code, preview_payload = session.preview_order(self.build_schwab_order_json_from_ui())
+        self.schwab_status_var.set("Schwab session: connected")
+        if isinstance(preview_payload, dict):
+            self._record_schwab_preview_status(preview_payload)
+        else:
+            self.last_schwab_preview_status = "UNKNOWN"
+            self.schwab_preview_status_var.set("Last Schwab preview: UNKNOWN")
+        self._set_preview_text(self.format_schwab_preview_response(status_code, preview_payload))
+    except Exception as exc:
+        self.last_schwab_preview_status = None
+        self.schwab_preview_status_var.set("Last Schwab preview: none")
+        messagebox.showerror("Schwab order preview failed", str(exc))
+
+
 def _format_money(value: float) -> str:
     return f"${value:,.2f}"
 
@@ -338,10 +401,11 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
 
     primary_actions = ttk.Frame(ticket, style="Panel.TFrame")
     primary_actions.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(16, 0))
-    primary_actions.columnconfigure((0, 1, 2), weight=1)
+    primary_actions.columnconfigure((0, 1, 2, 3), weight=1)
     ttk.Button(primary_actions, text="Preview Risk", command=self.preview_order, style="Accent.TButton").grid(row=0, column=0, sticky="ew", padx=(0, 8))
-    ttk.Button(primary_actions, text="Schwab Preview", command=self.run_schwab_preview).grid(row=0, column=1, sticky="ew", padx=(0, 8))
-    ttk.Button(primary_actions, text="Submit Paper Order", command=self.submit_order).grid(row=0, column=2, sticky="ew")
+    ttk.Button(primary_actions, text="Connect Schwab", command=self.connect_schwab).grid(row=0, column=1, sticky="ew", padx=(0, 8))
+    ttk.Button(primary_actions, text="Refresh Account", command=self.refresh_schwab_account).grid(row=0, column=2, sticky="ew", padx=(0, 8))
+    ttk.Button(primary_actions, text="Preview Order", command=self.run_schwab_preview).grid(row=0, column=3, sticky="ew")
 
     secondary_actions = ttk.Frame(ticket, style="Panel.TFrame")
     secondary_actions.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(8, 0))
@@ -355,6 +419,7 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
         ("Live Safety", self.show_live_submit_safety_review, "TButton"),
         ("Position Size", self.show_position_size, "TButton"),
         ("Checklist", self.show_manual_checklist, "TButton"),
+        ("Submit Paper", self.submit_order, "TButton"),
         ("Cancel Order", self.show_cancel_order_placeholder, "Danger.TButton"),
         ("LIVE Submit", self.submit_live_schwab_order_guarded, "Danger.TButton"),
     ]):
@@ -393,7 +458,7 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     self.preview_text.pack(fill=tk.BOTH, expand=True)
     self._set_preview_text(
         "Create an order and click Preview Risk.\n\n"
-        "Tip: drag the splitters between panels to resize the cockpit for your workflow.\n\n"
+        "Tip: Connect Schwab once, Refresh Account when you want updated positions/P&L, and Preview Order only when you want Schwab to validate the current ticket.\n\n"
         "Reminder: live Schwab orders require staged safety checks before anything can be submitted."
     )
 
