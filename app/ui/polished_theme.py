@@ -308,14 +308,14 @@ def _connect_schwab(self: tk.Tk) -> None:
         if session is None:
             return
         self.schwab_session = session
+        source_message = self._sync_schwab_account_snapshot(session)
         self.schwab_status_var.set("Schwab session: connected")
         self._set_preview_text(
-            "SCHWAB CONNECTED\n"
-            "================\n\n"
-            "The cockpit is connected to Schwab.\n\n"
-            "Next steps:\n"
-            "- Click Refresh Account to load balances, positions, P&L, and risk alerts.\n"
-            "- Click Preview Order only when you want Schwab to validate the current ticket.\n\n"
+            "SCHWAB CONNECTED + ACCOUNT REFRESHED\n"
+            "====================================\n\n"
+            f"{source_message}\n\n"
+            "The cockpit is connected to Schwab, and the left-side account snapshot, positions, P&L, and risk alerts were refreshed.\n\n"
+            "Next step: click Preview Order only when you want Schwab to validate the current ticket.\n\n"
             "No order was previewed, submitted, replaced, or canceled."
         )
     except Exception as exc:
@@ -458,7 +458,7 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     self.preview_text.pack(fill=tk.BOTH, expand=True)
     self._set_preview_text(
         "Create an order and click Preview Risk.\n\n"
-        "Tip: Connect Schwab once, Refresh Account when you want updated positions/P&L, and Preview Order only when you want Schwab to validate the current ticket.\n\n"
+        "Tip: Connect Schwab loads your account snapshot immediately. Use Refresh Account when you want updated positions/P&L, and Preview Order only when you want Schwab to validate the current ticket.\n\n"
         "Reminder: live Schwab orders require staged safety checks before anything can be submitted."
     )
 
