@@ -29,7 +29,8 @@ def portfolio_from_plaid_holdings(payload: dict[str, Any]) -> tuple[Portfolio, s
         positions[symbol] = Position(symbol, round(quantity, 8), round(average_cost, 4), round(last_price, 4))
 
     cash = _cash(accounts)
-    return Portfolio(cash=round(cash, 2), positions=positions), "Loaded Plaid Investments holdings"
+    source = _source_message(payload, accounts)
+    return Portfolio(cash=round(cash, 2), positions=positions), source
 
 
 def merge_portfolios(primary: Portfolio, secondary: Portfolio) -> Portfolio:
@@ -57,6 +58,18 @@ def merge_portfolios(primary: Portfolio, secondary: Portfolio) -> Portfolio:
             existing.average_cost = round(abs(new_cost / new_quantity), 4)
             existing.last_price = position.last_price
     return merged
+
+
+def _source_message(payload: dict[str, Any], accounts: list[Any]) -> str:
+    item = payload.get("item") or {}
+    institution_id = str(item.get("institution_id") or "").strip()
+    account_names = [str(account.get("name") or "").strip() for account in accounts if isinstance(account, dict)]
+    account_hint = ", ".join(name for name in account_names if name) or "investment account"
+    if institution_id == "ins_109508":
+        return f"Loaded Plaid Sandbox test holdings ({account_hint})"
+    if institution_id:
+        return f"Loaded Plaid Investments holdings ({institution_id}; {account_hint})"
+    return f"Loaded Plaid Investments holdings ({account_hint})"
 
 
 def _symbol(security: dict[str, Any]) -> str | None:
