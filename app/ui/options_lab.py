@@ -15,16 +15,29 @@ STRATEGIES = [
     "Vertical Credit Spread",
 ]
 
+ACTIONS = ["Buy", "Sell"]
+OPTION_TYPES = ["Call", "Put"]
+ORDER_TYPES = ["LIMIT", "MARKET", "STOP", "STOP_LIMIT"]
+TIME_IN_FORCE = ["Day", "GTC"]
+
 
 @dataclass(frozen=True)
 class OptionsScenario:
     symbol: str
     strategy: str
+    action: str
+    expiration: str
+    option_type: str
+    order_type: str
+    time_in_force: str
     underlying_price: float
     quantity: float
     contracts: int
     strike: float
     short_strike: float
+    bid: float | None
+    ask: float | None
+    mark: float | None
     premium: float
     credit: float
     portfolio_value: float
@@ -86,11 +99,19 @@ def build_options_lab_tab(app: tk.Tk, parent: ttk.Frame) -> None:
 def _init_options_vars(app: tk.Tk) -> None:
     app.options_symbol_var = tk.StringVar(value="NVDA")
     app.options_strategy_var = tk.StringVar(value="Long Call")
+    app.options_action_var = tk.StringVar(value="Buy")
+    app.options_expiration_var = tk.StringVar(value="May 22 (0d)")
+    app.options_type_var = tk.StringVar(value="Call")
+    app.options_order_type_var = tk.StringVar(value="LIMIT")
+    app.options_tif_var = tk.StringVar(value="Day")
     app.options_underlying_price_var = tk.StringVar(value="200.00")
     app.options_quantity_var = tk.StringVar(value="2")
     app.options_contracts_var = tk.StringVar(value="1")
     app.options_strike_var = tk.StringVar(value="205.00")
     app.options_short_strike_var = tk.StringVar(value="215.00")
+    app.options_bid_var = tk.StringVar(value="")
+    app.options_ask_var = tk.StringVar(value="")
+    app.options_mark_var = tk.StringVar(value="")
     app.options_premium_var = tk.StringVar(value="8.20")
     app.options_credit_var = tk.StringVar(value="3.00")
     app.options_portfolio_value_var = tk.StringVar(value="25000.00")
@@ -114,8 +135,8 @@ def _build_options_disclaimer(parent: ttk.Frame) -> None:
     ttk.Label(
         banner,
         text=(
-            "Hypothetical scenario modeling only. This tab estimates risk, margin usage, "
-            "technical context, and portfolio impact. It does not generate trade recommendations, "
+            "Hypothetical scenario modeling only. This tab estimates risk, margin usage, technical context, "
+            "and portfolio impact. It mirrors a Thinkorswim-style ticket, but does not generate trade recommendations, "
             "submit orders, or replace broker margin requirements."
         ),
         wraplength=1020,
@@ -128,36 +149,35 @@ def _build_scenario_builder(app: tk.Tk, parent: ttk.Frame) -> None:
     left.grid(row=1, column=0, sticky="nsew")
     left.columnconfigure(0, weight=1)
 
-    scenario = ttk.LabelFrame(left, text="Scenario Builder", style="Card.TLabelframe")
-    scenario.grid(row=0, column=0, sticky="ew")
-    scenario.columnconfigure(1, weight=1)
-    scenario.columnconfigure(3, weight=1)
+    quote = ttk.LabelFrame(left, text="Symbol Quote", style="Card.TLabelframe")
+    quote.grid(row=0, column=0, sticky="ew")
+    quote.columnconfigure(1, weight=1)
+    quote.columnconfigure(3, weight=1)
+    _grid_pair(quote, 0, "Symbol", ttk.Entry(quote, textvariable=app.options_symbol_var), "Underlying", ttk.Entry(quote, textvariable=app.options_underlying_price_var))
 
-    _grid_pair(scenario, 0, "Symbol", ttk.Entry(scenario, textvariable=app.options_symbol_var), "Strategy", ttk.Combobox(scenario, textvariable=app.options_strategy_var, values=STRATEGIES, state="readonly"))
-    _grid_pair(scenario, 1, "Underlying", ttk.Entry(scenario, textvariable=app.options_underlying_price_var), "Shares", ttk.Entry(scenario, textvariable=app.options_quantity_var))
-    _grid_pair(scenario, 2, "Contracts", ttk.Entry(scenario, textvariable=app.options_contracts_var), "Long strike", ttk.Entry(scenario, textvariable=app.options_strike_var))
-    _grid_pair(scenario, 3, "Short strike", ttk.Entry(scenario, textvariable=app.options_short_strike_var), "Premium/debit", ttk.Entry(scenario, textvariable=app.options_premium_var))
-    _grid_pair(scenario, 4, "Credit", ttk.Entry(scenario, textvariable=app.options_credit_var), "Cash available", ttk.Entry(scenario, textvariable=app.options_cash_available_var))
-    _grid_pair(scenario, 5, "Portfolio value", ttk.Entry(scenario, textvariable=app.options_portfolio_value_var), "Initial margin %", ttk.Entry(scenario, textvariable=app.options_initial_margin_var))
-    _grid_pair(scenario, 6, "Maintenance %", ttk.Entry(scenario, textvariable=app.options_maintenance_margin_var), "Stop price", ttk.Entry(scenario, textvariable=app.options_stop_price_var))
-    _grid_pair(scenario, 7, "Target price", ttk.Entry(scenario, textvariable=app.options_target_price_var), "ATR %", ttk.Entry(scenario, textvariable=app.options_atr_var))
+    ticket = ttk.LabelFrame(left, text="Option Trade Ticket", style="Card.TLabelframe")
+    ticket.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+    ticket.columnconfigure(1, weight=1)
+    ticket.columnconfigure(3, weight=1)
 
-    technical = ttk.LabelFrame(left, text="Manual Technical Context", style="Card.TLabelframe")
-    technical.grid(row=1, column=0, sticky="ew", pady=(12, 0))
-    technical.columnconfigure(1, weight=1)
-    technical.columnconfigure(3, weight=1)
-
-    _grid_pair(technical, 0, "RSI", ttk.Entry(technical, textvariable=app.options_rsi_var), "20 SMA", ttk.Entry(technical, textvariable=app.options_sma_20_var))
-    _grid_pair(technical, 1, "50 SMA", ttk.Entry(technical, textvariable=app.options_sma_50_var), "200 SMA", ttk.Entry(technical, textvariable=app.options_sma_200_var))
-    _grid_pair(technical, 2, "Support", ttk.Entry(technical, textvariable=app.options_support_var), "Resistance", ttk.Entry(technical, textvariable=app.options_resistance_var))
+    _grid_pair(ticket, 0, "Action", ttk.Combobox(ticket, textvariable=app.options_action_var, values=ACTIONS, state="readonly"), "Strategy", ttk.Combobox(ticket, textvariable=app.options_strategy_var, values=STRATEGIES, state="readonly"))
+    _grid_pair(ticket, 1, "Contracts", ttk.Entry(ticket, textvariable=app.options_contracts_var), "Expiration", ttk.Entry(ticket, textvariable=app.options_expiration_var))
+    _grid_pair(ticket, 2, "Strike", ttk.Entry(ticket, textvariable=app.options_strike_var), "Call / Put", ttk.Combobox(ticket, textvariable=app.options_type_var, values=OPTION_TYPES, state="readonly"))
+    _grid_pair(ticket, 3, "Bid", ttk.Entry(ticket, textvariable=app.options_bid_var), "Ask", ttk.Entry(ticket, textvariable=app.options_ask_var))
+    _grid_pair(ticket, 4, "Mark", ttk.Entry(ticket, textvariable=app.options_mark_var), "Limit / Debit", ttk.Entry(ticket, textvariable=app.options_premium_var))
+    _grid_pair(ticket, 5, "Order type", ttk.Combobox(ticket, textvariable=app.options_order_type_var, values=ORDER_TYPES, state="readonly"), "Time in force", ttk.Combobox(ticket, textvariable=app.options_tif_var, values=TIME_IN_FORCE, state="readonly"))
+    _grid_pair(ticket, 6, "Short strike", ttk.Entry(ticket, textvariable=app.options_short_strike_var), "Credit", ttk.Entry(ticket, textvariable=app.options_credit_var))
+    _grid_pair(ticket, 7, "Shares", ttk.Entry(ticket, textvariable=app.options_quantity_var), "Stop price", ttk.Entry(ticket, textvariable=app.options_stop_price_var))
+    _grid_pair(ticket, 8, "Target price", ttk.Entry(ticket, textvariable=app.options_target_price_var), "ATR %", ttk.Entry(ticket, textvariable=app.options_atr_var))
 
     buttons = ttk.Frame(left)
     buttons.grid(row=2, column=0, sticky="ew", pady=(12, 0))
     ttk.Button(buttons, text="Run What-If", command=lambda: run_options_what_if(app), style="Accent.TButton").pack(side=tk.LEFT)
     ttk.Button(buttons, text="Sync Current Portfolio", command=lambda: load_options_portfolio_values(app)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(buttons, text="Use Holding Price", command=lambda: use_current_symbol_holding_price(app)).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(buttons, text="Use Mid as Limit", command=lambda: use_mid_as_limit(app)).pack(side=tk.LEFT, padx=(8, 0))
 
-    context = ttk.LabelFrame(left, text="Current Portfolio Context", style="Card.TLabelframe")
+    context = ttk.LabelFrame(left, text="Account + Positions Context", style="Card.TLabelframe")
     context.grid(row=3, column=0, sticky="ew", pady=(12, 0))
     context.columnconfigure(0, weight=1)
     context.columnconfigure(1, weight=1)
@@ -177,23 +197,20 @@ def _build_scenario_builder(app: tk.Tk, parent: ttk.Frame) -> None:
     app.options_exposure_context_label = ttk.Label(context, text="Exposure: --", style="Subtle.TLabel")
     app.options_exposure_context_label.grid(row=2, column=1, sticky="w", pady=2)
 
-    notes = ttk.LabelFrame(left, text="Safety Protocols", style="Card.TLabelframe")
-    notes.grid(row=4, column=0, sticky="ew", pady=(12, 0))
-    ttk.Label(
-        notes,
-        text=(
-            "The checklist flags oversized portfolio risk, buying-power pressure, stops inside normal ATR noise, "
-            "and undefined-risk structures. Portfolio context comes from the same broker snapshot that powers the main cockpit tab."
-        ),
-        wraplength=460,
-        style="Subtle.TLabel",
-    ).pack(anchor=tk.W)
+    technical = ttk.LabelFrame(left, text="Manual Technical Context", style="Card.TLabelframe")
+    technical.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+    technical.columnconfigure(1, weight=1)
+    technical.columnconfigure(3, weight=1)
+
+    _grid_pair(technical, 0, "RSI", ttk.Entry(technical, textvariable=app.options_rsi_var), "20 SMA", ttk.Entry(technical, textvariable=app.options_sma_20_var))
+    _grid_pair(technical, 1, "50 SMA", ttk.Entry(technical, textvariable=app.options_sma_50_var), "200 SMA", ttk.Entry(technical, textvariable=app.options_sma_200_var))
+    _grid_pair(technical, 2, "Support", ttk.Entry(technical, textvariable=app.options_support_var), "Resistance", ttk.Entry(technical, textvariable=app.options_resistance_var))
 
 
 def _build_options_output(app: tk.Tk, parent: ttk.Frame) -> None:
     right = ttk.Frame(parent, padding=(10, 0, 0, 0))
     right.grid(row=1, column=1, sticky="nsew")
-    right.rowconfigure(1, weight=1)
+    right.rowconfigure(2, weight=1)
     right.columnconfigure(0, weight=1)
 
     metrics = ttk.LabelFrame(right, text="Risk + Margin Snapshot", style="Card.TLabelframe")
@@ -203,16 +220,22 @@ def _build_options_output(app: tk.Tk, parent: ttk.Frame) -> None:
     app.options_max_loss_label = _metric(metrics, "Max Loss", 0, 0)
     app.options_max_profit_label = _metric(metrics, "Max Profit", 0, 1)
     app.options_breakeven_label = _metric(metrics, "Breakeven", 0, 2)
-    app.options_margin_label = _metric(metrics, "Buying Power Used", 2, 0)
+    app.options_margin_label = _metric(metrics, "BP Effect", 2, 0)
     app.options_portfolio_risk_label = _metric(metrics, "Portfolio Risk", 2, 1)
     app.options_reward_risk_label = _metric(metrics, "Reward/Risk", 2, 2)
 
+    summary = ttk.LabelFrame(right, text="Selected Order", style="Card.TLabelframe")
+    summary.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+    summary.columnconfigure(0, weight=1)
+    app.options_order_summary_label = ttk.Label(summary, text="--", style="Subtle.TLabel", wraplength=820)
+    app.options_order_summary_label.grid(row=0, column=0, sticky="w")
+
     output = ttk.LabelFrame(right, text="Scenario Analysis", style="Card.TLabelframe")
-    output.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+    output.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
     output.rowconfigure(0, weight=1)
     output.columnconfigure(0, weight=1)
 
-    app.options_output_text = tk.Text(output, height=28, wrap=tk.WORD, font=("Consolas", 10), padx=10, pady=10)
+    app.options_output_text = tk.Text(output, height=24, wrap=tk.WORD, font=("Consolas", 10), padx=10, pady=10)
     app.options_output_text.grid(row=0, column=0, sticky="nsew")
     scrollbar = ttk.Scrollbar(output, orient=tk.VERTICAL, command=app.options_output_text.yview)
     scrollbar.grid(row=0, column=1, sticky="ns")
@@ -266,6 +289,28 @@ def use_current_symbol_holding_price(app: tk.Tk) -> None:
     run_options_what_if(app)
 
 
+def use_mid_as_limit(app: tk.Tk) -> None:
+    try:
+        bid = _optional_float(app.options_bid_var.get())
+        ask = _optional_float(app.options_ask_var.get())
+        mark = _optional_float(app.options_mark_var.get())
+    except ValueError as exc:
+        messagebox.showerror("Midpoint failed", str(exc))
+        return
+
+    if bid is not None and ask is not None:
+        midpoint = (bid + ask) / 2
+    elif mark is not None:
+        midpoint = mark
+    else:
+        messagebox.showinfo("No quote", "Enter bid/ask or mark first.")
+        return
+
+    app.options_mark_var.set(f"{midpoint:.2f}")
+    app.options_premium_var.set(f"{midpoint:.2f}")
+    run_options_what_if(app)
+
+
 def run_options_what_if(app: tk.Tk) -> None:
     try:
         scenario = _parse_scenario(app)
@@ -275,6 +320,7 @@ def run_options_what_if(app: tk.Tk) -> None:
         return
 
     _update_metric_labels(app, analysis)
+    _update_order_summary(app, scenario, analysis)
     _update_portfolio_context_labels(app, analysis["portfolio_context"])
     _set_options_text(app, _format_analysis(scenario, analysis))
 
@@ -286,26 +332,30 @@ def _parse_scenario(app: tk.Tk) -> OptionsScenario:
         except ValueError as exc:
             raise ValueError(f"{field} must be a number.") from exc
 
-    def optional_float(value: str) -> float | None:
-        value = value.strip().replace(",", "")
-        return float(value) if value else None
-
     return OptionsScenario(
         symbol=app.options_symbol_var.get().strip().upper() or "UNKNOWN",
         strategy=app.options_strategy_var.get(),
+        action=app.options_action_var.get(),
+        expiration=app.options_expiration_var.get().strip() or "--",
+        option_type=app.options_type_var.get(),
+        order_type=app.options_order_type_var.get(),
+        time_in_force=app.options_tif_var.get(),
         underlying_price=required_float(app.options_underlying_price_var.get(), "Underlying"),
         quantity=required_float(app.options_quantity_var.get(), "Shares"),
         contracts=max(0, int(required_float(app.options_contracts_var.get(), "Contracts"))),
-        strike=required_float(app.options_strike_var.get(), "Long strike"),
+        strike=required_float(app.options_strike_var.get(), "Strike"),
         short_strike=required_float(app.options_short_strike_var.get(), "Short strike"),
-        premium=required_float(app.options_premium_var.get(), "Premium/debit"),
+        bid=_optional_float(app.options_bid_var.get()),
+        ask=_optional_float(app.options_ask_var.get()),
+        mark=_optional_float(app.options_mark_var.get()),
+        premium=required_float(app.options_premium_var.get(), "Limit / Debit"),
         credit=required_float(app.options_credit_var.get(), "Credit"),
         portfolio_value=max(required_float(app.options_portfolio_value_var.get(), "Portfolio value"), 0.01),
         cash_available=required_float(app.options_cash_available_var.get(), "Cash available"),
         initial_margin_rate=required_float(app.options_initial_margin_var.get(), "Initial margin %") / 100,
         maintenance_margin_rate=required_float(app.options_maintenance_margin_var.get(), "Maintenance %") / 100,
-        stop_price=optional_float(app.options_stop_price_var.get()),
-        target_price=optional_float(app.options_target_price_var.get()),
+        stop_price=_optional_float(app.options_stop_price_var.get()),
+        target_price=_optional_float(app.options_target_price_var.get()),
         atr_percent=max(required_float(app.options_atr_var.get(), "ATR %"), 0) / 100,
         rsi=required_float(app.options_rsi_var.get(), "RSI"),
         sma_20=required_float(app.options_sma_20_var.get(), "20 SMA"),
@@ -314,6 +364,11 @@ def _parse_scenario(app: tk.Tk) -> OptionsScenario:
         support=required_float(app.options_support_var.get(), "Support"),
         resistance=required_float(app.options_resistance_var.get(), "Resistance"),
     )
+
+
+def _optional_float(value: str) -> float | None:
+    value = value.strip().replace(",", "")
+    return float(value) if value else None
 
 
 def _analyze_scenario(s: OptionsScenario, app: tk.Tk | None = None) -> dict:
@@ -543,6 +598,8 @@ def _safety_checklist(
 
     defined_risk = s.strategy not in {"Stock", "Covered Call"}
     checks.append(("OK" if defined_risk else "INFO", "Defined-risk options structure." if defined_risk else "Equity/covered stock exposure can remain large."))
+    if s.action == "Sell" and s.strategy in {"Long Call", "Long Put"}:
+        checks.append(("WARN", "Action is Sell while strategy is long-option math; this sandbox still models long-option risk, not naked short-option risk."))
     return checks
 
 
@@ -554,6 +611,21 @@ def _update_metric_labels(app: tk.Tk, analysis: dict) -> None:
     app.options_portfolio_risk_label.configure(text=f"{analysis['portfolio_risk']:.1%}")
     reward_risk = analysis["reward_risk"]
     app.options_reward_risk_label.configure(text="--" if reward_risk is None else f"{reward_risk:.2f}x")
+
+
+def _update_order_summary(app: tk.Tk, s: OptionsScenario, analysis: dict) -> None:
+    if not hasattr(app, "options_order_summary_label"):
+        return
+
+    summary = (
+        f"{s.action.upper()} {s.contracts} {s.symbol} {s.expiration} {s.strike:g} {s.option_type.upper()} "
+        f"@ {s.premium:.2f} {s.order_type} {s.time_in_force} · "
+        f"Cost/BP effect {_money(analysis['margin_required'])} · "
+        f"Breakeven {_money(analysis['breakeven'])}"
+    )
+    if s.bid is not None or s.ask is not None or s.mark is not None:
+        summary += f" · Bid {_format_optional_price(s.bid)} / Ask {_format_optional_price(s.ask)} / Mark {_format_optional_price(s.mark)}"
+    app.options_order_summary_label.configure(text=summary)
 
 
 def _update_portfolio_context_labels(app: tk.Tk, context: PortfolioContext) -> None:
@@ -579,7 +651,7 @@ def _update_portfolio_context_labels(app: tk.Tk, context: PortfolioContext) -> N
 
     app.options_projected_context_label.configure(
         text=(
-            f"Projected: cash after margin {_money(context.projected_cash_after_margin)} · "
+            f"Projected: cash after BP effect {_money(context.projected_cash_after_margin)} · "
             f"portfolio floor after max loss {_money(context.projected_portfolio_floor)}"
         )
     )
@@ -602,8 +674,11 @@ def _format_analysis(s: OptionsScenario, analysis: dict) -> str:
         "OPTIONS WHAT-IF ANALYSIS",
         "========================",
         "",
-        f"Symbol: {s.symbol}",
-        f"Strategy: {s.strategy}",
+        "Thinkorswim-style selected order:",
+        f"- {s.action.upper()} {s.contracts} {s.symbol} {s.expiration} {s.strike:g} {s.option_type.upper()} @ {s.premium:.2f} {s.order_type} {s.time_in_force}",
+        f"- Bid / Ask / Mark: {_format_optional_price(s.bid)} / {_format_optional_price(s.ask)} / {_format_optional_price(s.mark)}",
+        "",
+        f"Strategy math: {s.strategy}",
         f"Underlying price: {_money(s.underlying_price)}",
         f"Contracts: {s.contracts}",
         f"Shares: {s.quantity:g}",
@@ -621,9 +696,9 @@ def _format_analysis(s: OptionsScenario, analysis: dict) -> str:
         f"- Max loss: {_money(analysis['max_loss'])}",
         f"- Max profit: {max_profit_text}",
         f"- Breakeven: {_money(analysis['breakeven'])}",
-        f"- Estimated buying power used: {_money(analysis['margin_required'])}",
+        f"- Estimated BP effect: {_money(analysis['margin_required'])}",
         f"- Buying power after scenario: {_money(analysis['buying_power_after'])}",
-        f"- Current-cash after margin: {_money(context.projected_cash_after_margin)}",
+        f"- Current-cash after BP effect: {_money(context.projected_cash_after_margin)}",
         f"- Portfolio risk: {analysis['portfolio_risk']:.1%}",
         f"- Portfolio floor after max loss: {_money(context.projected_portfolio_floor)}",
         "",
@@ -650,8 +725,8 @@ def _format_analysis(s: OptionsScenario, analysis: dict) -> str:
         "Notes:",
         "- Option values are simplified expiration-style estimates, not live Greeks/IV marks.",
         "- Exposure proxy is underlying notional/control value, not option delta-adjusted exposure.",
-        "- Margin is an approximation for planning only; broker requirements can differ.",
-        "- This is a what-if sandbox, not a trade recommendation.",
+        "- BP effect is an approximation for planning only; broker requirements can differ.",
+        "- This is a what-if sandbox, not a trade recommendation or order ticket submission."
     ])
     return "\n".join(lines)
 
@@ -673,3 +748,7 @@ def _format_optional_money(value: float | None) -> str:
 
 def _format_optional_percent(value: float | None) -> str:
     return "--" if value is None else f"{value:.2f}%"
+
+
+def _format_optional_price(value: float | None) -> str:
+    return "--" if value is None else f"{value:.2f}"
