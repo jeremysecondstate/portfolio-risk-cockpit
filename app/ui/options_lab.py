@@ -367,13 +367,15 @@ def _analyze_scenario(s: OptionsScenario, app: tk.Tk | None = None) -> dict:
     if stop_loss is not None and stop_loss < 0 and target_profit is not None and target_profit > 0:
         reward_risk = target_profit / abs(stop_loss)
 
+    portfolio_context = _portfolio_context(s, app, margin_required, max_loss)
+    portfolio_risk = max_loss / max(portfolio_context.total_value, 0.01)
+
     price_rows = []
     for move in [-0.20, -0.10, -0.05, 0.0, 0.05, 0.10, 0.20]:
         price = s.underlying_price * (1 + move)
         pnl = _estimate_price_pnl(s, price)
-        price_rows.append((move, price, pnl, pnl / s.portfolio_value))
+        price_rows.append((move, price, pnl, pnl / max(portfolio_context.total_value, 0.01)))
 
-    portfolio_context = _portfolio_context(s, app, margin_required, max_loss)
     technical = _technical_context(s)
     checklist = _safety_checklist(s, max_loss, margin_required, stop_loss, portfolio_context)
 
@@ -382,7 +384,7 @@ def _analyze_scenario(s: OptionsScenario, app: tk.Tk | None = None) -> dict:
         "max_profit": max_profit,
         "breakeven": breakeven,
         "margin_required": margin_required,
-        "portfolio_risk": max_loss / s.portfolio_value,
+        "portfolio_risk": portfolio_risk,
         "buying_power_after": s.cash_available - margin_required,
         "stop_loss": stop_loss,
         "target_profit": target_profit,
