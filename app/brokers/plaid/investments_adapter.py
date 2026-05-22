@@ -6,8 +6,80 @@ from app.core.portfolio import Portfolio, Position
 
 
 def portfolio_from_plaid_holdings(payload: dict[str, Any]) -> tuple[Portfolio, str]:
-    return Portfolio(cash=0.0, positions={}), "Plaid adapter placeholder"
+    accounts = payload.get("accounts") or []
+    holdings = payload.get("holdings") or []
+    securities = payload.get("securities") or []
+    securities_by_id = {str(item.get("security_id")): item for item in securities if isinstance(item, dict)}
+    positions: dict[str, Position] = {}
+
+    for holding in holdings:
+        if not isinstance(holding, dict):
+            continue
+        security = securities_by_id.get(str(holding.get("security_id")), {})
+        symbol = _symbol(security)
+        if not symbol:
+            continue
+        quantity = _num(holding.get("quantity"))
+        last_price = _num(holding.get("institution_price"))
+        value = _num(holding.get("institution_value"))
+        cost_basis = _num(holding.get("cost_basis"))
+        if last_price <= 0 and quantity:
+            last_price = abs(value / quantity)
+        average_cost = abs(cost_basis / quantity) if cost_basis and quantity else last_price
+        positions[symbol] = Position(symbol, round(quantity, 8), round(average_cost, 4), round(last_price, 4))
+
+    cash = _cash(accounts)
+    return Portfolio(cash=round(cash, 2), positions=positions), "Loaded Plaid Investments holdings"
 
 
 def merge_portfolios(primary: Portfolio, secondary: Portfolio) -> Portfolio:
-    return Portfolio(cash=round(primary.cash + secondary.cash, 2), positions={**primary.positions, **secondary.positions})
+    merged = Portfolio(cash=round(primary.cash + secondary.cash, 2), positions={})
+    for source in (primary, secondary):
+        for position in source.positions.values():
+            existing = merged.positions.get(position.symbol)
+            if existing is None:
+                merged.positions[position.symbol] = Position(
+                    position.symbol,
+                    position.quantity,
+                    position.average_cost,
+                    position.last_price,
+                    position.day_profit_loss,
+                    position.day_profit_loss_percent,
+                    position.open_profit_loss,
+                )
+                continue
+            new_quantity = existing.quantity + position.quantity
+            if abs(new_quantity) <= 0.00000001:
+                del merged.positions[position.symbol]
+                continue
+            new_cost = (existing.average_cost * existing.quantity) + (position.average_cost * position.quantity)
+            existing.quantity = round(new_quantity, 8)
+            existing.average_cost = round(abs(new_cost / new_quantity), 4)
+            existing.last_price = position.last_price
+    return merged
+
+
+def _symbol(security: dict[str, Any]) -> str | None:
+    symbol = str(security.get("ticker_symbol") or security.get("symbol") or "").strip().upper()
+    return symbol or None
+
+
+def _cash(accounts: list[Any]) -> float:
+    total = 0.0
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        balances = account.get("balances") or {}
+        available = _num(balances.get("available"))
+        current = _num(balances.get("current"))
+        name = str(account.get("name") or "").lower()
+        if "cash" in name:
+            total += available or current
+    return total
+
+
+def _num(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
