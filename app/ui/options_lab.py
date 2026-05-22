@@ -413,6 +413,11 @@ def _update_metric_labels(app: tk.Tk, analysis: dict) -> None:
 
 
 def _format_analysis(s: OptionsScenario, analysis: dict) -> str:
+    max_profit_text = "Unlimited/variable" if analysis["max_profit"] is None else _money(analysis["max_profit"])
+    stop_text = "--" if analysis["stop_loss"] is None else _money(analysis["stop_loss"])
+    target_text = "--" if analysis["target_profit"] is None else _money(analysis["target_profit"])
+    reward_risk_text = "--" if analysis["reward_risk"] is None else f"{analysis['reward_risk']:.2f}x"
+
     lines = [
         "OPTIONS WHAT-IF ANALYSIS",
         "========================",
@@ -425,16 +430,16 @@ def _format_analysis(s: OptionsScenario, analysis: dict) -> str:
         "",
         "Risk + Margin:",
         f"- Max loss: {_money(analysis['max_loss'])}",
-        f"- Max profit: {'Unlimited/variable' if analysis['max_profit'] is None else _money(analysis['max_profit'])}",
+        f"- Max profit: {max_profit_text}",
         f"- Breakeven: {_money(analysis['breakeven'])}",
         f"- Estimated buying power used: {_money(analysis['margin_required'])}",
         f"- Buying power after scenario: {_money(analysis['buying_power_after'])}",
         f"- Portfolio risk: {analysis['portfolio_risk']:.1%}",
         "",
         "Stop / Target Path:",
-        f"- Stop-loss P/L: {'--' if analysis['stop_loss'] is None else _money(analysis['stop_loss'])}",
-        f"- Target P/L: {'--' if analysis['target_profit'] is None else _money(analysis['target_profit'])}",
-        f"- Reward/Risk: {'--' if analysis['reward_risk'] is None else f'{analysis['reward_risk']:.2f}x'}",
+        f"- Stop-loss P/L: {stop_text}",
+        f"- Target P/L: {target_text}",
+        f"- Reward/Risk: {reward_risk_text}",
         "",
         "Technical Context:",
     ]
