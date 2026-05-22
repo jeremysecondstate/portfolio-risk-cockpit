@@ -16,6 +16,7 @@ venv/
 # App data
 /data/*.csv
 /data/*tokens*.json
+/data/secrets/
 !/data/.gitkeep
 
 # OS
