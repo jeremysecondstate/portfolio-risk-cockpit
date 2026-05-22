@@ -24,6 +24,22 @@ def _sync_single_ticket_price(self: tk.Tk, *_args) -> None:
         self._syncing_ticket_price = False
 
 
+def _sync_robinhood_combined(self: tk.Tk) -> None:
+    """Refresh Plaid holdings, merge them into the active cockpit portfolio, and refresh UI."""
+    if not hasattr(self, "refresh_plaid_holdings") or not hasattr(self, "use_combined_schwab_plaid_portfolio"):
+        self._set_preview_text(
+            "ROBINHOOD / PLAID NOT READY\n"
+            "===========================\n\n"
+            "Plaid controls are not installed yet. Restart the app after pulling the latest repo changes."
+        )
+        return
+
+    self.refresh_plaid_holdings()
+    if getattr(self, "plaid_portfolio", None) is None:
+        return
+    self.use_combined_schwab_plaid_portfolio()
+
+
 def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     stack = _make_paned(parent, tk.VERTICAL)
     stack.pack(fill=tk.BOTH, expand=True)
@@ -53,11 +69,13 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
 
     primary_actions = ttk.Frame(ticket, style="Panel.TFrame")
     primary_actions.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(16, 0))
-    primary_actions.columnconfigure((0, 1, 2, 3), weight=1)
+    for column in range(5):
+        primary_actions.columnconfigure(column, weight=1, uniform="primary")
     ttk.Button(primary_actions, text="Preview Risk", command=self.preview_order, style="Accent.TButton").grid(row=0, column=0, sticky="ew", padx=(0, 8))
     ttk.Button(primary_actions, text="Connect Schwab", command=self.connect_schwab).grid(row=0, column=1, sticky="ew", padx=(0, 8))
-    ttk.Button(primary_actions, text="Refresh Account", command=self.refresh_schwab_account).grid(row=0, column=2, sticky="ew", padx=(0, 8))
-    ttk.Button(primary_actions, text="Tech Analysis", command=self.show_technical_analysis).grid(row=0, column=3, sticky="ew")
+    ttk.Button(primary_actions, text="Refresh Schwab", command=self.refresh_schwab_account).grid(row=0, column=2, sticky="ew", padx=(0, 8))
+    ttk.Button(primary_actions, text="Sync Robinhood", command=lambda: _sync_robinhood_combined(self)).grid(row=0, column=3, sticky="ew", padx=(0, 8))
+    ttk.Button(primary_actions, text="Tech Analysis", command=self.show_technical_analysis).grid(row=0, column=4, sticky="ew")
 
     secondary_actions = ttk.Frame(ticket, style="Panel.TFrame")
     secondary_actions.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(8, 0))
@@ -119,7 +137,7 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     self._set_preview_text(
         "Create a ticket, then use Preview Risk, Tech Analysis, or Trade Setup.\n\n"
         "Entry / Limit is the single planning price used for local risk, trade setup, and Schwab limit-order preview.\n\n"
-        "Advanced / Live Actions are intentionally separated from the normal analysis workflow."
+        "Sync Robinhood refreshes the Plaid portfolio and combines it with the active Schwab/current cockpit portfolio."
     )
 
     explainer = ttk.LabelFrame(explainer_shell, text="Order Type Cheat Sheet", style="Card.TLabelframe")
