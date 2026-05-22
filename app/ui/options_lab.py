@@ -42,6 +42,27 @@ class OptionsScenario:
     resistance: float
 
 
+@dataclass(frozen=True)
+class PortfolioContext:
+    source_message: str
+    cash: float
+    total_value: float
+    positions_value: float
+    symbol: str
+    existing_quantity: float
+    existing_average_cost: float | None
+    existing_last_price: float | None
+    existing_market_value: float
+    existing_weight: float
+    existing_unrealized_pnl: float | None
+    existing_unrealized_pnl_percent: float | None
+    scenario_exposure_proxy: float
+    projected_symbol_exposure_proxy: float
+    projected_symbol_weight: float
+    projected_cash_after_margin: float
+    projected_portfolio_floor: float
+
+
 def build_options_lab_tab(app: tk.Tk, parent: ttk.Frame) -> None:
     """Build a safe, hypothetical options/stock what-if tab.
 
@@ -133,15 +154,36 @@ def _build_scenario_builder(app: tk.Tk, parent: ttk.Frame) -> None:
     buttons = ttk.Frame(left)
     buttons.grid(row=2, column=0, sticky="ew", pady=(12, 0))
     ttk.Button(buttons, text="Run What-If", command=lambda: run_options_what_if(app), style="Accent.TButton").pack(side=tk.LEFT)
-    ttk.Button(buttons, text="Load Portfolio Values", command=lambda: load_options_portfolio_values(app)).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(buttons, text="Sync Current Portfolio", command=lambda: load_options_portfolio_values(app)).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(buttons, text="Use Holding Price", command=lambda: use_current_symbol_holding_price(app)).pack(side=tk.LEFT, padx=(8, 0))
+
+    context = ttk.LabelFrame(left, text="Current Portfolio Context", style="Card.TLabelframe")
+    context.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+    context.columnconfigure(0, weight=1)
+    context.columnconfigure(1, weight=1)
+
+    app.options_portfolio_source_label = ttk.Label(context, text="Source: --", style="Subtle.TLabel")
+    app.options_portfolio_source_label.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+    app.options_account_context_label = ttk.Label(context, text="Account: --", style="Subtle.TLabel")
+    app.options_account_context_label.grid(row=1, column=0, sticky="w", padx=(0, 10), pady=2)
+
+    app.options_symbol_context_label = ttk.Label(context, text="Selected symbol: --", style="Subtle.TLabel")
+    app.options_symbol_context_label.grid(row=1, column=1, sticky="w", pady=2)
+
+    app.options_projected_context_label = ttk.Label(context, text="Projected: --", style="Subtle.TLabel")
+    app.options_projected_context_label.grid(row=2, column=0, sticky="w", padx=(0, 10), pady=2)
+
+    app.options_exposure_context_label = ttk.Label(context, text="Exposure: --", style="Subtle.TLabel")
+    app.options_exposure_context_label.grid(row=2, column=1, sticky="w", pady=2)
 
     notes = ttk.LabelFrame(left, text="Safety Protocols", style="Card.TLabelframe")
-    notes.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+    notes.grid(row=4, column=0, sticky="ew", pady=(12, 0))
     ttk.Label(
         notes,
         text=(
             "The checklist flags oversized portfolio risk, buying-power pressure, stops inside normal ATR noise, "
-            "and undefined-risk structures. Keep this as a sandbox before using broker previewOrder."
+            "and undefined-risk structures. Portfolio context comes from the same broker snapshot that powers the main cockpit tab."
         ),
         wraplength=460,
         style="Subtle.TLabel",
@@ -200,18 +242,40 @@ def load_options_portfolio_values(app: tk.Tk) -> None:
 
     app.options_cash_available_var.set(f"{portfolio.cash:.2f}")
     app.options_portfolio_value_var.set(f"{portfolio.total_value:.2f}")
+
+    position = portfolio.get_position(app.options_symbol_var.get())
+    if position is not None:
+        app.options_underlying_price_var.set(f"{position.last_price:.2f}")
+
+    run_options_what_if(app)
+
+
+def use_current_symbol_holding_price(app: tk.Tk) -> None:
+    try:
+        portfolio = app.broker.get_portfolio()
+    except Exception as exc:
+        messagebox.showerror("Holding price load failed", str(exc))
+        return
+
+    position = portfolio.get_position(app.options_symbol_var.get())
+    if position is None:
+        messagebox.showinfo("No current holding", f"No current holding found for {app.options_symbol_var.get().strip().upper()}.")
+        return
+
+    app.options_underlying_price_var.set(f"{position.last_price:.2f}")
     run_options_what_if(app)
 
 
 def run_options_what_if(app: tk.Tk) -> None:
     try:
         scenario = _parse_scenario(app)
-        analysis = _analyze_scenario(scenario)
+        analysis = _analyze_scenario(scenario, app)
     except Exception as exc:
         messagebox.showerror("Options what-if failed", str(exc))
         return
 
     _update_metric_labels(app, analysis)
+    _update_portfolio_context_labels(app, analysis["portfolio_context"])
     _set_options_text(app, _format_analysis(scenario, analysis))
 
 
@@ -252,7 +316,7 @@ def _parse_scenario(app: tk.Tk) -> OptionsScenario:
     )
 
 
-def _analyze_scenario(s: OptionsScenario) -> dict:
+def _analyze_scenario(s: OptionsScenario, app: tk.Tk | None = None) -> dict:
     strategy = s.strategy
     contract_multiplier = 100
     contracts = max(s.contracts, 1)
@@ -309,8 +373,9 @@ def _analyze_scenario(s: OptionsScenario) -> dict:
         pnl = _estimate_price_pnl(s, price)
         price_rows.append((move, price, pnl, pnl / s.portfolio_value))
 
+    portfolio_context = _portfolio_context(s, app, margin_required, max_loss)
     technical = _technical_context(s)
-    checklist = _safety_checklist(s, max_loss, margin_required, stop_loss)
+    checklist = _safety_checklist(s, max_loss, margin_required, stop_loss, portfolio_context)
 
     return {
         "max_loss": max_loss,
@@ -325,7 +390,76 @@ def _analyze_scenario(s: OptionsScenario) -> dict:
         "price_rows": price_rows,
         "technical": technical,
         "checklist": checklist,
+        "portfolio_context": portfolio_context,
     }
+
+
+def _portfolio_context(s: OptionsScenario, app: tk.Tk | None, margin_required: float, max_loss: float) -> PortfolioContext:
+    source_message = "Manual inputs"
+    cash = s.cash_available
+    total_value = s.portfolio_value
+    positions_value = max(total_value - cash, 0.0)
+    existing_quantity = 0.0
+    existing_average_cost: float | None = None
+    existing_last_price: float | None = None
+    existing_market_value = 0.0
+    existing_unrealized_pnl: float | None = None
+    existing_unrealized_pnl_percent: float | None = None
+
+    if app is not None:
+        try:
+            portfolio = app.broker.get_portfolio()
+            source_message = getattr(app.broker, "source_message", "Current cockpit portfolio")
+            cash = portfolio.cash
+            total_value = max(portfolio.total_value, 0.01)
+            positions_value = portfolio.positions_value
+            position = portfolio.get_position(s.symbol)
+            if position is not None:
+                existing_quantity = position.quantity
+                existing_average_cost = position.average_cost
+                existing_last_price = position.last_price
+                existing_market_value = position.market_value
+                existing_unrealized_pnl = position.unrealized_profit_loss
+                existing_unrealized_pnl_percent = position.unrealized_profit_loss_percent
+        except Exception:
+            source_message = "Manual inputs; current cockpit portfolio was unavailable"
+
+    existing_weight = existing_market_value / max(total_value, 0.01)
+    scenario_exposure_proxy = _scenario_exposure_proxy(s)
+    projected_symbol_exposure_proxy = existing_market_value + scenario_exposure_proxy
+    projected_symbol_weight = projected_symbol_exposure_proxy / max(total_value, 0.01)
+    projected_cash_after_margin = cash - margin_required
+    projected_portfolio_floor = total_value - max_loss
+
+    return PortfolioContext(
+        source_message=source_message,
+        cash=cash,
+        total_value=total_value,
+        positions_value=positions_value,
+        symbol=s.symbol,
+        existing_quantity=existing_quantity,
+        existing_average_cost=existing_average_cost,
+        existing_last_price=existing_last_price,
+        existing_market_value=existing_market_value,
+        existing_weight=existing_weight,
+        existing_unrealized_pnl=existing_unrealized_pnl,
+        existing_unrealized_pnl_percent=existing_unrealized_pnl_percent,
+        scenario_exposure_proxy=scenario_exposure_proxy,
+        projected_symbol_exposure_proxy=projected_symbol_exposure_proxy,
+        projected_symbol_weight=projected_symbol_weight,
+        projected_cash_after_margin=projected_cash_after_margin,
+        projected_portfolio_floor=projected_portfolio_floor,
+    )
+
+
+def _scenario_exposure_proxy(s: OptionsScenario) -> float:
+    contracts = max(s.contracts, 1)
+    multiplier = 100
+    if s.strategy in {"Stock", "Covered Call"}:
+        return s.quantity * s.underlying_price
+    if s.strategy == "Cash-Secured Put":
+        return s.strike * contracts * multiplier
+    return s.underlying_price * contracts * multiplier
 
 
 def _estimate_price_pnl(s: OptionsScenario, underlying_price: float | None) -> float:
@@ -382,14 +516,22 @@ def _technical_context(s: OptionsScenario) -> list[str]:
     return notes
 
 
-def _safety_checklist(s: OptionsScenario, max_loss: float, margin_required: float, stop_loss: float | None) -> list[tuple[str, str]]:
+def _safety_checklist(
+    s: OptionsScenario,
+    max_loss: float,
+    margin_required: float,
+    stop_loss: float | None,
+    portfolio_context: PortfolioContext,
+) -> list[tuple[str, str]]:
     checks: list[tuple[str, str]] = []
-    risk_pct = max_loss / s.portfolio_value
-    buying_power_pct = margin_required / max(s.cash_available, 0.01)
+    risk_pct = max_loss / max(portfolio_context.total_value, 0.01)
+    buying_power_pct = margin_required / max(portfolio_context.cash, 0.01)
     atr_dollars = s.underlying_price * s.atr_percent
 
-    checks.append(("OK" if risk_pct <= 0.02 else "WARN", f"Max loss equals {risk_pct:.1%} of portfolio value."))
-    checks.append(("OK" if buying_power_pct <= 0.25 else "WARN", f"Buying-power usage equals {buying_power_pct:.1%} of available cash."))
+    checks.append(("OK" if risk_pct <= 0.02 else "WARN", f"Max loss equals {risk_pct:.1%} of current portfolio value."))
+    checks.append(("OK" if buying_power_pct <= 0.25 else "WARN", f"Buying-power usage equals {buying_power_pct:.1%} of current cash."))
+    checks.append(("OK" if portfolio_context.projected_cash_after_margin >= 0 else "WARN", f"Projected cash after margin: {_money(portfolio_context.projected_cash_after_margin)}."))
+    checks.append(("OK" if portfolio_context.projected_symbol_weight <= 0.20 else "WARN", f"Projected {s.symbol} exposure proxy equals {portfolio_context.projected_symbol_weight:.1%} of portfolio."))
 
     if stop_loss is None:
         checks.append(("WARN", "No stop-loss price entered for path-risk modeling."))
@@ -412,11 +554,47 @@ def _update_metric_labels(app: tk.Tk, analysis: dict) -> None:
     app.options_reward_risk_label.configure(text="--" if reward_risk is None else f"{reward_risk:.2f}x")
 
 
+def _update_portfolio_context_labels(app: tk.Tk, context: PortfolioContext) -> None:
+    if not hasattr(app, "options_portfolio_source_label"):
+        return
+
+    app.options_portfolio_source_label.configure(text=f"Source: {context.source_message}")
+    app.options_account_context_label.configure(
+        text=f"Account: cash {_money(context.cash)} · total {_money(context.total_value)} · positions {_money(context.positions_value)}"
+    )
+
+    if context.existing_quantity:
+        pnl_text = _format_optional_money(context.existing_unrealized_pnl)
+        pnl_pct_text = _format_optional_percent(context.existing_unrealized_pnl_percent)
+        app.options_symbol_context_label.configure(
+            text=(
+                f"{context.symbol}: {context.existing_quantity:g} shares · value {_money(context.existing_market_value)} "
+                f"· weight {context.existing_weight:.1%} · P/L {pnl_text} ({pnl_pct_text})"
+            )
+        )
+    else:
+        app.options_symbol_context_label.configure(text=f"{context.symbol}: no current holding in cockpit snapshot")
+
+    app.options_projected_context_label.configure(
+        text=(
+            f"Projected: cash after margin {_money(context.projected_cash_after_margin)} · "
+            f"portfolio floor after max loss {_money(context.projected_portfolio_floor)}"
+        )
+    )
+    app.options_exposure_context_label.configure(
+        text=(
+            f"Exposure proxy: scenario {_money(context.scenario_exposure_proxy)} · "
+            f"projected {context.symbol} {_money(context.projected_symbol_exposure_proxy)} ({context.projected_symbol_weight:.1%})"
+        )
+    )
+
+
 def _format_analysis(s: OptionsScenario, analysis: dict) -> str:
     max_profit_text = "Unlimited/variable" if analysis["max_profit"] is None else _money(analysis["max_profit"])
     stop_text = "--" if analysis["stop_loss"] is None else _money(analysis["stop_loss"])
     target_text = "--" if analysis["target_profit"] is None else _money(analysis["target_profit"])
     reward_risk_text = "--" if analysis["reward_risk"] is None else f"{analysis['reward_risk']:.2f}x"
+    context: PortfolioContext = analysis["portfolio_context"]
 
     lines = [
         "OPTIONS WHAT-IF ANALYSIS",
@@ -428,13 +606,24 @@ def _format_analysis(s: OptionsScenario, analysis: dict) -> str:
         f"Contracts: {s.contracts}",
         f"Shares: {s.quantity:g}",
         "",
+        "Current Portfolio Context:",
+        f"- Source: {context.source_message}",
+        f"- Cash: {_money(context.cash)}",
+        f"- Total value: {_money(context.total_value)}",
+        f"- Existing {s.symbol} quantity: {context.existing_quantity:g}",
+        f"- Existing {s.symbol} value: {_money(context.existing_market_value)} ({context.existing_weight:.1%} of portfolio)",
+        f"- Scenario exposure proxy: {_money(context.scenario_exposure_proxy)}",
+        f"- Projected {s.symbol} exposure proxy: {_money(context.projected_symbol_exposure_proxy)} ({context.projected_symbol_weight:.1%} of portfolio)",
+        "",
         "Risk + Margin:",
         f"- Max loss: {_money(analysis['max_loss'])}",
         f"- Max profit: {max_profit_text}",
         f"- Breakeven: {_money(analysis['breakeven'])}",
         f"- Estimated buying power used: {_money(analysis['margin_required'])}",
         f"- Buying power after scenario: {_money(analysis['buying_power_after'])}",
+        f"- Current-cash after margin: {_money(context.projected_cash_after_margin)}",
         f"- Portfolio risk: {analysis['portfolio_risk']:.1%}",
+        f"- Portfolio floor after max loss: {_money(context.projected_portfolio_floor)}",
         "",
         "Stop / Target Path:",
         f"- Stop-loss P/L: {stop_text}",
@@ -458,6 +647,7 @@ def _format_analysis(s: OptionsScenario, analysis: dict) -> str:
         "",
         "Notes:",
         "- Option values are simplified expiration-style estimates, not live Greeks/IV marks.",
+        "- Exposure proxy is underlying notional/control value, not option delta-adjusted exposure.",
         "- Margin is an approximation for planning only; broker requirements can differ.",
         "- This is a what-if sandbox, not a trade recommendation.",
     ])
@@ -473,3 +663,11 @@ def _set_options_text(app: tk.Tk, content: str) -> None:
 
 def _money(value: float) -> str:
     return f"${value:,.2f}"
+
+
+def _format_optional_money(value: float | None) -> str:
+    return "--" if value is None else _money(value)
+
+
+def _format_optional_percent(value: float | None) -> str:
+    return "--" if value is None else f"{value:.2f}%"
