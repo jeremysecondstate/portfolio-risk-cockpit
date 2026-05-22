@@ -70,17 +70,28 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     primary_actions = ttk.Frame(ticket, style="Panel.TFrame")
     primary_actions.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(16, 0))
     for column in range(5):
-        primary_actions.columnconfigure(column, weight=1, uniform="primary")
-    ttk.Button(primary_actions, text="Preview Risk", command=self.preview_order, style="Accent.TButton").grid(row=0, column=0, sticky="ew", padx=(0, 8))
-    ttk.Button(primary_actions, text="Connect Schwab", command=self.connect_schwab).grid(row=0, column=1, sticky="ew", padx=(0, 8))
-    ttk.Button(primary_actions, text="Refresh Schwab", command=self.refresh_schwab_account).grid(row=0, column=2, sticky="ew", padx=(0, 8))
-    ttk.Button(primary_actions, text="Sync Robinhood", command=lambda: _sync_robinhood_combined(self)).grid(row=0, column=3, sticky="ew", padx=(0, 8))
-    ttk.Button(primary_actions, text="Tech Analysis", command=self.show_technical_analysis).grid(row=0, column=4, sticky="ew")
+        primary_actions.columnconfigure(column, weight=1, uniform="primary_actions")
+
+    primary_buttons = [
+        ("Preview Risk", self.preview_order, "Accent.TButton"),
+        ("Connect Schwab", self.connect_schwab, "TButton"),
+        ("Refresh Schwab", self.refresh_schwab_account, "TButton"),
+        ("Sync Robinhood", lambda: _sync_robinhood_combined(self), "TButton"),
+        ("Tech Analysis", self.show_technical_analysis, "TButton"),
+    ]
+    for column, (label, command, style_name) in enumerate(primary_buttons):
+        ttk.Button(primary_actions, text=label, command=command, style=style_name).grid(
+            row=0,
+            column=column,
+            sticky="nsew",
+            padx=(0 if column == 0 else 4, 0 if column == len(primary_buttons) - 1 else 4),
+            ipady=2,
+        )
 
     secondary_actions = ttk.Frame(ticket, style="Panel.TFrame")
     secondary_actions.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(8, 0))
-    for column in range(4):
-        secondary_actions.columnconfigure(column, weight=1, uniform="actions")
+    for column in range(5):
+        secondary_actions.columnconfigure(column, weight=1, uniform="secondary_actions")
     for index, (label, command) in enumerate([
         ("Trade Setup", self.show_position_size),
         ("Preview Order", self.run_schwab_preview),
@@ -89,11 +100,11 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
         ("Reset Session", self.reset_schwab_session),
     ]):
         ttk.Button(secondary_actions, text=label, command=command).grid(
-            row=index // 4,
-            column=index % 4,
-            sticky="ew",
-            padx=(0 if index % 4 == 0 else 6, 0),
-            pady=(0 if index < 4 else 6, 0),
+            row=0,
+            column=index,
+            sticky="nsew",
+            padx=(0 if index == 0 else 4, 0 if index == 4 else 4),
+            ipady=1,
         )
 
     advanced = ttk.LabelFrame(ticket, text="Advanced / Live Actions", style="Card.TLabelframe")
