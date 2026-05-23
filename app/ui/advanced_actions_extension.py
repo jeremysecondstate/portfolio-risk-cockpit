@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import tkinter as tk
-from tkinter import simpledialog, ttk
+from tkinter import messagebox, simpledialog, ttk
 from typing import Type
 
 from app.brokers.hyperliquid.client import (
@@ -95,9 +95,9 @@ def _sync_hyperliquid_account(self: tk.Tk) -> None:
         self.last_hyperliquid_cash_adjustment = hyperliquid_portfolio.cash
         self.refresh_portfolio()
         self._set_preview_text(format_hyperliquid_snapshot(snapshot, hyperliquid_portfolio))
-        self._show_info("Hyperliquid synced", hyperliquid_source_message)
+        messagebox.showinfo("Hyperliquid synced", hyperliquid_source_message)
     except Exception as exc:
-        self._show_error("Hyperliquid sync failed", str(exc))
+        messagebox.showerror("Hyperliquid sync failed", str(exc))
 
 
 def _hyperliquid_display_symbol(symbol: str) -> str:
