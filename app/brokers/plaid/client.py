@@ -43,6 +43,25 @@ class PlaidClient:
             "language": "en",
         })
 
+    def create_hosted_link_token(self, *, user_id: str = "portfolio-risk-cockpit-user") -> dict[str, Any]:
+        return self._post("/link/token/create", {
+            "client_id": self.client_id,
+            "secret": self.api_secret,
+            "client_name": "Portfolio Risk Cockpit",
+            "user": {"client_user_id": user_id},
+            "products": self.products,
+            "country_codes": self.country_codes,
+            "language": "en",
+            "hosted_link": {"url_lifetime_seconds": 1800},
+        })
+
+    def get_link_token(self, link_token: str) -> dict[str, Any]:
+        return self._post("/link/token/get", {
+            "client_id": self.client_id,
+            "secret": self.api_secret,
+            "link_token": link_token,
+        })
+
     def create_sandbox_public_token(self, *, institution_id: str = "ins_109508") -> dict[str, Any]:
         if self.env != "sandbox":
             raise RuntimeError("Sandbox public token creation requires PLAID_ENV=sandbox")
