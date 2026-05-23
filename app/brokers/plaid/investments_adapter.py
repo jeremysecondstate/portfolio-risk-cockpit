@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.core.portfolio import Portfolio, Position
+from app.core.portfolio import CashPosition, Portfolio, Position
 
 
 def portfolio_from_plaid_holdings(payload: dict[str, Any]) -> tuple[Portfolio, str]:
@@ -29,13 +29,16 @@ def portfolio_from_plaid_holdings(payload: dict[str, Any]) -> tuple[Portfolio, s
         positions[symbol] = Position(symbol, round(quantity, 8), round(average_cost, 4), round(last_price, 4))
 
     cash = _cash(accounts)
+    cash_positions = {"USD:PLAID": CashPosition("USD", round(cash, 2), "Plaid")}
     source = _source_message(payload, accounts)
-    return Portfolio(cash=round(cash, 2), positions=positions), source
+    return Portfolio(cash=round(cash, 2), positions=positions, cash_positions=cash_positions), source
 
 
 def merge_portfolios(primary: Portfolio, secondary: Portfolio) -> Portfolio:
-    merged = Portfolio(cash=round(primary.cash + secondary.cash, 2), positions={})
-    for source in (primary, secondary):
+    merged = Portfolio(cash=round(primary.cash + secondary.cash, 2), positions={}, cash_positions={})
+    for source_name, source in (("PRIMARY", primary), ("SECONDARY", secondary)):
+        for key, cash in source.cash_positions.items():
+            merged.cash_positions[f"{source_name}:{key}"] = cash
         for position in source.positions.values():
             existing = merged.positions.get(position.symbol)
             if existing is None:
