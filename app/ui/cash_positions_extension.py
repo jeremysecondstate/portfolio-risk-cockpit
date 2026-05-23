@@ -3,6 +3,7 @@ from __future__ import annotations
 import tkinter as tk
 from typing import Type
 
+from app.core.portfolio import Portfolio, Position
 from app.ui import polished_theme
 
 
@@ -10,6 +11,45 @@ def install_cash_positions_extension(app_cls: Type[tk.Tk]) -> None:
     """Show cash-like balances as neutral rows in the Positions table."""
 
     app_cls.refresh_portfolio = _refresh_portfolio_with_cash_rows  # type: ignore[method-assign]
+    app_cls._merge_hyperliquid_portfolio = _merge_hyperliquid_portfolio_with_cash_rows  # type: ignore[method-assign]
+
+
+def _merge_hyperliquid_portfolio_with_cash_rows(self: tk.Tk, hyperliquid_portfolio: Portfolio) -> Portfolio:
+    """Merge Hyperliquid while preserving source-level cash display rows."""
+
+    current = self.broker.get_portfolio()
+    non_hyperliquid_cash = round(current.cash - self.last_hyperliquid_cash_adjustment, 2)
+    positions = {
+        symbol: position
+        for symbol, position in current.positions.items()
+        if not symbol.startswith("HL:")
+    }
+    cash_positions = {
+        key: cash
+        for key, cash in current.cash_positions.items()
+        if "HYPERLIQUID" not in key.upper()
+    }
+
+    for symbol, position in hyperliquid_portfolio.positions.items():
+        display_symbol = f"HL:{symbol}"
+        positions[display_symbol] = Position(
+            symbol=display_symbol,
+            quantity=position.quantity,
+            average_cost=position.average_cost,
+            last_price=position.last_price,
+            day_profit_loss=position.day_profit_loss,
+            day_profit_loss_percent=position.day_profit_loss_percent,
+            open_profit_loss=position.open_profit_loss,
+        )
+
+    for key, cash in hyperliquid_portfolio.cash_positions.items():
+        cash_positions[f"HL:{key}"] = cash
+
+    return Portfolio(
+        cash=round(non_hyperliquid_cash + hyperliquid_portfolio.cash, 2),
+        positions=positions,
+        cash_positions=cash_positions,
+    )
 
 
 def _refresh_portfolio_with_cash_rows(self: tk.Tk) -> None:
