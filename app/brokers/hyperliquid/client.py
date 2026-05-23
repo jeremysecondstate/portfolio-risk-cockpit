@@ -13,6 +13,11 @@ from app.core.portfolio import Portfolio, Position
 DEFAULT_INFO_URL = "https://api.hyperliquid.xyz/info"
 ZERO_EPSILON = 0.00000001
 CASH_LIKE_COINS = {"USDC", "USD"}
+DEFAULT_SPOT_MID_KEYS: dict[str, tuple[str, ...]] = {
+    # Hyperliquid allMids can expose spot markets by @index. Keep this as a
+    # harmless fallback while also supporting direct coin/name matches.
+    "HYPE": ("HYPE", "HYPE/USDC", "@107"),
+}
 
 
 @dataclass(frozen=True)
@@ -23,14 +28,17 @@ class HyperliquidSnapshot:
     clearinghouse_state: dict[str, Any]
     spot_state: dict[str, Any]
     open_orders: list[dict[str, Any]]
+    all_mids: dict[str, Any]
+    spot_meta_and_asset_ctxs: Any
     fetched_at: datetime
 
 
 class HyperliquidInfoClient:
     """Small read-only wrapper around Hyperliquid's public info endpoint.
 
-    Balance/position sync only needs the user's master or sub-account address.
-    Do not pass an API/agent wallet address here; those are for signed actions.
+    Balance/position/P&L sync only needs the user's master or sub-account
+    address. Do not pass an API/agent wallet address here; those are for signed
+    actions such as placing or canceling orders.
     """
 
     def __init__(self, info_url: str | None = None, timeout_seconds: int = 30) -> None:
@@ -55,6 +63,8 @@ class HyperliquidInfoClient:
         clearinghouse_state = self.post_info({"type": "clearinghouseState", "user": normalized_user})
         spot_state = self.post_info({"type": "spotClearinghouseState", "user": normalized_user})
         open_orders = self.post_info({"type": "openOrders", "user": normalized_user}) if include_open_orders else []
+        all_mids = self._safe_post_info({"type": "allMids"}, default={})
+        spot_meta_and_asset_ctxs = self._safe_post_info({"type": "spotMetaAndAssetCtxs"}, default=None)
 
         if not isinstance(clearinghouse_state, dict):
             raise RuntimeError("Unexpected Hyperliquid clearinghouseState response shape.")
@@ -62,14 +72,25 @@ class HyperliquidInfoClient:
             spot_state = {}
         if not isinstance(open_orders, list):
             open_orders = []
+        if not isinstance(all_mids, dict):
+            all_mids = {}
 
         return HyperliquidSnapshot(
             user=normalized_user,
             clearinghouse_state=clearinghouse_state,
             spot_state=spot_state,
             open_orders=[order for order in open_orders if isinstance(order, dict)],
+            all_mids=all_mids,
+            spot_meta_and_asset_ctxs=spot_meta_and_asset_ctxs,
             fetched_at=datetime.now(),
         )
+
+    def _safe_post_info(self, payload: dict[str, Any], default: Any) -> Any:
+        """Optional read-only enrichment call; sync should still work without it."""
+        try:
+            return self.post_info(payload)
+        except Exception:
+            return default
 
 
 def normalize_hyperliquid_address(user: str) -> str:
@@ -85,13 +106,7 @@ def normalize_hyperliquid_address(user: str) -> str:
 
 
 def portfolio_from_hyperliquid_snapshot(snapshot: HyperliquidSnapshot) -> tuple[Portfolio, str]:
-    """Convert Hyperliquid state into the cockpit's stock-shaped Portfolio model.
-
-    The cockpit's Portfolio object expects cash plus long-style market values.
-    Perpetual futures are therefore shown as positive notional exposure, with
-    SHORT added to the symbol when the Hyperliquid size is negative. Cash is the
-    balancing line that makes total_value equal Hyperliquid equity plus spot value.
-    """
+    """Convert Hyperliquid state into the cockpit's stock-shaped Portfolio model."""
 
     positions: dict[str, Position] = {}
     perp_notional = 0.0
@@ -106,7 +121,7 @@ def portfolio_from_hyperliquid_snapshot(snapshot: HyperliquidSnapshot) -> tuple[
     spot_cash = 0.0
     spot_positions_value = 0.0
     for raw_balance in _spot_balances(snapshot.spot_state):
-        position, cash_value = _spot_position_from_hyperliquid(raw_balance)
+        position, cash_value = _spot_position_from_hyperliquid(raw_balance, snapshot)
         spot_cash += cash_value
         if position is None:
             continue
@@ -190,10 +205,17 @@ def format_hyperliquid_snapshot(snapshot: HyperliquidSnapshot, portfolio: Portfo
             total = _first_number(raw_balance, ("total", "balance", "amount"))
             hold = _first_number(raw_balance, ("hold", "held", "locked"))
             entry_ntl = _first_number(raw_balance, ("entryNtl", "entryNotional", "usdValue"))
+            mid_price = _spot_mid_price(coin, snapshot)
+            current_value = (total * mid_price) if total is not None and mid_price is not None else None
+            pnl = (current_value - entry_ntl) if current_value is not None and entry_ntl is not None else None
+            pnl_percent = (pnl / entry_ntl * 100) if pnl is not None and entry_ntl and entry_ntl > 0 else None
             lines.append(
                 f"- {coin}: total {_format_optional_number(total)}, "
                 f"held {_format_optional_number(hold)}, "
-                f"notional/entry {_format_optional_money(entry_ntl)}"
+                f"price {_format_optional_money(mid_price)}, "
+                f"value {_format_optional_money(current_value)}, "
+                f"entry {_format_optional_money(entry_ntl)}, "
+                f"P&L {_format_optional_money(pnl)} ({_format_optional_percent(pnl_percent)})"
             )
 
     lines.extend(["", "Open orders:"])
@@ -214,7 +236,8 @@ def format_hyperliquid_snapshot(snapshot: HyperliquidSnapshot, portfolio: Portfo
         [
             "",
             "No order was submitted, replaced, or canceled.",
-            "Use your main Hyperliquid account address for sync. API/agent wallets are only needed for future signed actions.",
+            "Spot P&L is read-only: current value minus entry notional from Hyperliquid public info data.",
+            "API/agent wallets are only needed for future signed actions.",
         ]
     )
     return "\n".join(lines)
@@ -257,19 +280,23 @@ def _perp_position_from_hyperliquid(raw_position: dict[str, Any]) -> Position | 
     )
 
 
-def _spot_position_from_hyperliquid(raw_balance: dict[str, Any]) -> tuple[Position | None, float]:
+def _spot_position_from_hyperliquid(raw_balance: dict[str, Any], snapshot: HyperliquidSnapshot) -> tuple[Position | None, float]:
     coin = str(raw_balance.get("coin") or raw_balance.get("token") or "").strip().upper()
     quantity = _first_number(raw_balance, ("total", "balance", "amount")) or 0.0
     if not coin or quantity <= ZERO_EPSILON:
         return None, 0.0
 
-    price = _first_number(raw_balance, ("markPx", "midPx", "price"))
-    entry_notional = _first_number(raw_balance, ("entryNtl", "entryNotional", "usdValue"))
+    mid_price = _spot_mid_price(coin, snapshot)
+    entry_notional = _first_number(raw_balance, ("entryNtl", "entryNotional"))
+    direct_usd_value = _first_number(raw_balance, ("usdValue", "usdcValue", "currentValue"))
+    current_value = (quantity * mid_price) if mid_price is not None else direct_usd_value
     average_cost = (entry_notional / quantity) if entry_notional is not None and quantity > ZERO_EPSILON else None
-    last_price = price or average_cost or (1.0 if coin in CASH_LIKE_COINS else 0.0)
 
     if coin in CASH_LIKE_COINS:
-        return None, round(quantity * last_price, 2)
+        return None, round(current_value or quantity, 2)
+
+    last_price = mid_price or ((current_value / quantity) if current_value is not None and quantity > ZERO_EPSILON else None) or average_cost or 0.0
+    open_profit_loss = (current_value - entry_notional) if current_value is not None and entry_notional is not None else None
 
     return (
         Position(
@@ -277,9 +304,62 @@ def _spot_position_from_hyperliquid(raw_balance: dict[str, Any]) -> tuple[Positi
             quantity=round(quantity, 8),
             average_cost=round(average_cost or last_price, 4),
             last_price=round(last_price, 4),
+            open_profit_loss=round(open_profit_loss, 2) if open_profit_loss is not None else None,
         ),
         0.0,
     )
+
+
+def _spot_mid_price(coin: str, snapshot: HyperliquidSnapshot) -> float | None:
+    coin = coin.strip().upper()
+    if coin in CASH_LIKE_COINS:
+        return 1.0
+
+    env_key = os.getenv(f"HYPERLIQUID_{coin}_MID_KEY", "").strip()
+    candidate_keys = [
+        env_key,
+        coin,
+        f"{coin}/USDC",
+        f"{coin}-USDC",
+        *DEFAULT_SPOT_MID_KEYS.get(coin, ()),
+    ]
+    for key in candidate_keys:
+        if not key:
+            continue
+        value = _to_float(snapshot.all_mids.get(key))
+        if value is not None:
+            return value
+
+    meta_price = _spot_meta_price(coin, snapshot.spot_meta_and_asset_ctxs)
+    if meta_price is not None:
+        return meta_price
+
+    for key, raw_value in snapshot.all_mids.items():
+        upper_key = str(key).upper()
+        if upper_key == coin or upper_key.startswith(f"{coin}/") or upper_key.startswith(f"{coin}-"):
+            value = _to_float(raw_value)
+            if value is not None:
+                return value
+    return None
+
+
+def _spot_meta_price(coin: str, payload: Any) -> float | None:
+    if not isinstance(payload, list) or len(payload) < 2:
+        return None
+    meta, asset_ctxs = payload[0], payload[1]
+    universe = meta.get("universe") if isinstance(meta, dict) else None
+    if not isinstance(universe, list) or not isinstance(asset_ctxs, list):
+        return None
+
+    for index, asset in enumerate(universe):
+        if not isinstance(asset, dict):
+            continue
+        name = str(asset.get("name") or asset.get("coin") or "").upper()
+        if name != coin and not name.startswith(f"{coin}/") and not name.startswith(f"{coin}-"):
+            continue
+        ctx = asset_ctxs[index] if index < len(asset_ctxs) and isinstance(asset_ctxs[index], dict) else {}
+        return _first_number(ctx, ("midPx", "markPx", "oraclePx", "price", "prevDayPx"))
+    return None
 
 
 def _perp_account_value(state: dict[str, Any]) -> float:
@@ -327,3 +407,7 @@ def _format_optional_money(value: float | None) -> str:
 
 def _format_optional_number(value: float | None) -> str:
     return "--" if value is None else f"{value:g}"
+
+
+def _format_optional_percent(value: float | None) -> str:
+    return "--" if value is None else f"{value:+.2f}%"
