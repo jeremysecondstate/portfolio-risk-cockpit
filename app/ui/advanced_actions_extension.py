@@ -40,6 +40,19 @@ def _sync_robinhood_combined(self: tk.Tk) -> None:
     self.use_combined_schwab_plaid_portfolio()
 
 
+def _sync_hyperliquid_combined(self: tk.Tk) -> None:
+    """Run the read-only Hyperliquid account sync if the cockpit has the connector installed."""
+    if not hasattr(self, "sync_hyperliquid_account"):
+        self._set_preview_text(
+            "HYPERLIQUID SYNC NOT READY\n"
+            "==========================\n\n"
+            "Hyperliquid controls are not installed yet. Restart the app after pulling the latest repo changes."
+        )
+        return
+
+    self.sync_hyperliquid_account()
+
+
 def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     stack = _make_paned(parent, tk.VERTICAL)
     stack.pack(fill=tk.BOTH, expand=True)
@@ -69,7 +82,7 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
 
     primary_actions = ttk.Frame(ticket, style="Panel.TFrame")
     primary_actions.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(16, 0))
-    for column in range(5):
+    for column in range(6):
         primary_actions.columnconfigure(column, weight=1, uniform="primary_actions")
 
     primary_buttons = [
@@ -77,6 +90,7 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
         ("Connect Schwab", self.connect_schwab, "TButton"),
         ("Refresh Schwab", self.refresh_schwab_account, "TButton"),
         ("Sync Robinhood", lambda: _sync_robinhood_combined(self), "TButton"),
+        ("Sync Hyperliquid", lambda: _sync_hyperliquid_combined(self), "TButton"),
         ("Tech Analysis", self.show_technical_analysis, "TButton"),
     ]
     for column, (label, command, style_name) in enumerate(primary_buttons):
@@ -148,7 +162,7 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     self._set_preview_text(
         "Create a ticket, then use Preview Risk, Tech Analysis, or Trade Setup.\n\n"
         "Entry / Limit is the single planning price used for local risk, trade setup, and Schwab limit-order preview.\n\n"
-        "Sync Robinhood refreshes the Plaid portfolio and combines it with the active Schwab/current cockpit portfolio."
+        "Sync Robinhood refreshes Plaid holdings. Sync Hyperliquid reads the public info API and merges HL: rows into the active cockpit portfolio."
     )
 
     explainer = ttk.LabelFrame(explainer_shell, text="Order Type Cheat Sheet", style="Card.TLabelframe")
