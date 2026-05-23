@@ -7,11 +7,17 @@ from datetime import datetime, timedelta, timezone
 from tkinter import messagebox, simpledialog, ttk
 
 from app.analytics.technical_analysis import analyze_candles, candles_from_price_history, compare_timeframes
+from app.brokers.hyperliquid.client import (
+    HyperliquidInfoClient,
+    format_hyperliquid_snapshot,
+    portfolio_from_hyperliquid_snapshot,
+)
 from app.brokers.paper import PaperBroker
 from app.brokers.schwab.account_adapter import portfolio_from_schwab_account
 from app.brokers.schwab.session import SchwabSession
 from app.brokers.schwab.token_store import clear_token_payload
 from app.core.order_models import OrderSide, OrderType, TimeInForce
+from app.core.portfolio import Portfolio, Position
 from app.ui.dashboard import PortfolioRiskCockpitApp
 
 
@@ -36,6 +42,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         self.last_schwab_preview_status: str | None = None
         self.open_only_verified_this_session = False
         self.cancel_verified_this_session = False
+        self.last_hyperliquid_cash_adjustment = 0.0
 
         self.symbol_var = tk.StringVar(value="NVDA")
         self.side_var = tk.StringVar(value=OrderSide.BUY.value)
@@ -66,20 +73,21 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
 
         self._grid_row(ticket, 0, "Symbol", ttk.Entry(ticket, textvariable=self.symbol_var), "Side", ttk.Combobox(ticket, textvariable=self.side_var, values=[s.value for s in OrderSide], state="readonly"))
         self._grid_row(ticket, 1, "Order type", ttk.Combobox(ticket, textvariable=self.order_type_var, values=[o.value for o in OrderType], state="readonly"), "Time", ttk.Combobox(ticket, textvariable=self.time_in_force_var, values=[t.value for t in TimeInForce], state="readonly"))
-        self._grid_row(ticket, 2, "Quantity", ttk.Entry(ticket, textvariable=self.quantity_var), "Est. price", ttk.Entry(ticket, textvariable=self.estimated_price_var))
-        self._grid_row(ticket, 3, "Limit price", ttk.Entry(ticket, textvariable=self.limit_price_var), "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var))
-        self._grid_row(ticket, 4, "Risk % cash", ttk.Entry(ticket, textvariable=self.risk_percent_var), "Type CONFIRM", ttk.Entry(ticket, textvariable=self.confirmation_var))
+        self._grid_row(ticket, 2, "Quantity", ttk.Entry(ticket, textvariable=self.quantity_var), "Entry / Limit", ttk.Entry(ticket, textvariable=self.limit_price_var))
+        self._grid_row(ticket, 3, "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var), "Type CONFIRM", ttk.Entry(ticket, textvariable=self.confirmation_var))
+        ttk.Label(ticket, text="Cancel order ID").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=6)
+        ttk.Entry(ticket, textvariable=self.cancel_order_id_var).grid(row=4, column=1, columnspan=3, sticky="ew", pady=6)
 
         button_bar = ttk.Frame(ticket)
-        button_bar.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+        button_bar.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         ttk.Button(button_bar, text="Preview Risk", command=self.preview_order, style="Accent.TButton").pack(side=tk.LEFT)
-        ttk.Button(button_bar, text="Schwab Preview", command=self.run_schwab_preview).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(button_bar, text="Connect Schwab", command=self.run_schwab_preview).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(button_bar, text="Refresh Schwab", command=self.load_schwab_open_orders).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(button_bar, text="Sync Hyperliquid", command=self.sync_hyperliquid_account).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Recent Orders", command=self.load_schwab_open_orders).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Open Only", command=self.load_schwab_open_orders_only).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(button_bar, text="Reset Schwab Session", command=self.reset_schwab_session).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(button_bar, text="Reset Session", command=self.reset_schwab_session).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Cancel Order", command=self.show_cancel_order_placeholder).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Label(ticket, text="Cancel order ID").grid(row=5, column=0, sticky="w", padx=(0, 8), pady=6)
-        ttk.Entry(ticket, textvariable=self.cancel_order_id_var).grid(row=5, column=1, columnspan=3, sticky="ew", pady=6)
         ttk.Button(button_bar, text="Technical Analysis", command=self.show_technical_analysis).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Live Safety", command=self.show_live_submit_safety_review).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="LIVE Submit", command=self.submit_live_schwab_order_guarded).pack(side=tk.LEFT, padx=(8, 0))
@@ -88,21 +96,21 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         ttk.Button(button_bar, text="Submit Paper Order", command=self.submit_order).pack(side=tk.RIGHT)
 
         ttk.Label(ticket, textvariable=self.schwab_status_var, style="Subtle.TLabel").grid(
-            row=7,
+            row=6,
             column=0,
             columnspan=4,
             sticky="w",
             pady=(8, 0),
         )
         ttk.Label(ticket, textvariable=self.schwab_preview_status_var, style="Subtle.TLabel").grid(
-            row=8,
+            row=7,
             column=0,
             columnspan=4,
             sticky="w",
             pady=(2, 0),
         )
         ttk.Label(ticket, textvariable=self.schwab_verification_status_var, style="Subtle.TLabel").grid(
-            row=9,
+            row=8,
             column=0,
             columnspan=4,
             sticky="w",
@@ -124,12 +132,65 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         ttk.Label(
             explainer,
             text=(
-                "Limit buy = maximum price. Limit sell = minimum price. Stop = trigger order. "
-                "Stop-limit = trigger plus minimum/maximum limit, but may not fill."
+                "Limit buy = maximum price. Limit sell = minimum exit price. Stop = "
+                "trigger price. Stop-limit = trigger plus limit, but may not fill."
             ),
             wraplength=430,
             style="Subtle.TLabel",
         ).pack(anchor=tk.W)
+
+    def sync_hyperliquid_account(self) -> None:
+        """Read Hyperliquid balances/positions and merge them into the cockpit."""
+        default_address = os.getenv("HYPERLIQUID_USER_ADDRESS", "").strip()
+        address = default_address or simpledialog.askstring(
+            "Hyperliquid Sync",
+            "Enter your Hyperliquid master/sub-account wallet address.\n\n"
+            "Use the account address, not the API/agent wallet address.",
+        )
+        if not address:
+            return
+
+        try:
+            client = HyperliquidInfoClient()
+            snapshot = client.fetch_snapshot(address)
+            hyperliquid_portfolio, hyperliquid_source_message = portfolio_from_hyperliquid_snapshot(snapshot)
+            merged_portfolio = self._merge_hyperliquid_portfolio(hyperliquid_portfolio)
+
+            base_source_message = self.broker.source_message.split(" + Loaded Hyperliquid account ")[0]
+            source_message = f"{base_source_message} + {hyperliquid_source_message}"
+            self.broker.set_portfolio(merged_portfolio, source_message)
+            self.last_hyperliquid_cash_adjustment = hyperliquid_portfolio.cash
+            self.refresh_portfolio()
+            self._set_preview_text(format_hyperliquid_snapshot(snapshot, hyperliquid_portfolio))
+            messagebox.showinfo("Hyperliquid synced", hyperliquid_source_message)
+        except Exception as exc:
+            messagebox.showerror("Hyperliquid sync failed", str(exc))
+
+    def _merge_hyperliquid_portfolio(self, hyperliquid_portfolio: Portfolio) -> Portfolio:
+        current = self.broker.get_portfolio()
+        non_hyperliquid_cash = round(current.cash - self.last_hyperliquid_cash_adjustment, 2)
+        positions = {
+            symbol: position
+            for symbol, position in current.positions.items()
+            if not symbol.startswith("HL:")
+        }
+
+        for symbol, position in hyperliquid_portfolio.positions.items():
+            display_symbol = f"HL:{symbol}"
+            positions[display_symbol] = Position(
+                symbol=display_symbol,
+                quantity=position.quantity,
+                average_cost=position.average_cost,
+                last_price=position.last_price,
+                day_profit_loss=position.day_profit_loss,
+                day_profit_loss_percent=position.day_profit_loss_percent,
+                open_profit_loss=position.open_profit_loss,
+            )
+
+        return Portfolio(
+            cash=round(non_hyperliquid_cash + hyperliquid_portfolio.cash, 2),
+            positions=positions,
+        )
 
     def _authorize_schwab_session(self) -> SchwabSession | None:
         """Return the Schwab session, using the local refresh token when possible."""
@@ -177,6 +238,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
 
         portfolio, source_message = portfolio_from_schwab_account(account_payload)
         self.broker.set_portfolio(portfolio, source_message)
+        self.last_hyperliquid_cash_adjustment = 0.0
         self.refresh_portfolio()
         return source_message
 
