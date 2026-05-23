@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.ui.account_sources_fix import install_account_sources_fix
 from app.ui.advanced_actions_extension import install_advanced_actions_extension
+from app.ui.cash_positions_extension import install_cash_positions_extension
 from app.ui.options_core_math_extension import install_options_core_math_extension
 from app.ui.options_lab_extension import install_options_lab_extension
 from app.ui.options_resizable_layout_extension import install_options_resizable_layout_extension
@@ -20,6 +21,7 @@ def main() -> None:
     install_account_sources_fix(SchwabTradingCockpitApp)
     install_options_resizable_layout_extension()
     install_plaid_link_flow(SchwabTradingCockpitApp)
+    install_cash_positions_extension(SchwabTradingCockpitApp)
     app = SchwabTradingCockpitApp()
     app.mainloop()
 

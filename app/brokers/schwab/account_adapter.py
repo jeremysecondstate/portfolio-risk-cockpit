@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from app.core.portfolio import Portfolio, Position
+from app.core.portfolio import CashPosition, Portfolio, Position
 
 
 _NUMBER_KEYS_FOR_CASH = (
@@ -93,9 +93,10 @@ def portfolio_from_schwab_account(payload: Any) -> tuple[Portfolio, str]:
         cash = round(_first_number(balances, _NUMBER_KEYS_FOR_CASH) or 0.0, 2)
 
     account_label = _account_label(account)
+    cash_positions = {"USD:SCHWAB": CashPosition("USD", cash, "Schwab")}
     loaded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     source_message = f"Loaded Schwab account {account_label} at {loaded_at}"
-    return Portfolio(cash=cash, positions=positions), source_message
+    return Portfolio(cash=cash, positions=positions, cash_positions=cash_positions), source_message
 
 
 def _position_from_schwab(raw_position: Any) -> Position | None:
