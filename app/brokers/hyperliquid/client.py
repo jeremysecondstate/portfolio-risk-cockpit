@@ -7,7 +7,7 @@ from typing import Any
 
 import requests
 
-from app.core.portfolio import Portfolio, Position
+from app.core.portfolio import CashPosition, Portfolio, Position
 
 
 DEFAULT_INFO_URL = "https://api.hyperliquid.xyz/info"
@@ -109,6 +109,7 @@ def portfolio_from_hyperliquid_snapshot(snapshot: HyperliquidSnapshot) -> tuple[
     """Convert Hyperliquid state into the cockpit's stock-shaped Portfolio model."""
 
     positions: dict[str, Position] = {}
+    cash_positions: dict[str, CashPosition] = {}
     perp_notional = 0.0
 
     for raw_position in _asset_positions(snapshot.clearinghouse_state):
@@ -121,8 +122,11 @@ def portfolio_from_hyperliquid_snapshot(snapshot: HyperliquidSnapshot) -> tuple[
     spot_cash = 0.0
     spot_positions_value = 0.0
     for raw_balance in _spot_balances(snapshot.spot_state):
-        position, cash_value = _spot_position_from_hyperliquid(raw_balance, snapshot)
-        spot_cash += cash_value
+        position, cash_position = _spot_position_from_hyperliquid(raw_balance, snapshot)
+        if cash_position is not None:
+            cash_positions[f"{cash_position.symbol}:HYPERLIQUID"] = cash_position
+            spot_cash += cash_position.amount
+            continue
         if position is None:
             continue
         positions[position.symbol] = position
@@ -132,12 +136,15 @@ def portfolio_from_hyperliquid_snapshot(snapshot: HyperliquidSnapshot) -> tuple[
     total_value = round(perp_account_value + spot_cash + spot_positions_value, 2)
     positions_value = round(perp_notional + spot_positions_value, 2)
     cash = round(total_value - positions_value, 2)
+    perp_cash = round(cash - spot_cash, 2)
+    if abs(perp_cash) > 0.005:
+        cash_positions["USDC:HYPERLIQUID-PERP"] = CashPosition("USDC", perp_cash, "Hyperliquid Perps")
 
     source_message = (
         f"Loaded Hyperliquid account {_short_address(snapshot.user)} "
         f"at {snapshot.fetched_at.strftime('%Y-%m-%d %H:%M:%S')}"
     )
-    return Portfolio(cash=cash, positions=positions), source_message
+    return Portfolio(cash=cash, positions=positions, cash_positions=cash_positions), source_message
 
 
 def format_hyperliquid_snapshot(snapshot: HyperliquidSnapshot, portfolio: Portfolio) -> str:
@@ -280,11 +287,11 @@ def _perp_position_from_hyperliquid(raw_position: dict[str, Any]) -> Position | 
     )
 
 
-def _spot_position_from_hyperliquid(raw_balance: dict[str, Any], snapshot: HyperliquidSnapshot) -> tuple[Position | None, float]:
+def _spot_position_from_hyperliquid(raw_balance: dict[str, Any], snapshot: HyperliquidSnapshot) -> tuple[Position | None, CashPosition | None]:
     coin = str(raw_balance.get("coin") or raw_balance.get("token") or "").strip().upper()
     quantity = _first_number(raw_balance, ("total", "balance", "amount")) or 0.0
     if not coin or quantity <= ZERO_EPSILON:
-        return None, 0.0
+        return None, None
 
     mid_price = _spot_mid_price(coin, snapshot)
     entry_notional = _first_number(raw_balance, ("entryNtl", "entryNotional"))
@@ -293,7 +300,7 @@ def _spot_position_from_hyperliquid(raw_balance: dict[str, Any], snapshot: Hyper
     average_cost = (entry_notional / quantity) if entry_notional is not None and quantity > ZERO_EPSILON else None
 
     if coin in CASH_LIKE_COINS:
-        return None, round(current_value or quantity, 2)
+        return None, CashPosition(coin, round(current_value or quantity, 2), "Hyperliquid")
 
     last_price = mid_price or ((current_value / quantity) if current_value is not None and quantity > ZERO_EPSILON else None) or average_cost or 0.0
     open_profit_loss = (current_value - entry_notional) if current_value is not None and entry_notional is not None else None
@@ -306,7 +313,7 @@ def _spot_position_from_hyperliquid(raw_balance: dict[str, Any], snapshot: Hyper
             last_price=round(last_price, 4),
             open_profit_loss=round(open_profit_loss, 2) if open_profit_loss is not None else None,
         ),
-        0.0,
+        None,
     )
 
 
