@@ -22,6 +22,13 @@ def install_options_resizable_layout_extension() -> None:
     _installed = True
 
 
+def _safe_sash_place(pane: tk.PanedWindow, index: int, x: int, y: int) -> None:
+    try:
+        pane.sash_place(index, x, y)
+    except tk.TclError:
+        return
+
+
 def _build_resizable_options_lab_tab(app: tk.Tk, parent: ttk.Frame) -> None:
     """Build the options lab with draggable horizontal and vertical splitters."""
 
@@ -37,9 +44,9 @@ def _build_resizable_options_lab_tab(app: tk.Tk, parent: ttk.Frame) -> None:
 
     left_shell = ttk.Frame(body, style="Canvas.TFrame")
     right_shell = ttk.Frame(body, style="Canvas.TFrame")
-    body.add(left_shell, minsize=420, stretch="always")
-    body.add(right_shell, minsize=520, stretch="always")
-    app.after_idle(lambda: body.sash_place(0, max(460, int(parent.winfo_width() * 0.42)), 0))
+    body.add(left_shell, minsize=300, stretch="always")
+    body.add(right_shell, minsize=360, stretch="always")
+    app.after_idle(lambda: _safe_sash_place(body, 0, max(520, int(parent.winfo_width() * 0.58)), 0))
 
     _build_resizable_scenario_builder(app, left_shell)
     _build_resizable_options_output(app, right_shell)
@@ -58,10 +65,11 @@ def _build_resizable_scenario_builder(app: tk.Tk, parent: ttk.Frame) -> None:
     context_shell = ttk.Frame(stack, style="Canvas.TFrame")
     technical_shell = ttk.Frame(stack, style="Canvas.TFrame")
 
-    stack.add(quote_shell, minsize=82, stretch="never")
-    stack.add(ticket_shell, minsize=310, stretch="always")
-    stack.add(context_shell, minsize=145, stretch="never")
-    stack.add(technical_shell, minsize=125, stretch="never")
+    stack.add(quote_shell, minsize=56, stretch="always")
+    stack.add(ticket_shell, minsize=210, stretch="always")
+    stack.add(context_shell, minsize=78, stretch="always")
+    stack.add(technical_shell, minsize=62, stretch="always")
+    app.after_idle(lambda: _place_left_stack_sashes(stack, parent))
 
     quote = ttk.LabelFrame(quote_shell, text="Symbol Quote", style="Card.TLabelframe")
     quote.pack(fill=tk.BOTH, expand=True)
@@ -93,7 +101,7 @@ def _build_resizable_scenario_builder(app: tk.Tk, parent: ttk.Frame) -> None:
     options_lab._grid_pair(ticket, 8, "Target price", ttk.Entry(ticket, textvariable=app.options_target_price_var), "ATR %", ttk.Entry(ticket, textvariable=app.options_atr_var))
 
     buttons = ttk.Frame(ticket, style="Panel.TFrame")
-    buttons.grid(row=9, column=0, columnspan=4, sticky="sew", pady=(12, 0))
+    buttons.grid(row=9, column=0, columnspan=4, sticky="sew", pady=(8, 0))
     ttk.Button(buttons, text="Run What-If", command=lambda: options_lab.run_options_what_if(app), style="Accent.TButton").pack(side=tk.LEFT)
     ttk.Button(buttons, text="Sync Current Portfolio", command=lambda: options_lab.load_options_portfolio_values(app)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(buttons, text="Use Holding Price", command=lambda: options_lab.use_current_symbol_holding_price(app)).pack(side=tk.LEFT, padx=(8, 0))
@@ -105,15 +113,15 @@ def _build_resizable_scenario_builder(app: tk.Tk, parent: ttk.Frame) -> None:
     context.columnconfigure(1, weight=1)
 
     app.options_portfolio_source_label = ttk.Label(context, text="Source: --", style="Subtle.TLabel")
-    app.options_portfolio_source_label.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+    app.options_portfolio_source_label.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
     app.options_account_context_label = ttk.Label(context, text="Account: --", style="Subtle.TLabel")
-    app.options_account_context_label.grid(row=1, column=0, sticky="w", padx=(0, 10), pady=2)
+    app.options_account_context_label.grid(row=1, column=0, sticky="w", padx=(0, 10), pady=1)
     app.options_symbol_context_label = ttk.Label(context, text="Selected symbol: --", style="Subtle.TLabel")
-    app.options_symbol_context_label.grid(row=1, column=1, sticky="w", pady=2)
+    app.options_symbol_context_label.grid(row=1, column=1, sticky="w", pady=1)
     app.options_projected_context_label = ttk.Label(context, text="Projected: --", style="Subtle.TLabel")
-    app.options_projected_context_label.grid(row=2, column=0, sticky="w", padx=(0, 10), pady=2)
+    app.options_projected_context_label.grid(row=2, column=0, sticky="w", padx=(0, 10), pady=1)
     app.options_exposure_context_label = ttk.Label(context, text="Exposure: --", style="Subtle.TLabel")
-    app.options_exposure_context_label.grid(row=2, column=1, sticky="w", pady=2)
+    app.options_exposure_context_label.grid(row=2, column=1, sticky="w", pady=1)
 
     technical = ttk.LabelFrame(technical_shell, text="Manual Technical Context", style="Card.TLabelframe")
     technical.pack(fill=tk.BOTH, expand=True)
@@ -122,6 +130,16 @@ def _build_resizable_scenario_builder(app: tk.Tk, parent: ttk.Frame) -> None:
     options_lab._grid_pair(technical, 0, "RSI", ttk.Entry(technical, textvariable=app.options_rsi_var), "20 SMA", ttk.Entry(technical, textvariable=app.options_sma_20_var))
     options_lab._grid_pair(technical, 1, "50 SMA", ttk.Entry(technical, textvariable=app.options_sma_50_var), "200 SMA", ttk.Entry(technical, textvariable=app.options_sma_200_var))
     options_lab._grid_pair(technical, 2, "Support", ttk.Entry(technical, textvariable=app.options_support_var), "Resistance", ttk.Entry(technical, textvariable=app.options_resistance_var))
+
+
+def _place_left_stack_sashes(stack: tk.PanedWindow, parent: ttk.Frame) -> None:
+    height = max(parent.winfo_height(), 1)
+    quote_height = 74
+    ticket_height = max(360, int(height * 0.52))
+    context_height = max(110, int(height * 0.17))
+    _safe_sash_place(stack, 0, 0, quote_height)
+    _safe_sash_place(stack, 1, 0, quote_height + ticket_height)
+    _safe_sash_place(stack, 2, 0, quote_height + ticket_height + context_height)
 
 
 def _build_resizable_options_output(app: tk.Tk, parent: ttk.Frame) -> None:
@@ -134,9 +152,10 @@ def _build_resizable_options_output(app: tk.Tk, parent: ttk.Frame) -> None:
     metrics_shell = ttk.Frame(stack, style="Canvas.TFrame")
     summary_shell = ttk.Frame(stack, style="Canvas.TFrame")
     output_shell = ttk.Frame(stack, style="Canvas.TFrame")
-    stack.add(metrics_shell, minsize=160, stretch="never")
-    stack.add(summary_shell, minsize=90, stretch="never")
-    stack.add(output_shell, minsize=260, stretch="always")
+    stack.add(metrics_shell, minsize=100, stretch="always")
+    stack.add(summary_shell, minsize=58, stretch="always")
+    stack.add(output_shell, minsize=160, stretch="always")
+    app.after_idle(lambda: _place_right_stack_sashes(stack, parent))
 
     metrics = ttk.LabelFrame(metrics_shell, text="Risk + Margin Snapshot", style="Card.TLabelframe")
     metrics.pack(fill=tk.BOTH, expand=True)
@@ -151,7 +170,7 @@ def _build_resizable_options_output(app: tk.Tk, parent: ttk.Frame) -> None:
     summary = ttk.LabelFrame(summary_shell, text="Selected Order", style="Card.TLabelframe")
     summary.pack(fill=tk.BOTH, expand=True)
     summary.columnconfigure(0, weight=1)
-    app.options_order_summary_label = ttk.Label(summary, text="--", style="Subtle.TLabel", wraplength=820)
+    app.options_order_summary_label = ttk.Label(summary, text="--", style="Subtle.TLabel", wraplength=760)
     app.options_order_summary_label.grid(row=0, column=0, sticky="w")
 
     output = ttk.LabelFrame(output_shell, text="Scenario Analysis", style="Card.TLabelframe")
@@ -159,8 +178,16 @@ def _build_resizable_options_output(app: tk.Tk, parent: ttk.Frame) -> None:
     output.rowconfigure(0, weight=1)
     output.columnconfigure(0, weight=1)
 
-    app.options_output_text = tk.Text(output, height=18, wrap=tk.WORD, font=("Consolas", 10), padx=10, pady=10)
+    app.options_output_text = tk.Text(output, height=12, wrap=tk.WORD, font=("Consolas", 10), padx=10, pady=10)
     app.options_output_text.grid(row=0, column=0, sticky="nsew")
     scrollbar = ttk.Scrollbar(output, orient=tk.VERTICAL, command=app.options_output_text.yview)
     scrollbar.grid(row=0, column=1, sticky="ns")
     app.options_output_text.configure(yscrollcommand=scrollbar.set)
+
+
+def _place_right_stack_sashes(stack: tk.PanedWindow, parent: ttk.Frame) -> None:
+    height = max(parent.winfo_height(), 1)
+    metrics_height = max(130, int(height * 0.22))
+    summary_height = max(78, int(height * 0.12))
+    _safe_sash_place(stack, 0, 0, metrics_height)
+    _safe_sash_place(stack, 1, 0, metrics_height + summary_height)
