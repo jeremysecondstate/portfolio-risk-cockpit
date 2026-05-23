@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+import os
 import tkinter as tk
-from tkinter import ttk
+from tkinter import simpledialog, ttk
 from typing import Type
 
+from app.brokers.hyperliquid.client import (
+    HyperliquidInfoClient,
+    format_hyperliquid_snapshot,
+    portfolio_from_hyperliquid_snapshot,
+)
 from app.core.order_models import OrderSide, OrderType, TimeInForce
+from app.core.portfolio import Portfolio, Position
 from app.ui.polished_theme import CANVAS, DANGER, INPUT, _make_paned
 
 
 def install_advanced_actions_extension(app_cls: Type[tk.Tk]) -> None:
     """Tuck dangerous/live controls into a dedicated advanced section."""
     app_cls._build_order_panel = _build_order_panel  # type: ignore[method-assign]
+    app_cls.sync_hyperliquid_account = _sync_hyperliquid_account  # type: ignore[method-assign]
+    app_cls._merge_hyperliquid_portfolio = _merge_hyperliquid_portfolio  # type: ignore[method-assign]
 
 
 def _sync_single_ticket_price(self: tk.Tk, *_args) -> None:
@@ -51,6 +60,84 @@ def _sync_hyperliquid_combined(self: tk.Tk) -> None:
         return
 
     self.sync_hyperliquid_account()
+
+
+def _hyperliquid_address_from_env() -> str:
+    """Support the friendly HYPE env var plus the original generic name."""
+    for key in ("HYPE_WALLET_ADDRESS", "HYPERLIQUID_USER_ADDRESS"):
+        value = os.getenv(key, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _sync_hyperliquid_account(self: tk.Tk) -> None:
+    """Read Hyperliquid balances/positions and merge them into the cockpit."""
+    default_address = _hyperliquid_address_from_env()
+    address = default_address or simpledialog.askstring(
+        "Hyperliquid Sync",
+        "Enter your Hyperliquid master/sub-account wallet address.\n\n"
+        "Tip: save HYPE_WALLET_ADDRESS=0x... in .env to skip this prompt.\n\n"
+        "Use the account address, not the API/agent wallet address.",
+    )
+    if not address:
+        return
+
+    try:
+        client = HyperliquidInfoClient()
+        snapshot = client.fetch_snapshot(address)
+        hyperliquid_portfolio, hyperliquid_source_message = portfolio_from_hyperliquid_snapshot(snapshot)
+        merged_portfolio = self._merge_hyperliquid_portfolio(hyperliquid_portfolio)
+
+        base_source_message = self.broker.source_message.split(" + Loaded Hyperliquid account ")[0]
+        source_message = f"{base_source_message} + {hyperliquid_source_message}"
+        self.broker.set_portfolio(merged_portfolio, source_message)
+        self.last_hyperliquid_cash_adjustment = hyperliquid_portfolio.cash
+        self.refresh_portfolio()
+        self._set_preview_text(format_hyperliquid_snapshot(snapshot, hyperliquid_portfolio))
+        self._show_info("Hyperliquid synced", hyperliquid_source_message)
+    except Exception as exc:
+        self._show_error("Hyperliquid sync failed", str(exc))
+
+
+def _hyperliquid_display_symbol(symbol: str) -> str:
+    """Make Hyperliquid symbols look natural in the stock-style grid."""
+    symbol = symbol.strip().upper()
+    if symbol.endswith("-SPOT"):
+        return symbol.removesuffix("-SPOT")
+    return symbol
+
+
+def _merge_hyperliquid_portfolio(self: tk.Tk, hyperliquid_portfolio: Portfolio) -> Portfolio:
+    current = self.broker.get_portfolio()
+    non_hyperliquid_cash = round(current.cash - getattr(self, "last_hyperliquid_cash_adjustment", 0.0), 2)
+    previous_hyperliquid_symbols = set(getattr(self, "last_hyperliquid_display_symbols", set()))
+
+    positions = {
+        symbol: position
+        for symbol, position in current.positions.items()
+        if not symbol.startswith("HL:") and symbol not in previous_hyperliquid_symbols
+    }
+
+    display_symbols: set[str] = set()
+    for symbol, position in hyperliquid_portfolio.positions.items():
+        display_symbol = _hyperliquid_display_symbol(symbol)
+        display_symbols.add(display_symbol)
+        positions[display_symbol] = Position(
+            symbol=display_symbol,
+            quantity=position.quantity,
+            average_cost=position.average_cost,
+            last_price=position.last_price,
+            day_profit_loss=position.day_profit_loss,
+            day_profit_loss_percent=position.day_profit_loss_percent,
+            open_profit_loss=position.open_profit_loss,
+        )
+
+    self.last_hyperliquid_display_symbols = display_symbols
+    return Portfolio(
+        cash=round(non_hyperliquid_cash + hyperliquid_portfolio.cash, 2),
+        positions=positions,
+    )
 
 
 def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
@@ -162,7 +249,7 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     self._set_preview_text(
         "Create a ticket, then use Preview Risk, Tech Analysis, or Trade Setup.\n\n"
         "Entry / Limit is the single planning price used for local risk, trade setup, and Schwab limit-order preview.\n\n"
-        "Sync Robinhood refreshes Plaid holdings. Sync Hyperliquid reads the public info API and merges HL: rows into the active cockpit portfolio."
+        "Sync Robinhood refreshes Plaid holdings. Sync Hyperliquid reads HYPE_WALLET_ADDRESS from .env when present and merges clean symbols like HYPE into the active cockpit portfolio."
     )
 
     explainer = ttk.LabelFrame(explainer_shell, text="Order Type Cheat Sheet", style="Card.TLabelframe")
