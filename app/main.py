@@ -4,6 +4,7 @@ from app.ui.account_sources_fix import install_account_sources_fix
 from app.ui.advanced_actions_extension import install_advanced_actions_extension
 from app.ui.options_core_math_extension import install_options_core_math_extension
 from app.ui.options_lab_extension import install_options_lab_extension
+from app.ui.options_resizable_layout_extension import install_options_resizable_layout_extension
 from app.ui.plaid_link_flow_extension import install_plaid_link_flow
 from app.ui.polished_theme import install_polished_cockpit_theme
 from app.ui.trade_setup_extension import install_trade_setup_extension
@@ -16,6 +17,7 @@ def main() -> None:
     install_advanced_actions_extension(SchwabTradingCockpitApp)
     install_options_lab_extension(SchwabTradingCockpitApp)
     install_options_core_math_extension()
+    install_options_resizable_layout_extension()
     install_account_sources_fix(SchwabTradingCockpitApp)
     install_plaid_link_flow(SchwabTradingCockpitApp)
     app = SchwabTradingCockpitApp()
