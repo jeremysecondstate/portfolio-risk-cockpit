@@ -12,7 +12,7 @@ from app.brokers.hyperliquid.client import (
 )
 from app.core.order_models import OrderSide, OrderType, TimeInForce
 from app.core.portfolio import Portfolio, Position
-from app.ui.polished_theme import CANVAS, DANGER, INPUT, _make_paned
+from app.ui.polished_theme import _make_paned
 
 
 def install_advanced_actions_extension(app_cls: Type[tk.Tk]) -> None:
@@ -31,22 +31,6 @@ def _sync_single_ticket_price(self: tk.Tk, *_args) -> None:
         self.estimated_price_var.set(self.limit_price_var.get())
     finally:
         self._syncing_ticket_price = False
-
-
-def _sync_robinhood_combined(self: tk.Tk) -> None:
-    """Refresh Plaid holdings, merge them into the active cockpit portfolio, and refresh UI."""
-    if not hasattr(self, "refresh_plaid_holdings") or not hasattr(self, "use_combined_schwab_plaid_portfolio"):
-        self._set_preview_text(
-            "ROBINHOOD / PLAID NOT READY\n"
-            "===========================\n\n"
-            "Plaid controls are not installed yet. Restart the app after pulling the latest repo changes."
-        )
-        return
-
-    self.refresh_plaid_holdings()
-    if getattr(self, "plaid_portfolio", None) is None:
-        return
-    self.use_combined_schwab_plaid_portfolio()
 
 
 def _sync_hyperliquid_combined(self: tk.Tk) -> None:
@@ -169,14 +153,13 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
 
     primary_actions = ttk.Frame(ticket, style="Panel.TFrame")
     primary_actions.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(16, 0))
-    for column in range(6):
+    for column in range(5):
         primary_actions.columnconfigure(column, weight=1, uniform="primary_actions")
 
     primary_buttons = [
         ("Preview Risk", self.preview_order, "Accent.TButton"),
         ("Connect Schwab", self.connect_schwab, "TButton"),
         ("Refresh Schwab", self.refresh_schwab_account, "TButton"),
-        ("Sync Robinhood", lambda: _sync_robinhood_combined(self), "TButton"),
         ("Sync Hyperliquid", lambda: _sync_hyperliquid_combined(self), "TButton"),
         ("Tech Analysis", self.show_technical_analysis, "TButton"),
     ]
@@ -249,7 +232,7 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     self._set_preview_text(
         "Create a ticket, then use Preview Risk, Tech Analysis, or Trade Setup.\n\n"
         "Entry / Limit is the single planning price used for local risk, trade setup, and Schwab limit-order preview.\n\n"
-        "Sync Robinhood refreshes Plaid holdings. Sync Hyperliquid reads HYPE_WALLET_ADDRESS from .env when present and merges clean symbols like HYPE into the active cockpit portfolio."
+        "Sync Hyperliquid reads HYPE_WALLET_ADDRESS from .env when present and merges clean symbols like HYPE into the active cockpit portfolio."
     )
 
     explainer = ttk.LabelFrame(explainer_shell, text="Order Type Cheat Sheet", style="Card.TLabelframe")
