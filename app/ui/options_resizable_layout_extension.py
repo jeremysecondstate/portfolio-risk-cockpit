@@ -3,7 +3,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-from app.ui import options_lab, options_lab_extension
+from app.ui import account_sources_fix, options_lab, options_lab_extension
 from app.ui.polished_theme import _make_paned
 
 _installed = False
@@ -18,6 +18,7 @@ def install_options_resizable_layout_extension() -> None:
 
     options_lab.build_options_lab_tab = _build_resizable_options_lab_tab
     options_lab_extension.build_options_lab_tab = _build_resizable_options_lab_tab
+    account_sources_fix.build_options_lab_tab = _build_resizable_options_lab_tab
     _installed = True
 
 
