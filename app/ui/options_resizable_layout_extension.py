@@ -19,6 +19,7 @@ def install_options_resizable_layout_extension() -> None:
     options_lab.build_options_lab_tab = _build_resizable_options_lab_tab
     options_lab_extension.build_options_lab_tab = _build_resizable_options_lab_tab
     account_sources_fix.build_options_lab_tab = _build_resizable_options_lab_tab
+    account_sources_fix._build_options_lab_market_loader = _skip_bottom_options_loader
     _installed = True
 
 
@@ -29,6 +30,11 @@ def _safe_sash_place(pane: tk.PanedWindow, index: int, x: int, y: int) -> None:
         return
 
 
+def _skip_bottom_options_loader(app: tk.Tk, parent: ttk.Frame) -> None:
+    """The loader now lives in the Options Lab header to preserve vertical space."""
+    return
+
+
 def _build_resizable_options_lab_tab(app: tk.Tk, parent: ttk.Frame) -> None:
     """Build the options lab with draggable horizontal and vertical splitters."""
 
@@ -37,7 +43,7 @@ def _build_resizable_options_lab_tab(app: tk.Tk, parent: ttk.Frame) -> None:
     parent.columnconfigure(0, weight=1)
     parent.rowconfigure(1, weight=1)
 
-    options_lab._build_options_disclaimer(parent)
+    _build_options_lab_header(app, parent)
 
     body = _make_paned(parent, tk.HORIZONTAL)
     body.grid(row=1, column=0, sticky="nsew")
@@ -51,6 +57,30 @@ def _build_resizable_options_lab_tab(app: tk.Tk, parent: ttk.Frame) -> None:
     _build_resizable_scenario_builder(app, left_shell)
     _build_resizable_options_output(app, right_shell)
     options_lab.run_options_what_if(app)
+
+
+def _build_options_lab_header(app: tk.Tk, parent: ttk.Frame) -> None:
+    banner = ttk.LabelFrame(parent, text="Options What-If Lab", style="Card.TLabelframe")
+    banner.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+    banner.columnconfigure(0, weight=1)
+
+    ttk.Label(
+        banner,
+        text=(
+            "Hypothetical scenario modeling only. This tab estimates risk, margin usage, technical context, "
+            "and portfolio impact. It mirrors a Thinkorswim-style ticket, but does not generate trade recommendations, "
+            "submit orders, or replace broker margin requirements."
+        ),
+        wraplength=1120,
+        style="Subtle.TLabel",
+    ).grid(row=0, column=0, sticky="w", padx=(0, 14))
+
+    ttk.Button(
+        banner,
+        text="Load Schwab Technicals",
+        command=getattr(app, "load_options_lab_technical_context"),
+        style="Accent.TButton",
+    ).grid(row=0, column=1, sticky="e")
 
 
 def _build_resizable_scenario_builder(app: tk.Tk, parent: ttk.Frame) -> None:
