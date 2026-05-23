@@ -71,16 +71,22 @@ def _build_options_lab_header(app: tk.Tk, parent: ttk.Frame) -> None:
             "and portfolio impact. It mirrors a Thinkorswim-style ticket, but does not generate trade recommendations, "
             "submit orders, or replace broker margin requirements."
         ),
-        wraplength=1120,
+        wraplength=900,
         style="Subtle.TLabel",
     ).grid(row=0, column=0, sticky="w", padx=(0, 14))
 
+    actions = ttk.Frame(banner, style="Panel.TFrame")
+    actions.grid(row=0, column=1, sticky="e")
+    ttk.Button(actions, text="Run What-If", command=lambda: options_lab.run_options_what_if(app), style="Accent.TButton").pack(side=tk.LEFT)
+    ttk.Button(actions, text="Sync Portfolio", command=lambda: options_lab.load_options_portfolio_values(app)).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(actions, text="Use Holding", command=lambda: options_lab.use_current_symbol_holding_price(app)).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(actions, text="Use Mid", command=lambda: options_lab.use_mid_as_limit(app)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(
-        banner,
+        actions,
         text="Load Schwab Technicals",
         command=getattr(app, "load_options_lab_technical_context"),
         style="Accent.TButton",
-    ).grid(row=0, column=1, sticky="e")
+    ).pack(side=tk.LEFT, padx=(8, 0))
 
 
 def _build_resizable_scenario_builder(app: tk.Tk, parent: ttk.Frame) -> None:
@@ -118,7 +124,6 @@ def _build_resizable_scenario_builder(app: tk.Tk, parent: ttk.Frame) -> None:
     ticket.pack(fill=tk.BOTH, expand=True)
     ticket.columnconfigure(1, weight=1)
     ticket.columnconfigure(3, weight=1)
-    ticket.rowconfigure(9, weight=1)
 
     options_lab._grid_pair(ticket, 0, "Action", ttk.Combobox(ticket, textvariable=app.options_action_var, values=options_lab.ACTIONS, state="readonly"), "Strategy", ttk.Combobox(ticket, textvariable=app.options_strategy_var, values=options_lab.STRATEGIES, state="readonly"))
     options_lab._grid_pair(ticket, 1, "Contracts", ttk.Entry(ticket, textvariable=app.options_contracts_var), "Expiration", ttk.Entry(ticket, textvariable=app.options_expiration_var))
@@ -129,13 +134,6 @@ def _build_resizable_scenario_builder(app: tk.Tk, parent: ttk.Frame) -> None:
     options_lab._grid_pair(ticket, 6, "Short strike", ttk.Entry(ticket, textvariable=app.options_short_strike_var), "Credit", ttk.Entry(ticket, textvariable=app.options_credit_var))
     options_lab._grid_pair(ticket, 7, "Shares", ttk.Entry(ticket, textvariable=app.options_quantity_var), "Stop price", ttk.Entry(ticket, textvariable=app.options_stop_price_var))
     options_lab._grid_pair(ticket, 8, "Target price", ttk.Entry(ticket, textvariable=app.options_target_price_var), "ATR %", ttk.Entry(ticket, textvariable=app.options_atr_var))
-
-    buttons = ttk.Frame(ticket, style="Panel.TFrame")
-    buttons.grid(row=9, column=0, columnspan=4, sticky="sew", pady=(8, 0))
-    ttk.Button(buttons, text="Run What-If", command=lambda: options_lab.run_options_what_if(app), style="Accent.TButton").pack(side=tk.LEFT)
-    ttk.Button(buttons, text="Sync Current Portfolio", command=lambda: options_lab.load_options_portfolio_values(app)).pack(side=tk.LEFT, padx=(8, 0))
-    ttk.Button(buttons, text="Use Holding Price", command=lambda: options_lab.use_current_symbol_holding_price(app)).pack(side=tk.LEFT, padx=(8, 0))
-    ttk.Button(buttons, text="Use Mid as Limit", command=lambda: options_lab.use_mid_as_limit(app)).pack(side=tk.LEFT, padx=(8, 0))
 
     context = ttk.LabelFrame(context_shell, text="Account + Positions Context", style="Card.TLabelframe")
     context.pack(fill=tk.BOTH, expand=True)
@@ -165,7 +163,7 @@ def _build_resizable_scenario_builder(app: tk.Tk, parent: ttk.Frame) -> None:
 def _place_left_stack_sashes(stack: tk.PanedWindow, parent: ttk.Frame) -> None:
     height = max(parent.winfo_height(), 1)
     quote_height = 74
-    ticket_height = max(360, int(height * 0.52))
+    ticket_height = max(330, int(height * 0.49))
     context_height = max(110, int(height * 0.17))
     _safe_sash_place(stack, 0, 0, quote_height)
     _safe_sash_place(stack, 1, 0, quote_height + ticket_height)
