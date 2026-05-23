@@ -7,7 +7,6 @@ from app.ui.hyperliquid_trading_extension import install_hyperliquid_trading_ext
 from app.ui.options_core_math_extension import install_options_core_math_extension
 from app.ui.options_lab_extension import install_options_lab_extension
 from app.ui.options_resizable_layout_extension import install_options_resizable_layout_extension
-from app.ui.plaid_link_flow_extension import install_plaid_link_flow
 from app.ui.polished_theme import install_polished_cockpit_theme
 from app.ui.trade_setup_extension import install_trade_setup_extension
 from app.ui.trading_cockpit import SchwabTradingCockpitApp
@@ -22,7 +21,6 @@ def main() -> None:
     install_options_core_math_extension()
     install_account_sources_fix(SchwabTradingCockpitApp)
     install_options_resizable_layout_extension()
-    install_plaid_link_flow(SchwabTradingCockpitApp)
     install_cash_positions_extension(SchwabTradingCockpitApp)
     app = SchwabTradingCockpitApp()
     app.mainloop()
