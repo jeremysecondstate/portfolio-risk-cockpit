@@ -37,9 +37,44 @@ class Position:
 
 
 @dataclass
+class CashPosition:
+    """Display-only cash-like holding such as Schwab USD or Hyperliquid USDC."""
+
+    symbol: str
+    amount: float
+    source: str = ""
+
+    @property
+    def display_symbol(self) -> str:
+        source = self.source.strip()
+        return f"{self.symbol} ({source})" if source else self.symbol
+
+    @property
+    def quantity(self) -> float:
+        return round(self.amount, 2)
+
+    @property
+    def average_cost(self) -> float:
+        return 1.0
+
+    @property
+    def last_price(self) -> float:
+        return 1.0
+
+    @property
+    def cost_basis(self) -> float:
+        return round(self.amount, 2)
+
+    @property
+    def market_value(self) -> float:
+        return round(self.amount, 2)
+
+
+@dataclass
 class Portfolio:
     cash: float
     positions: Dict[str, Position] = field(default_factory=dict)
+    cash_positions: Dict[str, CashPosition] = field(default_factory=dict)
 
     @property
     def positions_value(self) -> float:
@@ -70,6 +105,22 @@ class Portfolio:
         if not values:
             return None
         return round(sum(values), 2)
+
+    def display_cash_positions(self) -> list[CashPosition]:
+        """Return cash rows for UI display without changing portfolio totals.
+
+        `cash` remains the single source of truth for total cash. `cash_positions`
+        is an optional source/currency breakdown used by the Positions table. If
+        a source adapter does not provide a breakdown, show the aggregate as USD.
+        """
+
+        rows = [cash for cash in self.cash_positions.values() if abs(cash.amount) > 0.00000001]
+        allocated_cash = round(sum(row.amount for row in rows), 2)
+        residual_cash = round(self.cash - allocated_cash, 2)
+        if abs(residual_cash) > 0.005:
+            source = "Unallocated" if rows else "Cash"
+            rows.append(CashPosition("USD", residual_cash, source))
+        return sorted(rows, key=lambda cash: cash.display_symbol)
 
     def get_position(self, symbol: str) -> Position | None:
         return self.positions.get(symbol.strip().upper())
