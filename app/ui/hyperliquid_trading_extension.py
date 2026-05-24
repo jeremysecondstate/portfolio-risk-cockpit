@@ -25,6 +25,7 @@ def install_hyperliquid_trading_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls._build_order_panel = _build_order_panel_with_hyperliquid  # type: ignore[method-assign]
     app_cls.preview_selected_venue = _preview_selected_venue  # type: ignore[attr-defined]
     app_cls.show_selected_live_safety_review = _show_selected_live_safety_review  # type: ignore[attr-defined]
+    app_cls.submit_selected_venue = _submit_selected_venue  # type: ignore[attr-defined]
     app_cls.preview_hyperliquid_ticket = _preview_hyperliquid_ticket  # type: ignore[attr-defined]
     app_cls.show_hyperliquid_live_submit_safety_review = _show_hyperliquid_live_submit_safety_review  # type: ignore[attr-defined]
     app_cls.parse_hyperliquid_ticket = _parse_hyperliquid_ticket  # type: ignore[attr-defined]
@@ -108,7 +109,7 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
         ("Reset Session", self.reset_schwab_session, "TButton"),
         ("Cancel Order", self.show_cancel_order_placeholder, "Danger.TButton"),
         ("Live Status", self.show_selected_live_safety_review, "Danger.TButton"),
-        ("LIVE Submit", self.show_selected_live_safety_review, "Danger.TButton"),
+        ("LIVE Submit", self.submit_selected_venue, "Danger.TButton"),
     ]):
         ttk.Button(secondary_actions, text=label, command=command, style=style_name).grid(
             row=index // 4,
@@ -191,6 +192,13 @@ def _show_selected_live_safety_review(self: tk.Tk) -> None:
         self.show_hyperliquid_live_submit_safety_review()
     else:
         self.show_live_submit_safety_review()
+
+
+def _submit_selected_venue(self: tk.Tk) -> None:
+    if self.trade_venue_var.get() == "Hyperliquid":
+        self.show_hyperliquid_live_submit_safety_review()
+    else:
+        self.submit_live_schwab_order_guarded()
 
 
 def _parse_hyperliquid_ticket(self: tk.Tk) -> HyperliquidOrderTicket:
