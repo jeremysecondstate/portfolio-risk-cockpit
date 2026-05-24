@@ -28,9 +28,6 @@ def _build_layout_without_account_strip(self: tk.Tk) -> None:
     tabs.add(cockpit_tab, text="Cockpit")
     tabs.add(options_tab, text="Options What-If Lab")
 
-    self.plaid_portfolio = None
-    self.plaid_source_message = "Plaid: not connected"
-    self.plaid_status_var = tk.StringVar(value=self.plaid_source_message)
     self.active_portfolio_source_var = tk.StringVar(value="Active portfolio: current cockpit source")
     self.cockpit_source_portfolio = None
     self.cockpit_source_message = "Current cockpit portfolio"
