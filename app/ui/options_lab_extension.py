@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import Type
+from typing import Callable, Type
 
 from app.analytics.technical_analysis import (
     analyze_candles,
@@ -10,6 +10,7 @@ from app.analytics.technical_analysis import (
     simple_moving_average,
 )
 from app.analytics.trade_setup import calculate_support_resistance
+from app.core.order_models import OrderSide, OrderType, TimeInForce
 from app.ui.options_lab import build_options_lab_tab, run_options_what_if
 from app.ui.polished_theme import _make_paned
 
@@ -32,8 +33,12 @@ def _build_layout_with_options_lab(self: tk.Tk) -> None:
     tabs.pack(fill=tk.BOTH, expand=True, pady=(16, 0))
 
     cockpit_tab = ttk.Frame(tabs, style="Canvas.TFrame", padding=0)
+    schwab_tab = ttk.Frame(tabs, style="Canvas.TFrame", padding=14)
+    hyperliquid_tab = ttk.Frame(tabs, style="Canvas.TFrame", padding=14)
     options_tab = ttk.Frame(tabs, style="Canvas.TFrame", padding=14)
     tabs.add(cockpit_tab, text="Cockpit")
+    tabs.add(schwab_tab, text="Schwab Trading")
+    tabs.add(hyperliquid_tab, text="Hyperliquid Trading")
     tabs.add(options_tab, text="Options What-If Lab")
 
     self.active_portfolio_source_var = tk.StringVar(value="Active portfolio: current cockpit source")
@@ -53,10 +58,323 @@ def _build_layout_with_options_lab(self: tk.Tk) -> None:
 
     self._build_portfolio_panel(left)
     self._build_order_panel(right)
+    _ensure_execution_workspace_vars(self)
     self.after_idle(lambda: _capture_current_source_portfolio(self))
+
+    _build_schwab_trading_tab(self, schwab_tab, tabs, options_tab)
+    _build_hyperliquid_trading_tab(self, hyperliquid_tab)
 
     build_options_lab_tab(self, options_tab)
     _build_options_lab_market_loader(self, options_tab)
+
+
+def _ensure_execution_workspace_vars(self: tk.Tk) -> None:
+    """Keep the dedicated venue tabs safe even if extensions load in a different order."""
+    if not hasattr(self, "trade_venue_var"):
+        self.trade_venue_var = tk.StringVar(value="Schwab")
+    if not hasattr(self, "hyperliquid_coin_var"):
+        self.hyperliquid_coin_var = tk.StringVar(value="HYPE")
+    if not hasattr(self, "hyperliquid_tif_var"):
+        self.hyperliquid_tif_var = tk.StringVar(value="Gtc")
+    if not hasattr(self, "hyperliquid_reduce_only_var"):
+        self.hyperliquid_reduce_only_var = tk.BooleanVar(value=False)
+    if not hasattr(self, "hyperliquid_status_var"):
+        self.hyperliquid_status_var = tk.StringVar(value="Hyperliquid: preview only")
+
+
+def _workspace_text(parent: ttk.Frame) -> tk.Text:
+    text = tk.Text(
+        parent,
+        height=18,
+        wrap=tk.WORD,
+        font=("Cascadia Mono", 10),
+        padx=14,
+        pady=12,
+        relief=tk.FLAT,
+        borderwidth=0,
+        background="#0b1120",
+        foreground="#dbeafe",
+        insertbackground="#dbeafe",
+        selectbackground="#1d4ed8",
+    )
+    text.pack(fill=tk.BOTH, expand=True)
+    return text
+
+
+def _set_workspace_text(widget: tk.Text, content: str) -> None:
+    widget.configure(state=tk.NORMAL)
+    widget.delete("1.0", tk.END)
+    widget.insert(tk.END, content)
+    widget.configure(state=tk.DISABLED)
+
+
+def _first_available_command(self: tk.Tk, *names: str) -> Callable[[], None]:
+    for name in names:
+        command = getattr(self, name, None)
+        if callable(command):
+            return command
+
+    def _missing() -> None:
+        messagebox.showinfo(
+            "Action unavailable",
+            f"None of these actions are installed yet: {', '.join(names)}",
+        )
+
+    return _missing
+
+
+def _run_workspace_action(
+    self: tk.Tk,
+    *,
+    venue: str,
+    preview_widget: tk.Text,
+    command: Callable[[], None],
+) -> None:
+    _ensure_execution_workspace_vars(self)
+    self.trade_venue_var.set(venue)
+    if hasattr(self, "on_trading_venue_changed"):
+        try:
+            self.on_trading_venue_changed()
+        except Exception:
+            pass
+    self.preview_text = preview_widget
+    command()
+
+
+def _add_workspace_button(
+    parent: ttk.Frame,
+    *,
+    row: int,
+    column: int,
+    text: str,
+    command: Callable[[], None],
+    style: str = "TButton",
+    columnspan: int = 1,
+) -> None:
+    ttk.Button(parent, text=text, command=command, style=style).grid(
+        row=row,
+        column=column,
+        columnspan=columnspan,
+        sticky="ew",
+        padx=(0 if column == 0 else 4, 0),
+        pady=(0 if row == 0 else 8, 8),
+        ipady=2,
+    )
+
+
+def _build_schwab_trading_tab(
+    self: tk.Tk,
+    parent: ttk.Frame,
+    tabs: ttk.Notebook,
+    options_tab: ttk.Frame,
+) -> None:
+    parent.columnconfigure(0, weight=1)
+    parent.rowconfigure(1, weight=1)
+
+    header = ttk.LabelFrame(parent, text="Schwab Trading Workspace", style="Card.TLabelframe")
+    header.grid(row=0, column=0, sticky="ew")
+    header.columnconfigure(0, weight=1)
+    ttk.Label(
+        header,
+        text=(
+            "Dedicated Schwab execution surface for stocks, ETFs, and option planning. "
+            "The original Cockpit tab is unchanged as a fallback."
+        ),
+        style="Subtle.TLabel",
+        wraplength=1120,
+    ).grid(row=0, column=0, sticky="w", padx=(0, 12))
+    ttk.Button(
+        header,
+        text="Open Options Lab",
+        command=lambda: tabs.select(options_tab),
+        style="Accent.TButton",
+    ).grid(row=0, column=1, sticky="e")
+
+    workspace = _make_paned(parent, tk.HORIZONTAL)
+    workspace.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+
+    ticket_shell = ttk.Frame(workspace, style="Canvas.TFrame")
+    output_shell = ttk.Frame(workspace, style="Canvas.TFrame")
+    workspace.add(ticket_shell, minsize=540, stretch="never")
+    workspace.add(output_shell, minsize=520, stretch="always")
+
+    ticket = ttk.LabelFrame(ticket_shell, text="Schwab Stock / ETF Ticket", style="Card.TLabelframe")
+    ticket.pack(fill=tk.BOTH, expand=True)
+    ticket.columnconfigure(1, weight=1)
+    ticket.columnconfigure(3, weight=1)
+
+    self._grid_row(
+        ticket,
+        0,
+        "Symbol",
+        ttk.Entry(ticket, textvariable=self.symbol_var),
+        "Side",
+        ttk.Combobox(ticket, textvariable=self.side_var, values=[s.value for s in OrderSide], state="readonly"),
+    )
+    self._grid_row(
+        ticket,
+        1,
+        "Order type",
+        ttk.Combobox(ticket, textvariable=self.order_type_var, values=[o.value for o in OrderType], state="readonly"),
+        "Time",
+        ttk.Combobox(ticket, textvariable=self.time_in_force_var, values=[t.value for t in TimeInForce], state="readonly"),
+    )
+    self._grid_row(ticket, 2, "Quantity", ttk.Entry(ticket, textvariable=self.quantity_var), "Entry / Limit", ttk.Entry(ticket, textvariable=self.limit_price_var))
+    self._grid_row(ticket, 3, "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var), "Type CONFIRM", ttk.Entry(ticket, textvariable=self.confirmation_var))
+    ttk.Label(ticket, text="Cancel order ID", style="Subtle.TLabel").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+    ttk.Entry(ticket, textvariable=self.cancel_order_id_var).grid(row=4, column=1, columnspan=3, sticky="ew", pady=(8, 0))
+
+    schwab_output_frame = ttk.LabelFrame(output_shell, text="Schwab Analysis + Order Output", style="Card.TLabelframe")
+    schwab_output_frame.pack(fill=tk.BOTH, expand=True)
+    self.schwab_trading_preview_text = _workspace_text(schwab_output_frame)
+
+    actions = ttk.LabelFrame(ticket, text="Schwab Actions", style="Card.TLabelframe")
+    actions.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+    for column in range(3):
+        actions.columnconfigure(column, weight=1, uniform="schwab_actions")
+
+    def schwab_action(*names: str) -> Callable[[], None]:
+        return lambda: _run_workspace_action(
+            self,
+            venue="Schwab",
+            preview_widget=self.schwab_trading_preview_text,
+            command=_first_available_command(self, *names),
+        )
+
+    _add_workspace_button(actions, row=0, column=0, text="Connect Schwab", command=schwab_action("connect_schwab", "run_schwab_preview"))
+    _add_workspace_button(actions, row=0, column=1, text="Refresh Account", command=schwab_action("refresh_schwab_account", "refresh_portfolio"))
+    _add_workspace_button(actions, row=0, column=2, text="Tech Analysis", command=schwab_action("show_technical_analysis"))
+    _add_workspace_button(actions, row=1, column=0, text="Preview Risk", command=schwab_action("preview_order"), style="Accent.TButton")
+    _add_workspace_button(actions, row=1, column=1, text="Preview Schwab Order", command=schwab_action("run_schwab_preview"))
+    _add_workspace_button(actions, row=1, column=2, text="Position Size", command=schwab_action("show_position_size"))
+    _add_workspace_button(actions, row=2, column=0, text="Recent Orders", command=schwab_action("load_selected_recent_orders", "load_schwab_open_orders"))
+    _add_workspace_button(actions, row=2, column=1, text="Open Only", command=schwab_action("load_selected_open_orders_only", "load_schwab_open_orders_only"))
+    _add_workspace_button(actions, row=2, column=2, text="Order Checklist", command=schwab_action("show_manual_checklist"))
+    _add_workspace_button(actions, row=3, column=0, text="Cancel Order", command=schwab_action("cancel_selected_order", "show_cancel_order_placeholder"), style="Danger.TButton")
+    _add_workspace_button(actions, row=3, column=1, text="Live Safety", command=schwab_action("show_live_submit_safety_review"))
+    _add_workspace_button(actions, row=3, column=2, text="LIVE Submit", command=schwab_action("submit_selected_venue", "submit_live_schwab_order_guarded"), style="Danger.TButton")
+
+    status = ttk.Frame(ticket, style="Panel.TFrame")
+    status.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+    status.columnconfigure((0, 1, 2), weight=1)
+    ttk.Label(status, textvariable=self.schwab_status_var, style="Chip.TLabel").grid(row=0, column=0, sticky="ew", padx=(0, 6))
+    ttk.Label(status, textvariable=self.schwab_preview_status_var, style="Chip.TLabel").grid(row=0, column=1, sticky="ew", padx=(0, 6))
+    ttk.Label(status, textvariable=self.schwab_verification_status_var, style="Chip.TLabel").grid(row=0, column=2, sticky="ew")
+
+    _set_workspace_text(
+        self.schwab_trading_preview_text,
+        "SCHWAB TRADING WORKSPACE\n"
+        "========================\n\n"
+        "Use this tab for stocks, ETFs, Schwab previews, order history, and guarded live Schwab actions.\n\n"
+        "Options still live in the Options What-If Lab; use the button above when the weekly setup needs calls/puts instead of shares.",
+    )
+
+
+def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
+    _ensure_execution_workspace_vars(self)
+    parent.columnconfigure(0, weight=1)
+    parent.rowconfigure(1, weight=1)
+
+    header = ttk.LabelFrame(parent, text="Hyperliquid Trading Workspace", style="Card.TLabelframe")
+    header.grid(row=0, column=0, sticky="ew")
+    header.columnconfigure(0, weight=1)
+    ttk.Label(
+        header,
+        text=(
+            "Dedicated Hyperliquid execution surface for HYPE/BTC-style perp tickets. "
+            "This keeps perp-only controls away from Schwab stock and option workflows."
+        ),
+        style="Subtle.TLabel",
+        wraplength=1120,
+    ).grid(row=0, column=0, sticky="w", padx=(0, 12))
+    ttk.Button(
+        header,
+        text="Sync Hyperliquid",
+        command=lambda: _run_workspace_action(
+            self,
+            venue="Hyperliquid",
+            preview_widget=self.hyperliquid_trading_preview_text,
+            command=_first_available_command(self, "sync_hyperliquid_account"),
+        ),
+        style="Accent.TButton",
+    ).grid(row=0, column=1, sticky="e")
+
+    workspace = _make_paned(parent, tk.HORIZONTAL)
+    workspace.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+
+    ticket_shell = ttk.Frame(workspace, style="Canvas.TFrame")
+    output_shell = ttk.Frame(workspace, style="Canvas.TFrame")
+    workspace.add(ticket_shell, minsize=540, stretch="never")
+    workspace.add(output_shell, minsize=520, stretch="always")
+
+    ticket = ttk.LabelFrame(ticket_shell, text="Hyperliquid Perp Ticket", style="Card.TLabelframe")
+    ticket.pack(fill=tk.BOTH, expand=True)
+    ticket.columnconfigure(1, weight=1)
+    ticket.columnconfigure(3, weight=1)
+
+    self._grid_row(ticket, 0, "Coin", ttk.Entry(ticket, textvariable=self.hyperliquid_coin_var), "Symbol", ttk.Entry(ticket, textvariable=self.symbol_var))
+    self._grid_row(
+        ticket,
+        1,
+        "Direction",
+        ttk.Combobox(ticket, textvariable=self.side_var, values=[s.value for s in OrderSide], state="readonly"),
+        "Order type",
+        ttk.Combobox(ticket, textvariable=self.order_type_var, values=[o.value for o in OrderType], state="readonly"),
+    )
+    self._grid_row(ticket, 2, "Size", ttk.Entry(ticket, textvariable=self.quantity_var), "Entry / Limit", ttk.Entry(ticket, textvariable=self.limit_price_var))
+    self._grid_row(ticket, 3, "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var), "Type CONFIRM", ttk.Entry(ticket, textvariable=self.confirmation_var))
+    self._grid_row(
+        ticket,
+        4,
+        "HL TIF",
+        ttk.Combobox(ticket, textvariable=self.hyperliquid_tif_var, values=["Alo", "Ioc", "Gtc"], state="readonly"),
+        "Reduce-only",
+        ttk.Checkbutton(ticket, variable=self.hyperliquid_reduce_only_var),
+    )
+    ttk.Label(ticket, text="Cancel order ID", style="Subtle.TLabel").grid(row=5, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+    ttk.Entry(ticket, textvariable=self.cancel_order_id_var).grid(row=5, column=1, columnspan=3, sticky="ew", pady=(8, 0))
+
+    hyperliquid_output_frame = ttk.LabelFrame(output_shell, text="Hyperliquid Analysis + Order Output", style="Card.TLabelframe")
+    hyperliquid_output_frame.pack(fill=tk.BOTH, expand=True)
+    self.hyperliquid_trading_preview_text = _workspace_text(hyperliquid_output_frame)
+
+    actions = ttk.LabelFrame(ticket, text="Hyperliquid Actions", style="Card.TLabelframe")
+    actions.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+    for column in range(3):
+        actions.columnconfigure(column, weight=1, uniform="hyperliquid_actions")
+
+    def hyperliquid_action(*names: str) -> Callable[[], None]:
+        return lambda: _run_workspace_action(
+            self,
+            venue="Hyperliquid",
+            preview_widget=self.hyperliquid_trading_preview_text,
+            command=_first_available_command(self, *names),
+        )
+
+    _add_workspace_button(actions, row=0, column=0, text="Sync Account", command=hyperliquid_action("sync_hyperliquid_account"), style="Accent.TButton")
+    _add_workspace_button(actions, row=0, column=1, text="Tech Analysis", command=hyperliquid_action("show_technical_analysis"))
+    _add_workspace_button(actions, row=0, column=2, text="Preview Perp Ticket", command=hyperliquid_action("preview_hyperliquid_ticket", "preview_order"))
+    _add_workspace_button(actions, row=1, column=0, text="Recent Orders", command=hyperliquid_action("load_selected_recent_orders", "load_hyperliquid_open_orders"))
+    _add_workspace_button(actions, row=1, column=1, text="Open Only", command=hyperliquid_action("load_selected_open_orders_only", "load_hyperliquid_open_orders"))
+    _add_workspace_button(actions, row=1, column=2, text="Position Size", command=hyperliquid_action("show_position_size"))
+    _add_workspace_button(actions, row=2, column=0, text="Cancel Order", command=hyperliquid_action("cancel_selected_order", "cancel_hyperliquid_order_guarded"), style="Danger.TButton")
+    _add_workspace_button(actions, row=2, column=1, text="Live Safety", command=hyperliquid_action("show_hyperliquid_live_submit_safety_review"))
+    _add_workspace_button(actions, row=2, column=2, text="LIVE Submit", command=hyperliquid_action("submit_selected_venue"), style="Danger.TButton")
+
+    status = ttk.Frame(ticket, style="Panel.TFrame")
+    status.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+    status.columnconfigure((0, 1, 2), weight=1)
+    ttk.Label(status, textvariable=self.hyperliquid_status_var, style="Chip.TLabel").grid(row=0, column=0, sticky="ew", padx=(0, 6))
+    ttk.Label(status, textvariable=self.schwab_verification_status_var, style="Chip.TLabel").grid(row=0, column=1, sticky="ew", padx=(0, 6))
+    ttk.Label(status, text="Venue locked: Hyperliquid", style="Chip.TLabel").grid(row=0, column=2, sticky="ew")
+
+    _set_workspace_text(
+        self.hyperliquid_trading_preview_text,
+        "HYPERLIQUID TRADING WORKSPACE\n"
+        "=============================\n\n"
+        "Use this tab for HYPE/BTC perp planning, Hyperliquid previews, active orders, cancels, and guarded live submit.\n\n"
+        "The tab forces Venue = Hyperliquid before every action, so Schwab-specific buttons and workflows stay out of the way.",
+    )
 
 
 def _build_account_sources_panel(self: tk.Tk, parent: ttk.Frame) -> None:
