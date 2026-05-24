@@ -125,8 +125,6 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     _grid_action_button(connect_group, 1, 0, "Refresh Schwab", self.refresh_schwab_account)
     _grid_action_button(connect_group, 1, 1, "Reset Session", self.reset_schwab_session)
 
-    _grid_action_button(plan_group, 0, 0, "Trade Setup", self.show_position_size)
-    _grid_action_button(plan_group, 0, 1, "Schwab Preview", self.run_schwab_preview)
     _grid_action_button(plan_group, 1, 0, "Tech Analysis", self.show_technical_analysis, columnspan=2)
 
     _grid_action_button(live_group, 0, 0, "Recent Orders", self.load_schwab_open_orders)

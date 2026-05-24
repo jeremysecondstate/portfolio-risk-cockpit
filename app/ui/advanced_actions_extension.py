@@ -177,7 +177,6 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     for column in range(5):
         secondary_actions.columnconfigure(column, weight=1, uniform="secondary_actions")
     for index, (label, command) in enumerate([
-        ("Trade Setup", self.show_position_size),
         ("Preview Order", self.run_schwab_preview),
         ("Recent Orders", self.load_schwab_open_orders),
         ("Open Only", self.load_schwab_open_orders_only),
