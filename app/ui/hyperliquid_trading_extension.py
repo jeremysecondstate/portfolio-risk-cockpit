@@ -40,6 +40,33 @@ def _ensure_hyperliquid_vars(self: tk.Tk) -> None:
     self.hyperliquid_status_var = tk.StringVar(value="Hyperliquid: preview only")
 
 
+def _build_action_group(parent: ttk.Frame, title: str, column: int) -> ttk.LabelFrame:
+    group = ttk.LabelFrame(parent, text=title, style="Card.TLabelframe")
+    group.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 8, 0))
+    group.columnconfigure(0, weight=1)
+    group.columnconfigure(1, weight=1)
+    return group
+
+
+def _grid_action_button(
+    parent: ttk.LabelFrame,
+    row: int,
+    column: int,
+    text: str,
+    command: object,
+    style: str = "TButton",
+    columnspan: int = 1,
+) -> None:
+    ttk.Button(parent, text=text, command=command, style=style).grid(
+        row=row,
+        column=column,
+        columnspan=columnspan,
+        sticky="ew",
+        padx=(0, 6) if column == 0 and columnspan == 1 else 0,
+        pady=(4, 6) if row == 0 else (0, 4),
+    )
+
+
 def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     _ensure_hyperliquid_vars(self)
 
@@ -49,8 +76,8 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     ticket_shell = ttk.Frame(stack, style="Canvas.TFrame")
     preview_shell = ttk.Frame(stack, style="Canvas.TFrame")
     explainer_shell = ttk.Frame(stack, style="Canvas.TFrame")
-    stack.add(ticket_shell, minsize=290, stretch="never")
-    stack.add(preview_shell, minsize=220, stretch="always")
+    stack.add(ticket_shell, minsize=330, stretch="never")
+    stack.add(preview_shell, minsize=200, stretch="always")
     stack.add(explainer_shell, minsize=78, stretch="never")
 
     ticket = ttk.LabelFrame(ticket_shell, text="Trade Planner", style="Card.TLabelframe")
@@ -85,38 +112,30 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     ttk.Label(ticket, text="Cancel order ID", style="Subtle.TLabel").grid(row=6, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
     ttk.Entry(ticket, textvariable=self.cancel_order_id_var).grid(row=6, column=1, columnspan=3, sticky="ew", pady=(8, 0))
 
-    primary_actions = ttk.Frame(ticket, style="Panel.TFrame")
-    primary_actions.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(12, 0))
-    for column in range(5):
-        primary_actions.columnconfigure(column, weight=1, uniform="venue_actions")
-    ttk.Button(primary_actions, text="Connect Schwab", command=self.connect_schwab).grid(row=0, column=1, sticky="ew", padx=(0, 8))
-    ttk.Button(primary_actions, text="Connect Hyperliquid", command=self.sync_hyperliquid_account).grid(row=0, column=2, sticky="ew", padx=(0, 8))
-    ttk.Button(primary_actions, text="Refresh Schwab", command=self.refresh_schwab_account).grid(row=0, column=3, sticky="ew", padx=(0, 8))
-    ttk.Button(primary_actions, text="Tech Analysis", command=self.show_technical_analysis).grid(row=0, column=4, sticky="ew")
+    actions = ttk.Frame(ticket, style="Panel.TFrame")
+    actions.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+    actions.columnconfigure((0, 1, 2), weight=1, uniform="action_groups")
 
-    secondary_actions = ttk.Frame(ticket, style="Panel.TFrame")
-    secondary_actions.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(8, 0))
-    for column in range(4):
-        secondary_actions.columnconfigure(column, weight=1, uniform="actions")
-    for index, (label, command, style_name) in enumerate([
-        ("Trade Setup", self.show_position_size, "TButton"),
-        ("Schwab Preview", self.run_schwab_preview, "TButton"),
-        ("Recent Orders", self.load_schwab_open_orders, "TButton"),
-        ("Open Only", self.load_schwab_open_orders_only, "TButton"),
-        ("Reset Session", self.reset_schwab_session, "TButton"),
-        ("Cancel Order", self.show_cancel_order_placeholder, "Danger.TButton"),
-        ("LIVE Submit", self.submit_selected_venue, "Danger.TButton"),
-    ]):
-        ttk.Button(secondary_actions, text=label, command=command, style=style_name).grid(
-            row=index // 4,
-            column=index % 4,
-            sticky="ew",
-            padx=(0 if index % 4 == 0 else 6, 0),
-            pady=(0 if index < 4 else 6, 0),
-        )
+    connect_group = _build_action_group(actions, "Connections", 0)
+    plan_group = _build_action_group(actions, "Planning", 1)
+    live_group = _build_action_group(actions, "Guarded Live Actions", 2)
+
+    _grid_action_button(connect_group, 0, 0, "Connect Schwab", self.connect_schwab)
+    _grid_action_button(connect_group, 0, 1, "Connect Hyperliquid", self.sync_hyperliquid_account)
+    _grid_action_button(connect_group, 1, 0, "Refresh Schwab", self.refresh_schwab_account)
+    _grid_action_button(connect_group, 1, 1, "Reset Session", self.reset_schwab_session)
+
+    _grid_action_button(plan_group, 0, 0, "Trade Setup", self.show_position_size)
+    _grid_action_button(plan_group, 0, 1, "Schwab Preview", self.run_schwab_preview)
+    _grid_action_button(plan_group, 1, 0, "Tech Analysis", self.show_technical_analysis, columnspan=2)
+
+    _grid_action_button(live_group, 0, 0, "Recent Orders", self.load_schwab_open_orders)
+    _grid_action_button(live_group, 0, 1, "Open Only", self.load_schwab_open_orders_only)
+    _grid_action_button(live_group, 1, 0, "Cancel Order", self.show_cancel_order_placeholder, "Danger.TButton")
+    _grid_action_button(live_group, 1, 1, "LIVE Submit", self.submit_selected_venue, "Danger.TButton")
 
     status_bar = ttk.Frame(ticket, style="Panel.TFrame")
-    status_bar.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+    status_bar.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(10, 0))
     status_bar.columnconfigure((0, 1, 2, 3), weight=1)
     ttk.Label(status_bar, textvariable=self.schwab_status_var, style="Chip.TLabel").grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=(4, 0))
     ttk.Label(status_bar, textvariable=self.schwab_preview_status_var, style="Chip.TLabel").grid(row=0, column=1, sticky="ew", padx=(0, 6), pady=(4, 0))
@@ -146,7 +165,7 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     )
     self.preview_text.pack(fill=tk.BOTH, expand=True)
     self._set_preview_text(
-        "Choose Schwab or Hyperliquid, create a ticket, then use Preview Venue.\n\n"
+        "Choose Schwab or Hyperliquid, create a ticket, then use the grouped planning and guarded live actions.\n\n"
         "Schwab keeps the existing preview/order workflow. Hyperliquid uses the fast local submit hook once enabled in .env.\n\n"
         "For Hyperliquid, LIVE Submit checks env readiness + max notional, then calls the local hook."
     )
