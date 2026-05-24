@@ -1,59 +1,46 @@
 # Broker authentication notes
 
-## Current decision
+## Current broker direction
 
-The app remains **paper mode by default**. Live trading must be added in stages:
+The cockpit is focused on **Schwab + Hyperliquid**:
 
-1. Paper trading only.
-2. Read-only live account connection.
-3. Live order preview.
-4. Live order submission with hard confirmations.
-
-## Robinhood status
-
-Robinhood has an official **Crypto Trading API** for eligible Robinhood Crypto customers. That API supports crypto market data, crypto account/holding/order reads, and crypto order placement.
-
-Robinhood's own third-party connections help page says it does not allow trading APIs to be linked to a Robinhood account without written authorization, and it does not allow third-party applications to control or take action on the Robinhood app. For crypto API details, Robinhood directs users to the Robinhood Crypto Trading API.
-
-Practical interpretation for this project:
-
-- Robinhood crypto integration may be possible through official API credentials.
-- Robinhood equities/options trading should be treated as unsupported unless Robinhood provides written authorization or an official documented API for that account type.
-- Do not use username/password scraping or unofficial app-control automation for live trading.
+- Schwab handles stock/ETF account sync, previews, and guarded live order workflows.
+- Hyperliquid handles read-only portfolio sync and local signed-submit workflow through API wallet credentials.
+- The app remains paper/planning-first by default, with live actions controlled by explicit local `.env` settings.
 
 ## Credential handling rules
 
 - Never commit real API keys, private keys, account IDs, passwords, or MFA backup codes.
 - Use `.env` for local development secrets.
 - Keep `.env` ignored by git.
-- Prefer read-only credentials first.
-- Use separate credentials for paper/sandbox and live modes whenever the broker supports that.
-- Add a kill switch before any live order-submission code.
+- Prefer read-only credentials first when adding a new connector.
+- Use separate API wallets/credentials when a platform supports it.
+- Keep max-order-size controls in `.env` for live workflows.
 
-## Robinhood Crypto setup checklist
+## Schwab setup checklist
 
-When ready to test official crypto API access:
+1. Create or verify Schwab Trader API app credentials.
+2. Set `SCHWAB_CLIENT_ID`, `SCHWAB_CLIENT_SECRET`, and `SCHWAB_REDIRECT_URI` in local `.env`.
+3. Keep `SCHWAB_ENABLE_LIVE_ORDERS=false` until live order flow is intentionally enabled.
+4. Use account refresh / preview flows before live submit.
+5. Keep `SCHWAB_MAX_LIVE_ORDER_DOLLARS` set to a reasonable local cap.
 
-1. Sign in to Robinhood on desktop web.
-2. Go to crypto account settings.
-3. Find the API trading / API credentials area.
-4. Add a key.
-5. Enable only the minimum actions needed.
-6. Start with read-only actions.
-7. Store credentials locally in `.env`; do not commit them.
+## Hyperliquid setup checklist
 
-## Equities/options integration
+1. Create or authorize a Hyperliquid API wallet.
+2. Set the main/sub-account wallet as `HYPE_WALLET_ADDRESS`.
+3. Set the API wallet address as `HYPE_API_ADDRESS`.
+4. Set the API wallet private key as `HYPE_API_SECRET` in local `.env` only.
+5. Keep `HYPERLIQUID_ENABLE_LIVE_ORDERS=false` until the local signed submit hook is intentionally wired and tested.
+6. Keep `HYPERLIQUID_MAX_LIVE_ORDER_DOLLARS` set to a reasonable local cap.
 
-For stock and ETF automation, prefer brokers with official, documented trading APIs such as Alpaca, Interactive Brokers, Tradier, or other supported providers.
+## Live-action expectations
 
-Before adding any live equities broker adapter, the app must include:
+Before adding or changing any live broker adapter, the app should preserve:
 
-- Paper mode default.
-- Live trading disabled by default.
-- Explicit config opt-in.
-- Typed confirmation on every live order.
-- Final modal confirmation.
-- Cash-only/margin-off checks.
+- Paper/planning mode as the default mental model.
+- Local `.env` opt-in for live submit.
 - Max order size checks.
-- Max position percent checks.
-- Audit logging.
+- Position/risk visibility before submit.
+- Clear post-action account refresh.
+- No committed secrets.
