@@ -128,33 +128,29 @@ class HyperliquidExecutionAdapter:
         return self._local_signed_submit(ticket)
 
     def _local_signed_submit(self, ticket: HyperliquidOrderTicket) -> Any:
-        """Wire the local Hyperliquid SDK signed order call here.
+        from eth_account import Account
+        from hyperliquid.exchange import Exchange
+        from hyperliquid.utils import constants
 
-        The official SDK's basic order example uses this shape:
+        api_secret = os.getenv("HYPE_API_SECRET", "").strip()
+        wallet_address = os.getenv("HYPE_WALLET_ADDRESS", "").strip()
 
-            exchange.order("ETH", True, 0.2, 1100, {"limit": {"tif": "Gtc"}})
+        api_wallet = Account.from_key(api_secret)
 
-        Your local hook maps directly to:
-
-            exchange.order(
-                ticket.coin,
-                ticket.is_buy,
-                ticket.size,
-                ticket.limit_price,
-                ticket.order_type_payload(),
-                reduce_only=ticket.reduce_only,
-            )
-
-        Configure the SDK with:
-        - HYPE_WALLET_ADDRESS as the main/sub-account address
-        - HYPE_API_ADDRESS as the API wallet address
-        - HYPE_API_SECRET as the API wallet private key
-        """
-        raise NotImplementedError(
-            "Local signed Hyperliquid submit is not wired yet. "
-            "Wire HyperliquidExecutionAdapter._local_signed_submit() on your machine."
+        exchange = Exchange(
+            api_wallet,
+            constants.MAINNET_API_URL,
+            account_address=wallet_address,
         )
 
+        return exchange.order(
+            ticket.coin,
+            ticket.is_buy,
+            ticket.size,
+            ticket.limit_price,
+            ticket.order_type_payload(),
+            reduce_only=ticket.reduce_only,
+        )
 
 def normalize_hyperliquid_coin(symbol: str) -> str:
     coin = symbol.strip().upper()
