@@ -5,6 +5,11 @@ from tkinter import ttk
 from typing import Type
 
 from app.ui.options_lab import build_options_lab_tab, run_options_what_if
+from app.ui.options_lab_extension import (
+    _build_hyperliquid_trading_tab,
+    _build_schwab_trading_tab,
+    _ensure_execution_workspace_vars,
+)
 from app.ui.polished_theme import _make_paned
 
 
@@ -24,8 +29,12 @@ def _build_layout_without_account_strip(self: tk.Tk) -> None:
     tabs.pack(fill=tk.BOTH, expand=True, pady=(16, 0))
 
     cockpit_tab = ttk.Frame(tabs, style="Canvas.TFrame", padding=0)
+    schwab_tab = ttk.Frame(tabs, style="Canvas.TFrame", padding=14)
+    hyperliquid_tab = ttk.Frame(tabs, style="Canvas.TFrame", padding=14)
     options_tab = ttk.Frame(tabs, style="Canvas.TFrame", padding=14)
     tabs.add(cockpit_tab, text="Cockpit")
+    tabs.add(schwab_tab, text="Schwab Trading")
+    tabs.add(hyperliquid_tab, text="Hyperliquid Trading")
     tabs.add(options_tab, text="Options What-If Lab")
 
     self.active_portfolio_source_var = tk.StringVar(value="Active portfolio: current cockpit source")
@@ -43,7 +52,11 @@ def _build_layout_without_account_strip(self: tk.Tk) -> None:
 
     self._build_portfolio_panel(left)
     self._build_order_panel(right)
+    _ensure_execution_workspace_vars(self)
     self.after_idle(lambda: _capture_current_source_portfolio(self))
+
+    _build_schwab_trading_tab(self, schwab_tab, tabs, options_tab)
+    _build_hyperliquid_trading_tab(self, hyperliquid_tab)
 
     build_options_lab_tab(self, options_tab)
     _build_options_lab_market_loader(self, options_tab)
