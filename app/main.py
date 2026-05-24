@@ -8,6 +8,7 @@ from app.ui.options_core_math_extension import install_options_core_math_extensi
 from app.ui.options_lab_extension import install_options_lab_extension
 from app.ui.options_resizable_layout_extension import install_options_resizable_layout_extension
 from app.ui.polished_theme import install_polished_cockpit_theme
+from app.ui.schwab_live_status_extension import install_schwab_live_status_extension
 from app.ui.trade_setup_extension import install_trade_setup_extension
 from app.ui.trading_cockpit import SchwabTradingCockpitApp
 
@@ -22,6 +23,7 @@ def main() -> None:
     install_account_sources_fix(SchwabTradingCockpitApp)
     install_options_resizable_layout_extension()
     install_cash_positions_extension(SchwabTradingCockpitApp)
+    install_schwab_live_status_extension(SchwabTradingCockpitApp)
     app = SchwabTradingCockpitApp()
     app.mainloop()
 
