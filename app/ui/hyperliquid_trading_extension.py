@@ -23,8 +23,6 @@ def install_hyperliquid_trading_extension(app_cls: Type[tk.Tk]) -> None:
     """Add a venue selector and guarded Hyperliquid ticket workflow."""
 
     app_cls._build_order_panel = _build_order_panel_with_hyperliquid  # type: ignore[method-assign]
-    app_cls.preview_selected_venue = _preview_selected_venue  # type: ignore[attr-defined]
-    app_cls.show_selected_live_safety_review = _show_selected_live_safety_review  # type: ignore[attr-defined]
     app_cls.submit_selected_venue = _submit_selected_venue  # type: ignore[attr-defined]
     app_cls.preview_hyperliquid_ticket = _preview_hyperliquid_ticket  # type: ignore[attr-defined]
     app_cls.show_hyperliquid_live_submit_safety_review = _show_hyperliquid_live_submit_safety_review  # type: ignore[attr-defined]
@@ -91,7 +89,6 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     primary_actions.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(12, 0))
     for column in range(5):
         primary_actions.columnconfigure(column, weight=1, uniform="venue_actions")
-    ttk.Button(primary_actions, text="Preview Venue", command=self.preview_selected_venue, style="Accent.TButton").grid(row=0, column=0, sticky="ew", padx=(0, 8))
     ttk.Button(primary_actions, text="Connect Schwab", command=self.connect_schwab).grid(row=0, column=1, sticky="ew", padx=(0, 8))
     ttk.Button(primary_actions, text="Connect Hyperliquid", command=self.sync_hyperliquid_account).grid(row=0, column=2, sticky="ew", padx=(0, 8))
     ttk.Button(primary_actions, text="Refresh Schwab", command=self.refresh_schwab_account).grid(row=0, column=3, sticky="ew", padx=(0, 8))
@@ -108,7 +105,6 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
         ("Open Only", self.load_schwab_open_orders_only, "TButton"),
         ("Reset Session", self.reset_schwab_session, "TButton"),
         ("Cancel Order", self.show_cancel_order_placeholder, "Danger.TButton"),
-        ("Live Status", self.show_selected_live_safety_review, "Danger.TButton"),
         ("LIVE Submit", self.submit_selected_venue, "Danger.TButton"),
     ]):
         ttk.Button(secondary_actions, text=label, command=command, style=style_name).grid(
@@ -178,20 +174,6 @@ def _on_trading_venue_changed(self: tk.Tk) -> None:
         self.hyperliquid_status_var.set("Hyperliquid: selected")
     else:
         self.hyperliquid_status_var.set("Hyperliquid: preview only")
-
-
-def _preview_selected_venue(self: tk.Tk) -> None:
-    if self.trade_venue_var.get() == "Hyperliquid":
-        self.preview_hyperliquid_ticket()
-    else:
-        self.preview_order()
-
-
-def _show_selected_live_safety_review(self: tk.Tk) -> None:
-    if self.trade_venue_var.get() == "Hyperliquid":
-        self.show_hyperliquid_live_submit_safety_review()
-    else:
-        self.show_live_submit_safety_review()
 
 
 def _submit_selected_venue(self: tk.Tk) -> None:
