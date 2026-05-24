@@ -26,9 +26,11 @@ HYPERLIQUID_ADDRESS_ENV_KEYS = ("HYPE_WALLET_ADDRESS", "HYPERLIQUID_USER_ADDRESS
 def install_hyperliquid_trading_extension(app_cls: Type[tk.Tk]) -> None:
     """Add a venue selector and guarded Hyperliquid ticket workflow."""
 
-    app_cls._build_order_panel = _build_order_panel_with_hyperliquid  # type: ignore[method-assign]
     app_cls.submit_selected_venue = _submit_selected_venue  # type: ignore[attr-defined]
+    app_cls.cancel_selected_order = _cancel_selected_order  # type: ignore[attr-defined]
+    app_cls.cancel_hyperliquid_order_guarded = _cancel_hyperliquid_order_guarded  # type: ignore[attr-defined]
     app_cls.load_selected_recent_orders = _load_selected_recent_orders  # type: ignore[attr-defined]
+    app_cls._build_order_panel = _build_order_panel_with_hyperliquid  # type: ignore[method-assign]
     app_cls.load_selected_open_orders_only = _load_selected_open_orders_only  # type: ignore[attr-defined]
     app_cls.load_hyperliquid_open_orders = _load_hyperliquid_open_orders  # type: ignore[attr-defined]
     app_cls.preview_hyperliquid_ticket = _preview_hyperliquid_ticket  # type: ignore[attr-defined]
@@ -45,6 +47,7 @@ def _ensure_hyperliquid_vars(self: tk.Tk) -> None:
     self.hyperliquid_tif_var = tk.StringVar(value="Gtc")
     self.hyperliquid_reduce_only_var = tk.BooleanVar(value=False)
     self.hyperliquid_status_var = tk.StringVar(value="Hyperliquid: preview only")
+    self.hyperliquid_open_order_coin_by_oid = {}
 
 
 def _build_action_group(parent: ttk.Frame, title: str, column: int) -> ttk.LabelFrame:
@@ -131,12 +134,11 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     _grid_action_button(connect_group, 0, 1, "Connect Hyperliquid", self.sync_hyperliquid_account)
     _grid_action_button(connect_group, 1, 0, "Refresh Schwab", self.refresh_schwab_account)
     _grid_action_button(connect_group, 1, 1, "Reset Session", self.reset_schwab_session)
-
     _grid_action_button(plan_group, 1, 0, "Tech Analysis", self.show_technical_analysis, columnspan=2)
 
     _grid_action_button(live_group, 0, 0, "Recent Orders", self.load_selected_recent_orders)
     _grid_action_button(live_group, 0, 1, "Open Only", self.load_selected_open_orders_only)
-    _grid_action_button(live_group, 1, 0, "Cancel Order", self.show_cancel_order_placeholder, "Danger.TButton")
+    _grid_action_button(live_group, 1, 0, "Cancel Order", self.cancel_selected_order, "Danger.TButton")
     _grid_action_button(live_group, 1, 1, "LIVE Submit", self.submit_selected_venue, "Danger.TButton")
 
     status_bar = ttk.Frame(ticket, style="Panel.TFrame")
@@ -206,6 +208,97 @@ def _load_selected_open_orders_only(self: tk.Tk) -> None:
     self.load_schwab_open_orders_only()
 
 
+def _cancel_selected_order(self: tk.Tk) -> None:
+    if _selected_venue_is_hyperliquid(self):
+        self.cancel_hyperliquid_order_guarded()
+        return
+    self.show_cancel_order_placeholder()
+
+
+def _hyperliquid_cancel_coin_for_order(self: tk.Tk, order_id: str) -> str:
+    cached_orders = getattr(self, "hyperliquid_open_order_coin_by_oid", {})
+    cached_coin = cached_orders.get(order_id)
+    if cached_coin:
+        return cached_coin
+
+    coin_source = getattr(self, "hyperliquid_coin_var", tk.StringVar(value="")).get().strip()
+    if coin_source:
+        return normalize_hyperliquid_coin(coin_source)
+
+    raise ValueError(
+        "Could not determine the Hyperliquid market for this order. "
+        "Click Open Only first, then try Cancel Order again."
+    )
+
+
+def _cancel_hyperliquid_order_guarded(self: tk.Tk) -> None:
+    raw_order_id = self.cancel_order_id_var.get().strip()
+    if not raw_order_id:
+        messagebox.showerror("Hyperliquid cancel blocked", "Enter an active Hyperliquid order ID first.")
+        return
+
+    try:
+        order_id = int(raw_order_id)
+    except ValueError:
+        messagebox.showerror("Hyperliquid cancel blocked", "Hyperliquid order ID must be a number.")
+        return
+
+    try:
+        coin = _hyperliquid_cancel_coin_for_order(self, raw_order_id)
+    except Exception as exc:
+        messagebox.showerror("Hyperliquid cancel blocked", str(exc))
+        return
+
+    config = HyperliquidTradingConfig()
+    try:
+        config.validate_for_live_action()
+    except Exception as exc:
+        self._set_preview_text(
+            "HYPERLIQUID CANCEL BLOCKED\n"
+            "==========================\n\n"
+            f"{exc}\n\n"
+            "Required local .env gates:\n"
+            "- HYPE_WALLET_ADDRESS\n"
+            "- HYPE_API_ADDRESS\n"
+            "- HYPE_API_SECRET\n"
+            "- HYPERLIQUID_ENABLE_LIVE_ORDERS=true\n\n"
+            "No order was submitted, replaced, or canceled."
+        )
+        messagebox.showerror("Hyperliquid cancel blocked", str(exc))
+        return
+
+    ok = messagebox.askyesno(
+        "FINAL HYPERLIQUID CANCEL CONFIRMATION",
+        "This will send a LIVE Hyperliquid cancel request.\n\n"
+        f"Market: {coin}\n"
+        f"Order ID: {order_id}\n\n"
+        "Continue?",
+    )
+    if not ok:
+        return
+
+    try:
+        result = HyperliquidExecutionAdapter().cancel(coin, order_id)
+        self.hyperliquid_status_var.set("Hyperliquid: cancel attempted")
+        self._set_preview_text(
+            "HYPERLIQUID CANCEL ORDER RESULT\n"
+            "===============================\n\n"
+            f"Market: {coin}\n"
+            f"Order ID: {order_id}\n\n"
+            f"Response:\n{result}\n\n"
+            "Refreshing Hyperliquid open orders..."
+        )
+
+        try:
+            self.load_hyperliquid_open_orders(title="HYPERLIQUID OPEN ORDERS AFTER CANCEL")
+        except Exception:
+            pass
+
+    except Exception as exc:
+        self.hyperliquid_status_var.set("Hyperliquid: cancel failed")
+        messagebox.showerror("Hyperliquid cancel failed", str(exc))
+
+
 def _hyperliquid_env_address() -> tuple[str, str] | tuple[None, None]:
     for key in HYPERLIQUID_ADDRESS_ENV_KEYS:
         address = os.getenv(key, "").strip()
@@ -233,6 +326,11 @@ def _load_hyperliquid_open_orders(self: tk.Tk, title: str = "HYPERLIQUID OPEN OR
     try:
         client = HyperliquidInfoClient()
         snapshot = client.fetch_snapshot(address, include_open_orders=True)
+        self.hyperliquid_open_order_coin_by_oid = {
+            str(order.get("oid")): str(order.get("coin"))
+            for order in snapshot.open_orders
+            if order.get("oid") is not None and order.get("coin")
+        }
         selected_coin = getattr(self, "hyperliquid_coin_var", tk.StringVar(value="")).get().strip()
         _address, source_key = _hyperliquid_env_address()
         self.hyperliquid_status_var.set(f"Hyperliquid: {len(snapshot.open_orders)} open orders")

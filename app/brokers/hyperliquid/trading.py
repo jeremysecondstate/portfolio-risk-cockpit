@@ -46,14 +46,7 @@ class HyperliquidTradingConfig:
         return lines
 
     def validate_for_live(self, ticket: HyperliquidOrderTicket) -> None:
-        if not self.wallet_address.startswith("0x") or len(self.wallet_address) != 42:
-            raise ValueError("HYPE_WALLET_ADDRESS must be the 42-character Hyperliquid master/sub-account address.")
-        if not self.api_address.startswith("0x") or len(self.api_address) != 42:
-            raise ValueError("HYPE_API_ADDRESS must be the 42-character Hyperliquid API wallet address.")
-        if not self.has_signing_secret:
-            raise ValueError("HYPE_API_SECRET is missing from local .env.")
-        if not self.live_enabled:
-            raise PermissionError("Set HYPERLIQUID_ENABLE_LIVE_ORDERS=true in .env before live Hyperliquid submit.")
+        self.validate_for_live_action()
         if ticket.size <= 0:
             raise ValueError("Hyperliquid size must be positive.")
         if ticket.limit_price <= 0:
@@ -63,6 +56,14 @@ class HyperliquidTradingConfig:
                 f"Estimated notional ${ticket.notional:,.2f} exceeds "
                 f"HYPERLIQUID_MAX_LIVE_ORDER_DOLLARS=${self.max_live_notional:,.2f}."
             )
+        if not self.wallet_address.startswith("0x") or len(self.wallet_address) != 42:
+            raise ValueError("HYPE_WALLET_ADDRESS must be the 42-character Hyperliquid master/sub-account address.")
+        if not self.api_address.startswith("0x") or len(self.api_address) != 42:
+            raise ValueError("HYPE_API_ADDRESS must be the 42-character Hyperliquid API wallet address.")
+        if not self.has_signing_secret:
+            raise ValueError("HYPE_API_SECRET is missing from local .env.")
+        if not self.live_enabled:
+            raise PermissionError("Set HYPERLIQUID_ENABLE_LIVE_ORDERS=true in .env before live Hyperliquid submit.")
 
     def preview_text(self, ticket: HyperliquidOrderTicket) -> str:
         return "\n".join(
@@ -118,14 +119,36 @@ class HyperliquidTradingConfig:
             ]
         )
 
+    def validate_for_live_action(self) -> None:
+        if not self.wallet_address.startswith("0x") or len(self.wallet_address) != 42:
+            raise ValueError("HYPE_WALLET_ADDRESS must be the 42-character Hyperliquid master/sub-account address.")
+        if not self.api_address.startswith("0x") or len(self.api_address) != 42:
+            raise ValueError("HYPE_API_ADDRESS must be the 42-character Hyperliquid API wallet address.")
+        if not self.has_signing_secret:
+            raise ValueError("HYPE_API_SECRET is missing from local .env.")
+        if not self.live_enabled:
+            raise PermissionError("Set HYPERLIQUID_ENABLE_LIVE_ORDERS=true in .env before live Hyperliquid actions.")
+
 
 class HyperliquidExecutionAdapter:
-    """Fast guarded execution adapter with one local SDK hook."""
+    """Fast guarded execution adapter with local SDK hooks."""
 
     def submit(self, ticket: HyperliquidOrderTicket) -> Any:
         config = HyperliquidTradingConfig()
         config.validate_for_live(ticket)
         return self._local_signed_submit(ticket)
+
+    def cancel(self, coin: str, order_id: int) -> Any:
+        config = HyperliquidTradingConfig()
+        config.validate_for_live_action()
+
+        normalized_coin = coin.strip()
+        if not normalized_coin:
+            raise ValueError("Hyperliquid cancel requires a coin/market for the order.")
+        if order_id <= 0:
+            raise ValueError("Hyperliquid cancel requires a positive order ID.")
+
+        return self._local_signed_cancel(normalized_coin, order_id)
 
     def _local_signed_submit(self, ticket: HyperliquidOrderTicket) -> Any:
         from eth_account import Account
@@ -151,6 +174,24 @@ class HyperliquidExecutionAdapter:
             ticket.order_type_payload(),
             reduce_only=ticket.reduce_only,
         )
+
+    def _local_signed_cancel(self, coin: str, order_id: int) -> Any:
+        from eth_account import Account
+        from hyperliquid.exchange import Exchange
+        from hyperliquid.utils import constants
+
+        api_secret = os.getenv("HYPE_API_SECRET", "").strip()
+        wallet_address = os.getenv("HYPE_WALLET_ADDRESS", "").strip()
+
+        api_wallet = Account.from_key(api_secret)
+
+        exchange = Exchange(
+            api_wallet,
+            constants.MAINNET_API_URL,
+            account_address=wallet_address,
+        )
+
+        return exchange.cancel(coin, order_id)
 
 def normalize_hyperliquid_coin(symbol: str) -> str:
     coin = symbol.strip().upper()
