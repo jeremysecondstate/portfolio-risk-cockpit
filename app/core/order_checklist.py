@@ -6,16 +6,16 @@ from app.core.order_models import OrderPreview, OrderSide, OrderType
 
 
 def build_manual_order_checklist(preview: OrderPreview) -> str:
-    """Create a copy/paste checklist for manually entering the order in Robinhood."""
+    """Create a copy/paste checklist for manually entering an order in a broker UI."""
     order = preview.order
     action = "BUY" if order.side == OrderSide.BUY else "SELL"
     lines = [
-        "ROBINHOOD MANUAL ORDER CHECKLIST",
-        "=" * 34,
+        "MANUAL BROKER ORDER CHECKLIST",
+        "=" * 31,
         f"Created: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "",
-        "This app does NOT place Robinhood trades.",
-        "Manually enter this order in Robinhood only after reviewing every line.",
+        "This checklist is for manual broker entry only.",
+        "Manually enter this order only after reviewing every line.",
         "",
         f"Action: {action}",
         f"Symbol: {order.symbol}",
@@ -53,14 +53,14 @@ def build_manual_order_checklist(preview: OrderPreview) -> str:
     lines.extend(
         [
             "",
-            "Manual Robinhood steps:",
-            "1. Open Robinhood / Robinhood Legend.",
+            "Manual broker steps:",
+            "1. Open the broker ticket.",
             f"2. Search {order.symbol}.",
             f"3. Choose {action}.",
             f"4. Set quantity to {order.quantity:g}.",
             f"5. Choose order type: {order.order_type.value}.",
             "6. Enter limit/stop fields exactly as listed above, if applicable.",
-            "7. Preview Robinhood's order ticket.",
+            "7. Preview the broker order ticket.",
             "8. Confirm estimated credit/debit and remaining cash.",
             "9. Submit only if it matches this checklist.",
             "",
