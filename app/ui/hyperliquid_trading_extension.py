@@ -5,6 +5,7 @@ from tkinter import messagebox, ttk
 from typing import Type
 
 from app.brokers.hyperliquid.trading import (
+    HyperliquidExecutionAdapter,
     HyperliquidOrderTicket,
     HyperliquidTradingConfig,
     normalize_hyperliquid_coin,
@@ -106,7 +107,7 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
         ("Open Only", self.load_schwab_open_orders_only, "TButton"),
         ("Reset Session", self.reset_schwab_session, "TButton"),
         ("Cancel Order", self.show_cancel_order_placeholder, "Danger.TButton"),
-        ("Live Safety", self.show_selected_live_safety_review, "Danger.TButton"),
+        ("Live Status", self.show_selected_live_safety_review, "Danger.TButton"),
         ("LIVE Submit", self.show_selected_live_safety_review, "Danger.TButton"),
     ]):
         ttk.Button(secondary_actions, text=label, command=command, style=style_name).grid(
@@ -149,8 +150,8 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     self.preview_text.pack(fill=tk.BOTH, expand=True)
     self._set_preview_text(
         "Choose Schwab or Hyperliquid, create a ticket, then use Preview Venue.\n\n"
-        "Schwab keeps the existing preview/order workflow. Hyperliquid currently supports local ticket readiness preview and a disabled live-submit safety review.\n\n"
-        "Reminder: live actions remain behind explicit safety checks."
+        "Schwab keeps the existing preview/order workflow. Hyperliquid uses the fast local submit hook once enabled in .env.\n\n"
+        "For Hyperliquid, LIVE Submit checks env readiness + max notional, then calls the local hook."
     )
 
     explainer = ttk.LabelFrame(explainer_shell, text="Order Type Cheat Sheet", style="Card.TLabelframe")
@@ -235,8 +236,27 @@ def _show_hyperliquid_live_submit_safety_review(self: tk.Tk) -> None:
     try:
         ticket = self.parse_hyperliquid_ticket()
         config = HyperliquidTradingConfig()
-        self.hyperliquid_status_var.set("Hyperliquid: live disabled")
-        self._set_preview_text(config.live_disabled_text(ticket, self.confirmation_var.get()))
+        self._set_preview_text(config.live_review_text(ticket))
+        result = HyperliquidExecutionAdapter().submit(ticket)
+        self.hyperliquid_status_var.set("Hyperliquid: submit attempted")
+        self._set_preview_text(
+            "HYPERLIQUID LIVE SUBMIT RESULT\n"
+            "==============================\n\n"
+            f"{result}\n\n"
+            "Refreshing Hyperliquid account snapshot..."
+        )
+        try:
+            self.sync_hyperliquid_account()
+        except Exception:
+            pass
+    except NotImplementedError as exc:
+        self.hyperliquid_status_var.set("Hyperliquid: hook missing")
+        self._set_preview_text(
+            "HYPERLIQUID LOCAL SUBMIT HOOK MISSING\n"
+            "=====================================\n\n"
+            f"{exc}\n\n"
+            "Wire HyperliquidExecutionAdapter._local_signed_submit() locally."
+        )
     except Exception as exc:
-        self.hyperliquid_status_var.set("Hyperliquid: safety failed")
-        messagebox.showerror("Hyperliquid safety review failed", str(exc))
+        self.hyperliquid_status_var.set("Hyperliquid: live blocked")
+        messagebox.showerror("Hyperliquid live submit blocked", str(exc))
