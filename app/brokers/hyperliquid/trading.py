@@ -130,13 +130,25 @@ class HyperliquidExecutionAdapter:
     def _local_signed_submit(self, ticket: HyperliquidOrderTicket) -> Any:
         """Wire the local Hyperliquid SDK signed order call here.
 
-        Expected ticket fields:
-        - ticket.coin
-        - ticket.is_buy
-        - ticket.size
-        - ticket.limit_price
-        - ticket.order_type_payload()
-        - ticket.reduce_only
+        The official SDK's basic order example uses this shape:
+
+            exchange.order("ETH", True, 0.2, 1100, {"limit": {"tif": "Gtc"}})
+
+        Your local hook maps directly to:
+
+            exchange.order(
+                ticket.coin,
+                ticket.is_buy,
+                ticket.size,
+                ticket.limit_price,
+                ticket.order_type_payload(),
+                reduce_only=ticket.reduce_only,
+            )
+
+        Configure the SDK with:
+        - HYPE_WALLET_ADDRESS as the main/sub-account address
+        - HYPE_API_ADDRESS as the API wallet address
+        - HYPE_API_SECRET as the API wallet private key
         """
         raise NotImplementedError(
             "Local signed Hyperliquid submit is not wired yet. "
