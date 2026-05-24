@@ -6,6 +6,11 @@ from typing import Type
 from app.core.portfolio import Portfolio, Position
 from app.ui import polished_theme
 
+_HYPERLIQUID_SPOT_ALIASES = {
+    "UBTC": "BTC",
+    "UBTC/USDC": "BTC",
+}
+
 
 def install_cash_positions_extension(app_cls: Type[tk.Tk]) -> None:
     """Show cash-like balances as neutral rows in the Positions table."""
@@ -14,15 +19,27 @@ def install_cash_positions_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls._merge_hyperliquid_portfolio = _merge_hyperliquid_portfolio_with_cash_rows  # type: ignore[method-assign]
 
 
+def _clean_hyperliquid_symbol(symbol: str) -> str:
+    clean = symbol.strip().upper()
+    if clean.startswith("HL:"):
+        clean = clean[3:]
+    for suffix in ("-PERP-SHORT", "-PERP", "-SPOT"):
+        if clean.endswith(suffix):
+            clean = clean[: -len(suffix)]
+            break
+    return _HYPERLIQUID_SPOT_ALIASES.get(clean, clean)
+
+
 def _merge_hyperliquid_portfolio_with_cash_rows(self: tk.Tk, hyperliquid_portfolio: Portfolio) -> Portfolio:
     """Merge Hyperliquid while preserving source-level cash display rows."""
 
     current = self.broker.get_portfolio()
     non_hyperliquid_cash = round(current.cash - self.last_hyperliquid_cash_adjustment, 2)
+    previous_hyperliquid_symbols = set(getattr(self, "last_hyperliquid_display_symbols", set()))
     positions = {
         symbol: position
         for symbol, position in current.positions.items()
-        if not symbol.startswith("HL:")
+        if not symbol.startswith("HL:") and symbol not in previous_hyperliquid_symbols
     }
     cash_positions = {
         key: cash
@@ -30,8 +47,10 @@ def _merge_hyperliquid_portfolio_with_cash_rows(self: tk.Tk, hyperliquid_portfol
         if "HYPERLIQUID" not in key.upper()
     }
 
+    display_symbols: set[str] = set()
     for symbol, position in hyperliquid_portfolio.positions.items():
-        display_symbol = f"HL:{symbol}"
+        display_symbol = _clean_hyperliquid_symbol(symbol)
+        display_symbols.add(display_symbol)
         positions[display_symbol] = Position(
             symbol=display_symbol,
             quantity=position.quantity,
@@ -42,6 +61,7 @@ def _merge_hyperliquid_portfolio_with_cash_rows(self: tk.Tk, hyperliquid_portfol
             open_profit_loss=position.open_profit_loss,
         )
 
+    self.last_hyperliquid_display_symbols = display_symbols
     for key, cash in hyperliquid_portfolio.cash_positions.items():
         cash_positions[f"HL:{key}"] = cash
 
