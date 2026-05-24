@@ -479,7 +479,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             return
 
         env_gate = "SCHWAB_ENABLE_LIVE_ORDERS=true"
-        confirm_phrase = "PLACE LIVE SCHWAB ORDER"
+        confirm_phrase = "PLACE"
         order_type = order.order_type.value.upper()
         tif = order.time_in_force.value.upper()
         side = order.side.value.upper()
@@ -614,13 +614,13 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             return
 
         confirmation = self.confirmation_var.get().strip()
-        if confirmation != "PLACE LIVE SCHWAB ORDER":
+        if confirmation != "PLACE":
             self._set_preview_text(
                 "LIVE SCHWAB SUBMIT BLOCKED\n"
                 "==========================\n\n"
                 "Exact confirmation phrase required.\n\n"
                 "Type exactly into the Type CONFIRM field:\n\n"
-                "  PLACE LIVE SCHWAB ORDER\n\n"
+                "  PLACE\n\n"
                 "No live order was submitted."
             )
             return
