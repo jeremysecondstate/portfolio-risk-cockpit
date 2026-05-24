@@ -24,7 +24,7 @@ If the repository has a `.venv`, the launcher uses `.venv\Scripts\pythonw.exe` f
 
 The cockpit can now merge a Hyperliquid account snapshot into the left-side portfolio/risk table.
 
-Use the **Sync Hyperliquid** button in the trading cockpit and enter your Hyperliquid master or sub-account wallet address.
+Use the **Connect Hyperliquid** button in the trading cockpit and enter your Hyperliquid master or sub-account wallet address.
 
 Important: this is read-only and uses Hyperliquid's public info endpoint. It does **not** need an API wallet/private key, and you should not paste the API/agent wallet address for portfolio sync.
 
@@ -34,6 +34,6 @@ Optional `.env` setting:
 HYPERLIQUID_USER_ADDRESS=0xYourMasterOrSubAccountAddress
 ```
 
-When the env var is set, the Sync Hyperliquid button uses it directly. Otherwise, the app prompts for the address.
+When the env var is set, the Connect Hyperliquid button uses it directly. Otherwise, the app prompts for the address.
 
 Loaded Hyperliquid rows are prefixed with `HL:` so they stay visually separate from Schwab/stock rows, for example `HL:BTC-PERP`, `HL:ETH-PERP-SHORT`, or `HL:HYPE-SPOT`.

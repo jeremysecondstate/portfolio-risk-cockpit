@@ -92,8 +92,8 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
         primary_actions.columnconfigure(column, weight=1, uniform="venue_actions")
     ttk.Button(primary_actions, text="Preview Venue", command=self.preview_selected_venue, style="Accent.TButton").grid(row=0, column=0, sticky="ew", padx=(0, 8))
     ttk.Button(primary_actions, text="Connect Schwab", command=self.connect_schwab).grid(row=0, column=1, sticky="ew", padx=(0, 8))
-    ttk.Button(primary_actions, text="Refresh Schwab", command=self.refresh_schwab_account).grid(row=0, column=2, sticky="ew", padx=(0, 8))
-    ttk.Button(primary_actions, text="Sync Hyperliquid", command=self.sync_hyperliquid_account).grid(row=0, column=3, sticky="ew", padx=(0, 8))
+    ttk.Button(primary_actions, text="Connect Hyperliquid", command=self.sync_hyperliquid_account).grid(row=0, column=2, sticky="ew", padx=(0, 8))
+    ttk.Button(primary_actions, text="Refresh Schwab", command=self.refresh_schwab_account).grid(row=0, column=3, sticky="ew", padx=(0, 8))
     ttk.Button(primary_actions, text="Tech Analysis", command=self.show_technical_analysis).grid(row=0, column=4, sticky="ew")
 
     secondary_actions = ttk.Frame(ticket, style="Panel.TFrame")

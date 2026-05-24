@@ -159,8 +159,8 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     primary_buttons = [
         ("Preview Risk", self.preview_order, "Accent.TButton"),
         ("Connect Schwab", self.connect_schwab, "TButton"),
+        ("Connect Hyperliquid", lambda: _sync_hyperliquid_combined(self), "TButton"),
         ("Refresh Schwab", self.refresh_schwab_account, "TButton"),
-        ("Sync Hyperliquid", lambda: _sync_hyperliquid_combined(self), "TButton"),
         ("Tech Analysis", self.show_technical_analysis, "TButton"),
     ]
     for column, (label, command, style_name) in enumerate(primary_buttons):
@@ -232,7 +232,7 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     self._set_preview_text(
         "Create a ticket, then use Preview Risk, Tech Analysis, or Trade Setup.\n\n"
         "Entry / Limit is the single planning price used for local risk, trade setup, and Schwab limit-order preview.\n\n"
-        "Sync Hyperliquid reads HYPE_WALLET_ADDRESS from .env when present and merges clean symbols like HYPE into the active cockpit portfolio."
+        "Connect Hyperliquid reads HYPE_WALLET_ADDRESS from .env when present and merges clean symbols like HYPE into the active cockpit portfolio."
     )
 
     explainer = ttk.LabelFrame(explainer_shell, text="Order Type Cheat Sheet", style="Card.TLabelframe")
