@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from datetime import datetime
+import os
 import tkinter as tk
-from tkinter import messagebox, ttk
-from typing import Type
+from tkinter import messagebox, simpledialog, ttk
+from typing import Any, Type
 
+from app.brokers.hyperliquid.client import HyperliquidInfoClient
 from app.brokers.hyperliquid.trading import (
     HyperliquidExecutionAdapter,
     HyperliquidOrderTicket,
@@ -24,6 +27,9 @@ def install_hyperliquid_trading_extension(app_cls: Type[tk.Tk]) -> None:
 
     app_cls._build_order_panel = _build_order_panel_with_hyperliquid  # type: ignore[method-assign]
     app_cls.submit_selected_venue = _submit_selected_venue  # type: ignore[attr-defined]
+    app_cls.load_selected_recent_orders = _load_selected_recent_orders  # type: ignore[attr-defined]
+    app_cls.load_selected_open_orders_only = _load_selected_open_orders_only  # type: ignore[attr-defined]
+    app_cls.load_hyperliquid_open_orders = _load_hyperliquid_open_orders  # type: ignore[attr-defined]
     app_cls.preview_hyperliquid_ticket = _preview_hyperliquid_ticket  # type: ignore[attr-defined]
     app_cls.show_hyperliquid_live_submit_safety_review = _show_hyperliquid_live_submit_safety_review  # type: ignore[attr-defined]
     app_cls.parse_hyperliquid_ticket = _parse_hyperliquid_ticket  # type: ignore[attr-defined]
@@ -127,8 +133,8 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
 
     _grid_action_button(plan_group, 1, 0, "Tech Analysis", self.show_technical_analysis, columnspan=2)
 
-    _grid_action_button(live_group, 0, 0, "Recent Orders", self.load_schwab_open_orders)
-    _grid_action_button(live_group, 0, 1, "Open Only", self.load_schwab_open_orders_only)
+    _grid_action_button(live_group, 0, 0, "Recent Orders", self.load_selected_recent_orders)
+    _grid_action_button(live_group, 0, 1, "Open Only", self.load_selected_open_orders_only)
     _grid_action_button(live_group, 1, 0, "Cancel Order", self.show_cancel_order_placeholder, "Danger.TButton")
     _grid_action_button(live_group, 1, 1, "LIVE Submit", self.submit_selected_venue, "Danger.TButton")
 
@@ -164,7 +170,7 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     self.preview_text.pack(fill=tk.BOTH, expand=True)
     self._set_preview_text(
         "Choose Schwab or Hyperliquid, create a ticket, then use the grouped planning and guarded live actions.\n\n"
-        "Schwab keeps the existing preview/order workflow. Hyperliquid uses the fast local submit hook once enabled in .env.\n\n"
+        "Recent Orders and Open Only now follow the selected venue. Schwab uses Schwab orders; Hyperliquid reads active open orders.\n\n"
         "For Hyperliquid, LIVE Submit checks env readiness + max notional, then calls the local hook."
     )
 
@@ -179,6 +185,99 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
         wraplength=560,
         style="Subtle.TLabel",
     ).pack(anchor=tk.W)
+
+
+def _selected_venue_is_hyperliquid(self: tk.Tk) -> bool:
+    return getattr(self, "trade_venue_var", tk.StringVar(value="Schwab")).get() == "Hyperliquid"
+
+
+def _load_selected_recent_orders(self: tk.Tk) -> None:
+    if _selected_venue_is_hyperliquid(self):
+        self.load_hyperliquid_open_orders(title="HYPERLIQUID ACTIVE ORDERS")
+        return
+    self.load_schwab_open_orders()
+
+
+def _load_selected_open_orders_only(self: tk.Tk) -> None:
+    if _selected_venue_is_hyperliquid(self):
+        self.load_hyperliquid_open_orders(title="HYPERLIQUID OPEN ORDERS ONLY")
+        return
+    self.load_schwab_open_orders_only()
+
+
+def _hyperliquid_user_address(self: tk.Tk) -> str | None:
+    address = os.getenv("HYPERLIQUID_USER_ADDRESS", "").strip()
+    if not address:
+        address = simpledialog.askstring(
+            "Hyperliquid Open Orders",
+            "Enter your Hyperliquid master/sub-account wallet address.\n\n"
+            "Use the account address, not the API/agent wallet address.",
+        ) or ""
+    return address.strip() or None
+
+
+def _load_hyperliquid_open_orders(self: tk.Tk, title: str = "HYPERLIQUID OPEN ORDERS") -> None:
+    address = _hyperliquid_user_address(self)
+    if not address:
+        return
+
+    try:
+        client = HyperliquidInfoClient()
+        snapshot = client.fetch_snapshot(address, include_open_orders=True)
+        self.hyperliquid_status_var.set(f"Hyperliquid: {len(snapshot.open_orders)} open orders")
+        self._set_preview_text(_format_hyperliquid_open_orders(title, snapshot.user, snapshot.open_orders, snapshot.fetched_at))
+    except Exception as exc:
+        self.hyperliquid_status_var.set("Hyperliquid: open orders failed")
+        messagebox.showerror("Load Hyperliquid open orders failed", str(exc))
+
+
+def _format_hyperliquid_open_orders(
+    title: str,
+    user: str,
+    open_orders: list[dict[str, Any]],
+    fetched_at: datetime,
+) -> str:
+    lines = [
+        title,
+        "=" * len(title),
+        "",
+        f"Wallet: {_short_address(user)}",
+        f"Fetched: {fetched_at.strftime('%Y-%m-%d %H:%M:%S')}",
+        "Mode: read-only public info API; no order was submitted, replaced, or canceled.",
+        "",
+        f"Open orders: {len(open_orders)}",
+        "",
+    ]
+
+    if not open_orders:
+        lines.append("- None")
+    else:
+        for index, order in enumerate(open_orders, start=1):
+            coin = order.get("coin", "UNKNOWN")
+            side = order.get("side", "UNKNOWN")
+            size = order.get("sz", order.get("size", "?"))
+            price = order.get("limitPx", order.get("price", "?"))
+            oid = order.get("oid", "?")
+            tif = order.get("tif") or order.get("timeInForce") or "--"
+            reduce_only = order.get("reduceOnly", order.get("reduce_only", False))
+            lines.append(
+                f"{index}. {coin} {side} {size} @ {price} · oid {oid} · TIF {tif} · reduce-only {reduce_only}"
+            )
+
+    lines.extend(
+        [
+            "",
+            "Note: In Hyperliquid mode, Recent Orders and Open Only are routed to Hyperliquid active open orders.",
+            "Switch Venue back to Schwab to use the Schwab recent/open order lookups.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _short_address(address: str) -> str:
+    if len(address) < 12:
+        return address
+    return f"{address[:6]}…{address[-4:]}"
 
 
 def _on_trading_venue_changed(self: tk.Tk) -> None:
