@@ -20,6 +20,7 @@ from app.ui.polished_theme import _make_paned
 
 TRADING_VENUES = ["Schwab", "Hyperliquid"]
 HYPERLIQUID_TIFS = ["Alo", "Ioc", "Gtc"]
+HYPERLIQUID_ADDRESS_ENV_KEYS = ("HYPE_WALLET_ADDRESS", "HYPERLIQUID_USER_ADDRESS")
 
 
 def install_hyperliquid_trading_extension(app_cls: Type[tk.Tk]) -> None:
@@ -205,13 +206,21 @@ def _load_selected_open_orders_only(self: tk.Tk) -> None:
     self.load_schwab_open_orders_only()
 
 
+def _hyperliquid_env_address() -> tuple[str, str] | tuple[None, None]:
+    for key in HYPERLIQUID_ADDRESS_ENV_KEYS:
+        address = os.getenv(key, "").strip()
+        if address:
+            return address, key
+    return None, None
+
+
 def _hyperliquid_user_address(self: tk.Tk) -> str | None:
-    address = os.getenv("HYPERLIQUID_USER_ADDRESS", "").strip()
+    address, _source_key = _hyperliquid_env_address()
     if not address:
         address = simpledialog.askstring(
             "Hyperliquid Open Orders",
             "Enter your Hyperliquid master/sub-account wallet address.\n\n"
-            "Use the account address, not the API/agent wallet address.",
+            "Tip: set HYPE_WALLET_ADDRESS in .env to skip this prompt.",
         ) or ""
     return address.strip() or None
 
@@ -224,8 +233,19 @@ def _load_hyperliquid_open_orders(self: tk.Tk, title: str = "HYPERLIQUID OPEN OR
     try:
         client = HyperliquidInfoClient()
         snapshot = client.fetch_snapshot(address, include_open_orders=True)
+        selected_coin = getattr(self, "hyperliquid_coin_var", tk.StringVar(value="")).get().strip()
+        _address, source_key = _hyperliquid_env_address()
         self.hyperliquid_status_var.set(f"Hyperliquid: {len(snapshot.open_orders)} open orders")
-        self._set_preview_text(_format_hyperliquid_open_orders(title, snapshot.user, snapshot.open_orders, snapshot.fetched_at))
+        self._set_preview_text(
+            _format_hyperliquid_open_orders(
+                title,
+                snapshot.user,
+                snapshot.open_orders,
+                snapshot.fetched_at,
+                selected_coin=selected_coin,
+                address_source=source_key or "manual entry",
+            )
+        )
     except Exception as exc:
         self.hyperliquid_status_var.set("Hyperliquid: open orders failed")
         messagebox.showerror("Load Hyperliquid open orders failed", str(exc))
@@ -236,12 +256,16 @@ def _format_hyperliquid_open_orders(
     user: str,
     open_orders: list[dict[str, Any]],
     fetched_at: datetime,
+    *,
+    selected_coin: str = "",
+    address_source: str = "manual entry",
 ) -> str:
     lines = [
         title,
         "=" * len(title),
         "",
         f"Wallet: {_short_address(user)}",
+        f"Address source: {address_source}",
         f"Fetched: {fetched_at.strftime('%Y-%m-%d %H:%M:%S')}",
         "Mode: read-only public info API; no order was submitted, replaced, or canceled.",
         "",
@@ -253,25 +277,51 @@ def _format_hyperliquid_open_orders(
         lines.append("- None")
     else:
         for index, order in enumerate(open_orders, start=1):
-            coin = order.get("coin", "UNKNOWN")
-            side = order.get("side", "UNKNOWN")
+            coin = _display_order_coin(order.get("coin", "UNKNOWN"), selected_coin)
+            side = _display_order_side(order.get("side", "UNKNOWN"))
             size = order.get("sz", order.get("size", "?"))
             price = order.get("limitPx", order.get("price", "?"))
             oid = order.get("oid", "?")
             tif = order.get("tif") or order.get("timeInForce") or "--"
             reduce_only = order.get("reduceOnly", order.get("reduce_only", False))
-            lines.append(
-                f"{index}. {coin} {side} {size} @ {price} · oid {oid} · TIF {tif} · reduce-only {reduce_only}"
+            lines.extend(
+                [
+                    f"Order {index}",
+                    f"- Market: {coin}",
+                    f"- Side: {side}",
+                    f"- Size: {size}",
+                    f"- Limit price: {price}",
+                    f"- Order ID: {oid}",
+                    f"- TIF: {tif}",
+                    f"- Reduce-only: {reduce_only}",
+                    "",
+                ]
             )
 
     lines.extend(
         [
-            "",
             "Note: In Hyperliquid mode, Recent Orders and Open Only are routed to Hyperliquid active open orders.",
             "Switch Venue back to Schwab to use the Schwab recent/open order lookups.",
         ]
     )
     return "\n".join(lines)
+
+
+def _display_order_coin(raw_coin: Any, selected_coin: str) -> str:
+    coin = str(raw_coin or "UNKNOWN").strip()
+    selected = selected_coin.strip().upper()
+    if coin.startswith("@") and selected:
+        return f"{selected} ({coin})"
+    return coin
+
+
+def _display_order_side(raw_side: Any) -> str:
+    side = str(raw_side or "UNKNOWN").strip().upper()
+    if side == "B":
+        return "BUY"
+    if side == "A":
+        return "SELL"
+    return side
 
 
 def _short_address(address: str) -> str:
