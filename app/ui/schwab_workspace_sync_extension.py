@@ -31,6 +31,8 @@ def _polish_schwab_workspace(self: tk.Tk) -> None:
     if output is None:
         return
 
+    _embed_options_lab_under_schwab(self)
+
     for button in _walk_buttons(self):
         label = str(button.cget("text"))
         if label == "Open Options Lab" and _inside_labelframe(button, "Schwab Trading Workspace"):
@@ -52,6 +54,60 @@ def _polish_schwab_workspace(self: tk.Tk) -> None:
             )
 
     _set_schwab_workspace_intro(self)
+
+
+def _embed_options_lab_under_schwab(self: tk.Tk) -> None:
+    """Keep Schwab stock and option planning in one top-level Schwab tab.
+
+    The base options extension still creates an Options What-If Lab tab for backward
+    compatibility. This polish pass hides that separate top-level tab and builds the
+    same lab at the bottom of the Schwab workspace so Schwab owns stocks, ETFs, and
+    options while Hyperliquid stays perp-only.
+    """
+
+    if getattr(self, "_schwab_options_lab_embedded", False):
+        _hide_top_level_options_tab(self)
+        return
+
+    notebook = _find_notebook(self)
+    if notebook is None:
+        return
+
+    schwab_tab = None
+    for tab_id in notebook.tabs():
+        if notebook.tab(tab_id, "text") == "Schwab Trading":
+            schwab_tab = notebook.nametowidget(tab_id)
+            break
+    if schwab_tab is None:
+        return
+
+    embedded = ttk.LabelFrame(
+        schwab_tab,
+        text="Schwab Options What-If Lab",
+        style="Card.TLabelframe",
+    )
+    embedded.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
+    embedded.columnconfigure(0, weight=1)
+    embedded.columnconfigure(1, weight=1)
+    embedded.rowconfigure(1, weight=1)
+
+    options_lab_extension.build_options_lab_tab(self, embedded)
+    options_lab_extension._build_options_lab_market_loader(self, embedded)
+
+    schwab_tab.rowconfigure(2, weight=1)
+    self._schwab_options_lab_embedded = True
+    self._schwab_options_lab_frame = embedded
+    _hide_top_level_options_tab(self)
+
+
+def _hide_top_level_options_tab(self: tk.Tk) -> None:
+    notebook = _find_notebook(self)
+    if notebook is None:
+        return
+    for tab_id in notebook.tabs():
+        if notebook.tab(tab_id, "text") == "Options What-If Lab":
+            notebook.hide(tab_id)
+            return
 
 
 def _run_schwab_workspace_action(self: tk.Tk, *command_names: str) -> None:
@@ -81,13 +137,22 @@ def _set_schwab_workspace_intro(self: tk.Tk) -> None:
         output,
         "SCHWAB TRADING WORKSPACE\n"
         "========================\n\n"
-        "Use this tab for stocks, ETFs, Schwab previews, order history, and guarded live Schwab actions.\n\n"
+        "Use this tab for stocks, ETFs, Schwab previews, order history, guarded live Schwab actions, and options what-if planning.\n\n"
         "Sync Schwab refreshes account balances and positions through the Trader API account snapshot flow.\n\n"
-        "Options tickets still live in the Options What-If Lab; use Options Lab when the setup needs calls/puts instead of shares.",
+        "The Schwab Options What-If Lab is embedded below the stock/ETF ticket because options are a Schwab-only workflow in this cockpit.",
     )
 
 
 def _select_options_lab(self: tk.Tk) -> None:
+    embedded = getattr(self, "_schwab_options_lab_frame", None)
+    if embedded is not None:
+        try:
+            embedded.focus_set()
+            embedded.tkraise()
+            return
+        except Exception:
+            pass
+
     notebook = _find_notebook(self)
     if notebook is None:
         return
