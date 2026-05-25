@@ -147,16 +147,19 @@ def _preview_hyperliquid_ticket_overview(self: tk.Tk) -> None:
         _ensure_perp_vars(self)
         ticket = self.parse_hyperliquid_ticket()
         config = HyperliquidTradingConfig()
-        leverage = _optional_float(getattr(self, "hyperliquid_leverage_var").get(), default=1.0)
-        fee_rate = _optional_float(getattr(self, "hyperliquid_fee_rate_var").get(), default=0.045)
+        leverage = _optional_float(getattr(self, "hyperliquid_leverage_var").get(), default=1.0) or 1.0
+        fee_rate = _optional_float(getattr(self, "hyperliquid_fee_rate_var").get(), default=0.045) or 0.045
         tp_price = _optional_float(getattr(self, "hyperliquid_target_price_var").get(), default=None)
         sl_price = _optional_float(getattr(self, "stop_price_var").get(), default=None)
         attach_tpsl = bool(self.hyperliquid_attach_tpsl_var.get())
         notional = ticket.size * ticket.limit_price
         margin = notional / leverage if leverage > 0 else notional
+        collateral = _planning_collateral_usdc(self, margin)
+        rough_liq = _rough_liquidation_price(ticket.limit_price, ticket.size, ticket.is_buy, margin, collateral)
         closing_side = "SELL" if ticket.is_buy else "BUY"
         main_direction = "BUY / LONG" if ticket.is_buy else "SELL / SHORT"
         reduce_text = "reduce-only" if ticket.reduce_only else "not reduce-only"
+        hedge_lines = _spot_hedge_lines(self, ticket.coin, ticket.size, ticket.is_buy, ticket.limit_price)
 
         lines = [
             "HYPERLIQUID ORDER OVERVIEW",
@@ -170,6 +173,8 @@ def _preview_hyperliquid_ticket_overview(self: tk.Tk) -> None:
             f"- {reduce_text}",
             f"- Order value: ${notional:,.2f}",
             f"- Estimated margin: ${margin:,.2f}",
+            f"- Collateral used for liq estimate: ${collateral:,.2f}",
+            f"- Rough liquidation estimate: {_format_liq(rough_liq)}",
             f"- Fee estimate: {fee_rate:g}% per side",
             "",
             "Protection",
@@ -186,11 +191,7 @@ def _preview_hyperliquid_ticket_overview(self: tk.Tk) -> None:
         else:
             lines.append("- Attach TP/SL is off. LIVE Submit is a single main order only.")
 
-        lines.extend([
-            "",
-            "Environment gates",
-            *config.validation_lines(),
-        ])
+        lines.extend(["", *hedge_lines, "", "Environment gates", *config.validation_lines()])
         self.hyperliquid_status_var.set("Hyperliquid: overview ready")
         self._set_preview_text("\n".join(lines))
     except Exception as exc:
@@ -202,8 +203,8 @@ def _run_hyperliquid_perp_what_if_clean(self: tk.Tk) -> None:
     try:
         _ensure_perp_vars(self)
         ticket = self.parse_hyperliquid_ticket()
-        leverage = _optional_float(getattr(self, "hyperliquid_leverage_var").get(), default=1.0)
-        fee_rate = _optional_float(getattr(self, "hyperliquid_fee_rate_var").get(), default=0.045)
+        leverage = _optional_float(getattr(self, "hyperliquid_leverage_var").get(), default=1.0) or 1.0
+        fee_rate = _optional_float(getattr(self, "hyperliquid_fee_rate_var").get(), default=0.045) or 0.045
         tp_price = _optional_float(getattr(self, "hyperliquid_target_price_var").get(), default=None)
         sl_price = _optional_float(getattr(self, "stop_price_var").get(), default=None)
         is_long = ticket.is_buy
@@ -218,10 +219,12 @@ def _run_hyperliquid_perp_what_if_clean(self: tk.Tk) -> None:
         sl_case = _perp_case(ticket.limit_price, sl_price, ticket.size, is_long, leverage, fee_rate)
         notional = ticket.limit_price * ticket.size
         margin = notional / leverage if leverage > 0 else notional
-        rough_liq = _rough_liquidation_price(ticket.limit_price, is_long, leverage)
+        collateral = _planning_collateral_usdc(self, margin)
+        rough_liq = _rough_liquidation_price(ticket.limit_price, ticket.size, is_long, margin, collateral)
         rr = _risk_reward(tp_case["net_pnl"], sl_case["net_pnl"])
         direction = "LONG" if is_long else "SHORT"
         attach = "on" if self.hyperliquid_attach_tpsl_var.get() else "off"
+        hedge_lines = _spot_hedge_lines(self, ticket.coin, ticket.size, is_long, ticket.limit_price)
 
         self.hyperliquid_status_var.set("Hyperliquid: what-if ready")
         self._set_preview_text(
@@ -235,8 +238,10 @@ def _run_hyperliquid_perp_what_if_clean(self: tk.Tk) -> None:
             f"Attach TP/SL: {attach}\n"
             f"Order value: ${notional:,.2f}\n"
             f"Estimated margin required: ${margin:,.2f}\n"
+            f"Collateral used for liq estimate: ${collateral:,.2f}\n"
             f"Fee estimate: {fee_rate:g}% per side\n"
-            f"Rough liquidation warning line: ${rough_liq:,.4f}\n\n"
+            f"Rough liquidation estimate: {_format_liq(rough_liq)}\n\n"
+            + "\n".join(hedge_lines) + "\n\n"
             "Take Profit scenario\n"
             f"- TP Price: ${tp_price:,.4f}\n"
             f"- Gross P&L: ${tp_case['gross_pnl']:+,.2f}\n"
@@ -251,11 +256,81 @@ def _run_hyperliquid_perp_what_if_clean(self: tk.Tk) -> None:
             f"- ROI on estimated margin: {sl_case['margin_roi_percent']:+.2f}%\n\n"
             "Setup quality\n"
             f"- Reward/risk using net P&L: {rr}\n"
-            "- TP/SL fields are scenario inputs unless Attach TP/SL is on and child-order execution is wired."
+            "- TP/SL fields are scenario inputs unless Attach TP/SL is on and child-order execution is wired.\n"
+            "- Liquidation is an estimate: Hyperliquid can also account for maintenance margin, funding, open orders, and account mode."
         )
     except Exception as exc:
         self.hyperliquid_status_var.set("Hyperliquid: what-if failed")
         messagebox.showerror("Hyperliquid perp what-if failed", str(exc))
+
+
+def _planning_collateral_usdc(self: tk.Tk, fallback_margin: float) -> float:
+    try:
+        portfolio = self.broker.get_portfolio()
+    except Exception:
+        return max(fallback_margin, 0.0)
+
+    hyperliquid_usdc = 0.0
+    for cash in portfolio.cash_positions.values():
+        if cash.symbol.upper() in {"USDC", "USD"} and "HYPERLIQUID" in cash.source.upper():
+            hyperliquid_usdc += cash.amount
+    if hyperliquid_usdc > 0:
+        return hyperliquid_usdc
+    return max(portfolio.cash, fallback_margin, 0.0)
+
+
+def _rough_liquidation_price(entry: float, size: float, is_long: bool, margin_required: float, collateral: float) -> float | None:
+    """Approximate cross-style liquidation using available USDC buffer.
+
+    Hyperliquid's UI uses account state, maintenance margin, open orders, and account mode.
+    This estimate is intentionally conservative and closer to the exchange UI than the old
+    isolated entry +/- 1/leverage shortcut.
+    """
+    if size <= 0 or entry <= 0:
+        return None
+    loss_budget = max(collateral - margin_required, 0.0)
+    if is_long:
+        return max(entry - loss_budget / size, 0.0)
+    return entry + loss_budget / size
+
+
+def _spot_hedge_lines(self: tk.Tk, coin: str, perp_size: float, is_long: bool, entry: float) -> list[str]:
+    spot = _spot_position_for_coin(self, coin)
+    if spot is None:
+        return ["Spot hedge context", f"- No synced {coin} spot position found in the cockpit portfolio."]
+
+    spot_qty = spot.quantity
+    spot_value = spot_qty * spot.last_price
+    perp_notional = perp_size * entry
+    hedge_ratio = (perp_size / spot_qty * 100.0) if spot_qty > 0 else 0.0
+    net_delta = spot_qty + perp_size if is_long else spot_qty - perp_size
+    net_label = "net long" if net_delta > 0 else "net short" if net_delta < 0 else "flat"
+    if is_long:
+        interpretation = "This perp adds to your existing spot exposure. It is not a hedge."
+    else:
+        interpretation = "This short offsets part of your spot exposure. A 100% ratio is roughly spot-neutral before fees/funding."
+
+    return [
+        "Spot hedge context",
+        f"- Synced spot: {spot_qty:g} {coin} worth about ${spot_value:,.2f}",
+        f"- Perp notional: ${perp_notional:,.2f}",
+        f"- Hedge ratio vs spot size: {hedge_ratio:.1f}%",
+        f"- Net directional size after this ticket: {net_delta:+g} {coin} ({net_label})",
+        f"- {interpretation}",
+    ]
+
+
+def _spot_position_for_coin(self: tk.Tk, coin: str):
+    try:
+        portfolio = self.broker.get_portfolio()
+    except Exception:
+        return None
+    candidates = (f"HL:{coin}-SPOT", f"{coin}-SPOT", f"HL:{coin}", coin)
+    for symbol in candidates:
+        position = portfolio.positions.get(symbol.upper())
+        if position is not None and position.quantity > 0:
+            return position
+    return None
 
 
 def _grid_replacement_use_mid(
@@ -326,12 +401,6 @@ def _perp_case(entry: float, exit_price: float, size: float, is_long: bool, leve
     return {"move_percent": signed_move * 100.0, "gross_pnl": gross_pnl, "fees": fees, "net_pnl": net_pnl, "margin_roi_percent": margin_roi_percent}
 
 
-def _rough_liquidation_price(entry: float, is_long: bool, leverage: float) -> float:
-    if leverage <= 1:
-        return 0.0 if is_long else entry * 2.0
-    return entry * (1.0 - 1.0 / leverage) if is_long else entry * (1.0 + 1.0 / leverage)
-
-
 def _risk_reward(reward_net: float, stop_net: float) -> str:
     risk = abs(min(stop_net, 0.0))
     reward = max(reward_net, 0.0)
@@ -352,6 +421,12 @@ def _optional_float(raw: object, *, default: float | None) -> float | None:
 
 def _format_price(value: float) -> str:
     return f"{value:.4f}".rstrip("0").rstrip(".")
+
+
+def _format_liq(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"${value:,.4f}"
 
 
 def _walk_widgets(root: tk.Widget):
