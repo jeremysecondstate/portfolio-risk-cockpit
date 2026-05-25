@@ -133,7 +133,7 @@ def _build_header(self: tk.Tk, parent: ttk.Frame) -> None:
     status_stack = ttk.Frame(header, style="Hero.TFrame")
     status_stack.grid(row=0, column=1, sticky="e")
     ttk.Label(status_stack, text="TRADE CENTER", style="Mode.TLabel").pack(anchor=tk.E)
-    ttk.Label(status_stack, text="Live actions require explicit safety checks", style="HeroSubtle.TLabel").pack(anchor=tk.E, pady=(4, 0))
+    ttk.Label(status_stack, text="Lock In", style="HeroSubtle.TLabel").pack(anchor=tk.E, pady=(4, 0))
 
 
 def _build_portfolio_panel(self: tk.Tk, parent: ttk.Frame) -> None:
