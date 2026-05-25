@@ -77,6 +77,25 @@ def _grid_action_button(
     )
 
 
+def _use_mid_from_cockpit(self: tk.Tk) -> None:
+    """Route the Cockpit Trade Planner's inline Use Mid button to the Hyperliquid helper."""
+    _ensure_hyperliquid_vars(self)
+    self.trade_venue_var.set("Hyperliquid")
+    try:
+        self.on_trading_venue_changed()
+    except Exception:
+        pass
+
+    command = getattr(self, "use_hyperliquid_mid_market", None)
+    if callable(command):
+        command()
+        return
+    messagebox.showinfo(
+        "Use Mid unavailable",
+        "The Hyperliquid mid-market helper is not installed yet. Restart the app after pulling the latest changes.",
+    )
+
+
 def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     _ensure_hyperliquid_vars(self)
 
@@ -109,7 +128,7 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     self._grid_row(ticket, 1, "Symbol", ttk.Entry(ticket, textvariable=self.symbol_var), "Side", ttk.Combobox(ticket, textvariable=self.side_var, values=[s.value for s in OrderSide], state="readonly"))
     self._grid_row(ticket, 2, "Order type", ttk.Combobox(ticket, textvariable=self.order_type_var, values=[o.value for o in OrderType], state="readonly"), "Time", ttk.Combobox(ticket, textvariable=self.time_in_force_var, values=[t.value for t in TimeInForce], state="readonly"))
     self._grid_row(ticket, 3, "Quantity", ttk.Entry(ticket, textvariable=self.quantity_var), "Entry / Limit", ttk.Entry(ticket, textvariable=self.limit_price_var))
-    self._grid_row(ticket, 4, "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var), "Type CONFIRM", ttk.Entry(ticket, textvariable=self.confirmation_var))
+    self._grid_row(ticket, 4, "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var), "Use Mid", ttk.Button(ticket, text="Use Mid", command=lambda: _use_mid_from_cockpit(self), style="Accent.TButton"))
     self._grid_row(
         ticket,
         5,
@@ -174,7 +193,7 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     self._set_preview_text(
         "Choose Schwab or Hyperliquid, create a ticket, then use the grouped planning and guarded live actions.\n\n"
         "Recent Orders and Open Only now follow the selected venue. Schwab uses Schwab orders; Hyperliquid reads active open orders.\n\n"
-        "For Hyperliquid, LIVE Submit checks env readiness + max notional, then calls the local hook."
+        "For Hyperliquid, Use Mid pulls the current Hyperliquid allMids price into Entry / Limit. LIVE Submit checks env readiness + max notional, then calls the local hook."
     )
 
     explainer = ttk.LabelFrame(explainer_shell, text="Order Type Cheat Sheet", style="Card.TLabelframe")
