@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import ttk
-from typing import Type
+from typing import Callable, Type
 
 from app.ui.options_lab import build_options_lab_tab, run_options_what_if
 from app.ui.options_lab_extension import (
