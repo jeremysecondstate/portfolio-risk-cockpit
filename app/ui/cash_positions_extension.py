@@ -174,7 +174,9 @@ def _refresh_portfolio_with_cash_rows(self: tk.Tk) -> None:
         self.positions_table.delete(row_id)
 
     self.positions_table.tag_configure("cash_position", foreground="#334155")
-    self.positions_table.tag_configure("perp_position", foreground="#7c2d12")
+    self.positions_table.tag_configure("pnl_positive", foreground="#047857")
+    self.positions_table.tag_configure("pnl_negative", foreground="#b91c1c")
+    self.positions_table.tag_configure("pnl_neutral", foreground="#334155")
     total_value = max(portfolio.total_value, 0.01)
 
     for cash in portfolio.display_cash_positions():
@@ -208,13 +210,6 @@ def _refresh_portfolio_with_cash_rows(self: tk.Tk) -> None:
         p = portfolio.positions[symbol]
         position_type = _position_type(p)
         weight = (p.market_value / total_value) * 100
-        row_tag = (
-            "perp_position"
-            if position_type.startswith("Perp")
-            else "pnl_positive"
-            if p.unrealized_profit_loss >= 0
-            else "pnl_negative"
-        )
         self.positions_table.insert(
             "",
             tk.END,
@@ -234,7 +229,28 @@ def _refresh_portfolio_with_cash_rows(self: tk.Tk) -> None:
                     "day_pnl": polished_theme._format_optional_money(p.day_profit_loss),
                 },
             ),
-            tags=(row_tag,),
+            tags=(_position_row_tag(p),),
         )
 
     polished_theme._update_risk_alerts(self, portfolio)
+
+
+def _position_row_tag(position: Position) -> str:
+    """Choose a live red/green row color from the most active P&L signal.
+
+    Tk's built-in Treeview supports row foreground colors, not independent
+    per-cell foreground colors. Use Day P&L when it exists, because that is the
+    number most likely to flip during live refreshes; otherwise fall back to the
+    open/unrealized P&L. This removes the old fixed red Perp color and makes
+    positive rows green, negative rows red, and flat rows neutral.
+    """
+
+    driver = position.day_profit_loss
+    if driver is None or abs(driver) <= 0.005:
+        driver = position.unrealized_profit_loss
+
+    if driver > 0.005:
+        return "pnl_positive"
+    if driver < -0.005:
+        return "pnl_negative"
+    return "pnl_neutral"
