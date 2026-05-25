@@ -6,10 +6,11 @@ from tkinter import ttk
 from app.ui import options_lab_extension
 
 
-def install_hyperliquid_perp_ticket_use_mid_fix(app_cls: type[tk.Tk]) -> None:
+def install_hyperliquid_perp_ticket_use_mid_fix(app_cls: type[tk.Tk] | None = None) -> None:
     """Replace the unused Hyperliquid Type CONFIRM field with a Use Mid button."""
     _patch_hyperliquid_tab_builder()
-    _patch_layout_after_build(app_cls)
+    if app_cls is not None:
+        _patch_layout_after_build(app_cls)
 
 
 def _patch_hyperliquid_tab_builder() -> None:
