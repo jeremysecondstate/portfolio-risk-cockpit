@@ -4,6 +4,7 @@ from app.ui.account_sources_fix import install_account_sources_fix
 from app.ui.advanced_actions_extension import install_advanced_actions_extension
 from app.ui.cash_positions_extension import install_cash_positions_extension
 from app.ui.hyperliquid_notifications_fix import install_hyperliquid_notifications_fix
+from app.ui.hyperliquid_perp_ticket_use_mid_fix import install_hyperliquid_perp_ticket_use_mid_fix
 from app.ui.hyperliquid_trading_extension import install_hyperliquid_trading_extension
 from app.ui.options_core_math_extension import install_options_core_math_extension
 from app.ui.options_lab_extension import install_options_lab_extension
@@ -21,6 +22,7 @@ def main() -> None:
     install_advanced_actions_extension(SchwabTradingCockpitApp)
     install_hyperliquid_trading_extension(SchwabTradingCockpitApp)
     install_hyperliquid_notifications_fix(SchwabTradingCockpitApp)
+    install_hyperliquid_perp_ticket_use_mid_fix()
     install_options_lab_extension(SchwabTradingCockpitApp)
     install_venue_mid_extension(SchwabTradingCockpitApp)
     install_options_core_math_extension()
