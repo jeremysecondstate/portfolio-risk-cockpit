@@ -14,6 +14,8 @@ from app.brokers.hyperliquid.client import (
 
 HYPERLIQUID_ADDRESS_ENV_KEYS = ("HYPE_WALLET_ADDRESS", "HYPERLIQUID_USER_ADDRESS")
 REFRESH_DUE_AFTER_MS = 5 * 60 * 1000
+AUTO_REFRESH_AFTER_MS = 3 * 60 * 1000
+AUTO_REFRESH_ENV_KEY = "COCKPIT_AUTO_REFRESH_MS"
 
 
 def install_unified_refresh_extension(app_cls: Type[tk.Tk]) -> None:
@@ -22,6 +24,7 @@ def install_unified_refresh_extension(app_cls: Type[tk.Tk]) -> None:
     previous_build_order_panel = app_cls._build_order_panel
     app_cls._build_order_panel = _wrap_build_order_panel(previous_build_order_panel)  # type: ignore[method-assign]
     app_cls.refresh_connected_portfolio = _refresh_connected_portfolio  # type: ignore[attr-defined]
+    app_cls.refresh_connected_portfolio_silent = _refresh_connected_portfolio_silent  # type: ignore[attr-defined]
 
 
 def _wrap_build_order_panel(previous_build_order_panel: Callable[[tk.Tk, ttk.Frame], None]) -> Callable[[tk.Tk, ttk.Frame], None]:
@@ -50,6 +53,8 @@ def _replace_connection_refresh_controls(self: tk.Tk) -> None:
         elif label == "Reset Session":
             child.destroy()
 
+    _schedule_auto_refresh(self)
+
 
 def _configure_refresh_status_styles(self: tk.Tk) -> None:
     style = ttk.Style(self)
@@ -73,6 +78,9 @@ def _ensure_refresh_status_label(self: tk.Tk, parent: ttk.LabelFrame) -> None:
     )
     self.refresh_portfolio_status_label.grid(row=1, column=1, sticky="w", padx=(6, 0), pady=(0, 4))
     self.refresh_portfolio_due_after_id = None
+    self.refresh_portfolio_auto_after_id = None
+    self.refresh_portfolio_auto_enabled = True
+    self.refresh_portfolio_auto_running = False
 
 
 def _set_refresh_status(self: tk.Tk, text: str, style_name: str) -> None:
@@ -103,6 +111,57 @@ def _schedule_refresh_due_status(self: tk.Tk) -> None:
     )
 
 
+def _auto_refresh_interval_ms() -> int:
+    raw_value = os.getenv(AUTO_REFRESH_ENV_KEY, "").strip()
+    if not raw_value:
+        return AUTO_REFRESH_AFTER_MS
+    try:
+        interval = int(raw_value)
+    except ValueError:
+        return AUTO_REFRESH_AFTER_MS
+    return max(interval, 60_000)
+
+
+def _cancel_auto_refresh(self: tk.Tk) -> None:
+    after_id = getattr(self, "refresh_portfolio_auto_after_id", None)
+    if after_id is None:
+        return
+    try:
+        self.after_cancel(after_id)
+    except Exception:
+        pass
+    self.refresh_portfolio_auto_after_id = None
+
+
+def _schedule_auto_refresh(self: tk.Tk) -> None:
+    if not getattr(self, "refresh_portfolio_auto_enabled", True):
+        return
+    _cancel_auto_refresh(self)
+    self.refresh_portfolio_auto_after_id = self.after(
+        _auto_refresh_interval_ms(),
+        lambda app=self: _run_auto_refresh(app),
+    )
+
+
+def _run_auto_refresh(self: tk.Tk) -> None:
+    if getattr(self, "refresh_portfolio_auto_running", False):
+        _schedule_auto_refresh(self)
+        return
+
+    try:
+        if not self.winfo_exists():
+            return
+    except Exception:
+        return
+
+    self.refresh_portfolio_auto_running = True
+    try:
+        _refresh_connected_portfolio(self, automated=True)
+    finally:
+        self.refresh_portfolio_auto_running = False
+        _schedule_auto_refresh(self)
+
+
 def _find_label_frame_by_text(root: tk.Widget, text: str) -> ttk.LabelFrame | None:
     for child in root.winfo_children():
         if isinstance(child, ttk.LabelFrame) and str(child.cget("text")) == text:
@@ -113,11 +172,15 @@ def _find_label_frame_by_text(root: tk.Widget, text: str) -> ttk.LabelFrame | No
     return None
 
 
-def _refresh_connected_portfolio(self: tk.Tk) -> None:
+def _refresh_connected_portfolio_silent(self: tk.Tk) -> None:
+    _refresh_connected_portfolio(self, automated=True)
+
+
+def _refresh_connected_portfolio(self: tk.Tk, automated: bool = False) -> None:
     """Refresh Schwab, then Hyperliquid, through one user-facing action."""
 
     _cancel_refresh_due_timer(self)
-    _set_refresh_status(self, "↻ refreshing...", "RefreshWorking.TLabel")
+    _set_refresh_status(self, "↻ auto-refreshing..." if automated else "↻ refreshing...", "RefreshWorking.TLabel")
 
     results: list[str] = [
         "PORTFOLIO REFRESH",
@@ -139,7 +202,7 @@ def _refresh_connected_portfolio(self: tk.Tk) -> None:
         results.append(f"- Schwab refresh failed: {exc}")
 
     try:
-        hyperliquid_source_message, hyperliquid_preview = _sync_hyperliquid_account_silent(self)
+        hyperliquid_source_message, hyperliquid_preview = _sync_hyperliquid_account_silent(self, automated=automated)
         results.append(f"- {hyperliquid_source_message}")
     except Exception as exc:
         hyperliquid_error = exc
@@ -167,11 +230,12 @@ def _refresh_connected_portfolio(self: tk.Tk) -> None:
             failed.append("Schwab")
         if hyperliquid_error:
             failed.append("Hyperliquid")
-        _set_refresh_status(self, "● refresh failed", "RefreshDue.TLabel")
-        messagebox.showerror("Portfolio refresh incomplete", f"Could not refresh: {', '.join(failed)}")
+        _set_refresh_status(self, "● auto-refresh failed" if automated else "● refresh failed", "RefreshDue.TLabel")
+        if not automated:
+            messagebox.showerror("Portfolio refresh incomplete", f"Could not refresh: {', '.join(failed)}")
         return
 
-    _set_refresh_status(self, "✓ refreshed", "RefreshSuccess.TLabel")
+    _set_refresh_status(self, "✓ auto-refreshed" if automated else "✓ refreshed", "RefreshSuccess.TLabel")
     _schedule_refresh_due_status(self)
 
 
@@ -193,16 +257,18 @@ def _hyperliquid_address_from_env() -> str:
     return ""
 
 
-def _sync_hyperliquid_account_silent(self: tk.Tk) -> tuple[str, str | None]:
+def _sync_hyperliquid_account_silent(self: tk.Tk, automated: bool = False) -> tuple[str, str | None]:
     default_address = _hyperliquid_address_from_env()
-    address = default_address or simpledialog.askstring(
-        "Hyperliquid Sync",
-        "Enter your Hyperliquid master/sub-account wallet address.\n\n"
-        "Tip: save HYPE_WALLET_ADDRESS=0x... in .env to skip this prompt.\n\n"
-        "Use the account address, not the API/agent wallet address.",
-    )
+    address = default_address
+    if not address and not automated:
+        address = simpledialog.askstring(
+            "Hyperliquid Sync",
+            "Enter your Hyperliquid master/sub-account wallet address.\n\n"
+            "Tip: save HYPE_WALLET_ADDRESS=0x... in .env to skip this prompt.\n\n"
+            "Use the account address, not the API/agent wallet address.",
+        )
     if not address:
-        raise RuntimeError("Hyperliquid refresh canceled; no wallet address was provided.")
+        raise RuntimeError("Hyperliquid refresh skipped; save HYPE_WALLET_ADDRESS=0x... in .env to enable automatic Hyperliquid sync.")
 
     client = HyperliquidInfoClient()
     snapshot = client.fetch_snapshot(address)
