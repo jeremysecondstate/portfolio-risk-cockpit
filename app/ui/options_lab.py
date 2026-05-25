@@ -77,17 +77,12 @@ class PortfolioContext:
 
 
 def build_options_lab_tab(app: tk.Tk, parent: ttk.Frame) -> None:
-    """Build a safe, hypothetical options/stock what-if tab.
-
-    This tab deliberately does not place, preview, or recommend trades. It only models
-    approximate risk, margin, technical context, and portfolio impact for a user-entered
-    scenario.
-    """
+    """Build a compact Schwab options what-if workspace."""
 
     _init_options_vars(app)
 
-    parent.columnconfigure(0, weight=2)
-    parent.columnconfigure(1, weight=3)
+    parent.columnconfigure(0, weight=5)
+    parent.columnconfigure(1, weight=4)
     parent.rowconfigure(1, weight=1)
 
     _build_options_disclaimer(parent)
@@ -130,16 +125,15 @@ def _init_options_vars(app: tk.Tk) -> None:
 
 
 def _build_options_disclaimer(parent: ttk.Frame) -> None:
-    banner = ttk.LabelFrame(parent, text="Options What-If Lab", style="Card.TLabelframe")
-    banner.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+    banner = ttk.LabelFrame(parent, text="Options What-If", style="Card.TLabelframe")
+    banner.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
     ttk.Label(
         banner,
         text=(
-            "Hypothetical scenario modeling only. This tab estimates risk, margin usage, technical context, "
-            "and portfolio impact. It mirrors a Thinkorswim-style ticket, but does not generate trade recommendations, "
-            "submit orders, or replace broker margin requirements."
+            "Schwab-only options planner. Enter the ticket, run the what-if, and review risk/margin. "
+            "No orders are submitted from this lab."
         ),
-        wraplength=1020,
+        wraplength=1100,
         style="Subtle.TLabel",
     ).pack(anchor=tk.W)
 
@@ -149,56 +143,30 @@ def _build_scenario_builder(app: tk.Tk, parent: ttk.Frame) -> None:
     left.grid(row=1, column=0, sticky="nsew")
     left.columnconfigure(0, weight=1)
 
-    quote = ttk.LabelFrame(left, text="Symbol Quote", style="Card.TLabelframe")
-    quote.grid(row=0, column=0, sticky="ew")
-    quote.columnconfigure(1, weight=1)
-    quote.columnconfigure(3, weight=1)
-    _grid_pair(quote, 0, "Symbol", ttk.Entry(quote, textvariable=app.options_symbol_var), "Underlying", ttk.Entry(quote, textvariable=app.options_underlying_price_var))
-
     ticket = ttk.LabelFrame(left, text="Option Trade Ticket", style="Card.TLabelframe")
-    ticket.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+    ticket.grid(row=0, column=0, sticky="ew")
     ticket.columnconfigure(1, weight=1)
     ticket.columnconfigure(3, weight=1)
 
-    _grid_pair(ticket, 0, "Action", ttk.Combobox(ticket, textvariable=app.options_action_var, values=ACTIONS, state="readonly"), "Strategy", ttk.Combobox(ticket, textvariable=app.options_strategy_var, values=STRATEGIES, state="readonly"))
-    _grid_pair(ticket, 1, "Contracts", ttk.Entry(ticket, textvariable=app.options_contracts_var), "Expiration", ttk.Entry(ticket, textvariable=app.options_expiration_var))
-    _grid_pair(ticket, 2, "Strike", ttk.Entry(ticket, textvariable=app.options_strike_var), "Call / Put", ttk.Combobox(ticket, textvariable=app.options_type_var, values=OPTION_TYPES, state="readonly"))
-    _grid_pair(ticket, 3, "Bid", ttk.Entry(ticket, textvariable=app.options_bid_var), "Ask", ttk.Entry(ticket, textvariable=app.options_ask_var))
-    _grid_pair(ticket, 4, "Mark", ttk.Entry(ticket, textvariable=app.options_mark_var), "Limit / Debit", ttk.Entry(ticket, textvariable=app.options_premium_var))
-    _grid_pair(ticket, 5, "Order type", ttk.Combobox(ticket, textvariable=app.options_order_type_var, values=ORDER_TYPES, state="readonly"), "Time in force", ttk.Combobox(ticket, textvariable=app.options_tif_var, values=TIME_IN_FORCE, state="readonly"))
-    _grid_pair(ticket, 6, "Short strike", ttk.Entry(ticket, textvariable=app.options_short_strike_var), "Credit", ttk.Entry(ticket, textvariable=app.options_credit_var))
-    _grid_pair(ticket, 7, "Shares", ttk.Entry(ticket, textvariable=app.options_quantity_var), "Stop price", ttk.Entry(ticket, textvariable=app.options_stop_price_var))
-    _grid_pair(ticket, 8, "Target price", ttk.Entry(ticket, textvariable=app.options_target_price_var), "ATR %", ttk.Entry(ticket, textvariable=app.options_atr_var))
+    _grid_pair(ticket, 0, "Symbol", ttk.Entry(ticket, textvariable=app.options_symbol_var), "Underlying", ttk.Entry(ticket, textvariable=app.options_underlying_price_var))
+    _grid_pair(ticket, 1, "Action", ttk.Combobox(ticket, textvariable=app.options_action_var, values=ACTIONS, state="readonly"), "Strategy", ttk.Combobox(ticket, textvariable=app.options_strategy_var, values=STRATEGIES, state="readonly"))
+    _grid_pair(ticket, 2, "Contracts", ttk.Entry(ticket, textvariable=app.options_contracts_var), "Expiration", ttk.Entry(ticket, textvariable=app.options_expiration_var))
+    _grid_pair(ticket, 3, "Strike", ttk.Entry(ticket, textvariable=app.options_strike_var), "Call / Put", ttk.Combobox(ticket, textvariable=app.options_type_var, values=OPTION_TYPES, state="readonly"))
+    _grid_pair(ticket, 4, "Bid", ttk.Entry(ticket, textvariable=app.options_bid_var), "Ask", ttk.Entry(ticket, textvariable=app.options_ask_var))
+    _grid_pair(ticket, 5, "Mark", ttk.Entry(ticket, textvariable=app.options_mark_var), "Limit / Debit", ttk.Entry(ticket, textvariable=app.options_premium_var))
+    _grid_pair(ticket, 6, "Order type", ttk.Combobox(ticket, textvariable=app.options_order_type_var, values=ORDER_TYPES, state="readonly"), "Time in force", ttk.Combobox(ticket, textvariable=app.options_tif_var, values=TIME_IN_FORCE, state="readonly"))
+    _grid_pair(ticket, 7, "Short strike", ttk.Entry(ticket, textvariable=app.options_short_strike_var), "Credit", ttk.Entry(ticket, textvariable=app.options_credit_var))
+    _grid_pair(ticket, 8, "Shares", ttk.Entry(ticket, textvariable=app.options_quantity_var), "Stop price", ttk.Entry(ticket, textvariable=app.options_stop_price_var))
+    _grid_pair(ticket, 9, "Target price", ttk.Entry(ticket, textvariable=app.options_target_price_var), "ATR %", ttk.Entry(ticket, textvariable=app.options_atr_var))
 
-    buttons = ttk.Frame(left)
-    buttons.grid(row=2, column=0, sticky="ew", pady=(12, 0))
-    ttk.Button(buttons, text="Run What-If", command=lambda: run_options_what_if(app), style="Accent.TButton").pack(side=tk.LEFT)
-    ttk.Button(buttons, text="Sync Current Portfolio", command=lambda: load_options_portfolio_values(app)).pack(side=tk.LEFT, padx=(8, 0))
-    ttk.Button(buttons, text="Use Holding Price", command=lambda: use_current_symbol_holding_price(app)).pack(side=tk.LEFT, padx=(8, 0))
-    ttk.Button(buttons, text="Use Mid as Limit", command=lambda: use_mid_as_limit(app)).pack(side=tk.LEFT, padx=(8, 0))
+    buttons = ttk.Frame(left, style="Panel.TFrame")
+    buttons.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+    buttons.columnconfigure((0, 1), weight=1, uniform="options_actions")
+    ttk.Button(buttons, text="Run What-If", command=lambda: run_options_what_if(app), style="Accent.TButton").grid(row=0, column=0, sticky="ew", padx=(0, 6))
+    ttk.Button(buttons, text="Load Schwab Technicals", command=lambda: _run_optional_command(app, "load_options_lab_technical_context"), style="Accent.TButton").grid(row=0, column=1, sticky="ew")
 
-    context = ttk.LabelFrame(left, text="Account + Positions Context", style="Card.TLabelframe")
-    context.grid(row=3, column=0, sticky="ew", pady=(12, 0))
-    context.columnconfigure(0, weight=1)
-    context.columnconfigure(1, weight=1)
-
-    app.options_portfolio_source_label = ttk.Label(context, text="Source: --", style="Subtle.TLabel")
-    app.options_portfolio_source_label.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
-
-    app.options_account_context_label = ttk.Label(context, text="Account: --", style="Subtle.TLabel")
-    app.options_account_context_label.grid(row=1, column=0, sticky="w", padx=(0, 10), pady=2)
-
-    app.options_symbol_context_label = ttk.Label(context, text="Selected symbol: --", style="Subtle.TLabel")
-    app.options_symbol_context_label.grid(row=1, column=1, sticky="w", pady=2)
-
-    app.options_projected_context_label = ttk.Label(context, text="Projected: --", style="Subtle.TLabel")
-    app.options_projected_context_label.grid(row=2, column=0, sticky="w", padx=(0, 10), pady=2)
-
-    app.options_exposure_context_label = ttk.Label(context, text="Exposure: --", style="Subtle.TLabel")
-    app.options_exposure_context_label.grid(row=2, column=1, sticky="w", pady=2)
-
-    technical = ttk.LabelFrame(left, text="Manual Technical Context", style="Card.TLabelframe")
-    technical.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+    technical = ttk.LabelFrame(left, text="Technical Context", style="Card.TLabelframe")
+    technical.grid(row=2, column=0, sticky="ew", pady=(10, 0))
     technical.columnconfigure(1, weight=1)
     technical.columnconfigure(3, weight=1)
 
@@ -207,13 +175,21 @@ def _build_scenario_builder(app: tk.Tk, parent: ttk.Frame) -> None:
     _grid_pair(technical, 2, "Support", ttk.Entry(technical, textvariable=app.options_support_var), "Resistance", ttk.Entry(technical, textvariable=app.options_resistance_var))
 
 
+def _run_optional_command(app: tk.Tk, command_name: str) -> None:
+    command = getattr(app, command_name, None)
+    if callable(command):
+        command()
+    else:
+        messagebox.showinfo("Action unavailable", f"{command_name} is not installed yet.")
+
+
 def _build_options_output(app: tk.Tk, parent: ttk.Frame) -> None:
     right = ttk.Frame(parent, padding=(10, 0, 0, 0))
     right.grid(row=1, column=1, sticky="nsew")
     right.rowconfigure(2, weight=1)
     right.columnconfigure(0, weight=1)
 
-    metrics = ttk.LabelFrame(right, text="Risk + Margin Snapshot", style="Card.TLabelframe")
+    metrics = ttk.LabelFrame(right, text="Risk + Margin", style="Card.TLabelframe")
     metrics.grid(row=0, column=0, sticky="ew")
     metrics.columnconfigure((0, 1, 2), weight=1)
 
@@ -225,17 +201,17 @@ def _build_options_output(app: tk.Tk, parent: ttk.Frame) -> None:
     app.options_reward_risk_label = _metric(metrics, "Reward/Risk", 2, 2)
 
     summary = ttk.LabelFrame(right, text="Selected Order", style="Card.TLabelframe")
-    summary.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+    summary.grid(row=1, column=0, sticky="ew", pady=(10, 0))
     summary.columnconfigure(0, weight=1)
-    app.options_order_summary_label = ttk.Label(summary, text="--", style="Subtle.TLabel", wraplength=820)
+    app.options_order_summary_label = ttk.Label(summary, text="--", style="Subtle.TLabel", wraplength=720)
     app.options_order_summary_label.grid(row=0, column=0, sticky="w")
 
     output = ttk.LabelFrame(right, text="Scenario Analysis", style="Card.TLabelframe")
-    output.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
+    output.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
     output.rowconfigure(0, weight=1)
     output.columnconfigure(0, weight=1)
 
-    app.options_output_text = tk.Text(output, height=24, wrap=tk.WORD, font=("Consolas", 10), padx=10, pady=10)
+    app.options_output_text = tk.Text(output, height=14, wrap=tk.WORD, font=("Consolas", 10), padx=10, pady=10)
     app.options_output_text.grid(row=0, column=0, sticky="nsew")
     scrollbar = ttk.Scrollbar(output, orient=tk.VERTICAL, command=app.options_output_text.yview)
     scrollbar.grid(row=0, column=1, sticky="ns")
@@ -243,16 +219,16 @@ def _build_options_output(app: tk.Tk, parent: ttk.Frame) -> None:
 
 
 def _grid_pair(parent: ttk.Frame, row: int, label_a: str, widget_a: tk.Widget, label_b: str, widget_b: tk.Widget) -> None:
-    ttk.Label(parent, text=label_a).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=5)
-    widget_a.grid(row=row, column=1, sticky="ew", padx=(0, 14), pady=5)
-    ttk.Label(parent, text=label_b).grid(row=row, column=2, sticky="w", padx=(0, 8), pady=5)
-    widget_b.grid(row=row, column=3, sticky="ew", pady=5)
+    ttk.Label(parent, text=label_a).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+    widget_a.grid(row=row, column=1, sticky="ew", padx=(0, 12), pady=4)
+    ttk.Label(parent, text=label_b).grid(row=row, column=2, sticky="w", padx=(0, 8), pady=4)
+    widget_b.grid(row=row, column=3, sticky="ew", pady=4)
 
 
 def _metric(parent: ttk.Frame, title: str, row: int, column: int) -> ttk.Label:
     ttk.Label(parent, text=title, style="Subtle.TLabel").grid(row=row, column=column, sticky="w")
-    label = ttk.Label(parent, text="--", font=("Segoe UI", 14, "bold"))
-    label.grid(row=row + 1, column=column, sticky="w", pady=(2, 10))
+    label = ttk.Label(parent, text="--", font=("Segoe UI", 12, "bold"))
+    label.grid(row=row + 1, column=column, sticky="w", pady=(2, 8))
     return label
 
 
