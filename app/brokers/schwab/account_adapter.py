@@ -20,6 +20,21 @@ _NUMBER_KEYS_FOR_LIQUIDATION = (
     "accountValue",
 )
 
+_BALANCE_REPORT_KEYS = (
+    ("liquidationValue", "Liquidation value"),
+    ("cashBalance", "Cash balance"),
+    ("cashAvailableForTrading", "Cash available for trading"),
+    ("settledCash", "Settled cash"),
+    ("availableFunds", "Available funds"),
+    ("availableFundsNonMarginableTrade", "Available non-margin funds"),
+    ("buyingPower", "Buying power"),
+    ("stockBuyingPower", "Stock buying power"),
+    ("optionBuyingPower", "Option buying power"),
+    ("maintenanceRequirement", "Maintenance requirement"),
+    ("regTCall", "Reg-T call"),
+    ("dayTradingBuyingPower", "Day-trading buying power"),
+)
+
 _NUMBER_KEYS_FOR_PRICE = (
     "marketPrice",
     "lastPrice",
@@ -64,16 +79,8 @@ def portfolio_from_schwab_account(payload: Any) -> tuple[Portfolio, str]:
     balance/position fields and by deriving last price from market value when a
     direct price field is not present.
     """
-    if not isinstance(payload, dict):
-        raise ValueError("Unexpected Schwab account response; expected an object.")
-
-    account = payload.get("securitiesAccount") or payload
-    if not isinstance(account, dict):
-        raise ValueError("Unexpected Schwab account response; missing securitiesAccount object.")
-
-    balances = account.get("currentBalances") or account.get("initialBalances") or {}
-    if not isinstance(balances, dict):
-        balances = {}
+    account = _securities_account(payload)
+    balances = _current_balances(account)
 
     positions: dict[str, Position] = {}
     raw_positions = account.get("positions") or []
@@ -97,6 +104,158 @@ def portfolio_from_schwab_account(payload: Any) -> tuple[Portfolio, str]:
     loaded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     source_message = f"Loaded Schwab account {account_label} at {loaded_at}"
     return Portfolio(cash=cash, positions=positions, cash_positions=cash_positions), source_message
+
+
+def format_schwab_account_snapshot(payload: Any, portfolio: Portfolio) -> str:
+    """Create a Schwab sync report similar to the Hyperliquid portfolio report."""
+
+    account = _securities_account(payload)
+    balances = _current_balances(account)
+    raw_positions = account.get("positions") or []
+    if not isinstance(raw_positions, list):
+        raw_positions = []
+
+    account_label = _account_label(account)
+    account_type = str(account.get("type") or account.get("accountType") or "--")
+    loaded_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    total_value = portfolio.total_value
+    cash_weight = portfolio.cash / max(total_value, 0.01)
+    long_value = sum(max(position.market_value, 0.0) for position in portfolio.positions.values())
+    short_value = sum(abs(min(position.market_value, 0.0)) for position in portfolio.positions.values())
+    day_pnl = portfolio.day_profit_loss
+
+    lines = [
+        "SCHWAB ACCOUNT SYNC",
+        "===================",
+        "",
+        f"Account: {account_label}",
+        f"Account type: {account_type}",
+        f"Fetched: {loaded_at}",
+        "",
+        "Account summary:",
+        f"- Cash loaded into cockpit: {_money(portfolio.cash)} ({cash_weight:.1%} of account)",
+        f"- Positions value loaded: {_money(portfolio.positions_value)}",
+        f"- Total value loaded into cockpit: {_money(total_value)}",
+        f"- Unrealized P&L: {_money(portfolio.unrealized_profit_loss)} ({_optional_percent(portfolio.unrealized_profit_loss_percent)})",
+        f"- Day P&L: {_optional_money(day_pnl)}",
+        f"- Positions loaded: {len(portfolio.positions)}",
+        "",
+    ]
+
+    balance_lines = _format_balance_lines(balances)
+    if balance_lines:
+        lines.extend(["Schwab balances:", *balance_lines, ""])
+
+    lines.extend(
+        [
+            "Exposure snapshot:",
+            f"- Long market value: {_money(long_value)}",
+            f"- Short market value: {_money(short_value)}",
+            f"- Net market exposure: {_money(long_value - short_value)}",
+            f"- Gross market exposure: {_money(long_value + short_value)}",
+            f"- Largest position: {_largest_position_line(portfolio)}",
+            "",
+            "Positions:",
+        ]
+    )
+
+    if not portfolio.positions:
+        lines.append("- None")
+    else:
+        for symbol in sorted(portfolio.positions):
+            position = portfolio.positions[symbol]
+            weight = position.market_value / max(total_value, 0.01)
+            day_pnl_text = _optional_money(position.day_profit_loss)
+            day_pnl_pct_text = _optional_percent(position.day_profit_loss_percent)
+            lines.append(
+                f"- {symbol}: qty {position.quantity:g}, "
+                f"last {_money(position.last_price)}, "
+                f"value {_money(position.market_value)} ({weight:.1%}), "
+                f"cost {_money(position.cost_basis)}, "
+                f"uPnL {_money(position.unrealized_profit_loss)} ({_optional_percent(position.unrealized_profit_loss_percent)}), "
+                f"day {day_pnl_text} ({day_pnl_pct_text})"
+            )
+
+    lines.extend(
+        [
+            "",
+            "Risk read-through:",
+            f"- Concentration: {_concentration_note(portfolio)}",
+            f"- Cash buffer: {_cash_buffer_note(portfolio)}",
+            f"- Day move: {_day_move_note(portfolio)}",
+            "",
+            "Notes:",
+            "- This is a read-only Schwab account sync report. No order was previewed, submitted, replaced, or canceled.",
+            "- Schwab balances can vary by account type; missing fields are omitted from the balance section.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _format_balance_lines(balances: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    seen_labels: set[str] = set()
+    for key, label in _BALANCE_REPORT_KEYS:
+        value = _to_float(balances.get(key))
+        if value is None or label in seen_labels:
+            continue
+        seen_labels.add(label)
+        lines.append(f"- {label}: {_money(value)}")
+    return lines
+
+
+def _largest_position_line(portfolio: Portfolio) -> str:
+    if not portfolio.positions:
+        return "none"
+    total_value = max(portfolio.total_value, 0.01)
+    largest = max(portfolio.positions.values(), key=lambda position: abs(position.market_value))
+    weight = abs(largest.market_value) / total_value
+    return f"{largest.symbol} at {_money(largest.market_value)} ({weight:.1%} of account)"
+
+
+def _concentration_note(portfolio: Portfolio) -> str:
+    if not portfolio.positions:
+        return "no positions loaded."
+    total_value = max(portfolio.total_value, 0.01)
+    largest = max(portfolio.positions.values(), key=lambda position: abs(position.market_value))
+    weight = abs(largest.market_value) / total_value
+    if weight >= 0.35:
+        return f"{largest.symbol} is concentrated at {weight:.1%} of account value."
+    if weight >= 0.20:
+        return f"{largest.symbol} is the largest holding at {weight:.1%}; worth monitoring."
+    return f"largest holding is {largest.symbol} at {weight:.1%}; concentration looks moderate."
+
+
+def _cash_buffer_note(portfolio: Portfolio) -> str:
+    cash_weight = portfolio.cash / max(portfolio.total_value, 0.01)
+    if cash_weight < 0.05:
+        return f"cash is low at {cash_weight:.1%} of account value."
+    if cash_weight > 0.25:
+        return f"cash is high at {cash_weight:.1%} of account value."
+    return f"cash is {cash_weight:.1%} of account value."
+
+
+def _day_move_note(portfolio: Portfolio) -> str:
+    if portfolio.day_profit_loss is None:
+        return "no day P&L field was available in the Schwab positions payload."
+    pct = portfolio.day_profit_loss / max(portfolio.total_value, 0.01)
+    direction = "gain" if portfolio.day_profit_loss >= 0 else "loss"
+    return f"account day {direction} is {_money(portfolio.day_profit_loss)} ({pct:+.2%} of account value)."
+
+
+def _securities_account(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("Unexpected Schwab account response; expected an object.")
+
+    account = payload.get("securitiesAccount") or payload
+    if not isinstance(account, dict):
+        raise ValueError("Unexpected Schwab account response; missing securitiesAccount object.")
+    return account
+
+
+def _current_balances(account: dict[str, Any]) -> dict[str, Any]:
+    balances = account.get("currentBalances") or account.get("initialBalances") or {}
+    return balances if isinstance(balances, dict) else {}
 
 
 def _position_from_schwab(raw_position: Any) -> Position | None:
@@ -189,3 +348,15 @@ def _account_label(account: dict[str, Any]) -> str:
     if account_number:
         return "••••" + account_number[-4:]
     return "snapshot"
+
+
+def _money(value: float) -> str:
+    return f"${value:,.2f}"
+
+
+def _optional_money(value: float | None) -> str:
+    return "--" if value is None else _money(value)
+
+
+def _optional_percent(value: float | None) -> str:
+    return "--" if value is None else f"{value:+.2f}%"
