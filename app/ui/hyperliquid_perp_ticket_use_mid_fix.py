@@ -5,10 +5,13 @@ from tkinter import ttk
 
 from app.ui import options_lab_extension
 
+_DELETE_ME = "DELETE ME"
+
 
 def install_hyperliquid_perp_ticket_use_mid_fix(app_cls: type[tk.Tk] | None = None) -> None:
-    """Replace the unused Hyperliquid DELETE ME field with a Use Mid button."""
+    """Remove placeholder DELETE ME controls from the dedicated trading tabs."""
     _patch_hyperliquid_tab_builder()
+    _patch_options_layout_builder()
     if app_cls is not None:
         _patch_layout_after_build(app_cls)
 
@@ -27,7 +30,7 @@ def _patch_hyperliquid_tab_builder() -> None:
             right_label: str,
             right_widget: tk.Widget,
         ) -> None:
-            if left_label == "Stop price" and right_label == "DELETE ME":
+            if left_label == "Stop price" and right_label == _DELETE_ME:
                 right_label = "Use Mid"
                 right_widget = _make_use_mid_button(self, container)
             return original_grid_row(
@@ -48,47 +51,71 @@ def _patch_hyperliquid_tab_builder() -> None:
     options_lab_extension._build_hyperliquid_trading_tab = build_hyperliquid_tab_with_inline_use_mid
 
 
+def _patch_options_layout_builder() -> None:
+    original_build_layout = options_lab_extension._build_layout_with_options_lab
+
+    def build_layout_then_remove_delete_me(self: tk.Tk) -> None:
+        original_build_layout(self)
+        self.after_idle(lambda: _remove_delete_me_controls(self))
+
+    options_lab_extension._build_layout_with_options_lab = build_layout_then_remove_delete_me
+
+
 def _patch_layout_after_build(app_cls: type[tk.Tk]) -> None:
     original_build_layout = app_cls._build_layout
 
-    def build_layout_then_replace_type_confirm(self: tk.Tk) -> None:
+    def build_layout_then_remove_delete_me(self: tk.Tk) -> None:
         original_build_layout(self)
-        self.after_idle(lambda: _replace_existing_type_confirm_field(self))
+        self.after_idle(lambda: _remove_delete_me_controls(self))
 
-    app_cls._build_layout = build_layout_then_replace_type_confirm
+    app_cls._build_layout = build_layout_then_remove_delete_me
 
 
-def _replace_existing_type_confirm_field(self: tk.Tk) -> None:
-    for widget in _walk_widgets(self):
-        if not _is_hyperliquid_type_confirm_label(widget):
+def _remove_delete_me_controls(self: tk.Tk) -> None:
+    for widget in list(_walk_widgets(self)):
+        if not _is_delete_me_label(widget):
             continue
 
         parent = widget.master
+        if parent is None:
+            continue
+
         grid_info = widget.grid_info()
         row = int(grid_info.get("row", 0))
-        widget.configure(text="Use Mid")
+        title = _labelframe_title(parent)
 
+        widget.destroy()
         for existing in parent.grid_slaves(row=row, column=3):
             existing.destroy()
 
-        _make_use_mid_button(self, parent).grid(
-            row=row,
-            column=3,
-            sticky="ew",
-            pady=grid_info.get("pady", 0),
-        )
+        if title == "Hyperliquid Perp Ticket":
+            ttk.Label(parent, text="Use Mid", style="Subtle.TLabel").grid(
+                row=row,
+                column=2,
+                sticky="w",
+                padx=(0, 8),
+                pady=grid_info.get("pady", 0),
+            )
+            _make_use_mid_button(self, parent).grid(
+                row=row,
+                column=3,
+                sticky="ew",
+                pady=grid_info.get("pady", 0),
+            )
 
 
-def _is_hyperliquid_type_confirm_label(widget: tk.Widget) -> bool:
+def _is_delete_me_label(widget: tk.Widget) -> bool:
     try:
-        if widget.winfo_class() not in {"TLabel", "Label"}:
-            return False
-        if widget.cget("text") != "DELETE ME":
-            return False
-        parent = widget.master
-        return parent is not None and parent.cget("text") == "Hyperliquid Perp Ticket"
+        return widget.winfo_class() in {"TLabel", "Label"} and widget.cget("text") == _DELETE_ME
     except Exception:
         return False
+
+
+def _labelframe_title(widget: tk.Widget) -> str:
+    try:
+        return str(widget.cget("text"))
+    except Exception:
+        return ""
 
 
 def _make_use_mid_button(self: tk.Tk, parent: tk.Widget) -> ttk.Button:
