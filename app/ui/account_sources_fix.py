@@ -59,31 +59,13 @@ def _build_layout_without_account_strip(self: tk.Tk) -> None:
 
 
 def _install_schwab_options_feature(self: tk.Tk, schwab_tab: ttk.Frame) -> None:
-    """Expose the options lab as an in-tab Schwab feature instead of a top-level tab."""
+    """Expose the options what-if planner inside the Schwab tab."""
 
     stock_widgets = [widget for widget in schwab_tab.grid_slaves(row=1, column=0)]
 
     options_feature = ttk.Frame(schwab_tab, style="Canvas.TFrame")
     options_feature.columnconfigure(0, weight=1)
-    options_feature.rowconfigure(1, weight=1)
-
-    switcher = ttk.LabelFrame(options_feature, text="Schwab Options What-If", style="Card.TLabelframe")
-    switcher.grid(row=0, column=0, sticky="ew", pady=(0, 12))
-    switcher.columnconfigure(0, weight=1)
-    ttk.Label(
-        switcher,
-        text=(
-            "Options are a Schwab-only workflow here. This opens the same risk, margin, "
-            "technical context, and portfolio-impact lab without creating a redundant top-level tab."
-        ),
-        style="Subtle.TLabel",
-        wraplength=1080,
-    ).grid(row=0, column=0, sticky="w", padx=(0, 12))
-
-    options_body = ttk.Frame(options_feature, style="Canvas.TFrame")
-    options_body.grid(row=1, column=0, sticky="nsew")
-    build_options_lab_tab(self, options_body)
-    _build_options_lab_market_loader(self, options_body)
+    options_feature.rowconfigure(0, weight=1)
 
     def show_stock_ticket() -> None:
         options_feature.grid_remove()
@@ -103,14 +85,14 @@ def _install_schwab_options_feature(self: tk.Tk, schwab_tab: ttk.Frame) -> None:
         options_feature.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
         run_options_what_if(self)
 
-    ttk.Button(
-        switcher,
-        text="Back to Stock / ETF Ticket",
-        command=show_stock_ticket,
-    ).grid(row=0, column=1, sticky="e")
-
     self.show_schwab_stock_ticket = show_stock_ticket  # type: ignore[attr-defined]
     self.show_schwab_options_what_if = show_options_feature  # type: ignore[attr-defined]
+
+    options_body = ttk.Frame(options_feature, style="Canvas.TFrame")
+    options_body.grid(row=0, column=0, sticky="nsew")
+    build_options_lab_tab(self, options_body)
+    _add_back_button_to_options_header(options_body, show_stock_ticket)
+
     options_feature.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
     options_feature.grid_remove()
 
@@ -128,6 +110,25 @@ def _install_schwab_options_feature(self: tk.Tk, schwab_tab: ttk.Frame) -> None:
         "Use this tab for stocks, ETFs, Schwab previews, order history, and guarded live Schwab actions.\n\n"
         "Use Options What-If when the weekly setup needs calls/puts instead of shares."
     )
+
+
+def _add_back_button_to_options_header(root: tk.Widget, command) -> None:
+    for child in root.winfo_children():
+        if _widget_class(child) == "TLabelframe":
+            try:
+                title = str(child.cget("text"))
+            except Exception:
+                title = ""
+            if title == "Options What-If":
+                child.columnconfigure(2, weight=0)
+                ttk.Button(child, text="Back to Stock / ETF", command=command).grid(
+                    row=0,
+                    column=2,
+                    sticky="e",
+                    padx=(8, 0),
+                )
+                return
+        _add_back_button_to_options_header(child, command)
 
 
 def _set_schwab_mode_text(self: tk.Tk, content: str) -> None:
@@ -171,16 +172,7 @@ def _widget_class(widget: tk.Widget) -> str:
 
 
 def _build_options_lab_market_loader(self: tk.Tk, parent: ttk.Frame) -> None:
-    loader = ttk.LabelFrame(parent, text="Optional Schwab Technical Context Loader", style="Card.TLabelframe")
-    loader.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
-    loader.columnconfigure(0, weight=1)
-    ttk.Label(
-        loader,
-        text="Pulls recent daily Schwab candles for the sandbox symbol and fills technical context. No order action is made.",
-        style="Subtle.TLabel",
-        wraplength=860,
-    ).grid(row=0, column=0, sticky="w", padx=(0, 12))
-    ttk.Button(loader, text="Load Schwab Technicals", command=self.load_options_lab_technical_context, style="Accent.TButton").grid(row=0, column=1, sticky="e")
+    return
 
 
 def _capture_current_source_portfolio(self: tk.Tk) -> None:
