@@ -12,6 +12,19 @@ _HYPERLIQUID_SPOT_ALIASES = {
     "UBTC/USDC": "BTC",
 }
 _HIDDEN_CASH_SOURCES = {"HYPERLIQUID PERPS"}
+_POSITION_TABLE_HEADINGS = {
+    "symbol": ("Symbol", 90, tk.W),
+    "asset_type": ("Type", 84, tk.W),
+    "qty": ("Qty", 92, tk.E),
+    "avg_cost": ("Avg Cost", 112, tk.E),
+    "last": ("Last", 112, tk.E),
+    "cost_basis": ("Cost Basis", 118, tk.E),
+    "value": ("Value", 122, tk.E),
+    "weight": ("Weight", 88, tk.E),
+    "pnl": ("P&L $", 112, tk.E),
+    "pnl_pct": ("P&L %", 86, tk.E),
+    "day_pnl": ("Day P&L", 112, tk.E),
+}
 
 
 def install_cash_positions_extension(app_cls: Type[tk.Tk]) -> None:
@@ -26,8 +39,6 @@ def _clean_hyperliquid_symbol(symbol: str) -> str:
     if clean.startswith("HL:"):
         clean = clean[3:]
 
-    # Keep perp symbols explicit so a derivative row cannot be confused with
-    # spot HYPE/BTC or a Schwab equity position.
     if clean.endswith("-PERP-SHORT") or clean.endswith("-PERP"):
         return clean
 
@@ -69,16 +80,17 @@ def _is_hidden_cash_position(cash: CashPosition) -> bool:
 
 def _ensure_position_type_column(table: ttk.Treeview | Any) -> None:
     columns = list(table["columns"])
-    if "asset_type" in columns:
-        return
+    if "asset_type" not in columns:
+        insert_at = columns.index("symbol") + 1 if "symbol" in columns else 1
+        columns.insert(insert_at, "asset_type")
+        table.configure(columns=tuple(columns))
 
-    insert_at = columns.index("symbol") + 1 if "symbol" in columns else 1
-    columns.insert(insert_at, "asset_type")
-    table.configure(columns=tuple(columns))
-    table.heading("asset_type", text="Type")
-    table.column("asset_type", width=84, anchor=tk.W, stretch=True)
-    if "symbol" in columns:
-        table.column("symbol", anchor=tk.W)
+    # Re-applying columns through Treeview.configure can reset headings on some
+    # Tk themes. Put every header back, not just the inserted Type column.
+    for column in table["columns"]:
+        label, width, anchor = _POSITION_TABLE_HEADINGS.get(column, (column.replace("_", " ").title(), 100, tk.E))
+        table.heading(column, text=label)
+        table.column(column, width=width, anchor=anchor, stretch=True)
 
 
 def _table_values(table: ttk.Treeview | Any, values_by_column: dict[str, str]) -> tuple[str, ...]:
