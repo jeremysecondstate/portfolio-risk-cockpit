@@ -211,6 +211,20 @@ class SchwabSession:
         )
         return response.status_code, response.json()
 
+    def get_quote(self, symbol: str) -> tuple[int, Any]:
+        """Fetch a Schwab market-data quote for a stock, ETF, or option symbol."""
+        cleaned_symbol = symbol.strip().upper()
+        if not cleaned_symbol:
+            raise ValueError("Symbol is required for Schwab quote lookup.")
+
+        response = requests.get(
+            f"{MARKETDATA_BASE_URL}/quotes",
+            headers=self._headers(),
+            params={"symbols": cleaned_symbol, "fields": "quote"},
+            timeout=30,
+        )
+        return response.status_code, response.json()
+
     def get_price_history(
         self,
         symbol: str,
