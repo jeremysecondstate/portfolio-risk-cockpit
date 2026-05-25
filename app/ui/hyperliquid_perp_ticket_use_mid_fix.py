@@ -13,7 +13,41 @@ def install_hyperliquid_perp_ticket_use_mid_fix(app_cls: type[tk.Tk] | None = No
     _patch_hyperliquid_tab_builder()
     _patch_options_layout_builder()
     if app_cls is not None:
+        _patch_grid_row(app_cls)
         _patch_layout_after_build(app_cls)
+
+
+def _patch_grid_row(app_cls: type[tk.Tk]) -> None:
+    """Block DELETE ME controls at the shared row builder before widgets hit the UI."""
+    original_grid_row = app_cls._grid_row
+
+    def grid_row_without_delete_me(
+        self: tk.Tk,
+        parent: ttk.Frame,
+        row: int,
+        left_label: str,
+        left_widget: tk.Widget,
+        right_label: str | None = None,
+        right_widget: tk.Widget | None = None,
+    ) -> None:
+        if right_label == _DELETE_ME:
+            if _labelframe_title(parent) == "Hyperliquid Perp Ticket":
+                right_label = "Use Mid"
+                right_widget = _make_use_mid_button(self, parent)
+            else:
+                right_label = None
+                right_widget = None
+        return original_grid_row(
+            self,
+            parent,
+            row,
+            left_label,
+            left_widget,
+            right_label,
+            right_widget,
+        )
+
+    app_cls._grid_row = grid_row_without_delete_me
 
 
 def _patch_hyperliquid_tab_builder() -> None:
@@ -27,8 +61,8 @@ def _patch_hyperliquid_tab_builder() -> None:
             row: int,
             left_label: str,
             left_widget: tk.Widget,
-            right_label: str,
-            right_widget: tk.Widget,
+            right_label: str | None = None,
+            right_widget: tk.Widget | None = None,
         ) -> None:
             if left_label == "Stop price" and right_label == _DELETE_ME:
                 right_label = "Use Mid"
