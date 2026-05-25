@@ -13,6 +13,7 @@ from app.brokers.hyperliquid.client import (
 
 
 HYPERLIQUID_ADDRESS_ENV_KEYS = ("HYPE_WALLET_ADDRESS", "HYPERLIQUID_USER_ADDRESS")
+REFRESH_DUE_AFTER_MS = 5 * 60 * 1000
 
 
 def install_unified_refresh_extension(app_cls: Type[tk.Tk]) -> None:
@@ -36,15 +37,70 @@ def _replace_connection_refresh_controls(self: tk.Tk) -> None:
     if connections_group is None:
         return
 
+    _configure_refresh_status_styles(self)
+
     for child in list(connections_group.winfo_children()):
         if not isinstance(child, ttk.Button):
             continue
         label = str(child.cget("text"))
         if label == "Refresh Schwab":
             child.configure(text="Refresh Portfolio", command=self.refresh_connected_portfolio)
-            child.grid_configure(row=1, column=0, columnspan=2, sticky="ew", padx=0)
+            child.grid_configure(row=1, column=0, columnspan=1, sticky="ew", padx=(0, 6))
+            _ensure_refresh_status_label(self, connections_group)
         elif label == "Reset Session":
             child.destroy()
+
+
+def _configure_refresh_status_styles(self: tk.Tk) -> None:
+    style = ttk.Style(self)
+    style.configure("RefreshSuccess.TLabel", background="#f8fafc", foreground="#047857", font=("Segoe UI", 9, "bold"))
+    style.configure("RefreshDue.TLabel", background="#f8fafc", foreground="#b91c1c", font=("Segoe UI", 9, "bold"))
+    style.configure("RefreshWorking.TLabel", background="#f8fafc", foreground="#2563eb", font=("Segoe UI", 9, "bold"))
+    style.configure("RefreshIdle.TLabel", background="#f8fafc", foreground="#64748b", font=("Segoe UI", 9, "bold"))
+
+
+def _ensure_refresh_status_label(self: tk.Tk, parent: ttk.LabelFrame) -> None:
+    existing = getattr(self, "refresh_portfolio_status_label", None)
+    if existing is not None and existing.winfo_exists():
+        return
+
+    self.refresh_portfolio_status_var = tk.StringVar(value="")
+    self.refresh_portfolio_status_label = ttk.Label(
+        parent,
+        textvariable=self.refresh_portfolio_status_var,
+        style="RefreshIdle.TLabel",
+        anchor=tk.W,
+    )
+    self.refresh_portfolio_status_label.grid(row=1, column=1, sticky="w", padx=(6, 0), pady=(0, 4))
+    self.refresh_portfolio_due_after_id = None
+
+
+def _set_refresh_status(self: tk.Tk, text: str, style_name: str) -> None:
+    label = getattr(self, "refresh_portfolio_status_label", None)
+    var = getattr(self, "refresh_portfolio_status_var", None)
+    if label is None or var is None:
+        return
+    var.set(text)
+    label.configure(style=style_name)
+
+
+def _cancel_refresh_due_timer(self: tk.Tk) -> None:
+    after_id = getattr(self, "refresh_portfolio_due_after_id", None)
+    if after_id is None:
+        return
+    try:
+        self.after_cancel(after_id)
+    except Exception:
+        pass
+    self.refresh_portfolio_due_after_id = None
+
+
+def _schedule_refresh_due_status(self: tk.Tk) -> None:
+    _cancel_refresh_due_timer(self)
+    self.refresh_portfolio_due_after_id = self.after(
+        REFRESH_DUE_AFTER_MS,
+        lambda: _set_refresh_status(self, "● refresh due", "RefreshDue.TLabel"),
+    )
 
 
 def _find_label_frame_by_text(root: tk.Widget, text: str) -> ttk.LabelFrame | None:
@@ -59,6 +115,9 @@ def _find_label_frame_by_text(root: tk.Widget, text: str) -> ttk.LabelFrame | No
 
 def _refresh_connected_portfolio(self: tk.Tk) -> None:
     """Refresh Schwab, then Hyperliquid, through one user-facing action."""
+
+    _cancel_refresh_due_timer(self)
+    _set_refresh_status(self, "↻ refreshing...", "RefreshWorking.TLabel")
 
     results: list[str] = [
         "PORTFOLIO REFRESH",
@@ -108,10 +167,12 @@ def _refresh_connected_portfolio(self: tk.Tk) -> None:
             failed.append("Schwab")
         if hyperliquid_error:
             failed.append("Hyperliquid")
+        _set_refresh_status(self, "● refresh failed", "RefreshDue.TLabel")
         messagebox.showerror("Portfolio refresh incomplete", f"Could not refresh: {', '.join(failed)}")
         return
 
-    messagebox.showinfo("Portfolio refreshed", "Schwab and Hyperliquid refresh completed.")
+    _set_refresh_status(self, "✓ refreshed", "RefreshSuccess.TLabel")
+    _schedule_refresh_due_status(self)
 
 
 def _sync_schwab_account_silent(self: tk.Tk) -> str:
