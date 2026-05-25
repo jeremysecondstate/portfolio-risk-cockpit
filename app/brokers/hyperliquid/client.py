@@ -12,6 +12,7 @@ from app.core.portfolio import CashPosition, Portfolio, Position
 
 DEFAULT_INFO_URL = "https://api.hyperliquid.xyz/info"
 ZERO_EPSILON = 0.00000001
+SPOT_PRICE_SANITY_MULTIPLE = 100.0
 CASH_LIKE_COINS = {"USDC", "USD"}
 SPOT_COIN_ALIASES: dict[str, tuple[str, ...]] = {
     # Hyperliquid can expose wrapped spot tokens with a U-prefix while the UI
@@ -241,8 +242,17 @@ def format_hyperliquid_snapshot(snapshot: HyperliquidSnapshot, portfolio: Portfo
             coin = str(raw_balance.get("coin") or raw_balance.get("token") or "UNKNOWN").upper()
             total = _first_number(raw_balance, ("total", "balance", "amount"))
             hold = _first_number(raw_balance, ("hold", "held", "locked"))
+            token_index = _spot_token_index_from_balance(raw_balance)
             entry_ntl = _spot_entry_notional(raw_balance, total)
-            current_value = _spot_current_value(coin, total, snapshot, raw_balance)
+            reference_price = _reference_price(entry_ntl, total)
+            current_value = _spot_current_value(
+                coin,
+                total,
+                snapshot,
+                raw_balance,
+                token_index=token_index,
+                reference_price=reference_price,
+            )
             direct_pnl = _spot_direct_pnl(raw_balance)
             pnl = direct_pnl if direct_pnl is not None else (
                 (current_value - entry_ntl) if current_value is not None and entry_ntl is not None else None
@@ -250,7 +260,12 @@ def format_hyperliquid_snapshot(snapshot: HyperliquidSnapshot, portfolio: Portfo
             if entry_ntl is None and current_value is not None and pnl is not None:
                 entry_ntl = current_value - pnl
             pnl_percent = (pnl / entry_ntl * 100) if pnl is not None and entry_ntl and entry_ntl > 0 else None
-            spot_price = (current_value / total) if current_value is not None and total and total > ZERO_EPSILON else _spot_mid_price(coin, snapshot)
+            spot_price = (current_value / total) if current_value is not None and total and total > ZERO_EPSILON else _spot_mid_price(
+                coin,
+                snapshot,
+                token_index=token_index,
+                reference_price=reference_price,
+            )
             lines.append(
                 f"- {coin}: total {_format_optional_number(total)}, "
                 f"held {_format_optional_number(hold)}, "
@@ -328,10 +343,24 @@ def _spot_position_from_hyperliquid(raw_balance: dict[str, Any], snapshot: Hyper
     if not coin or quantity <= ZERO_EPSILON:
         return None, None
 
-    current_value = _spot_current_value(coin, quantity, snapshot, raw_balance)
-    mid_price = _spot_mid_price(coin, snapshot)
+    token_index = _spot_token_index_from_balance(raw_balance)
     entry_notional = _spot_entry_notional(raw_balance, quantity)
     direct_pnl = _spot_direct_pnl(raw_balance)
+    reference_price = _reference_price(entry_notional, quantity)
+    current_value = _spot_current_value(
+        coin,
+        quantity,
+        snapshot,
+        raw_balance,
+        token_index=token_index,
+        reference_price=reference_price,
+    )
+    mid_price = _spot_mid_price(
+        coin,
+        snapshot,
+        token_index=token_index,
+        reference_price=reference_price,
+    )
 
     if current_value is None and mid_price is not None:
         current_value = quantity * mid_price
@@ -368,6 +397,9 @@ def _spot_current_value(
     quantity: float | None,
     snapshot: HyperliquidSnapshot,
     raw_balance: dict[str, Any],
+    *,
+    token_index: int | None = None,
+    reference_price: float | None = None,
 ) -> float | None:
     """Prefer Hyperliquid's own USD balance value so the cockpit mirrors the UI."""
 
@@ -375,7 +407,12 @@ def _spot_current_value(
     if direct_usd_value is not None:
         return direct_usd_value
 
-    mid_price = _spot_mid_price(coin, snapshot)
+    mid_price = _spot_mid_price(
+        coin,
+        snapshot,
+        token_index=token_index,
+        reference_price=reference_price,
+    )
     if quantity is not None and mid_price is not None:
         return quantity * mid_price
     return None
@@ -397,7 +434,24 @@ def _spot_direct_pnl(raw_balance: dict[str, Any]) -> float | None:
     return _first_number(raw_balance, SPOT_PNL_KEYS)
 
 
-def _spot_mid_price(coin: str, snapshot: HyperliquidSnapshot) -> float | None:
+def _spot_token_index_from_balance(raw_balance: dict[str, Any]) -> int | None:
+    for key in ("token", "tokenIndex", "token_index", "asset", "assetIndex", "index"):
+        value = raw_balance.get(key)
+        if isinstance(value, str) and not value.strip().lstrip("-").isdigit():
+            continue
+        token_index = _to_int(value)
+        if token_index is not None:
+            return token_index
+    return None
+
+
+def _spot_mid_price(
+    coin: str,
+    snapshot: HyperliquidSnapshot,
+    *,
+    token_index: int | None = None,
+    reference_price: float | None = None,
+) -> float | None:
     coin = coin.strip().upper()
     if coin in CASH_LIKE_COINS:
         return 1.0
@@ -412,24 +466,37 @@ def _spot_mid_price(coin: str, snapshot: HyperliquidSnapshot) -> float | None:
     for key in candidate_keys:
         if not key:
             continue
-        value = _all_mids_value(snapshot.all_mids, key)
+        value = _all_mids_value(snapshot.all_mids, key, reference_price=reference_price)
         if value is not None:
             return value
 
-    meta_price = _spot_meta_price(coin, snapshot.spot_meta_and_asset_ctxs, snapshot.all_mids)
+    meta_price = _spot_meta_price(
+        coin,
+        snapshot.spot_meta_and_asset_ctxs,
+        snapshot.all_mids,
+        token_index=token_index,
+        reference_price=reference_price,
+    )
     if meta_price is not None:
         return meta_price
 
     for key, raw_value in snapshot.all_mids.items():
         upper_key = str(key).upper()
         if _matches_spot_alias(upper_key, aliases):
-            value = _to_float(raw_value)
+            value = _candidate_price(_to_float(raw_value), reference_price)
             if value is not None:
                 return value
     return None
 
 
-def _spot_meta_price(coin: str, payload: Any, all_mids: dict[str, Any] | None = None) -> float | None:
+def _spot_meta_price(
+    coin: str,
+    payload: Any,
+    all_mids: dict[str, Any] | None = None,
+    *,
+    token_index: int | None = None,
+    reference_price: float | None = None,
+) -> float | None:
     if not isinstance(payload, list) or len(payload) < 2:
         return None
     meta, asset_ctxs = payload[0], payload[1]
@@ -441,30 +508,66 @@ def _spot_meta_price(coin: str, payload: Any, all_mids: dict[str, Any] | None = 
     aliases = _spot_coin_aliases(coin)
     token_names_by_index = _spot_token_names_by_index(tokens)
     mids = all_mids if isinstance(all_mids, dict) else {}
+    matches: list[tuple[int, int, dict[str, Any], set[str]]] = []
 
     for market_index, asset in enumerate(universe):
         if not isinstance(asset, dict):
             continue
 
         market_names = _spot_market_names(asset, token_names_by_index)
-        if not any(_matches_spot_alias(name, aliases) for name in market_names):
+        base_token_index = _spot_market_base_token_index(asset)
+        exact_token_match = token_index is not None and base_token_index == token_index
+        name_match = any(_matches_spot_alias(name, aliases) for name in market_names)
+        if not exact_token_match and not name_match:
             continue
+        matches.append((0 if exact_token_match else 1, market_index, asset, market_names))
 
-        ctx = asset_ctxs[market_index] if market_index < len(asset_ctxs) and isinstance(asset_ctxs[market_index], dict) else {}
-        price = _first_number(ctx, ("midPx", "markPx", "oraclePx", "price", "prevDayPx"))
-        if price is not None:
-            return price
+    for _priority, market_index, asset, market_names in sorted(matches, key=lambda item: item[0]):
+        for key in _spot_market_mid_keys(asset, market_index, market_names):
+            price = _all_mids_value(mids, key, reference_price=reference_price)
+            if price is not None:
+                return price
 
-        candidate_keys = set(market_names)
-        candidate_keys.add(f"@{market_index}")
-        asset_index = _to_int(asset.get("index"))
-        if asset_index is not None:
-            candidate_keys.add(f"@{asset_index}")
-        for key in candidate_keys:
-            price = _all_mids_value(mids, key)
+        for ctx_index in _spot_asset_context_indexes(asset, market_index, len(asset_ctxs)):
+            ctx = asset_ctxs[ctx_index] if isinstance(asset_ctxs[ctx_index], dict) else {}
+            price = _candidate_price(
+                _first_number(ctx, ("midPx", "markPx", "oraclePx", "price", "prevDayPx")),
+                reference_price,
+            )
             if price is not None:
                 return price
     return None
+
+
+def _spot_market_mid_keys(asset: dict[str, Any], market_index: int, market_names: set[str]) -> list[str]:
+    keys: list[str] = []
+    for key in sorted(market_names):
+        _append_unique(keys, key)
+
+    asset_index = _to_int(asset.get("index"))
+    if asset_index is not None:
+        _append_unique(keys, f"@{asset_index}")
+        _append_unique(keys, f"@{10000 + asset_index}")
+    _append_unique(keys, f"@{market_index}")
+    _append_unique(keys, f"@{10000 + market_index}")
+    return keys
+
+
+def _spot_asset_context_indexes(asset: dict[str, Any], market_index: int, asset_ctxs_length: int) -> list[int]:
+    indexes: list[int] = []
+    asset_index = _to_int(asset.get("index"))
+    if asset_index is not None and 0 <= asset_index < asset_ctxs_length:
+        indexes.append(asset_index)
+    if 0 <= market_index < asset_ctxs_length and market_index not in indexes:
+        indexes.append(market_index)
+    return indexes
+
+
+def _spot_market_base_token_index(asset: dict[str, Any]) -> int | None:
+    token_indices = asset.get("tokens")
+    if isinstance(token_indices, list) and token_indices:
+        return _to_int(token_indices[0])
+    return _to_int(asset.get("baseTokenIndex") or asset.get("baseToken"))
 
 
 def _spot_token_names_by_index(tokens: Any) -> dict[int, set[str]]:
@@ -536,18 +639,53 @@ def _matches_spot_alias(value: str, aliases: tuple[str, ...]) -> bool:
     return False
 
 
-def _all_mids_value(all_mids: dict[str, Any], key: str) -> float | None:
-    value = _to_float(all_mids.get(key))
+def _all_mids_value(all_mids: dict[str, Any], key: str, *, reference_price: float | None = None) -> float | None:
+    value = _candidate_price(_to_float(all_mids.get(key)), reference_price)
     if value is not None:
         return value
 
     upper_key = key.upper()
     for raw_key, raw_value in all_mids.items():
         if str(raw_key).upper() == upper_key:
-            value = _to_float(raw_value)
+            value = _candidate_price(_to_float(raw_value), reference_price)
             if value is not None:
                 return value
     return None
+
+
+def _candidate_price(value: float | None, reference_price: float | None) -> float | None:
+    if value is None or value <= 0:
+        return None
+    if _spot_price_is_plausible(value, reference_price):
+        return value
+    return None
+
+
+def _spot_price_is_plausible(price: float, reference_price: float | None) -> bool:
+    """Reject obviously wrong metadata matches, such as ZEC resolving to $0.06.
+
+    If Hyperliquid provides entry notional, the live spot price should not be
+    thousands of times away from the position's average cost. This still allows
+    very large moves while preventing a mismatched @index/asset context from
+    turning a normal spot balance into a near-total loss in the cockpit UI.
+    """
+
+    if reference_price is None or reference_price <= 0:
+        return True
+    lower_bound = reference_price / SPOT_PRICE_SANITY_MULTIPLE
+    upper_bound = reference_price * SPOT_PRICE_SANITY_MULTIPLE
+    return lower_bound <= price <= upper_bound
+
+
+def _reference_price(entry_notional: float | None, quantity: float | None) -> float | None:
+    if entry_notional is None or quantity is None or quantity <= ZERO_EPSILON:
+        return None
+    return entry_notional / quantity
+
+
+def _append_unique(values: list[str], value: str) -> None:
+    if value and value not in values:
+        values.append(value)
 
 
 def _perp_account_value(state: dict[str, Any]) -> float:
