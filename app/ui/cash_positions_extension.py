@@ -12,6 +12,10 @@ _HYPERLIQUID_SPOT_ALIASES = {
     "UBTC/USDC": "BTC",
 }
 _HIDDEN_CASH_SOURCES = {"HYPERLIQUID PERPS"}
+_NEUTRAL_FOREGROUND = "#0f172a"
+_CASH_FOREGROUND = "#334155"
+_POSITIVE_FOREGROUND = "#047857"
+_NEGATIVE_FOREGROUND = "#b91c1c"
 _POSITION_TABLE_COLUMNS = [
     ("symbol", "Symbol", 90, tk.W),
     ("asset_type", "Type", 84, tk.W),
@@ -25,6 +29,8 @@ _POSITION_TABLE_COLUMNS = [
     ("pnl_pct", "P&L %", 86, tk.E),
     ("day_pnl", "Day P&L", 112, tk.E),
 ]
+_LEFT_POSITION_COLUMNS = tuple(column for column, *_rest in _POSITION_TABLE_COLUMNS if column not in {"pnl", "pnl_pct", "day_pnl"})
+_PNL_POSITION_COLUMNS = ("pnl", "pnl_pct", "day_pnl")
 
 
 def install_cash_positions_extension(app_cls: Type[tk.Tk]) -> None:
@@ -91,12 +97,7 @@ def _ensure_position_type_column(table: ttk.Treeview | Any) -> None:
 
 
 def _configure_position_table_headings(table: ttk.Treeview | Any) -> None:
-    """Re-apply every heading after adding the Type column.
-
-    Tk can drop existing heading labels when a Treeview's columns are reconfigured.
-    The cash/asset-type extension mutates the columns at refresh time, so restore
-    the full header set every time instead of only setting the new Type header.
-    """
+    """Re-apply every heading after adding the Type column."""
 
     active_columns = set(table["columns"])
     for column, label, width, anchor in _POSITION_TABLE_COLUMNS:
@@ -168,89 +169,217 @@ def _refresh_portfolio_with_cash_rows(self: tk.Tk) -> None:
     self.day_pnl_value_label.configure(text=polished_theme._format_optional_money(portfolio.day_profit_loss))
     self.snapshot_source_label.configure(text=f"Snapshot: {self.broker.source_message}")
 
+    _ensure_split_positions_table(self)
     _ensure_position_type_column(self.positions_table)
+    _clear_positions_tables(self)
+    _configure_position_tags(self)
 
-    for row_id in self.positions_table.get_children():
-        self.positions_table.delete(row_id)
-
-    self.positions_table.tag_configure("cash_position", foreground="#334155")
-    self.positions_table.tag_configure("pnl_positive", foreground="#047857")
-    self.positions_table.tag_configure("pnl_negative", foreground="#b91c1c")
-    self.positions_table.tag_configure("pnl_neutral", foreground="#334155")
     total_value = max(portfolio.total_value, 0.01)
+    row_index = 0
 
     for cash in portfolio.display_cash_positions():
         if _is_hidden_cash_position(cash):
             continue
 
         weight = (cash.market_value / total_value) * 100
-        self.positions_table.insert(
-            "",
-            tk.END,
-            values=_table_values(
-                self.positions_table,
-                {
-                    "symbol": cash.display_symbol,
-                    "asset_type": "Cash",
-                    "qty": f"{cash.quantity:g}",
-                    "avg_cost": polished_theme._format_money(cash.average_cost),
-                    "last": polished_theme._format_money(cash.last_price),
-                    "cost_basis": polished_theme._format_money(cash.cost_basis),
-                    "value": polished_theme._format_money(cash.market_value),
-                    "weight": f"{weight:.1f}%",
-                    "pnl": "--",
-                    "pnl_pct": "--",
-                    "day_pnl": "--",
-                },
-            ),
-            tags=("cash_position",),
+        row_id = f"row_{row_index}"
+        row_index += 1
+        _insert_position_row(
+            self,
+            row_id=row_id,
+            values={
+                "symbol": cash.display_symbol,
+                "asset_type": "Cash",
+                "qty": f"{cash.quantity:g}",
+                "avg_cost": polished_theme._format_money(cash.average_cost),
+                "last": polished_theme._format_money(cash.last_price),
+                "cost_basis": polished_theme._format_money(cash.cost_basis),
+                "value": polished_theme._format_money(cash.market_value),
+                "weight": f"{weight:.1f}%",
+                "pnl": "--",
+                "pnl_pct": "--",
+                "day_pnl": "--",
+            },
+            pnl_values={"pnl": None, "pnl_pct": None, "day_pnl": None},
+            main_tag="cash_position",
         )
 
     for symbol in sorted(portfolio.positions):
         p = portfolio.positions[symbol]
         position_type = _position_type(p)
         weight = (p.market_value / total_value) * 100
-        self.positions_table.insert(
-            "",
-            tk.END,
-            values=_table_values(
-                self.positions_table,
-                {
-                    "symbol": p.symbol,
-                    "asset_type": position_type,
-                    "qty": f"{p.quantity:g}",
-                    "avg_cost": polished_theme._format_money(p.average_cost),
-                    "last": polished_theme._format_money(p.last_price),
-                    "cost_basis": polished_theme._format_money(p.cost_basis),
-                    "value": polished_theme._format_money(p.market_value),
-                    "weight": f"{weight:.1f}%",
-                    "pnl": polished_theme._format_money(p.unrealized_profit_loss),
-                    "pnl_pct": polished_theme._format_percent(p.unrealized_profit_loss_percent),
-                    "day_pnl": polished_theme._format_optional_money(p.day_profit_loss),
-                },
-            ),
-            tags=(_position_row_tag(p),),
+        row_id = f"row_{row_index}"
+        row_index += 1
+        _insert_position_row(
+            self,
+            row_id=row_id,
+            values={
+                "symbol": p.symbol,
+                "asset_type": position_type,
+                "qty": f"{p.quantity:g}",
+                "avg_cost": polished_theme._format_money(p.average_cost),
+                "last": polished_theme._format_money(p.last_price),
+                "cost_basis": polished_theme._format_money(p.cost_basis),
+                "value": polished_theme._format_money(p.market_value),
+                "weight": f"{weight:.1f}%",
+                "pnl": polished_theme._format_money(p.unrealized_profit_loss),
+                "pnl_pct": polished_theme._format_percent(p.unrealized_profit_loss_percent),
+                "day_pnl": polished_theme._format_optional_money(p.day_profit_loss),
+            },
+            pnl_values={
+                "pnl": p.unrealized_profit_loss,
+                "pnl_pct": p.unrealized_profit_loss_percent,
+                "day_pnl": p.day_profit_loss,
+            },
+            main_tag="data_neutral",
         )
 
     polished_theme._update_risk_alerts(self, portfolio)
 
 
-def _position_row_tag(position: Position) -> str:
-    """Choose a live red/green row color from the most active P&L signal.
+def _ensure_split_positions_table(self: tk.Tk) -> None:
+    """Split the visual table so only P&L cells receive red/green color.
 
-    Tk's built-in Treeview supports row foreground colors, not independent
-    per-cell foreground colors. Use Day P&L when it exists, because that is the
-    number most likely to flip during live refreshes; otherwise fall back to the
-    open/unrealized P&L. This removes the old fixed red Perp color and makes
-    positive rows green, negative rows red, and flat rows neutral.
+    ttk.Treeview applies foreground color to an entire row. To color P&L cells
+    independently while keeping the symbol/quantity/value columns neutral, keep
+    the normal columns in the main Treeview and render each P&L column as its own
+    one-column Treeview that scrolls with the main table.
     """
 
-    driver = position.day_profit_loss
-    if driver is None or abs(driver) <= 0.005:
-        driver = position.unrealized_profit_loss
+    existing = getattr(self, "positions_pnl_tables", None)
+    if isinstance(existing, dict) and all(_widget_alive(widget) for widget in existing.values()):
+        return
 
-    if driver > 0.005:
+    parent = self.positions_table.master
+    for child in list(parent.winfo_children()):
+        child.destroy()
+
+    parent.rowconfigure(0, weight=1)
+    parent.rowconfigure(1, weight=0)
+    parent.columnconfigure(0, weight=1)
+    for column in range(1, 5):
+        parent.columnconfigure(column, weight=0)
+
+    main_table = ttk.Treeview(parent, columns=_LEFT_POSITION_COLUMNS, show="headings", height=14)
+    main_table.grid(row=0, column=0, sticky="nsew")
+    self.positions_table = main_table
+
+    pnl_tables: dict[str, ttk.Treeview] = {}
+    for grid_column, column in enumerate(_PNL_POSITION_COLUMNS, start=1):
+        table = ttk.Treeview(parent, columns=(column,), show="headings", height=14, selectmode="browse")
+        table.grid(row=0, column=grid_column, sticky="ns")
+        pnl_tables[column] = table
+    self.positions_pnl_tables = pnl_tables
+
+    y_scrollbar = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=lambda *args: _yview_all_position_tables(self, *args))
+    y_scrollbar.grid(row=0, column=4, sticky="ns")
+    main_table.configure(yscrollcommand=y_scrollbar.set)
+    for table in pnl_tables.values():
+        table.configure(yscrollcommand=y_scrollbar.set)
+
+    x_scrollbar = ttk.Scrollbar(parent, orient=tk.HORIZONTAL, command=main_table.xview)
+    x_scrollbar.grid(row=1, column=0, sticky="ew")
+    main_table.configure(xscrollcommand=x_scrollbar.set)
+
+    _bind_synced_table_scroll(self, main_table)
+    for table in pnl_tables.values():
+        _bind_synced_table_scroll(self, table)
+
+    _configure_position_table_headings(main_table)
+    for table in pnl_tables.values():
+        _configure_position_table_headings(table)
+
+
+def _widget_alive(widget: tk.Widget) -> bool:
+    try:
+        return bool(widget.winfo_exists())
+    except Exception:
+        return False
+
+
+def _all_position_tables(self: tk.Tk) -> list[ttk.Treeview]:
+    tables = [self.positions_table]
+    pnl_tables = getattr(self, "positions_pnl_tables", {})
+    if isinstance(pnl_tables, dict):
+        tables.extend(pnl_tables[column] for column in _PNL_POSITION_COLUMNS if column in pnl_tables)
+    return tables
+
+
+def _yview_all_position_tables(self: tk.Tk, *args: str) -> None:
+    for table in _all_position_tables(self):
+        table.yview(*args)
+
+
+def _bind_synced_table_scroll(self: tk.Tk, table: ttk.Treeview) -> None:
+    def _on_mousewheel(event: tk.Event) -> str:
+        if getattr(event, "num", None) == 4:
+            delta = -1
+        elif getattr(event, "num", None) == 5:
+            delta = 1
+        else:
+            delta = -1 if getattr(event, "delta", 0) > 0 else 1
+        for synced_table in _all_position_tables(self):
+            synced_table.yview_scroll(delta, "units")
+        return "break"
+
+    for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+        table.bind(sequence, _on_mousewheel, add="+")
+
+
+def _clear_positions_tables(self: tk.Tk) -> None:
+    for table in _all_position_tables(self):
+        for row_id in table.get_children():
+            table.delete(row_id)
+
+
+def _configure_position_tags(self: tk.Tk) -> None:
+    self.positions_table.tag_configure("cash_position", foreground=_CASH_FOREGROUND)
+    self.positions_table.tag_configure("data_neutral", foreground=_NEUTRAL_FOREGROUND)
+
+    pnl_tables = getattr(self, "positions_pnl_tables", {})
+    if not isinstance(pnl_tables, dict):
+        return
+    for table in pnl_tables.values():
+        table.tag_configure("pnl_positive", foreground=_POSITIVE_FOREGROUND)
+        table.tag_configure("pnl_negative", foreground=_NEGATIVE_FOREGROUND)
+        table.tag_configure("pnl_neutral", foreground=_CASH_FOREGROUND)
+
+
+def _insert_position_row(
+    self: tk.Tk,
+    *,
+    row_id: str,
+    values: dict[str, str],
+    pnl_values: dict[str, float | None],
+    main_tag: str,
+) -> None:
+    self.positions_table.insert(
+        "",
+        tk.END,
+        iid=row_id,
+        values=_table_values(self.positions_table, values),
+        tags=(main_tag,),
+    )
+
+    pnl_tables = getattr(self, "positions_pnl_tables", {})
+    if not isinstance(pnl_tables, dict):
+        return
+    for column in _PNL_POSITION_COLUMNS:
+        table = pnl_tables.get(column)
+        if table is None:
+            continue
+        table.insert(
+            "",
+            tk.END,
+            iid=row_id,
+            values=(values.get(column, ""),),
+            tags=(_pnl_value_tag(pnl_values.get(column)),),
+        )
+
+
+def _pnl_value_tag(value: float | None) -> str:
+    if value is None or abs(value) <= 0.005:
+        return "pnl_neutral"
+    if value > 0:
         return "pnl_positive"
-    if driver < -0.005:
-        return "pnl_negative"
-    return "pnl_neutral"
+    return "pnl_negative"
