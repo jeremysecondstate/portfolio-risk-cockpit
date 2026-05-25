@@ -264,7 +264,6 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             "====================\n\n"
             "The in-memory Schwab session, saved local token cache, and session-only safety checks were cleared.\n"
             "The next Schwab Preview, Recent Orders, or Open Only action will ask you to authorize again.\n\n"
-            "No order was submitted, replaced, or canceled."
         )
 
     def _record_schwab_preview_status(self, preview_payload: dict) -> None:
@@ -513,7 +512,6 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             f"Broker/session gates: {broker_label}\n"
             f"Human confirmation gates: {human_label}\n\n"
             "Status: LIVE SUBMIT DISABLED.\n"
-            "No order was submitted, replaced, or canceled.\n\n"
             "Current ticket:\n"
             f"- Symbol: {symbol}\n"
             f"- Side: {side}\n"

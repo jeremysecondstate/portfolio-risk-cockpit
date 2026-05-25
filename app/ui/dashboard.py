@@ -238,7 +238,6 @@ class PortfolioRiskCockpitApp(tk.Tk):
             "===================\n\n"
             "Status: placeholder only.\n\n"
             "No cancel request was sent to Schwab.\n"
-            "No order was submitted, replaced, or canceled.\n\n"
             "Future cancel workflow:\n"
             "1. Load Open Only orders.\n"
             "2. Select a known active/open order.\n"
@@ -637,14 +636,12 @@ class PortfolioRiskCockpitApp(tk.Tk):
         if not payload:
             lines.append("No currently open/active Schwab orders found for this date window.")
             lines.append("")
-            lines.append("No order was submitted, replaced, or canceled.")
             return "\n".join(lines)
 
         if not isinstance(payload, list):
             lines.append("Unexpected response shape:")
             lines.append(str(payload))
             lines.append("")
-            lines.append("No order was submitted, replaced, or canceled.")
             return "\n".join(lines)
 
         active_orders = [
@@ -660,7 +657,6 @@ class PortfolioRiskCockpitApp(tk.Tk):
             for status in seen_statuses:
                 lines.append(f"- {status}")
             lines.append("")
-            lines.append("No order was submitted, replaced, or canceled.")
             return "\n".join(lines)
 
         for index, order in enumerate(active_orders, start=1):
@@ -697,7 +693,6 @@ class PortfolioRiskCockpitApp(tk.Tk):
                 ]
             )
 
-        lines.append("No order was submitted, replaced, or canceled.")
         return "\n".join(lines)
 
     def format_schwab_open_orders_response(self, status_code: int, payload) -> str:
@@ -713,14 +708,12 @@ class PortfolioRiskCockpitApp(tk.Tk):
         if not payload:
             lines.append("No recent orders returned by Schwab for this date window.")
             lines.append("")
-            lines.append("No order was submitted, replaced, or canceled.")
             return "\n".join(lines)
 
         if not isinstance(payload, list):
             lines.append("Unexpected response shape:")
             lines.append(str(payload))
             lines.append("")
-            lines.append("No order was submitted, replaced, or canceled.")
             return "\n".join(lines)
 
         for index, order in enumerate(payload, start=1):
@@ -757,7 +750,6 @@ class PortfolioRiskCockpitApp(tk.Tk):
                 ]
             )
 
-        lines.append("No order was submitted, replaced, or canceled.")
         return "\n".join(lines)
 
     def _grid_row(

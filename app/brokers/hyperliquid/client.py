@@ -159,7 +159,6 @@ def format_hyperliquid_snapshot(snapshot: HyperliquidSnapshot, portfolio: Portfo
         "",
         f"Wallet: {_short_address(snapshot.user)}",
         f"Fetched: {snapshot.fetched_at.strftime('%Y-%m-%d %H:%M:%S')}",
-        "Mode: read-only public info API; no API wallet or private key used.",
         "",
         "Account summary:",
         f"- Perp account value: {_format_money(account_value)}",
@@ -242,7 +241,6 @@ def format_hyperliquid_snapshot(snapshot: HyperliquidSnapshot, portfolio: Portfo
     lines.extend(
         [
             "",
-            "No order was submitted, replaced, or canceled.",
             "Spot P&L is read-only: current value minus entry notional from Hyperliquid public info data.",
             "API/agent wallets are only needed for future signed actions.",
         ]

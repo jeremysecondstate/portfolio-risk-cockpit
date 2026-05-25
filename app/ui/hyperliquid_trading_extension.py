@@ -281,7 +281,6 @@ def _cancel_hyperliquid_order_guarded(self: tk.Tk) -> None:
             "- HYPE_API_ADDRESS\n"
             "- HYPE_API_SECRET\n"
             "- HYPERLIQUID_ENABLE_LIVE_ORDERS=true\n\n"
-            "No order was submitted, replaced, or canceled."
         )
         messagebox.showerror("Hyperliquid cancel blocked", str(exc))
         return
@@ -384,7 +383,6 @@ def _format_hyperliquid_open_orders(
         f"Wallet: {_short_address(user)}",
         f"Address source: {address_source}",
         f"Fetched: {fetched_at.strftime('%Y-%m-%d %H:%M:%S')}",
-        "Mode: read-only public info API; no order was submitted, replaced, or canceled.",
         "",
         f"Open orders: {len(open_orders)}",
         "",
