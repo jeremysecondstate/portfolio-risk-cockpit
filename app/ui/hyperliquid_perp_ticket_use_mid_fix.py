@@ -217,6 +217,9 @@ def _run_hyperliquid_perp_what_if_clean(self: tk.Tk) -> None:
 
         tp_case = _perp_case(ticket.limit_price, tp_price, ticket.size, is_long, leverage, fee_rate)
         sl_case = _perp_case(ticket.limit_price, sl_price, ticket.size, is_long, leverage, fee_rate)
+        spot_position = _spot_position_for_coin(self, ticket.coin)
+        tp_spot_lines = _spot_scenario_lines("TP", ticket.coin, tp_price, spot_position, tp_case["net_pnl"])
+        sl_spot_lines = _spot_scenario_lines("SL", ticket.coin, sl_price, spot_position, sl_case["net_pnl"])
         notional = ticket.limit_price * ticket.size
         margin = notional / leverage if leverage > 0 else notional
         collateral = _planning_collateral_usdc(self, margin)
@@ -247,15 +250,18 @@ def _run_hyperliquid_perp_what_if_clean(self: tk.Tk) -> None:
             f"- Gross P&L: ${tp_case['gross_pnl']:+,.2f}\n"
             f"- Estimated fees: ${tp_case['fees']:,.2f}\n"
             f"- Net gain/loss: ${tp_case['net_pnl']:+,.2f}\n"
-            f"- ROI on estimated margin: {tp_case['margin_roi_percent']:+.2f}%\n\n"
+            f"- ROI on estimated margin: {tp_case['margin_roi_percent']:+.2f}%\n"
+            + "\n".join(tp_spot_lines) + "\n\n"
             "Stop Loss scenario\n"
             f"- SL Price: ${sl_price:,.4f}\n"
             f"- Gross P&L: ${sl_case['gross_pnl']:+,.2f}\n"
             f"- Estimated fees: ${sl_case['fees']:,.2f}\n"
             f"- Net gain/loss: ${sl_case['net_pnl']:+,.2f}\n"
-            f"- ROI on estimated margin: {sl_case['margin_roi_percent']:+.2f}%\n\n"
+            f"- ROI on estimated margin: {sl_case['margin_roi_percent']:+.2f}%\n"
+            + "\n".join(sl_spot_lines) + "\n\n"
             "Setup quality\n"
             f"- Reward/risk using net P&L: {rr}\n"
+            "- Spot scenario P&L uses the synced spot mark as the starting point, plus avg-cost context when available.\n"
             "- TP/SL fields are scenario inputs unless Attach TP/SL is on and child-order execution is wired.\n"
             "- Liquidation is an estimate: Hyperliquid can also account for maintenance margin, funding, open orders, and account mode."
         )
@@ -317,6 +323,25 @@ def _spot_hedge_lines(self: tk.Tk, coin: str, perp_size: float, is_long: bool, e
         f"- Hedge ratio vs spot size: {hedge_ratio:.1f}%",
         f"- Net directional size after this ticket: {net_delta:+g} {coin} ({net_label})",
         f"- {interpretation}",
+    ]
+
+
+def _spot_scenario_lines(label: str, coin: str, scenario_price: float, spot, perp_net_pnl: float) -> list[str]:
+    if spot is None:
+        return [f"- Spot at {label}: no synced {coin} spot position found."]
+
+    spot_qty = spot.quantity
+    current_spot_value = spot_qty * spot.last_price
+    scenario_spot_value = spot_qty * scenario_price
+    spot_move_pnl = scenario_spot_value - current_spot_value
+    spot_open_pnl = scenario_spot_value - spot.cost_basis
+    combined_move_and_perp = spot_move_pnl + perp_net_pnl
+
+    return [
+        f"- Spot value at {label}: ${scenario_spot_value:,.2f}",
+        f"- Spot P&L from synced mark: ${spot_move_pnl:+,.2f}",
+        f"- Spot open P&L vs avg cost: ${spot_open_pnl:+,.2f}",
+        f"- Combined spot move + perp net P&L: ${combined_move_and_perp:+,.2f}",
     ]
 
 
