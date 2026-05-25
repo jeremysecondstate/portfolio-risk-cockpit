@@ -13,6 +13,7 @@ from app.ui.polished_theme import install_polished_cockpit_theme
 from app.ui.schwab_live_status_extension import install_schwab_live_status_extension
 from app.ui.trade_setup_extension import install_trade_setup_extension
 from app.ui.trading_cockpit import SchwabTradingCockpitApp
+from app.ui.unified_refresh_extension import install_unified_refresh_extension
 from app.ui.venue_mid_extension import install_venue_mid_extension
 
 
@@ -21,6 +22,7 @@ def main() -> None:
     install_trade_setup_extension(SchwabTradingCockpitApp)
     install_advanced_actions_extension(SchwabTradingCockpitApp)
     install_hyperliquid_trading_extension(SchwabTradingCockpitApp)
+    install_unified_refresh_extension(SchwabTradingCockpitApp)
     install_hyperliquid_notifications_fix(SchwabTradingCockpitApp)
     install_options_lab_extension(SchwabTradingCockpitApp)
     install_hyperliquid_perp_ticket_use_mid_fix(SchwabTradingCockpitApp)
