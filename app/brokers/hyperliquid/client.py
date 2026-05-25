@@ -13,6 +13,14 @@ from app.core.portfolio import CashPosition, Portfolio, Position
 DEFAULT_INFO_URL = "https://api.hyperliquid.xyz/info"
 ZERO_EPSILON = 0.00000001
 CASH_LIKE_COINS = {"USDC", "USD"}
+SPOT_COIN_ALIASES: dict[str, tuple[str, ...]] = {
+    # Hyperliquid can expose wrapped spot tokens with a U-prefix while the UI
+    # shows the familiar ticker. Treat both spellings as the same market.
+    "BTC": ("BTC", "UBTC"),
+    "UBTC": ("UBTC", "BTC"),
+    "ETH": ("ETH", "UETH"),
+    "UETH": ("UETH", "ETH"),
+}
 DEFAULT_SPOT_MID_KEYS: dict[str, tuple[str, ...]] = {
     # Hyperliquid allMids can expose spot markets by @index. Keep this as a
     # harmless fallback while also supporting direct coin/name matches.
@@ -252,10 +260,25 @@ def format_hyperliquid_snapshot(snapshot: HyperliquidSnapshot, portfolio: Portfo
                 f"P&L {_format_optional_money(pnl)} ({_format_optional_percent(pnl_percent)})"
             )
 
+    lines.extend(["", "Open orders:"])
+    if not snapshot.open_orders:
+        lines.append("- None")
+    else:
+        for order in snapshot.open_orders[:12]:
+            coin = order.get("coin", "UNKNOWN")
+            side = order.get("side", "UNKNOWN")
+            size = order.get("sz", order.get("size", "?"))
+            price = order.get("limitPx", order.get("price", "?"))
+            oid = order.get("oid", "?")
+            lines.append(f"- {coin} {side} {size} @ {price} · oid {oid}")
+        if len(snapshot.open_orders) > 12:
+            lines.append(f"- ... {len(snapshot.open_orders) - 12} more")
+
     lines.extend(
         [
             "",
             "Spot P&L is read-only: it uses Hyperliquid's spot P&L field when present, otherwise current value minus entry notional.",
+            "Spot prices resolve through Hyperliquid spot metadata when allMids only exposes @-indexed spot markets.",
             "API/agent wallets are only needed for future signed actions.",
         ]
     )
@@ -379,50 +402,151 @@ def _spot_mid_price(coin: str, snapshot: HyperliquidSnapshot) -> float | None:
     if coin in CASH_LIKE_COINS:
         return 1.0
 
+    aliases = _spot_coin_aliases(coin)
     env_key = os.getenv(f"HYPERLIQUID_{coin}_MID_KEY", "").strip()
-    candidate_keys = [
-        env_key,
-        coin,
-        f"{coin}/USDC",
-        f"{coin}-USDC",
-        *DEFAULT_SPOT_MID_KEYS.get(coin, ()),
-    ]
+    candidate_keys = [env_key]
+    for alias in aliases:
+        candidate_keys.extend((alias, f"{alias}/USDC", f"{alias}-USDC"))
+        candidate_keys.extend(DEFAULT_SPOT_MID_KEYS.get(alias, ()))
+
     for key in candidate_keys:
         if not key:
             continue
-        value = _to_float(snapshot.all_mids.get(key))
+        value = _all_mids_value(snapshot.all_mids, key)
         if value is not None:
             return value
 
-    meta_price = _spot_meta_price(coin, snapshot.spot_meta_and_asset_ctxs)
+    meta_price = _spot_meta_price(coin, snapshot.spot_meta_and_asset_ctxs, snapshot.all_mids)
     if meta_price is not None:
         return meta_price
 
     for key, raw_value in snapshot.all_mids.items():
         upper_key = str(key).upper()
-        if upper_key == coin or upper_key.startswith(f"{coin}/") or upper_key.startswith(f"{coin}-"):
+        if _matches_spot_alias(upper_key, aliases):
             value = _to_float(raw_value)
             if value is not None:
                 return value
     return None
 
 
-def _spot_meta_price(coin: str, payload: Any) -> float | None:
+def _spot_meta_price(coin: str, payload: Any, all_mids: dict[str, Any] | None = None) -> float | None:
     if not isinstance(payload, list) or len(payload) < 2:
         return None
     meta, asset_ctxs = payload[0], payload[1]
     universe = meta.get("universe") if isinstance(meta, dict) else None
+    tokens = meta.get("tokens") if isinstance(meta, dict) else None
     if not isinstance(universe, list) or not isinstance(asset_ctxs, list):
         return None
 
-    for index, asset in enumerate(universe):
+    aliases = _spot_coin_aliases(coin)
+    token_names_by_index = _spot_token_names_by_index(tokens)
+    mids = all_mids if isinstance(all_mids, dict) else {}
+
+    for market_index, asset in enumerate(universe):
         if not isinstance(asset, dict):
             continue
-        name = str(asset.get("name") or asset.get("coin") or "").upper()
-        if name != coin and not name.startswith(f"{coin}/") and not name.startswith(f"{coin}-"):
+
+        market_names = _spot_market_names(asset, token_names_by_index)
+        if not any(_matches_spot_alias(name, aliases) for name in market_names):
             continue
-        ctx = asset_ctxs[index] if index < len(asset_ctxs) and isinstance(asset_ctxs[index], dict) else {}
-        return _first_number(ctx, ("midPx", "markPx", "oraclePx", "price", "prevDayPx"))
+
+        ctx = asset_ctxs[market_index] if market_index < len(asset_ctxs) and isinstance(asset_ctxs[market_index], dict) else {}
+        price = _first_number(ctx, ("midPx", "markPx", "oraclePx", "price", "prevDayPx"))
+        if price is not None:
+            return price
+
+        candidate_keys = set(market_names)
+        candidate_keys.add(f"@{market_index}")
+        asset_index = _to_int(asset.get("index"))
+        if asset_index is not None:
+            candidate_keys.add(f"@{asset_index}")
+        for key in candidate_keys:
+            price = _all_mids_value(mids, key)
+            if price is not None:
+                return price
+    return None
+
+
+def _spot_token_names_by_index(tokens: Any) -> dict[int, set[str]]:
+    names_by_index: dict[int, set[str]] = {}
+    if not isinstance(tokens, list):
+        return names_by_index
+
+    for fallback_index, token in enumerate(tokens):
+        if not isinstance(token, dict):
+            continue
+        token_names = {
+            str(value).strip().upper()
+            for key in ("name", "coin", "token", "fullName")
+            for value in (token.get(key),)
+            if value not in (None, "")
+        }
+        if not token_names:
+            continue
+
+        names_by_index.setdefault(fallback_index, set()).update(token_names)
+        explicit_index = _to_int(token.get("index"))
+        if explicit_index is not None:
+            names_by_index.setdefault(explicit_index, set()).update(token_names)
+    return names_by_index
+
+
+def _spot_market_names(asset: dict[str, Any], token_names_by_index: dict[int, set[str]]) -> set[str]:
+    names = {
+        str(value).strip().upper()
+        for key in ("name", "coin", "token", "symbol")
+        for value in (asset.get(key),)
+        if value not in (None, "")
+    }
+
+    token_indices = asset.get("tokens")
+    if isinstance(token_indices, list) and token_indices:
+        base_index = _to_int(token_indices[0])
+        quote_index = _to_int(token_indices[1]) if len(token_indices) > 1 else None
+        base_names = token_names_by_index.get(base_index, set()) if base_index is not None else set()
+        quote_names = token_names_by_index.get(quote_index, set()) if quote_index is not None else {"USDC"}
+        names.update(base_names)
+        for base in base_names:
+            if quote_names:
+                for quote in quote_names:
+                    names.add(f"{base}/{quote}")
+                    names.add(f"{base}-{quote}")
+            else:
+                names.add(f"{base}/USDC")
+                names.add(f"{base}-USDC")
+    return {name for name in names if name}
+
+
+def _spot_coin_aliases(coin: str) -> tuple[str, ...]:
+    normalized = coin.strip().upper()
+    aliases = SPOT_COIN_ALIASES.get(normalized, (normalized,))
+    result: list[str] = []
+    for alias in aliases:
+        alias = alias.strip().upper()
+        if alias and alias not in result:
+            result.append(alias)
+    return tuple(result)
+
+
+def _matches_spot_alias(value: str, aliases: tuple[str, ...]) -> bool:
+    upper_value = value.strip().upper()
+    for alias in aliases:
+        if upper_value == alias or upper_value.startswith(f"{alias}/") or upper_value.startswith(f"{alias}-"):
+            return True
+    return False
+
+
+def _all_mids_value(all_mids: dict[str, Any], key: str) -> float | None:
+    value = _to_float(all_mids.get(key))
+    if value is not None:
+        return value
+
+    upper_key = key.upper()
+    for raw_key, raw_value in all_mids.items():
+        if str(raw_key).upper() == upper_key:
+            value = _to_float(raw_value)
+            if value is not None:
+                return value
     return None
 
 
@@ -459,6 +583,13 @@ def _to_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _to_int(value: Any) -> int | None:
+    number = _to_float(value)
+    if number is None:
+        return None
+    return int(number)
 
 
 def _short_address(address: str) -> str:
