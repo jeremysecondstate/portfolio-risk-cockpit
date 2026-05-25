@@ -11,7 +11,33 @@ def install_venue_mid_extension(app_cls: Type[tk.Tk]) -> None:
     """Make the shared Cockpit Use Mid button follow the selected venue."""
 
     app_cls.use_schwab_mid_market = _use_schwab_mid_market  # type: ignore[attr-defined]
+    app_cls.use_selected_venue_mid_market = _use_mid_from_cockpit  # type: ignore[attr-defined]
+    original_build_layout = getattr(app_cls, "_build_layout", None)
+
+    if callable(original_build_layout):
+        def _build_layout_with_venue_mid_hotkeys(self: tk.Tk) -> None:
+            original_build_layout(self)
+            _install_mid_hotkeys(self)
+
+        app_cls._build_layout = _build_layout_with_venue_mid_hotkeys  # type: ignore[method-assign]
+
     hyperliquid_ui._use_mid_from_cockpit = _use_mid_from_cockpit  # type: ignore[attr-defined]
+
+
+def _install_mid_hotkeys(self: tk.Tk) -> None:
+    """Install app-wide keyboard shortcuts for fast planning."""
+
+    def _trigger_use_mid(_event: tk.Event | None = None) -> str:
+        _use_mid_from_cockpit(self)
+        return "break"
+
+    # Windows/Linux use Control. Command-style bindings are harmless on Tk builds
+    # that support them and make the shortcut friendlier on macOS later.
+    for sequence in ("<Control-m>", "<Control-M>", "<Command-m>", "<Command-M>"):
+        try:
+            self.bind_all(sequence, _trigger_use_mid, add="+")
+        except tk.TclError:
+            continue
 
 
 def _use_mid_from_cockpit(self: tk.Tk) -> None:
