@@ -9,7 +9,7 @@ _DELETE_ME = "DELETE ME"
 
 
 def install_hyperliquid_perp_ticket_use_mid_fix(app_cls: type[tk.Tk] | None = None) -> None:
-    """Remove placeholder DELETE ME controls from the dedicated trading tabs."""
+    """Replace placeholder DELETE ME controls with venue-aware Use Mid buttons."""
     _patch_hyperliquid_tab_builder()
     _patch_options_layout_builder()
     if app_cls is not None:
@@ -31,9 +31,13 @@ def _patch_grid_row(app_cls: type[tk.Tk]) -> None:
         right_widget: tk.Widget | None = None,
     ) -> None:
         if right_label == _DELETE_ME:
-            if _labelframe_title(parent) == "Hyperliquid Perp Ticket":
+            ticket_title = _labelframe_title(parent)
+            if ticket_title == "Hyperliquid Perp Ticket":
                 right_label = "Use Mid"
-                right_widget = _make_use_mid_button(self, parent)
+                right_widget = _make_hyperliquid_use_mid_button(self, parent)
+            elif ticket_title == "Schwab Stock / ETF Ticket":
+                right_label = "Use Mid"
+                right_widget = _make_schwab_use_mid_button(self, parent)
             else:
                 # The polished shared row builder expects a real widget on the right.
                 # Use invisible placeholders so the left Stop price control still lays out cleanly.
@@ -68,7 +72,7 @@ def _patch_hyperliquid_tab_builder() -> None:
         ) -> None:
             if left_label == "Stop price" and right_label == _DELETE_ME:
                 right_label = "Use Mid"
-                right_widget = _make_use_mid_button(self, container)
+                right_widget = _make_hyperliquid_use_mid_button(self, container)
             return original_grid_row(
                 container,
                 row,
@@ -125,19 +129,40 @@ def _remove_delete_me_controls(self: tk.Tk) -> None:
             existing.destroy()
 
         if title == "Hyperliquid Perp Ticket":
-            ttk.Label(parent, text="Use Mid", style="Subtle.TLabel").grid(
-                row=row,
-                column=2,
-                sticky="w",
-                padx=(0, 8),
-                pady=grid_info.get("pady", 0),
+            _grid_replacement_use_mid(
+                parent,
+                row,
+                grid_info,
+                _make_hyperliquid_use_mid_button(self, parent),
             )
-            _make_use_mid_button(self, parent).grid(
-                row=row,
-                column=3,
-                sticky="ew",
-                pady=grid_info.get("pady", 0),
+        elif title == "Schwab Stock / ETF Ticket":
+            _grid_replacement_use_mid(
+                parent,
+                row,
+                grid_info,
+                _make_schwab_use_mid_button(self, parent),
             )
+
+
+def _grid_replacement_use_mid(
+    parent: tk.Widget,
+    row: int,
+    grid_info: dict[str, object],
+    button: ttk.Button,
+) -> None:
+    ttk.Label(parent, text="Use Mid", style="Subtle.TLabel").grid(
+        row=row,
+        column=2,
+        sticky="w",
+        padx=(0, 8),
+        pady=grid_info.get("pady", 0),
+    )
+    button.grid(
+        row=row,
+        column=3,
+        sticky="ew",
+        pady=grid_info.get("pady", 0),
+    )
 
 
 def _is_delete_me_label(widget: tk.Widget) -> bool:
@@ -154,7 +179,7 @@ def _labelframe_title(widget: tk.Widget) -> str:
         return ""
 
 
-def _make_use_mid_button(self: tk.Tk, parent: tk.Widget) -> ttk.Button:
+def _make_hyperliquid_use_mid_button(self: tk.Tk, parent: tk.Widget) -> ttk.Button:
     return ttk.Button(
         parent,
         text="Use Mid",
@@ -165,6 +190,23 @@ def _make_use_mid_button(self: tk.Tk, parent: tk.Widget) -> ttk.Button:
             command=options_lab_extension._first_available_command(
                 self,
                 "use_hyperliquid_mid_market",
+            ),
+        ),
+        style="Accent.TButton",
+    )
+
+
+def _make_schwab_use_mid_button(self: tk.Tk, parent: tk.Widget) -> ttk.Button:
+    return ttk.Button(
+        parent,
+        text="Use Mid",
+        command=lambda: options_lab_extension._run_workspace_action(
+            self,
+            venue="Schwab",
+            preview_widget=self.schwab_trading_preview_text,
+            command=options_lab_extension._first_available_command(
+                self,
+                "use_schwab_mid_market",
             ),
         ),
         style="Accent.TButton",
