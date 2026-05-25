@@ -172,6 +172,41 @@ def _find_label_frame_by_text(root: tk.Widget, text: str) -> ttk.LabelFrame | No
     return None
 
 
+def _set_refresh_output_text(self: tk.Tk, content: str, preserve_scroll: bool) -> None:
+    if not preserve_scroll:
+        self._set_preview_text(content)
+        return
+
+    output = getattr(self, "preview_text", None)
+    if output is None:
+        self._set_preview_text(content)
+        return
+
+    try:
+        previous_top, previous_bottom = output.yview()
+        was_at_bottom = previous_bottom >= 0.995
+    except Exception:
+        previous_top = 0.0
+        was_at_bottom = False
+
+    self._set_preview_text(content)
+
+    def restore_scroll() -> None:
+        try:
+            if was_at_bottom:
+                output.yview_moveto(1.0)
+            else:
+                output.yview_moveto(previous_top)
+        except Exception:
+            return
+
+    restore_scroll()
+    try:
+        output.after_idle(restore_scroll)
+    except Exception:
+        pass
+
+
 def _refresh_connected_portfolio_silent(self: tk.Tk) -> None:
     _refresh_connected_portfolio(self, automated=True)
 
@@ -222,7 +257,7 @@ def _refresh_connected_portfolio(self: tk.Tk, automated: bool = False) -> None:
     if hyperliquid_preview:
         results.extend(["", hyperliquid_preview])
 
-    self._set_preview_text("\n".join(results))
+    _set_refresh_output_text(self, "\n".join(results), preserve_scroll=automated)
 
     if schwab_error or hyperliquid_error:
         failed = []
