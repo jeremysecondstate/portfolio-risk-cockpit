@@ -73,9 +73,9 @@ def _refresh_connected_portfolio(self: tk.Tk) -> None:
     hyperliquid_preview: str | None = None
 
     try:
-        self.refresh_schwab_account()
-        results.append("- Schwab refresh requested.")
-    except Exception as exc:  # Defensive: refresh_schwab_account normally owns its own dialog.
+        schwab_source_message = _sync_schwab_account_silent(self)
+        results.append(f"- {schwab_source_message}")
+    except Exception as exc:
         schwab_error = exc
         results.append(f"- Schwab refresh failed: {exc}")
 
@@ -112,6 +112,16 @@ def _refresh_connected_portfolio(self: tk.Tk) -> None:
         return
 
     messagebox.showinfo("Portfolio refreshed", "Schwab and Hyperliquid refresh completed.")
+
+
+def _sync_schwab_account_silent(self: tk.Tk) -> str:
+    session = self._authorize_schwab_session()
+    if session is None:
+        raise RuntimeError("Schwab refresh canceled; no authorization was provided.")
+
+    source_message = self._sync_schwab_account_snapshot(session)
+    self.schwab_status_var.set("Schwab session: connected")
+    return source_message
 
 
 def _hyperliquid_address_from_env() -> str:
