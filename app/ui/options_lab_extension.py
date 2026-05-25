@@ -10,6 +10,8 @@ from app.analytics.technical_analysis import (
     simple_moving_average,
 )
 from app.analytics.trade_setup import calculate_support_resistance
+from app.brokers.hyperliquid.client import HyperliquidInfoClient
+from app.brokers.hyperliquid.trading import normalize_hyperliquid_coin
 from app.core.order_models import OrderSide, OrderType, TimeInForce
 from app.ui.options_lab import build_options_lab_tab, run_options_what_if
 from app.ui.polished_theme import _make_paned
@@ -21,6 +23,8 @@ def install_options_lab_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls._build_layout = _build_layout_with_options_lab  # type: ignore[method-assign]
     app_cls.load_options_lab_technical_context = _load_options_lab_technical_context  # type: ignore[attr-defined]
     app_cls.use_current_cockpit_source_portfolio = _use_current_cockpit_source_portfolio  # type: ignore[attr-defined]
+    app_cls.use_hyperliquid_mid_market = _use_hyperliquid_mid_market  # type: ignore[attr-defined]
+    app_cls.run_hyperliquid_perp_what_if = _run_hyperliquid_perp_what_if  # type: ignore[attr-defined]
 
 
 def _build_layout_with_options_lab(self: tk.Tk) -> None:
@@ -80,6 +84,14 @@ def _ensure_execution_workspace_vars(self: tk.Tk) -> None:
         self.hyperliquid_reduce_only_var = tk.BooleanVar(value=False)
     if not hasattr(self, "hyperliquid_status_var"):
         self.hyperliquid_status_var = tk.StringVar(value="Hyperliquid: preview only")
+    if not hasattr(self, "hyperliquid_target_price_var"):
+        self.hyperliquid_target_price_var = tk.StringVar(value="")
+    if not hasattr(self, "hyperliquid_bad_price_var"):
+        self.hyperliquid_bad_price_var = tk.StringVar(value="")
+    if not hasattr(self, "hyperliquid_leverage_var"):
+        self.hyperliquid_leverage_var = tk.StringVar(value="1")
+    if not hasattr(self, "hyperliquid_fee_rate_var"):
+        self.hyperliquid_fee_rate_var = tk.StringVar(value="0.045")
 
 
 def _workspace_text(parent: ttk.Frame) -> tk.Text:
@@ -322,24 +334,26 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
         ttk.Combobox(ticket, textvariable=self.order_type_var, values=[o.value for o in OrderType], state="readonly"),
     )
     self._grid_row(ticket, 2, "Size", ttk.Entry(ticket, textvariable=self.quantity_var), "Entry / Limit", ttk.Entry(ticket, textvariable=self.limit_price_var))
-    self._grid_row(ticket, 3, "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var), "Type CONFIRM", ttk.Entry(ticket, textvariable=self.confirmation_var))
+    self._grid_row(ticket, 3, "Target price", ttk.Entry(ticket, textvariable=self.hyperliquid_target_price_var), "Pain price", ttk.Entry(ticket, textvariable=self.hyperliquid_bad_price_var))
+    self._grid_row(ticket, 4, "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var), "Type CONFIRM", ttk.Entry(ticket, textvariable=self.confirmation_var))
     self._grid_row(
         ticket,
-        4,
+        5,
         "HL TIF",
         ttk.Combobox(ticket, textvariable=self.hyperliquid_tif_var, values=["Alo", "Ioc", "Gtc"], state="readonly"),
         "Reduce-only",
         ttk.Checkbutton(ticket, variable=self.hyperliquid_reduce_only_var),
     )
-    ttk.Label(ticket, text="Cancel order ID", style="Subtle.TLabel").grid(row=5, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
-    ttk.Entry(ticket, textvariable=self.cancel_order_id_var).grid(row=5, column=1, columnspan=3, sticky="ew", pady=(8, 0))
+    self._grid_row(ticket, 6, "Leverage x", ttk.Entry(ticket, textvariable=self.hyperliquid_leverage_var), "Fee % / side", ttk.Entry(ticket, textvariable=self.hyperliquid_fee_rate_var))
+    ttk.Label(ticket, text="Cancel order ID", style="Subtle.TLabel").grid(row=7, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+    ttk.Entry(ticket, textvariable=self.cancel_order_id_var).grid(row=7, column=1, columnspan=3, sticky="ew", pady=(8, 0))
 
     hyperliquid_output_frame = ttk.LabelFrame(output_shell, text="Hyperliquid Analysis + Order Output", style="Card.TLabelframe")
     hyperliquid_output_frame.pack(fill=tk.BOTH, expand=True)
     self.hyperliquid_trading_preview_text = _workspace_text(hyperliquid_output_frame)
 
     actions = ttk.LabelFrame(ticket, text="Hyperliquid Actions", style="Card.TLabelframe")
-    actions.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+    actions.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(14, 0))
     for column in range(3):
         actions.columnconfigure(column, weight=1, uniform="hyperliquid_actions")
 
@@ -351,18 +365,20 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
             command=_first_available_command(self, *names),
         )
 
-    _add_workspace_button(actions, row=0, column=0, text="Sync Account", command=hyperliquid_action("sync_hyperliquid_account"), style="Accent.TButton")
-    _add_workspace_button(actions, row=0, column=1, text="Tech Analysis", command=hyperliquid_action("show_technical_analysis"))
+    _add_workspace_button(actions, row=0, column=0, text="Use Mid", command=hyperliquid_action("use_hyperliquid_mid_market"), style="Accent.TButton")
+    _add_workspace_button(actions, row=0, column=1, text="Perp What-If", command=hyperliquid_action("run_hyperliquid_perp_what_if"), style="Accent.TButton")
     _add_workspace_button(actions, row=0, column=2, text="Preview Perp Ticket", command=hyperliquid_action("preview_hyperliquid_ticket", "preview_order"))
-    _add_workspace_button(actions, row=1, column=0, text="Recent Orders", command=hyperliquid_action("load_selected_recent_orders", "load_hyperliquid_open_orders"))
-    _add_workspace_button(actions, row=1, column=1, text="Open Only", command=hyperliquid_action("load_selected_open_orders_only", "load_hyperliquid_open_orders"))
+    _add_workspace_button(actions, row=1, column=0, text="Sync Account", command=hyperliquid_action("sync_hyperliquid_account"))
+    _add_workspace_button(actions, row=1, column=1, text="Tech Analysis", command=hyperliquid_action("show_technical_analysis"))
     _add_workspace_button(actions, row=1, column=2, text="Position Size", command=hyperliquid_action("show_position_size"))
-    _add_workspace_button(actions, row=2, column=0, text="Cancel Order", command=hyperliquid_action("cancel_selected_order", "cancel_hyperliquid_order_guarded"), style="Danger.TButton")
-    _add_workspace_button(actions, row=2, column=1, text="Live Safety", command=hyperliquid_action("show_hyperliquid_live_submit_safety_review"))
-    _add_workspace_button(actions, row=2, column=2, text="LIVE Submit", command=hyperliquid_action("submit_selected_venue"), style="Danger.TButton")
+    _add_workspace_button(actions, row=2, column=0, text="Recent Orders", command=hyperliquid_action("load_selected_recent_orders", "load_hyperliquid_open_orders"))
+    _add_workspace_button(actions, row=2, column=1, text="Open Only", command=hyperliquid_action("load_selected_open_orders_only", "load_hyperliquid_open_orders"))
+    _add_workspace_button(actions, row=2, column=2, text="Live Safety", command=hyperliquid_action("show_hyperliquid_live_submit_safety_review"))
+    _add_workspace_button(actions, row=3, column=0, text="Cancel Order", command=hyperliquid_action("cancel_selected_order", "cancel_hyperliquid_order_guarded"), style="Danger.TButton")
+    _add_workspace_button(actions, row=3, column=1, text="LIVE Submit", command=hyperliquid_action("submit_selected_venue"), style="Danger.TButton", columnspan=2)
 
     status = ttk.Frame(ticket, style="Panel.TFrame")
-    status.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+    status.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(8, 0))
     status.columnconfigure((0, 1, 2), weight=1)
     ttk.Label(status, textvariable=self.hyperliquid_status_var, style="Chip.TLabel").grid(row=0, column=0, sticky="ew", padx=(0, 6))
     ttk.Label(status, textvariable=self.schwab_verification_status_var, style="Chip.TLabel").grid(row=0, column=1, sticky="ew", padx=(0, 6))
@@ -372,9 +388,198 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
         self.hyperliquid_trading_preview_text,
         "HYPERLIQUID TRADING WORKSPACE\n"
         "=============================\n\n"
-        "Use this tab for HYPE/BTC perp planning, Hyperliquid previews, active orders, cancels, and guarded live submit.\n\n"
-        "The tab forces Venue = Hyperliquid before every action, so Schwab-specific buttons and workflows stay out of the way.",
+        "Use Mid pulls the current Hyperliquid allMids price into Entry / Limit.\n\n"
+        "Perp What-If compares your target and pain prices against the entry. It estimates gross P&L, fees, net P&L, account-risk-style ROI on margin, and a rough liquidation line.\n\n"
+        "The rough liquidation line ignores maintenance margin, funding, slippage, partial fills, and account-wide margin. Treat it as a planning warning, not an exchange quote.",
     )
+
+
+def _hyperliquid_selected_coin(self: tk.Tk) -> str:
+    _ensure_execution_workspace_vars(self)
+    raw = self.hyperliquid_coin_var.get().strip() or self.symbol_var.get().strip()
+    coin = normalize_hyperliquid_coin(raw)
+    self.hyperliquid_coin_var.set(coin)
+    self.symbol_var.set(coin)
+    return coin
+
+
+def _lookup_hyperliquid_mid(coin: str) -> float:
+    all_mids = HyperliquidInfoClient(timeout_seconds=10).post_info({"type": "allMids"})
+    if not isinstance(all_mids, dict):
+        raise RuntimeError("Hyperliquid allMids returned an unexpected response.")
+    candidates = (coin, f"{coin}-PERP", f"{coin}/USDC")
+    upper_mids = {str(key).upper(): value for key, value in all_mids.items()}
+    for candidate in candidates:
+        raw = upper_mids.get(candidate.upper())
+        if raw is None:
+            continue
+        price = _to_float(raw)
+        if price is not None and price > 0:
+            return price
+    raise RuntimeError(f"No Hyperliquid mid-market price found for {coin}. Try HYPE, BTC, ETH, or another listed coin.")
+
+
+def _use_hyperliquid_mid_market(self: tk.Tk) -> None:
+    try:
+        coin = _hyperliquid_selected_coin(self)
+        mid = _lookup_hyperliquid_mid(coin)
+        self.limit_price_var.set(f"{mid:.4f}".rstrip("0").rstrip("."))
+        self.hyperliquid_status_var.set(f"Hyperliquid: {coin} mid ${mid:,.4f}")
+        self._set_preview_text(
+            "HYPERLIQUID MID-MARKET PRICE\n"
+            "============================\n\n"
+            f"Coin: {coin}\n"
+            f"Mid-market price: ${mid:,.4f}\n\n"
+            "Entry / Limit was updated from Hyperliquid allMids. No order was submitted."
+        )
+    except Exception as exc:
+        self.hyperliquid_status_var.set("Hyperliquid: mid failed")
+        messagebox.showerror("Hyperliquid mid-market lookup failed", str(exc))
+
+
+def _run_hyperliquid_perp_what_if(self: tk.Tk) -> None:
+    try:
+        coin = _hyperliquid_selected_coin(self)
+        side = self.side_var.get().strip().lower()
+        if side not in {"buy", "sell"}:
+            raise ValueError("Direction must be buy or sell.")
+        size = _required_float(self.quantity_var.get(), "Size")
+        entry = _required_float(self.limit_price_var.get(), "Entry / Limit")
+        leverage = _optional_float(self.hyperliquid_leverage_var.get(), default=1.0)
+        fee_rate_percent = _optional_float(self.hyperliquid_fee_rate_var.get(), default=0.045)
+        if size <= 0 or entry <= 0:
+            raise ValueError("Size and Entry / Limit must be positive.")
+        if leverage <= 0:
+            raise ValueError("Leverage must be positive.")
+        if fee_rate_percent < 0:
+            raise ValueError("Fee % / side cannot be negative.")
+
+        is_long = side == "buy"
+        default_target = entry * (1.05 if is_long else 0.95)
+        default_pain = entry * (0.97 if is_long else 1.03)
+        target = _optional_float(self.hyperliquid_target_price_var.get(), default=default_target)
+        pain = _optional_float(self.hyperliquid_bad_price_var.get() or self.stop_price_var.get(), default=default_pain)
+        self.hyperliquid_target_price_var.set(_format_price(target))
+        self.hyperliquid_bad_price_var.set(_format_price(pain))
+
+        target_case = _perp_case(entry, target, size, is_long, leverage, fee_rate_percent)
+        pain_case = _perp_case(entry, pain, size, is_long, leverage, fee_rate_percent)
+        breakeven = _breakeven_price(entry, is_long, fee_rate_percent)
+        notional = entry * size
+        margin = notional / leverage
+        rough_liq = _rough_liquidation_price(entry, is_long, leverage)
+        rr = _risk_reward(target_case["net_pnl"], pain_case["net_pnl"])
+        direction = "LONG" if is_long else "SHORT"
+        favorable_word = "above" if is_long else "below"
+        pain_word = "below" if is_long else "above"
+
+        self.hyperliquid_status_var.set("Hyperliquid: what-if ready")
+        self._set_preview_text(
+            "HYPERLIQUID PERP WHAT-IF\n"
+            "========================\n\n"
+            "No order was submitted. This is a local scenario model for deciding whether the setup is worth taking.\n\n"
+            f"Market: {coin}-PERP\n"
+            f"Direction: {direction}\n"
+            f"Size: {size:g} {coin}\n"
+            f"Entry: ${entry:,.4f}\n"
+            f"Notional: ${notional:,.2f}\n"
+            f"Leverage used for margin math: {leverage:g}x\n"
+            f"Estimated initial margin: ${margin:,.2f}\n"
+            f"Fee estimate: {fee_rate_percent:g}% per side, entry + exit included\n\n"
+            "Decision map:\n"
+            f"- Good if price moves {favorable_word} entry toward target.\n"
+            f"- Bad if price moves {pain_word} entry toward pain/stop.\n"
+            f"- Fee-adjusted breakeven exit: ${breakeven:,.4f}\n"
+            f"- Rough liquidation warning line: ${rough_liq:,.4f}\n\n"
+            "Target scenario:\n"
+            f"- Exit price: ${target:,.4f}\n"
+            f"- Price move: {target_case['move_percent']:+.2f}%\n"
+            f"- Gross P&L: ${target_case['gross_pnl']:+,.2f}\n"
+            f"- Estimated fees: ${target_case['fees']:,.2f}\n"
+            f"- Net P&L: ${target_case['net_pnl']:+,.2f}\n"
+            f"- ROI on estimated margin: {target_case['margin_roi_percent']:+.2f}%\n\n"
+            "Pain / stop scenario:\n"
+            f"- Exit price: ${pain:,.4f}\n"
+            f"- Price move: {pain_case['move_percent']:+.2f}%\n"
+            f"- Gross P&L: ${pain_case['gross_pnl']:+,.2f}\n"
+            f"- Estimated fees: ${pain_case['fees']:,.2f}\n"
+            f"- Net P&L: ${pain_case['net_pnl']:+,.2f}\n"
+            f"- ROI on estimated margin: {pain_case['margin_roi_percent']:+.2f}%\n\n"
+            "Setup quality:\n"
+            f"- Reward/risk using net P&L: {rr}\n"
+            f"- Max modeled loss at pain/stop: ${min(pain_case['net_pnl'], 0):+,.2f}\n\n"
+            "Formula notes:\n"
+            "- Long P&L = (exit - entry) × size.\n"
+            "- Short P&L = (entry - exit) × size.\n"
+            "- Net P&L subtracts estimated entry and exit fees.\n"
+            "- Rough liquidation ignores maintenance margin, funding, slippage, partial fills, and account-wide margin."
+        )
+    except Exception as exc:
+        self.hyperliquid_status_var.set("Hyperliquid: what-if failed")
+        messagebox.showerror("Hyperliquid perp what-if failed", str(exc))
+
+
+def _perp_case(entry: float, exit_price: float, size: float, is_long: bool, leverage: float, fee_rate_percent: float) -> dict[str, float]:
+    signed_move = (exit_price - entry) / entry
+    gross_pnl = (exit_price - entry) * size if is_long else (entry - exit_price) * size
+    fees = (entry * size + exit_price * size) * (fee_rate_percent / 100.0)
+    net_pnl = gross_pnl - fees
+    margin = (entry * size) / leverage
+    margin_roi_percent = (net_pnl / margin * 100.0) if margin > 0 else 0.0
+    return {
+        "move_percent": signed_move * 100.0,
+        "gross_pnl": gross_pnl,
+        "fees": fees,
+        "net_pnl": net_pnl,
+        "margin_roi_percent": margin_roi_percent,
+    }
+
+
+def _breakeven_price(entry: float, is_long: bool, fee_rate_percent: float) -> float:
+    fee = fee_rate_percent / 100.0
+    if is_long:
+        return entry * (1.0 + fee) / max(1.0 - fee, 0.000001)
+    return entry * (1.0 - fee) / (1.0 + fee)
+
+
+def _rough_liquidation_price(entry: float, is_long: bool, leverage: float) -> float:
+    if leverage <= 1:
+        return 0.0 if is_long else entry * 2.0
+    return entry * (1.0 - 1.0 / leverage) if is_long else entry * (1.0 + 1.0 / leverage)
+
+
+def _risk_reward(reward_net: float, pain_net: float) -> str:
+    risk = abs(min(pain_net, 0.0))
+    reward = max(reward_net, 0.0)
+    if risk <= 0 or reward <= 0:
+        return "n/a — target must be profitable and pain/stop must be a loss"
+    return f"{reward / risk:.2f} : 1"
+
+
+def _required_float(raw: str, label: str) -> float:
+    value = _to_float(raw)
+    if value is None:
+        raise ValueError(f"{label} must be a number.")
+    return value
+
+
+def _optional_float(raw: str, *, default: float) -> float:
+    value = _to_float(raw)
+    return default if value is None else value
+
+
+def _to_float(raw: object) -> float | None:
+    try:
+        text = str(raw).strip().replace(",", "")
+        if text == "":
+            return None
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_price(value: float) -> str:
+    return f"{value:.4f}".rstrip("0").rstrip(".")
 
 
 def _build_account_sources_panel(self: tk.Tk, parent: ttk.Frame) -> None:
