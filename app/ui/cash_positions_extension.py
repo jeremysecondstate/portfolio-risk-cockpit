@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+from tkinter import ttk
 from typing import Any, Type
 
 from app.core.portfolio import CashPosition, Portfolio, Position
@@ -182,7 +183,13 @@ def _refresh_portfolio_with_cash_rows(self: tk.Tk) -> None:
         p = portfolio.positions[symbol]
         position_type = _position_type(p)
         weight = (p.market_value / total_value) * 100
-        row_tag = "perp_position" if position_type.startswith("Perp") else "pnl_positive" if p.unrealized_profit_loss >= 0 else "pnl_negative"
+        row_tag = (
+            "perp_position"
+            if position_type.startswith("Perp")
+            else "pnl_positive"
+            if p.unrealized_profit_loss >= 0
+            else "pnl_negative"
+        )
         self.positions_table.insert(
             "",
             tk.END,
