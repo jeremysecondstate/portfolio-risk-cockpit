@@ -103,7 +103,7 @@ def _install_schwab_options_feature(self: tk.Tk, schwab_tab: ttk.Frame) -> None:
         "SCHWAB TRADING WORKSPACE\n"
         "========================\n\n"
         "Use this single tab for stocks, ETFs, Schwab previews, order history, guarded live Schwab actions, and options what-if planning.\n\n"
-        "The stock/ETF ticket now includes the option-specific fields from the old what-if panel: contracts, expiration, strike, call/put, bid, ask, mark, and limit/debit.\n\n"
+        "The Schwab action buttons stay above the option-planning fields so guarded live/order-history controls remain visible.\n\n"
         "Sync Schwab refreshes account balances and positions. Options What-If writes the scenario analysis here without switching into a separate sub-tab.",
     )
 
@@ -136,17 +136,11 @@ def _add_integrated_option_fields(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
     if getattr(self, "_schwab_options_fields_integrated", False):
         return
 
-    for child in ticket.grid_slaves():
-        info = child.grid_info()
-        try:
-            row = int(info.get("row", -1))
-        except (TypeError, ValueError):
-            continue
-        if row >= 5:
-            child.grid(row=row + 1)
-
+    # The Schwab Actions frame is the primary execution control surface. Keep it
+    # in its original row so all buttons remain visible, and place the optional
+    # options-planning fields beneath the actions/status area.
     options = ttk.LabelFrame(ticket, text="Options Ticket Fields", style="Card.TLabelframe")
-    options.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+    options.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(14, 0))
     options.columnconfigure(1, weight=1)
     options.columnconfigure(3, weight=1)
 
