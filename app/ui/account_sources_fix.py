@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import ttk
-from typing import Type
+from typing import Callable, Type
 
 from app.ui.options_lab import build_options_lab_tab, run_options_what_if
 from app.ui.options_lab_extension import (
@@ -31,11 +31,9 @@ def _build_layout_without_account_strip(self: tk.Tk) -> None:
     cockpit_tab = ttk.Frame(tabs, style="Canvas.TFrame", padding=0)
     schwab_tab = ttk.Frame(tabs, style="Canvas.TFrame", padding=14)
     hyperliquid_tab = ttk.Frame(tabs, style="Canvas.TFrame", padding=14)
-    options_tab = ttk.Frame(tabs, style="Canvas.TFrame", padding=14)
     tabs.add(cockpit_tab, text="Cockpit")
     tabs.add(schwab_tab, text="Schwab Trading")
     tabs.add(hyperliquid_tab, text="Hyperliquid Trading")
-    tabs.add(options_tab, text="Options What-If Lab")
 
     self.active_portfolio_source_var = tk.StringVar(value="Active portfolio: current cockpit source")
     self.cockpit_source_portfolio = None
@@ -55,11 +53,121 @@ def _build_layout_without_account_strip(self: tk.Tk) -> None:
     _ensure_execution_workspace_vars(self)
     self.after_idle(lambda: _capture_current_source_portfolio(self))
 
-    _build_schwab_trading_tab(self, schwab_tab, tabs, options_tab)
+    _build_schwab_trading_tab(self, schwab_tab, tabs, schwab_tab)
+    _install_schwab_options_feature(self, schwab_tab)
     _build_hyperliquid_trading_tab(self, hyperliquid_tab)
 
-    build_options_lab_tab(self, options_tab)
-    _build_options_lab_market_loader(self, options_tab)
+
+def _install_schwab_options_feature(self: tk.Tk, schwab_tab: ttk.Frame) -> None:
+    """Expose the options lab as an in-tab Schwab feature instead of a top-level tab."""
+
+    stock_widgets = [widget for widget in schwab_tab.grid_slaves(row=1, column=0)]
+
+    options_feature = ttk.Frame(schwab_tab, style="Canvas.TFrame")
+    options_feature.columnconfigure(0, weight=1)
+    options_feature.rowconfigure(1, weight=1)
+
+    switcher = ttk.LabelFrame(options_feature, text="Schwab Options What-If", style="Card.TLabelframe")
+    switcher.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+    switcher.columnconfigure(0, weight=1)
+    ttk.Label(
+        switcher,
+        text=(
+            "Options are a Schwab-only workflow here. This opens the same risk, margin, "
+            "technical context, and portfolio-impact lab without creating a redundant top-level tab."
+        ),
+        style="Subtle.TLabel",
+        wraplength=1080,
+    ).grid(row=0, column=0, sticky="w", padx=(0, 12))
+
+    options_body = ttk.Frame(options_feature, style="Canvas.TFrame")
+    options_body.grid(row=1, column=0, sticky="nsew")
+    build_options_lab_tab(self, options_body)
+    _build_options_lab_market_loader(self, options_body)
+
+    def show_stock_ticket() -> None:
+        options_feature.grid_remove()
+        for widget in stock_widgets:
+            widget.grid()
+        _set_schwab_mode_text(
+            self,
+            "SCHWAB TRADING WORKSPACE\n"
+            "========================\n\n"
+            "Use this tab for stocks, ETFs, Schwab previews, order history, and guarded live Schwab actions.\n\n"
+            "Use Options What-If when the weekly setup needs calls/puts instead of shares."
+        )
+
+    def show_options_feature() -> None:
+        for widget in stock_widgets:
+            widget.grid_remove()
+        options_feature.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+        run_options_what_if(self)
+
+    ttk.Button(
+        switcher,
+        text="Back to Stock / ETF Ticket",
+        command=show_stock_ticket,
+    ).grid(row=0, column=1, sticky="e")
+
+    self.show_schwab_stock_ticket = show_stock_ticket  # type: ignore[attr-defined]
+    self.show_schwab_options_what_if = show_options_feature  # type: ignore[attr-defined]
+    options_feature.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+    options_feature.grid_remove()
+
+    for button in _walk_buttons(schwab_tab):
+        label = str(button.cget("text"))
+        if label == "Open Options Lab" and _inside_labelframe(button, "Schwab Trading Workspace"):
+            button.configure(text="Options What-If", command=show_options_feature, style="Accent.TButton")
+        elif label == "Order Checklist" and _inside_labelframe(button, "Schwab Actions"):
+            button.configure(text="Options What-If", command=show_options_feature, style="Accent.TButton")
+
+    _set_schwab_mode_text(
+        self,
+        "SCHWAB TRADING WORKSPACE\n"
+        "========================\n\n"
+        "Use this tab for stocks, ETFs, Schwab previews, order history, and guarded live Schwab actions.\n\n"
+        "Use Options What-If when the weekly setup needs calls/puts instead of shares."
+    )
+
+
+def _set_schwab_mode_text(self: tk.Tk, content: str) -> None:
+    output = getattr(self, "schwab_trading_preview_text", None)
+    if output is None:
+        return
+    try:
+        output.configure(state=tk.NORMAL)
+        output.delete("1.0", tk.END)
+        output.insert(tk.END, content)
+        output.configure(state=tk.DISABLED)
+    except Exception:
+        return
+
+
+def _walk_buttons(root: tk.Widget):
+    for child in root.winfo_children():
+        if _widget_class(child) == "TButton":
+            yield child
+        yield from _walk_buttons(child)
+
+
+def _inside_labelframe(widget: tk.Widget, title: str) -> bool:
+    parent = widget.master
+    while parent is not None:
+        if _widget_class(parent) == "TLabelframe":
+            try:
+                if str(parent.cget("text")) == title:
+                    return True
+            except Exception:
+                pass
+        parent = parent.master
+    return False
+
+
+def _widget_class(widget: tk.Widget) -> str:
+    try:
+        return str(widget.winfo_class())
+    except Exception:
+        return ""
 
 
 def _build_options_lab_market_loader(self: tk.Tk, parent: ttk.Frame) -> None:
