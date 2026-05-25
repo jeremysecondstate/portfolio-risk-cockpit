@@ -35,8 +35,10 @@ def _patch_grid_row(app_cls: type[tk.Tk]) -> None:
                 right_label = "Use Mid"
                 right_widget = _make_use_mid_button(self, parent)
             else:
-                right_label = None
-                right_widget = None
+                # The polished shared row builder expects a real widget on the right.
+                # Use invisible placeholders so the left Stop price control still lays out cleanly.
+                right_label = ""
+                right_widget = ttk.Frame(parent, style="Canvas.TFrame")
         return original_grid_row(
             self,
             parent,
