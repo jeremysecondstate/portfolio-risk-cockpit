@@ -18,6 +18,29 @@ DEFAULT_SPOT_MID_KEYS: dict[str, tuple[str, ...]] = {
     # harmless fallback while also supporting direct coin/name matches.
     "HYPE": ("HYPE", "HYPE/USDC", "@107"),
 }
+SPOT_CURRENT_VALUE_KEYS = ("usdValue", "usdcValue", "currentValue", "marketValue", "value")
+SPOT_ENTRY_NOTIONAL_KEYS = (
+    "entryNtl",
+    "entryNotional",
+    "entryUsd",
+    "costBasis",
+    "costBasisUsd",
+    "initialUsd",
+    "initialNotional",
+    "purchaseValue",
+)
+SPOT_AVERAGE_COST_KEYS = ("avgEntryPx", "averageEntryPrice", "avgCost", "averageCost")
+SPOT_PNL_KEYS = (
+    "unrealizedPnl",
+    "unrealizedPnlUsd",
+    "unrealizedProfitLoss",
+    "openPnl",
+    "pnl",
+    "PNL",
+    "profitAndLoss",
+    "spotPnl",
+    "uPnl",
+)
 
 
 @dataclass(frozen=True)
@@ -210,38 +233,29 @@ def format_hyperliquid_snapshot(snapshot: HyperliquidSnapshot, portfolio: Portfo
             coin = str(raw_balance.get("coin") or raw_balance.get("token") or "UNKNOWN").upper()
             total = _first_number(raw_balance, ("total", "balance", "amount"))
             hold = _first_number(raw_balance, ("hold", "held", "locked"))
-            entry_ntl = _first_number(raw_balance, ("entryNtl", "entryNotional", "usdValue"))
-            mid_price = _spot_mid_price(coin, snapshot)
-            current_value = (total * mid_price) if total is not None and mid_price is not None else None
-            pnl = (current_value - entry_ntl) if current_value is not None and entry_ntl is not None else None
+            entry_ntl = _spot_entry_notional(raw_balance, total)
+            current_value = _spot_current_value(coin, total, snapshot, raw_balance)
+            direct_pnl = _spot_direct_pnl(raw_balance)
+            pnl = direct_pnl if direct_pnl is not None else (
+                (current_value - entry_ntl) if current_value is not None and entry_ntl is not None else None
+            )
+            if entry_ntl is None and current_value is not None and pnl is not None:
+                entry_ntl = current_value - pnl
             pnl_percent = (pnl / entry_ntl * 100) if pnl is not None and entry_ntl and entry_ntl > 0 else None
+            spot_price = (current_value / total) if current_value is not None and total and total > ZERO_EPSILON else _spot_mid_price(coin, snapshot)
             lines.append(
                 f"- {coin}: total {_format_optional_number(total)}, "
                 f"held {_format_optional_number(hold)}, "
-                f"price {_format_optional_money(mid_price)}, "
+                f"price {_format_optional_money(spot_price)}, "
                 f"value {_format_optional_money(current_value)}, "
                 f"entry {_format_optional_money(entry_ntl)}, "
                 f"P&L {_format_optional_money(pnl)} ({_format_optional_percent(pnl_percent)})"
             )
 
-    lines.extend(["", "Open orders:"])
-    if not snapshot.open_orders:
-        lines.append("- None")
-    else:
-        for order in snapshot.open_orders[:12]:
-            coin = order.get("coin", "UNKNOWN")
-            side = order.get("side", "UNKNOWN")
-            size = order.get("sz", order.get("size", "?"))
-            price = order.get("limitPx", order.get("price", "?"))
-            oid = order.get("oid", "?")
-            lines.append(f"- {coin} {side} {size} @ {price} · oid {oid}")
-        if len(snapshot.open_orders) > 12:
-            lines.append(f"- ... {len(snapshot.open_orders) - 12} more")
-
     lines.extend(
         [
             "",
-            "Spot P&L is read-only: current value minus entry notional from Hyperliquid public info data.",
+            "Spot P&L is read-only: it uses Hyperliquid's spot P&L field when present, otherwise current value minus entry notional.",
             "API/agent wallets are only needed for future signed actions.",
         ]
     )
@@ -291,17 +305,28 @@ def _spot_position_from_hyperliquid(raw_balance: dict[str, Any], snapshot: Hyper
     if not coin or quantity <= ZERO_EPSILON:
         return None, None
 
+    current_value = _spot_current_value(coin, quantity, snapshot, raw_balance)
     mid_price = _spot_mid_price(coin, snapshot)
-    entry_notional = _first_number(raw_balance, ("entryNtl", "entryNotional"))
-    direct_usd_value = _first_number(raw_balance, ("usdValue", "usdcValue", "currentValue"))
-    current_value = (quantity * mid_price) if mid_price is not None else direct_usd_value
+    entry_notional = _spot_entry_notional(raw_balance, quantity)
+    direct_pnl = _spot_direct_pnl(raw_balance)
+
+    if current_value is None and mid_price is not None:
+        current_value = quantity * mid_price
+
+    if entry_notional is None and current_value is not None and direct_pnl is not None:
+        entry_notional = current_value - direct_pnl
+
     average_cost = (entry_notional / quantity) if entry_notional is not None and quantity > ZERO_EPSILON else None
 
     if coin in CASH_LIKE_COINS:
         return None, CashPosition(coin, round(current_value or quantity, 2), "Hyperliquid")
 
-    last_price = mid_price or ((current_value / quantity) if current_value is not None and quantity > ZERO_EPSILON else None) or average_cost or 0.0
-    open_profit_loss = (current_value - entry_notional) if current_value is not None and entry_notional is not None else None
+    last_price = (
+        (current_value / quantity) if current_value is not None and quantity > ZERO_EPSILON else None
+    ) or mid_price or average_cost or 0.0
+    open_profit_loss = direct_pnl if direct_pnl is not None else (
+        (current_value - entry_notional) if current_value is not None and entry_notional is not None else None
+    )
 
     return (
         Position(
@@ -313,6 +338,40 @@ def _spot_position_from_hyperliquid(raw_balance: dict[str, Any], snapshot: Hyper
         ),
         None,
     )
+
+
+def _spot_current_value(
+    coin: str,
+    quantity: float | None,
+    snapshot: HyperliquidSnapshot,
+    raw_balance: dict[str, Any],
+) -> float | None:
+    """Prefer Hyperliquid's own USD balance value so the cockpit mirrors the UI."""
+
+    direct_usd_value = _first_number(raw_balance, SPOT_CURRENT_VALUE_KEYS)
+    if direct_usd_value is not None:
+        return direct_usd_value
+
+    mid_price = _spot_mid_price(coin, snapshot)
+    if quantity is not None and mid_price is not None:
+        return quantity * mid_price
+    return None
+
+
+def _spot_entry_notional(raw_balance: dict[str, Any], quantity: float | None) -> float | None:
+    entry_notional = _first_number(raw_balance, SPOT_ENTRY_NOTIONAL_KEYS)
+    if entry_notional is not None:
+        return entry_notional
+
+    average_cost = _first_number(raw_balance, SPOT_AVERAGE_COST_KEYS)
+    if average_cost is not None and quantity is not None and quantity > ZERO_EPSILON:
+        return average_cost * quantity
+
+    return None
+
+
+def _spot_direct_pnl(raw_balance: dict[str, Any]) -> float | None:
+    return _first_number(raw_balance, SPOT_PNL_KEYS)
 
 
 def _spot_mid_price(coin: str, snapshot: HyperliquidSnapshot) -> float | None:
@@ -382,6 +441,12 @@ def _perp_account_value(state: dict[str, Any]) -> float:
 def _first_number(container: dict[str, Any], keys: tuple[str, ...]) -> float | None:
     for key in keys:
         value = _to_float(container.get(key))
+        if value is not None:
+            return value
+
+    lowercase_values = {str(key).lower(): value for key, value in container.items()}
+    for key in keys:
+        value = _to_float(lowercase_values.get(key.lower()))
         if value is not None:
             return value
     return None
