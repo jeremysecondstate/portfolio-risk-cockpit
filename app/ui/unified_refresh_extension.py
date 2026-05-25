@@ -16,6 +16,10 @@ HYPERLIQUID_ADDRESS_ENV_KEYS = ("HYPE_WALLET_ADDRESS", "HYPERLIQUID_USER_ADDRESS
 REFRESH_DUE_AFTER_MS = 5 * 60 * 1000
 AUTO_REFRESH_AFTER_MS = 3 * 60 * 1000
 AUTO_REFRESH_ENV_KEY = "COCKPIT_AUTO_REFRESH_MS"
+_AUTO_REFRESH_OUTPUT_PREFIXES = (
+    "PORTFOLIO REFRESH",
+    "HYPERLIQUID PORTFOLIO SYNC",
+)
 
 
 def install_unified_refresh_extension(app_cls: Type[tk.Tk]) -> None:
@@ -172,6 +176,61 @@ def _find_label_frame_by_text(root: tk.Widget, text: str) -> ttk.LabelFrame | No
     return None
 
 
+def _active_output_allows_auto_refresh_update(output: tk.Text) -> bool:
+    """Only overwrite the output if the user is already viewing refresh output.
+
+    Auto-refresh should keep the portfolio table live without stealing the output
+    panel from a Perp What-If, Tech Analysis, Position Size, or other workflow the
+    user explicitly opened. Manual refreshes still replace the output as before.
+    """
+
+    try:
+        content = output.get("1.0", "end-1c").lstrip()
+    except Exception:
+        return True
+    if not content:
+        return True
+    return any(content.startswith(prefix) for prefix in _AUTO_REFRESH_OUTPUT_PREFIXES)
+
+
+def _set_refresh_output_text(self: tk.Tk, content: str, preserve_scroll: bool) -> None:
+    if not preserve_scroll:
+        self._set_preview_text(content)
+        return
+
+    output = getattr(self, "preview_text", None)
+    if output is None:
+        self._set_preview_text(content)
+        return
+
+    if not _active_output_allows_auto_refresh_update(output):
+        return
+
+    try:
+        previous_top, previous_bottom = output.yview()
+        was_at_bottom = previous_bottom >= 0.995
+    except Exception:
+        previous_top = 0.0
+        was_at_bottom = False
+
+    self._set_preview_text(content)
+
+    def restore_scroll() -> None:
+        try:
+            if was_at_bottom:
+                output.yview_moveto(1.0)
+            else:
+                output.yview_moveto(previous_top)
+        except Exception:
+            return
+
+    restore_scroll()
+    try:
+        output.after_idle(restore_scroll)
+    except Exception:
+        pass
+
+
 def _refresh_connected_portfolio_silent(self: tk.Tk) -> None:
     _refresh_connected_portfolio(self, automated=True)
 
@@ -222,7 +281,7 @@ def _refresh_connected_portfolio(self: tk.Tk, automated: bool = False) -> None:
     if hyperliquid_preview:
         results.extend(["", hyperliquid_preview])
 
-    self._set_preview_text("\n".join(results))
+    _set_refresh_output_text(self, "\n".join(results), preserve_scroll=automated)
 
     if schwab_error or hyperliquid_error:
         failed = []
