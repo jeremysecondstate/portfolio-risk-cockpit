@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import Type
+from typing import Callable, Type
 
 from app.ui.options_lab import (
     OPTION_TYPES,
@@ -69,19 +69,13 @@ def _build_layout_without_account_strip(self: tk.Tk) -> None:
 
 
 def _install_schwab_options_feature(self: tk.Tk, schwab_tab: ttk.Frame) -> None:
-    """Flatten Schwab option planning into the stock/ETF ticket.
-
-    This keeps Schwab as one workspace: no nested what-if sub-tab, no duplicate
-    action row, and the option-specific fields live directly inside the stock/ETF
-    ticket beside the regular Schwab controls.
-    """
+    """Flatten Schwab stock/ETF and option planning into one compact ticket."""
 
     _init_options_vars(self)
 
     ticket = _find_labelframe(schwab_tab, "Schwab Stock / ETF Ticket")
     if ticket is not None:
-        _replace_delete_me_with_use_mid(self, ticket)
-        _add_integrated_option_fields(self, ticket)
+        _rebuild_schwab_ticket_side_by_side(self, ticket)
 
     for button in _walk_buttons(schwab_tab):
         label = str(button.cget("text"))
@@ -91,56 +85,74 @@ def _install_schwab_options_feature(self: tk.Tk, schwab_tab: ttk.Frame) -> None:
                 command=lambda app=self: _run_schwab_workspace_action(app, "refresh_schwab_account", "connect_schwab"),
                 style="Accent.TButton",
             )
-        elif label == "Order Checklist" and _inside_labelframe(button, "Schwab Actions"):
-            button.configure(
-                text="Options What-If",
-                command=lambda app=self: _run_schwab_integrated_options_what_if(app),
-                style="Accent.TButton",
-            )
 
     _set_schwab_mode_text(
         self,
         "SCHWAB TRADING WORKSPACE\n"
         "========================\n\n"
         "Use this single tab for stocks, ETFs, Schwab previews, order history, guarded live Schwab actions, and options what-if planning.\n\n"
-        "The Schwab action buttons stay above the option-planning fields so guarded live/order-history controls remain visible.\n\n"
+        "The Stock / ETF ticket and Options Ticket Fields now sit side by side above the Schwab action grid, so the option inputs and guarded Schwab buttons stay visible together.\n\n"
         "Sync Schwab refreshes account balances and positions. Options What-If writes the scenario analysis here without switching into a separate sub-tab.",
     )
 
 
-def _replace_delete_me_with_use_mid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
-    """Replace the temporary placeholder controls with the real Schwab mid helper."""
-
-    row_widgets = list(ticket.grid_slaves(row=3))
-    placeholder_found = any(_widget_text(widget) == "DELETE ME" for widget in row_widgets)
-    if not placeholder_found:
+def _rebuild_schwab_ticket_side_by_side(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
+    if getattr(self, "_schwab_ticket_side_by_side_built", False):
         return
 
-    for widget in row_widgets:
-        info = widget.grid_info()
-        try:
-            if int(info.get("column", -1)) >= 2:
-                widget.destroy()
-        except (TypeError, ValueError):
-            continue
+    for child in list(ticket.winfo_children()):
+        child.destroy()
 
-    ttk.Button(
-        ticket,
-        text="Use Mid",
-        command=lambda app=self: _run_schwab_workspace_action(app, "use_schwab_mid_market", "use_selected_venue_mid_market"),
-        style="Accent.TButton",
-    ).grid(row=3, column=2, columnspan=2, sticky="ew", pady=7)
+    ticket.columnconfigure(0, weight=1)
+    ticket.rowconfigure(0, weight=0)
+    ticket.rowconfigure(1, weight=0)
+    ticket.rowconfigure(2, weight=0)
 
+    ticket_fields = ttk.Frame(ticket, style="Panel.TFrame")
+    ticket_fields.grid(row=0, column=0, sticky="ew")
+    ticket_fields.columnconfigure(0, weight=1, uniform="schwab_ticket_columns")
+    ticket_fields.columnconfigure(1, weight=1, uniform="schwab_ticket_columns")
 
-def _add_integrated_option_fields(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
-    if getattr(self, "_schwab_options_fields_integrated", False):
-        return
+    stock = ttk.LabelFrame(ticket_fields, text="Stock / ETF Ticket", style="Card.TLabelframe")
+    stock.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+    stock.columnconfigure(1, weight=1)
+    stock.columnconfigure(3, weight=1)
 
-    # The Schwab Actions frame is the primary execution control surface. Keep it
-    # in its original row so all buttons remain visible, and place the optional
-    # options-planning fields beneath the actions/status area.
-    options = ttk.LabelFrame(ticket, text="Options Ticket Fields", style="Card.TLabelframe")
-    options.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+    self._grid_row(
+        stock,
+        0,
+        "Symbol",
+        ttk.Entry(stock, textvariable=self.symbol_var),
+        "Side",
+        ttk.Combobox(stock, textvariable=self.side_var, values=["buy", "sell"], state="readonly"),
+    )
+    self._grid_row(
+        stock,
+        1,
+        "Order type",
+        ttk.Combobox(stock, textvariable=self.order_type_var, values=["market", "limit", "stop", "stop_limit"], state="readonly"),
+        "Time",
+        ttk.Combobox(stock, textvariable=self.time_in_force_var, values=["day", "gtc"], state="readonly"),
+    )
+    self._grid_row(stock, 2, "Quantity", ttk.Entry(stock, textvariable=self.quantity_var), "Entry / Limit", ttk.Entry(stock, textvariable=self.limit_price_var))
+    self._grid_row(
+        stock,
+        3,
+        "Stop price",
+        ttk.Entry(stock, textvariable=self.stop_price_var),
+        "Use Mid",
+        ttk.Button(
+            stock,
+            text="Use Mid",
+            command=lambda app=self: _run_schwab_workspace_action(app, "use_schwab_mid_market", "use_selected_venue_mid_market"),
+            style="Accent.TButton",
+        ),
+    )
+    ttk.Label(stock, text="Cancel order ID", style="Subtle.TLabel").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=5)
+    ttk.Entry(stock, textvariable=self.cancel_order_id_var).grid(row=4, column=1, columnspan=3, sticky="ew", pady=5)
+
+    options = ttk.LabelFrame(ticket_fields, text="Options Ticket Fields", style="Card.TLabelframe")
+    options.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
     options.columnconfigure(1, weight=1)
     options.columnconfigure(3, weight=1)
 
@@ -165,7 +177,54 @@ def _add_integrated_option_fields(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
     _grid_pair(options, 4, "Limit / Debit", ttk.Entry(options, textvariable=self.options_premium_var), "Short strike", ttk.Entry(options, textvariable=self.options_short_strike_var))
     _grid_pair(options, 5, "Credit", ttk.Entry(options, textvariable=self.options_credit_var), "Target price", ttk.Entry(options, textvariable=self.options_target_price_var))
 
+    _build_schwab_action_grid(self, ticket)
+    _build_schwab_status_bar(self, ticket)
+
+    self._schwab_ticket_side_by_side_built = True
     self._schwab_options_fields_integrated = True
+
+
+def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
+    actions = ttk.LabelFrame(ticket, text="Schwab Actions", style="Card.TLabelframe")
+    actions.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+    for column in range(3):
+        actions.columnconfigure(column, weight=1, uniform="schwab_actions")
+
+    def schwab_action(*names: str) -> Callable[[], None]:
+        return lambda: _run_schwab_workspace_action(self, *names)
+
+    _add_action_button(actions, row=0, column=0, text="Connect Schwab", command=schwab_action("connect_schwab", "run_schwab_preview"))
+    _add_action_button(actions, row=0, column=1, text="Refresh Account", command=schwab_action("refresh_schwab_account", "refresh_portfolio"))
+    _add_action_button(actions, row=0, column=2, text="Tech Analysis", command=schwab_action("show_technical_analysis"))
+    _add_action_button(actions, row=1, column=0, text="Preview Risk", command=schwab_action("preview_order"), style="Accent.TButton")
+    _add_action_button(actions, row=1, column=1, text="Preview Schwab Order", command=schwab_action("run_schwab_preview"))
+    _add_action_button(actions, row=1, column=2, text="Position Size", command=schwab_action("show_position_size"))
+    _add_action_button(actions, row=2, column=0, text="Recent Orders", command=schwab_action("load_selected_recent_orders", "load_schwab_open_orders"))
+    _add_action_button(actions, row=2, column=1, text="Open Only", command=schwab_action("load_selected_open_orders_only", "load_schwab_open_orders_only"))
+    _add_action_button(actions, row=2, column=2, text="Options What-If", command=lambda app=self: _run_schwab_integrated_options_what_if(app), style="Accent.TButton")
+    _add_action_button(actions, row=3, column=0, text="Cancel Order", command=schwab_action("cancel_selected_order", "show_cancel_order_placeholder"), style="Danger.TButton")
+    _add_action_button(actions, row=3, column=1, text="Live Safety", command=schwab_action("show_live_submit_safety_review"))
+    _add_action_button(actions, row=3, column=2, text="LIVE Submit", command=schwab_action("submit_selected_venue", "submit_live_schwab_order_guarded"), style="Danger.TButton")
+
+
+def _add_action_button(parent: ttk.Frame, *, row: int, column: int, text: str, command: Callable[[], None], style: str = "TButton") -> None:
+    ttk.Button(parent, text=text, command=command, style=style).grid(
+        row=row,
+        column=column,
+        sticky="ew",
+        padx=(0 if column == 0 else 4, 0),
+        pady=(0 if row == 0 else 6, 6),
+        ipady=1,
+    )
+
+
+def _build_schwab_status_bar(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
+    status = ttk.Frame(ticket, style="Panel.TFrame")
+    status.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+    status.columnconfigure((0, 1, 2), weight=1)
+    ttk.Label(status, textvariable=self.schwab_status_var, style="Chip.TLabel").grid(row=0, column=0, sticky="ew", padx=(0, 6))
+    ttk.Label(status, textvariable=self.schwab_preview_status_var, style="Chip.TLabel").grid(row=0, column=1, sticky="ew", padx=(0, 6))
+    ttk.Label(status, textvariable=self.schwab_verification_status_var, style="Chip.TLabel").grid(row=0, column=2, sticky="ew")
 
 
 def _run_schwab_workspace_action(self: tk.Tk, *command_names: str) -> None:
@@ -243,10 +302,10 @@ def _set_schwab_mode_text(self: tk.Tk, content: str) -> None:
 
 
 def _grid_pair(parent: ttk.Frame, row: int, label_a: str, widget_a: tk.Widget, label_b: str, widget_b: tk.Widget) -> None:
-    ttk.Label(parent, text=label_a, style="Subtle.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=5)
-    widget_a.grid(row=row, column=1, sticky="ew", padx=(0, 14), pady=5)
-    ttk.Label(parent, text=label_b, style="Subtle.TLabel").grid(row=row, column=2, sticky="w", padx=(0, 8), pady=5)
-    widget_b.grid(row=row, column=3, sticky="ew", pady=5)
+    ttk.Label(parent, text=label_a, style="Subtle.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 6), pady=4)
+    widget_a.grid(row=row, column=1, sticky="ew", padx=(0, 10), pady=4)
+    ttk.Label(parent, text=label_b, style="Subtle.TLabel").grid(row=row, column=2, sticky="w", padx=(0, 6), pady=4)
+    widget_b.grid(row=row, column=3, sticky="ew", pady=4)
 
 
 def _find_labelframe(root: tk.Widget, title: str) -> ttk.LabelFrame | None:
@@ -281,13 +340,6 @@ def _inside_labelframe(widget: tk.Widget, title: str) -> bool:
                 pass
         parent = parent.master
     return False
-
-
-def _widget_text(widget: tk.Widget) -> str:
-    try:
-        return str(widget.cget("text"))
-    except Exception:
-        return ""
 
 
 def _widget_class(widget: tk.Widget) -> str:
