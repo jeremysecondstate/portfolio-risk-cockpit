@@ -7,7 +7,7 @@ from app.ui import options_lab_extension
 
 
 def install_hyperliquid_perp_ticket_use_mid_fix(app_cls: type[tk.Tk] | None = None) -> None:
-    """Replace the unused Hyperliquid Type CONFIRM field with a Use Mid button."""
+    """Replace the unused Hyperliquid DELETE ME field with a Use Mid button."""
     _patch_hyperliquid_tab_builder()
     if app_cls is not None:
         _patch_layout_after_build(app_cls)
@@ -27,7 +27,7 @@ def _patch_hyperliquid_tab_builder() -> None:
             right_label: str,
             right_widget: tk.Widget,
         ) -> None:
-            if left_label == "Stop price" and right_label == "Type CONFIRM":
+            if left_label == "Stop price" and right_label == "DELETE ME":
                 right_label = "Use Mid"
                 right_widget = _make_use_mid_button(self, container)
             return original_grid_row(
@@ -83,7 +83,7 @@ def _is_hyperliquid_type_confirm_label(widget: tk.Widget) -> bool:
     try:
         if widget.winfo_class() not in {"TLabel", "Label"}:
             return False
-        if widget.cget("text") != "Type CONFIRM":
+        if widget.cget("text") != "DELETE ME":
             return False
         parent = widget.master
         return parent is not None and parent.cget("text") == "Hyperliquid Perp Ticket"

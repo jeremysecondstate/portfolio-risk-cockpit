@@ -232,7 +232,7 @@ def _build_schwab_trading_tab(
         ttk.Combobox(ticket, textvariable=self.time_in_force_var, values=[t.value for t in TimeInForce], state="readonly"),
     )
     self._grid_row(ticket, 2, "Quantity", ttk.Entry(ticket, textvariable=self.quantity_var), "Entry / Limit", ttk.Entry(ticket, textvariable=self.limit_price_var))
-    self._grid_row(ticket, 3, "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var), "Type CONFIRM", ttk.Entry(ticket, textvariable=self.confirmation_var))
+    self._grid_row(ticket, 3, "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var), "DELETE ME", ttk.Entry(ticket, textvariable=self.confirmation_var))
     ttk.Label(ticket, text="Cancel order ID", style="Subtle.TLabel").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
     ttk.Entry(ticket, textvariable=self.cancel_order_id_var).grid(row=4, column=1, columnspan=3, sticky="ew", pady=(8, 0))
 
@@ -335,14 +335,8 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     )
     self._grid_row(ticket, 2, "Size", ttk.Entry(ticket, textvariable=self.quantity_var), "Entry / Limit", ttk.Entry(ticket, textvariable=self.limit_price_var))
     self._grid_row(ticket, 3, "Target price", ttk.Entry(ticket, textvariable=self.hyperliquid_target_price_var), "Pain price", ttk.Entry(ticket, textvariable=self.hyperliquid_bad_price_var))
-    self._grid_row(ticket, 4, "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var), "Type CONFIRM", ttk.Entry(ticket, textvariable=self.confirmation_var))
-    self._grid_row(
-        ticket,
-        5,
-        "HL TIF",
-        ttk.Combobox(ticket, textvariable=self.hyperliquid_tif_var, values=["Alo", "Ioc", "Gtc"], state="readonly"),
-        "Reduce-only",
-        ttk.Checkbutton(ticket, variable=self.hyperliquid_reduce_only_var),
+    self._grid_row(ticket, 4, "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var), "DELETE ME", ttk.Entry(ticket, textvariable=self.confirmation_var))
+    self._grid_row(ticket, 5, "HL TIF", ttk.Combobox(ticket, textvariable=self.hyperliquid_tif_var, values=["Alo", "Ioc", "Gtc"], state="readonly"), "Reduce-only", ttk.Checkbutton(ticket, variable=self.hyperliquid_reduce_only_var),
     )
     self._grid_row(ticket, 6, "Leverage x", ttk.Entry(ticket, textvariable=self.hyperliquid_leverage_var), "Fee % / side", ttk.Entry(ticket, textvariable=self.hyperliquid_fee_rate_var))
     ttk.Label(ticket, text="Cancel order ID", style="Subtle.TLabel").grid(row=7, column=0, sticky="w", padx=(0, 8), pady=(8, 0))

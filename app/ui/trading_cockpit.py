@@ -74,7 +74,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         self._grid_row(ticket, 0, "Symbol", ttk.Entry(ticket, textvariable=self.symbol_var), "Side", ttk.Combobox(ticket, textvariable=self.side_var, values=[s.value for s in OrderSide], state="readonly"))
         self._grid_row(ticket, 1, "Order type", ttk.Combobox(ticket, textvariable=self.order_type_var, values=[o.value for o in OrderType], state="readonly"), "Time", ttk.Combobox(ticket, textvariable=self.time_in_force_var, values=[t.value for t in TimeInForce], state="readonly"))
         self._grid_row(ticket, 2, "Quantity", ttk.Entry(ticket, textvariable=self.quantity_var), "Entry / Limit", ttk.Entry(ticket, textvariable=self.limit_price_var))
-        self._grid_row(ticket, 3, "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var), "Type CONFIRM", ttk.Entry(ticket, textvariable=self.confirmation_var))
+        self._grid_row(ticket, 3, "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var))
         ttk.Label(ticket, text="Cancel order ID").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=6)
         ttk.Entry(ticket, textvariable=self.cancel_order_id_var).grid(row=4, column=1, columnspan=3, sticky="ew", pady=6)
 
@@ -617,7 +617,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
                 "LIVE SCHWAB SUBMIT BLOCKED\n"
                 "==========================\n\n"
                 "Exact confirmation phrase required.\n\n"
-                "Type exactly into the Type CONFIRM field:\n\n"
+                "Type exactly into the DELETE ME field:\n\n"
                 "  PLACE\n\n"
                 "No live order was submitted."
             )
