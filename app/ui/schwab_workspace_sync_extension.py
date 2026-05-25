@@ -14,9 +14,16 @@ def install_schwab_workspace_sync_extension(app_cls: Type[tk.Tk]) -> None:
 
     def build_layout_with_schwab_sync_polish(self: tk.Tk) -> None:
         previous_build_layout(self)
-        self.after_idle(lambda: _polish_schwab_workspace(self))
+        _schedule_schwab_workspace_polish(self)
 
     app_cls._build_layout = build_layout_with_schwab_sync_polish  # type: ignore[method-assign]
+
+
+def _schedule_schwab_workspace_polish(self: tk.Tk) -> None:
+    """Run a few times because multiple UI extensions patch and build the tab lazily."""
+
+    for delay_ms in (0, 100, 500, 1200):
+        self.after(delay_ms, lambda app=self: _polish_schwab_workspace(app))
 
 
 def _polish_schwab_workspace(self: tk.Tk) -> None:
@@ -91,8 +98,8 @@ def _select_options_lab(self: tk.Tk) -> None:
 
 
 def _find_notebook(root: tk.Widget) -> ttk.Notebook | None:
-    if isinstance(root, ttk.Notebook):
-        return root
+    if _widget_class(root) == "TNotebook":
+        return root  # type: ignore[return-value]
     for child in root.winfo_children():
         found = _find_notebook(child)
         if found is not None:
@@ -103,7 +110,7 @@ def _find_notebook(root: tk.Widget) -> ttk.Notebook | None:
 def _inside_labelframe(widget: tk.Widget, title: str) -> bool:
     parent = widget.master
     while parent is not None:
-        if isinstance(parent, ttk.LabelFrame):
+        if _widget_class(parent) == "TLabelframe":
             try:
                 if str(parent.cget("text")) == title:
                     return True
@@ -115,6 +122,13 @@ def _inside_labelframe(widget: tk.Widget, title: str) -> bool:
 
 def _walk_buttons(root: tk.Widget):
     for child in root.winfo_children():
-        if isinstance(child, ttk.Button):
+        if _widget_class(child) == "TButton":
             yield child
         yield from _walk_buttons(child)
+
+
+def _widget_class(widget: tk.Widget) -> str:
+    try:
+        return str(widget.winfo_class())
+    except Exception:
+        return ""
