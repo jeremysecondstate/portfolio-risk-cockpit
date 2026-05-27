@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -42,6 +43,7 @@ class SecFiling:
     form: str
     primary_document: str
     description: str
+    items: str = ""
 
     @property
     def accession_no_dashes(self) -> str:
@@ -58,9 +60,54 @@ class SecFiling:
     def filing_directory_url(self) -> str:
         return f"{SEC_ARCHIVES_BASE_URL}/{self.company.cik_int}/{self.accession_no_dashes}/"
 
+    @property
+    def filing_index_url(self) -> str:
+        return f"{self.filing_directory_url}index.json"
+
+    @property
+    def likely_earnings_release_8k(self) -> bool:
+        return self.form == "8-K" and ("2.02" in self.items or "9.01" in self.items)
+
+
+@dataclass(frozen=True)
+class SecFilingDocument:
+    filing: SecFiling
+    document: str
+    description: str
+    type: str
+    sequence: str
+    size: int | None = None
+
+    @property
+    def url(self) -> str:
+        return f"{self.filing.filing_directory_url}{self.document}"
+
+    @property
+    def looks_like_earnings_exhibit(self) -> bool:
+        haystack = f"{self.type} {self.document} {self.description}".lower()
+        return (
+            "ex-99" in haystack
+            or "exhibit 99" in haystack
+            or "earnings" in haystack
+            or "press release" in haystack
+            or "results" in haystack
+        )
+
+
+@dataclass(frozen=True)
+class SecEarningsRelease:
+    company: SecCompany
+    filing: SecFiling
+    document: SecFilingDocument
+    text: str
+
+    @property
+    def source_url(self) -> str:
+        return self.document.url
+
 
 class SecEdgarClient:
-    """Small SEC EDGAR/data.sec.gov client with a local JSON cache.
+    """Small SEC EDGAR/data.sec.gov client with a local JSON/text cache.
 
     SEC endpoints are public and keyless, but the SEC asks automated clients to
     identify themselves and keep request rates reasonable. This client is tuned
@@ -144,6 +191,7 @@ class SecEdgarClient:
         report_dates = list(recent.get("reportDate") or [])
         primary_docs = list(recent.get("primaryDocument") or [])
         descriptions = list(recent.get("primaryDocDescription") or [])
+        items = list(recent.get("items") or [])
 
         filings: list[SecFiling] = []
         for index, form in enumerate(forms_list):
@@ -163,16 +211,75 @@ class SecEdgarClient:
                     form=form_text,
                     primary_document=primary_document,
                     description=_safe_list_get(descriptions, index),
+                    items=_safe_list_get(items, index),
                 )
             )
             if len(filings) >= limit:
                 break
         return filings
 
+    def filing_documents(self, filing: SecFiling) -> list[SecFilingDocument]:
+        payload = self._fetch_json(
+            filing.filing_index_url,
+            cache_name=f"filing_index_{filing.company.cik}_{filing.accession_no_dashes}.json",
+            ttl=DEFAULT_CACHE_TTL,
+        )
+        directory = payload.get("directory") if isinstance(payload, dict) else {}
+        raw_items = directory.get("item") if isinstance(directory, dict) else []
+        if not isinstance(raw_items, list):
+            return []
+
+        documents: list[SecFilingDocument] = []
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                continue
+            name = str(raw.get("name") or "")
+            if not name or name.endswith("/"):
+                continue
+            documents.append(
+                SecFilingDocument(
+                    filing=filing,
+                    document=name,
+                    description=str(raw.get("description") or ""),
+                    type=str(raw.get("type") or ""),
+                    sequence=str(raw.get("sequence") or ""),
+                    size=_to_int(raw.get("size")),
+                )
+            )
+        return documents
+
+    def document_text(self, document: SecFilingDocument) -> str:
+        raw = self._fetch_text(
+            document.url,
+            cache_name=f"document_{document.filing.company.cik}_{document.filing.accession_no_dashes}_{document.document}.txt",
+            ttl=DEFAULT_CACHE_TTL,
+        )
+        return html_to_text(raw)
+
+    def latest_earnings_release(self, ticker: str) -> SecEarningsRelease | None:
+        filings = self.recent_filings(ticker, forms=("8-K",), limit=30)
+        prioritized = sorted(filings, key=lambda filing: filing.likely_earnings_release_8k, reverse=True)
+        for filing in prioritized:
+            if filing.items and not filing.likely_earnings_release_8k:
+                continue
+            documents = self.filing_documents(filing)
+            document = choose_earnings_exhibit(documents)
+            if document is None:
+                continue
+            text = self.document_text(document)
+            if not text.strip():
+                continue
+            return SecEarningsRelease(company=filing.company, filing=filing, document=document, text=text)
+        return None
+
     def _fetch_json(self, url: str, *, cache_name: str, ttl: timedelta) -> Any:
+        text = self._fetch_text(url, cache_name=cache_name, ttl=ttl)
+        return json.loads(text)
+
+    def _fetch_text(self, url: str, *, cache_name: str, ttl: timedelta) -> str:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         cache_path = self.cache_dir / _safe_cache_filename(cache_name)
-        cached = self._read_cache(cache_path, ttl)
+        cached = self._read_text_cache(cache_path, ttl)
         if cached is not None:
             return cached
 
@@ -182,31 +289,29 @@ class SecEdgarClient:
             headers={
                 "User-Agent": self.user_agent,
                 "Accept-Encoding": "gzip, deflate",
-                "Accept": "application/json",
+                "Accept": "application/json,text/html,text/plain,*/*",
             },
             timeout=self.timeout_seconds,
         )
         response.raise_for_status()
-        payload = response.json()
-        self._write_cache(cache_path, payload)
-        return payload
+        text = response.text
+        self._write_text_cache(cache_path, text)
+        return text
 
-    def _read_cache(self, cache_path: Path, ttl: timedelta) -> Any | None:
+    def _read_text_cache(self, cache_path: Path, ttl: timedelta) -> str | None:
         if not cache_path.exists():
             return None
         age_seconds = time.time() - cache_path.stat().st_mtime
         if age_seconds > ttl.total_seconds():
             return None
         try:
-            with cache_path.open("r", encoding="utf-8") as handle:
-                return json.load(handle)
-        except (OSError, json.JSONDecodeError):
+            return cache_path.read_text(encoding="utf-8")
+        except OSError:
             return None
 
-    def _write_cache(self, cache_path: Path, payload: Any) -> None:
+    def _write_text_cache(self, cache_path: Path, text: str) -> None:
         temporary_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
-        with temporary_path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle)
+        temporary_path.write_text(text, encoding="utf-8")
         temporary_path.replace(cache_path)
 
     def _respect_rate_limit(self) -> None:
@@ -214,6 +319,29 @@ class SecEdgarClient:
         if elapsed < MIN_SECONDS_BETWEEN_SEC_REQUESTS:
             time.sleep(MIN_SECONDS_BETWEEN_SEC_REQUESTS - elapsed)
         self._last_request_at = time.monotonic()
+
+
+def choose_earnings_exhibit(documents: list[SecFilingDocument]) -> SecFilingDocument | None:
+    if not documents:
+        return None
+    primary_candidates = [document for document in documents if document.looks_like_earnings_exhibit]
+    if primary_candidates:
+        return sorted(primary_candidates, key=_document_rank)[0]
+    return None
+
+
+def html_to_text(raw: str) -> str:
+    text = re.sub(r"(?is)<script.*?</script>", " ", raw)
+    text = re.sub(r"(?is)<style.*?</style>", " ", text)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?i)</p>|</div>|</tr>|</h[1-6]>", "\n", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = re.sub(r"[\t\r\f\v]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ ]{2,}", " ", text)
+    return text.strip()
 
 
 def normalize_ticker(ticker: str) -> str:
@@ -228,6 +356,22 @@ def normalize_ticker(ticker: str) -> str:
     return normalized
 
 
+def _document_rank(document: SecFilingDocument) -> tuple[int, str]:
+    haystack = f"{document.type} {document.document} {document.description}".lower()
+    score = 10
+    if "ex-99.1" in haystack or "exhibit 99.1" in haystack:
+        score = 0
+    elif "ex-99" in haystack or "exhibit 99" in haystack:
+        score = 1
+    elif "earnings" in haystack:
+        score = 2
+    elif "press release" in haystack:
+        score = 3
+    elif "results" in haystack:
+        score = 4
+    return score, document.document
+
+
 def _safe_cache_filename(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", value)
 
@@ -237,6 +381,15 @@ def _safe_list_get(values: list[Any], index: int) -> str:
         return str(values[index] or "")
     except IndexError:
         return ""
+
+
+def _to_int(value: Any) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def cache_status_line() -> str:
