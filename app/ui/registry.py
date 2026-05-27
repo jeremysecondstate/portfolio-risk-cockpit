@@ -26,6 +26,7 @@ from app.ui.schwab_option_chain_visible_fix import install_schwab_option_chain_v
 from app.ui.schwab_output_popout_extension import install_schwab_output_popout_extension
 from app.ui.schwab_sync_report_extension import install_schwab_sync_report_extension
 from app.ui.schwab_workspace_sync_extension import install_schwab_workspace_sync_extension
+from app.ui.thesis_option_ticket_extension import install_thesis_option_ticket_extension
 from app.ui.trade_setup_extension import install_trade_setup_extension
 from app.ui.unified_refresh_extension import install_unified_refresh_extension
 from app.ui.unified_trade_thesis_extension import install_unified_trade_thesis_extension
@@ -60,6 +61,7 @@ def install_ui_extensions(app_cls: Type[tk.Tk]) -> None:
     install_hyperliquid_cockpit_spot_mid_extension(app_cls)
     install_schwab_option_chain_extension(app_cls)
     install_schwab_option_chain_visible_fix(app_cls)
+    install_thesis_option_ticket_extension(app_cls)
     install_schwab_output_popout_extension(app_cls)
     install_schwab_live_status_extension(app_cls)
     install_schwab_sync_report_extension(app_cls)
