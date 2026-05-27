@@ -19,6 +19,7 @@ from app.ui.hyperliquid_trading_extension import install_hyperliquid_trading_ext
 from app.ui.options_core_math_extension import install_options_core_math_extension
 from app.ui.options_lab_extension import install_options_lab_extension
 from app.ui.options_resizable_layout_extension import install_options_resizable_layout_extension
+from app.ui.options_what_if_enhancement_extension import install_options_what_if_enhancement_extension
 from app.ui.polished_theme import install_polished_cockpit_theme
 from app.ui.schwab_live_status_extension import install_schwab_live_status_extension
 from app.ui.schwab_option_chain_extension import install_schwab_option_chain_extension
@@ -48,6 +49,7 @@ def install_ui_extensions(app_cls: Type[tk.Tk]) -> None:
     install_unified_refresh_extension(app_cls)
     install_hyperliquid_notifications_fix(app_cls)
     install_options_lab_extension(app_cls)
+    install_options_what_if_enhancement_extension(app_cls)
     install_hyperliquid_perp_ticket_use_mid_fix(app_cls)
     install_hyperliquid_existing_perp_what_if_extension(app_cls)
     install_schwab_workspace_sync_extension(app_cls)
