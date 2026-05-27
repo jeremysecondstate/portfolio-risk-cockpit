@@ -18,6 +18,7 @@ from app.ui.options_lab_extension import install_options_lab_extension
 from app.ui.options_resizable_layout_extension import install_options_resizable_layout_extension
 from app.ui.polished_theme import install_polished_cockpit_theme
 from app.ui.schwab_live_status_extension import install_schwab_live_status_extension
+from app.ui.schwab_option_chain_extension import install_schwab_option_chain_extension
 from app.ui.schwab_sync_report_extension import install_schwab_sync_report_extension
 from app.ui.schwab_workspace_sync_extension import install_schwab_workspace_sync_extension
 from app.ui.trade_setup_extension import install_trade_setup_extension
@@ -50,5 +51,6 @@ def install_ui_extensions(app_cls: Type[tk.Tk]) -> None:
     install_cash_positions_extension(app_cls)
     install_hyperliquid_symbol_alias_extension()
     install_hyperliquid_submit_no_autosync_fix(app_cls)
+    install_schwab_option_chain_extension(app_cls)
     install_schwab_live_status_extension(app_cls)
     install_schwab_sync_report_extension(app_cls)
