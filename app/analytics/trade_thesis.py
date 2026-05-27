@@ -33,6 +33,15 @@ class OptionChainContext:
         return bool(self.candidates)
 
 
+@dataclass(frozen=True)
+class PriceLevel:
+    value: float
+    label: str
+
+    def format(self) -> str:
+        return f"${self.value:,.2f} ({self.label})"
+
+
 def format_unified_trade_thesis(
     *,
     symbol: str,
@@ -44,7 +53,9 @@ def format_unified_trade_thesis(
 ) -> str:
     directional_bias = _directional_bias(technical_report, fundamental_report, release_digest)
     latest_close = technical_report.daily.latest_close
-    support_level, resistance_level = _support_resistance_proxy(technical_report)
+    support_levels, resistance_levels = _support_resistance_levels(technical_report, option_context)
+    support_level = support_levels[0] if support_levels else None
+    resistance_level = resistance_levels[0] if resistance_levels else None
 
     lines = [
         f"UNIFIED TRADE THESIS — {symbol}",
@@ -55,7 +66,9 @@ def format_unified_trade_thesis(
         "",
         f"Overall directional read: {directional_bias.upper()}",
         f"Latest daily close: ${latest_close:,.2f}",
-        f"Key invalidation / confirmation map: support proxy {_format_optional_money(support_level)}, resistance proxy {_format_optional_money(resistance_level)}",
+        "Key invalidation / confirmation map:",
+        f"- Support candidates: {_format_level_list(support_levels)}",
+        f"- Resistance candidates: {_format_level_list(resistance_levels)}",
         "",
         "Technical read:",
         f"- Daily bias: {technical_report.daily.overall_bias.value}; intraday bias: {technical_report.intraday.overall_bias.value}",
@@ -84,7 +97,7 @@ def format_unified_trade_thesis(
             *_scenario_lines(directional_bias, latest_close, support_level, resistance_level),
             "",
             "Options planning layer:",
-            *_option_structure_lines(directional_bias, option_context, support_level, resistance_level),
+            *_option_structure_lines(directional_bias, option_context, _level_value(support_level), _level_value(resistance_level)),
             "",
             "Suggested next checks:",
             "- If using options, load/refresh the option chain immediately before planning; stale chains can mislead pricing and liquidity reads.",
@@ -167,28 +180,97 @@ def _directional_bias(
     return "mixed / wait for confirmation"
 
 
-def _support_resistance_proxy(report: MultiTimeframeTechnicalReport) -> tuple[float | None, float | None]:
+def _support_resistance_levels(
+    report: MultiTimeframeTechnicalReport,
+    option_context: OptionChainContext | None,
+) -> tuple[list[PriceLevel], list[PriceLevel]]:
     latest = report.daily.latest_close
-    sma_fast = report.daily.sma_fast
-    sma_slow = report.daily.sma_slow
-    levels = [level for level in (sma_fast, sma_slow) if level is not None]
-    below = [level for level in levels if level <= latest]
-    above = [level for level in levels if level >= latest]
-    support = max(below) if below else min(levels) if levels else None
-    resistance = min(above) if above else max(levels) if levels else None
-    return support, resistance
+    supports: list[PriceLevel] = []
+    resistances: list[PriceLevel] = []
+
+    _add_average_level(supports, resistances, latest, report.daily.sma_fast, "daily 20-SMA")
+    _add_average_level(supports, resistances, latest, report.daily.sma_slow, "daily 50-SMA")
+    _add_average_level(supports, resistances, latest, report.intraday.sma_fast, "intraday 20-SMA")
+    _add_average_level(supports, resistances, latest, report.intraday.sma_slow, "intraday 50-SMA")
+
+    if option_context is not None and option_context.has_rows:
+        strikes = sorted({candidate.strike for candidate in option_context.candidates if candidate.strike > 0})
+        below = [strike for strike in strikes if strike < latest]
+        above = [strike for strike in strikes if strike > latest]
+        if below:
+            supports.append(PriceLevel(max(below), "nearest loaded option strike below spot"))
+        if above:
+            resistances.append(PriceLevel(min(above), "nearest loaded option strike above spot"))
+
+    supports = _dedupe_levels(sorted(supports, key=lambda level: abs(latest - level.value)))
+    resistances = _dedupe_levels(sorted(resistances, key=lambda level: abs(level.value - latest)))
+
+    if not supports:
+        supports.append(PriceLevel(latest * 0.97, "3% downside watch level"))
+    if not resistances:
+        resistances.append(PriceLevel(latest * 1.03, "3% upside extension level"))
+
+    if supports and resistances and abs(supports[0].value - resistances[0].value) < 0.01:
+        resistances = resistances[1:] or [PriceLevel(supports[0].value * 1.03, "3% upside extension level")]
+
+    return supports[:3], resistances[:3]
 
 
-def _scenario_lines(bias: str, latest: float, support: float | None, resistance: float | None) -> list[str]:
+def _add_average_level(
+    supports: list[PriceLevel],
+    resistances: list[PriceLevel],
+    latest: float,
+    value: float | None,
+    label: str,
+) -> None:
+    if value is None or value <= 0:
+        return
+    level = PriceLevel(value, label)
+    if value < latest:
+        supports.append(level)
+    elif value > latest:
+        resistances.append(level)
+
+
+def _dedupe_levels(levels: list[PriceLevel]) -> list[PriceLevel]:
+    deduped: list[PriceLevel] = []
+    seen_values: set[int] = set()
+    for level in levels:
+        rounded = round(level.value * 100)
+        if rounded in seen_values:
+            continue
+        seen_values.add(rounded)
+        deduped.append(level)
+    return deduped
+
+
+def _format_level_list(levels: list[PriceLevel]) -> str:
+    if not levels:
+        return "--"
+    return "; ".join(level.format() for level in levels)
+
+
+def _level_value(level: PriceLevel | None) -> float | None:
+    return level.value if level is not None else None
+
+
+def _scenario_lines(
+    bias: str,
+    latest: float,
+    support: PriceLevel | None,
+    resistance: PriceLevel | None,
+) -> list[str]:
+    support_text = support.format() if support else "--"
+    resistance_text = resistance.format() if resistance else "--"
     lines = []
     if "bullish" in bias or "constructive" in bias:
-        lines.append(f"- Bull case: continuation holds above {_format_optional_money(support)} and pushes through {_format_optional_money(resistance)}.")
-        lines.append(f"- Bear risk: loss of {_format_optional_money(support)} would weaken the upside thesis and favor waiting/repricing.")
+        lines.append(f"- Bull case: continuation holds above {support_text} and pushes through {resistance_text}.")
+        lines.append(f"- Bear risk: loss of {support_text} would weaken the upside thesis and favor waiting/repricing.")
     elif "bearish" in bias or "cautious" in bias:
-        lines.append(f"- Bear case: price fails near {_format_optional_money(resistance)} and loses {_format_optional_money(support)}.")
-        lines.append(f"- Bull risk: reclaiming {_format_optional_money(resistance)} would challenge the downside thesis.")
+        lines.append(f"- Bear case: price fails near {resistance_text} and loses {support_text}.")
+        lines.append(f"- Bull risk: reclaiming {resistance_text} would challenge the downside thesis.")
     else:
-        lines.append(f"- Base case: mixed signal around ${latest:,.2f}; wait for a break above {_format_optional_money(resistance)} or below {_format_optional_money(support)}.")
+        lines.append(f"- Base case: mixed signal around ${latest:,.2f}; wait for a break above {resistance_text} or below {support_text}.")
     lines.append("- Event risk: earnings-release/call commentary can overpower technical levels, especially near reporting windows.")
     return lines
 
@@ -314,8 +396,23 @@ def _spread_line(label: str, long_leg: OptionChainCandidate, short_leg: OptionCh
     return (
         f"- {label}: buy {long_leg.strike:g}, sell {short_leg.strike:g} {short_leg.side.upper()} same expiry if liquid; "
         f"rough net debit ${net_debit:,.2f}, width ${width:,.2f}, breakeven {_format_optional_money(breakeven)}, "
-        f"max loss about ${max_loss_dollars:,.0f}/contract, max reward before fees/slippage about ${max_reward_dollars:,.0f}/contract."
+        f"max loss about ${max_loss_dollars:,.0f}/contract, max reward before fees/slippage about ${max_reward_dollars:,.0f}/contract.\n"
+        f"  Expiration scenarios: {_spread_loss_zone(long_leg, short_leg)}; "
+        f"breakeven at {_format_optional_money(breakeven)}; "
+        f"max reward at/through {_format_money(_max_reward_trigger(long_leg, short_leg))}."
     )
+
+
+def _spread_loss_zone(long_leg: OptionChainCandidate, short_leg: OptionChainCandidate) -> str:
+    if long_leg.side == "call":
+        return f"below {_format_money(long_leg.strike)} = max loss"
+    if long_leg.side == "put":
+        return f"above {_format_money(long_leg.strike)} = max loss"
+    return "outside long strike = max loss"
+
+
+def _max_reward_trigger(long_leg: OptionChainCandidate, short_leg: OptionChainCandidate) -> float:
+    return short_leg.strike
 
 
 def _vertical_spread_breakeven(long_leg: OptionChainCandidate, net_debit: float) -> float | None:
@@ -367,8 +464,12 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
+def _format_money(value: float) -> str:
+    return f"${value:,.2f}"
+
+
 def _format_optional_money(value: float | None) -> str:
-    return "--" if value is None else f"${value:,.2f}"
+    return "--" if value is None else _format_money(value)
 
 
 def _format_optional_number(value: float | None) -> str:
