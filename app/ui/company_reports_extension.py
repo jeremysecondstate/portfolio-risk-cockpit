@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Callable, Type
 
+from app.analytics.earnings_release import analyze_earnings_release, format_earnings_release_digest
 from app.analytics.fundamental_analysis import (
     analyze_company_facts,
     format_earnings_snapshot,
@@ -118,7 +119,8 @@ def _show_company_filings(self: tk.Tk) -> None:
         symbol = _symbol_from_ticket(self)
         client = SecEdgarClient()
         filings = client.recent_filings(symbol, forms=REPORT_FORMS, limit=18)
-        self._set_preview_text(_format_filings_report(symbol, filings))
+        release = client.latest_earnings_release(symbol)
+        self._set_preview_text(_format_filings_report(symbol, filings, release_digest=analyze_earnings_release(release)))
     except Exception as exc:
         messagebox.showerror("Company filings failed", str(exc))
 
@@ -129,8 +131,12 @@ def _show_earnings_snapshot(self: tk.Tk) -> None:
         client = SecEdgarClient()
         company, payload = client.get_companyfacts(symbol)
         filings = client.recent_filings(symbol, forms=REPORT_FORMS, limit=18)
+        release = client.latest_earnings_release(symbol)
         report = analyze_company_facts(company, payload)
-        text = _with_next_report_watch(format_earnings_snapshot(report), filings)
+        text = _with_fast_earnings_layer(
+            _with_next_report_watch(format_earnings_snapshot(report), filings),
+            analyze_earnings_release(release),
+        )
         self._set_preview_text(text + "\n\n" + cache_status_line())
     except Exception as exc:
         messagebox.showerror("Earnings snapshot failed", str(exc))
@@ -142,8 +148,12 @@ def _show_fundamental_analysis(self: tk.Tk) -> None:
         client = SecEdgarClient()
         company, payload = client.get_companyfacts(symbol)
         filings = client.recent_filings(symbol, forms=REPORT_FORMS, limit=18)
+        release = client.latest_earnings_release(symbol)
         report = analyze_company_facts(company, payload)
-        text = _with_next_report_watch(format_fundamental_analysis(report), filings)
+        text = _with_fast_earnings_layer(
+            _with_next_report_watch(format_fundamental_analysis(report), filings),
+            analyze_earnings_release(release),
+        )
         self._set_preview_text(text + "\n\n" + cache_status_line())
     except Exception as exc:
         messagebox.showerror("Fundamental analysis failed", str(exc))
@@ -151,6 +161,10 @@ def _show_fundamental_analysis(self: tk.Tk) -> None:
 
 def _symbol_from_ticket(self: tk.Tk) -> str:
     return normalize_ticker(self.symbol_var.get())
+
+
+def _with_fast_earnings_layer(report_text: str, release_digest) -> str:
+    return format_earnings_release_digest(release_digest) + "\n\n" + report_text
 
 
 def _with_next_report_watch(report_text: str, filings: list[SecFiling]) -> str:
@@ -166,7 +180,7 @@ def _with_next_report_watch(report_text: str, filings: list[SecFiling]) -> str:
     return report_text + "\n\n" + line
 
 
-def _format_filings_report(symbol: str, filings: list[SecFiling]) -> str:
+def _format_filings_report(symbol: str, filings: list[SecFiling], *, release_digest=None) -> str:
     if not filings:
         return (
             f"COMPANY FILINGS — {symbol}\n"
@@ -183,15 +197,19 @@ def _format_filings_report(symbol: str, filings: list[SecFiling]) -> str:
         f"Company: {company.title}",
         f"CIK: {company.cik}",
         format_next_report_watch_line(filings),
+        "",
+        format_earnings_release_digest(release_digest),
+        "",
         "Forms: 10-K, 10-Q, 8-K",
         "",
         "Recent filings:",
     ]
     for filing in filings:
         description = f" — {filing.description}" if filing.description else ""
+        items = f" | items {filing.items}" if filing.items else ""
         lines.extend(
             [
-                f"- {filing.form} | filed {filing.filing_date} | period {filing.report_date or '--'}{description}",
+                f"- {filing.form} | filed {filing.filing_date} | period {filing.report_date or '--'}{items}{description}",
                 f"  Accession: {filing.accession_number}",
                 f"  URL: {filing.filing_url}",
             ]
@@ -200,7 +218,7 @@ def _format_filings_report(symbol: str, filings: list[SecFiling]) -> str:
     lines.extend(
         [
             "",
-            "Tip: 8-K filings often contain earnings-release exhibits; 10-Q/10-K filings carry the full financial statements and notes.",
+            "Tip: prioritize 8-K Item 2.02 / Exhibit 99.x for the fastest official earnings-release layer, then reconcile against the later 10-Q/10-K.",
             cache_status_line(),
         ]
     )
