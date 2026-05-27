@@ -1,1 +1,1 @@
-x = 1
+"""Unused module kept intentionally empty."""
