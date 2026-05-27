@@ -65,7 +65,6 @@ def _sync_hyperliquid_account_with_assessment(self: tk.Tk) -> None:
         raw_report = format_hyperliquid_snapshot(snapshot, hyperliquid_portfolio)
         assessment = format_hyperliquid_position_assessment(snapshot, hyperliquid_portfolio)
         self._set_preview_text(f"{raw_report}\n\n{assessment}")
-        messagebox.showinfo("Hyperliquid synced", hyperliquid_source_message)
     except Exception as exc:
         if hasattr(self, "hyperliquid_status_var"):
             self.hyperliquid_status_var.set("Hyperliquid: sync failed")
