@@ -7,6 +7,7 @@ import tkinter as tk
 from app.ui.account_sources_fix import install_account_sources_fix
 from app.ui.advanced_actions_extension import install_advanced_actions_extension
 from app.ui.cash_positions_extension import install_cash_positions_extension
+from app.ui.company_reports_extension import install_company_reports_extension
 from app.ui.hyperliquid_existing_perp_what_if_extension import install_hyperliquid_existing_perp_what_if_extension
 from app.ui.hyperliquid_notifications_fix import install_hyperliquid_notifications_fix
 from app.ui.hyperliquid_perp_ticket_use_mid_fix import install_hyperliquid_perp_ticket_use_mid_fix
@@ -58,3 +59,4 @@ def install_ui_extensions(app_cls: Type[tk.Tk]) -> None:
     install_schwab_output_popout_extension(app_cls)
     install_schwab_live_status_extension(app_cls)
     install_schwab_sync_report_extension(app_cls)
+    install_company_reports_extension(app_cls)
