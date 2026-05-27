@@ -18,7 +18,6 @@ AUTO_REFRESH_AFTER_MS = 1 * 60 * 1000
 AUTO_REFRESH_ENV_KEY = "COCKPIT_AUTO_REFRESH_MS"
 _AUTO_REFRESH_OUTPUT_PREFIXES = (
     "PORTFOLIO REFRESH",
-    "HYPERLIQUID PORTFOLIO SYNC",
 )
 
 
@@ -151,7 +150,6 @@ def _run_auto_refresh(self: tk.Tk) -> None:
     if getattr(self, "refresh_portfolio_auto_running", False):
         _schedule_auto_refresh(self)
         return
-
     try:
         if not self.winfo_exists():
             return
@@ -177,11 +175,12 @@ def _find_label_frame_by_text(root: tk.Widget, text: str) -> ttk.LabelFrame | No
 
 
 def _active_output_allows_auto_refresh_update(output: tk.Text) -> bool:
-    """Only overwrite the output if the user is already viewing refresh output.
+    """Only overwrite the output if the user is already viewing auto/manual portfolio refresh output.
 
     Auto-refresh should keep the portfolio table live without stealing the output
-    panel from a Perp What-If, Tech Analysis, Position Size, or other workflow the
-    user explicitly opened. Manual refreshes still replace the output as before.
+    panel from a manual Hyperliquid sync assessment, Perp What-If, Tech Analysis,
+    Position Size, or any other report the user explicitly opened. Manual refreshes
+    still replace the output as before.
     """
 
     try:
