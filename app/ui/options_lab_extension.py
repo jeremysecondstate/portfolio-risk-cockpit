@@ -77,7 +77,7 @@ def _ensure_execution_workspace_vars(self: tk.Tk) -> None:
     if not hasattr(self, "trade_venue_var"):
         self.trade_venue_var = tk.StringVar(value="Schwab")
     if not hasattr(self, "hyperliquid_coin_var"):
-        self.hyperliquid_coin_var = tk.StringVar(value="HYPE")
+        self.hyperliquid_coin_var = tk.StringVar(value="")
     if not hasattr(self, "hyperliquid_tif_var"):
         self.hyperliquid_tif_var = tk.StringVar(value="Gtc")
     if not hasattr(self, "hyperliquid_reduce_only_var"):

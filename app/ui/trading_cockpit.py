@@ -44,7 +44,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         self.cancel_verified_this_session = False
         self.last_hyperliquid_cash_adjustment = 0.0
 
-        self.symbol_var = tk.StringVar(value="NVDA")
+        self.symbol_var = tk.StringVar(value="")
         self.side_var = tk.StringVar(value=OrderSide.BUY.value)
         self.order_type_var = tk.StringVar(value=OrderType.LIMIT.value)
         self.quantity_var = tk.StringVar(value="1")

@@ -33,12 +33,12 @@ class PortfolioRiskCockpitApp(tk.Tk):
         self.broker = PaperBroker()
         self.last_preview = None
 
-        self.symbol_var = tk.StringVar(value="NVDA")
+        self.symbol_var = tk.StringVar(value="")
         self.side_var = tk.StringVar(value=OrderSide.BUY.value)
         self.order_type_var = tk.StringVar(value=OrderType.LIMIT.value)
         self.quantity_var = tk.StringVar(value="1")
-        self.estimated_price_var = tk.StringVar(value="200.00")
-        self.limit_price_var = tk.StringVar(value="200.00")
+        self.estimated_price_var = tk.StringVar(value="")
+        self.limit_price_var = tk.StringVar(value="")
         self.stop_price_var = tk.StringVar(value="")
         self.time_in_force_var = tk.StringVar(value=TimeInForce.DAY.value)
         self.confirmation_var = tk.StringVar(value="")

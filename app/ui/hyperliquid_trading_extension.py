@@ -47,7 +47,7 @@ def _ensure_hyperliquid_vars(self: tk.Tk) -> None:
     if hasattr(self, "trade_venue_var"):
         return
     self.trade_venue_var = tk.StringVar(value="Schwab")
-    self.hyperliquid_coin_var = tk.StringVar(value="HYPE")
+    self.hyperliquid_coin_var = tk.StringVar(value="")
     self.hyperliquid_tif_var = tk.StringVar(value="Gtc")
     self.hyperliquid_reduce_only_var = tk.BooleanVar(value=False)
     self.hyperliquid_status_var = tk.StringVar(value="Hyperliquid: preview only")

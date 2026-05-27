@@ -97,7 +97,7 @@ def build_options_lab_tab(app: tk.Tk, parent: ttk.Frame) -> None:
 
 
 def _init_options_vars(app: tk.Tk) -> None:
-    app.options_symbol_var = tk.StringVar(value="NVDA")
+    app.options_symbol_var = tk.StringVar(value="")
     app.options_strategy_var = tk.StringVar(value="Long Call")
     app.options_action_var = tk.StringVar(value="Buy")
     app.options_expiration_var = tk.StringVar(value="May 22 (0d)")
