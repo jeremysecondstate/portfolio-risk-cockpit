@@ -24,6 +24,7 @@ from app.ui.polished_theme import install_polished_cockpit_theme
 from app.ui.schwab_live_status_extension import install_schwab_live_status_extension
 from app.ui.schwab_option_chain_extension import install_schwab_option_chain_extension
 from app.ui.schwab_option_chain_visible_fix import install_schwab_option_chain_visible_fix
+from app.ui.schwab_options_what_if_scenario_extension import install_schwab_options_what_if_scenario_extension
 from app.ui.schwab_output_popout_extension import install_schwab_output_popout_extension
 from app.ui.schwab_sync_report_extension import install_schwab_sync_report_extension
 from app.ui.schwab_workspace_sync_extension import install_schwab_workspace_sync_extension
@@ -56,6 +57,7 @@ def install_ui_extensions(app_cls: Type[tk.Tk]) -> None:
     install_venue_mid_extension(app_cls)
     install_options_core_math_extension()
     install_account_sources_fix(app_cls)
+    install_schwab_options_what_if_scenario_extension(app_cls)
     install_options_resizable_layout_extension()
     install_cash_positions_extension(app_cls)
     install_hyperliquid_symbol_alias_extension()
