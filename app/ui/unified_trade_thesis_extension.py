@@ -7,6 +7,7 @@ from typing import Type
 from app.analytics.earnings_release import analyze_earnings_release
 from app.analytics.fundamental_analysis import analyze_company_facts
 from app.analytics.technical_analysis import analyze_candles, candles_from_price_history, compare_timeframes
+from app.analytics.thesis_option_ticket import build_thesis_option_ticket
 from app.analytics.trade_thesis import format_unified_trade_thesis, option_context_from_rows
 from app.data.sec_edgar import SecEdgarClient, normalize_ticker
 
@@ -77,8 +78,16 @@ def _show_unified_trade_thesis(self: tk.Tk) -> None:
             release_digest=release_digest,
             option_context=option_context,
         )
+        directional_line = report.split("Overall directional read:", 1)[1].splitlines()[0].strip().lower() if "Overall directional read:" in report else "mixed"
+        self.current_thesis_option_ticket = build_thesis_option_ticket(
+            symbol=normalized_symbol,
+            directional_bias=directional_line,
+            option_context=option_context,
+            spot_price=technical_report.daily.latest_close,
+        )
 
         self.schwab_status_var.set("Schwab session: connected")
         self._set_preview_text(report)
     except Exception as exc:
+        self.current_thesis_option_ticket = None
         messagebox.showerror("Unified thesis failed", str(exc))
