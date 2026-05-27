@@ -4,6 +4,15 @@ from dataclasses import dataclass
 import os
 from typing import Any
 
+SPOT_EXECUTION_ALIASES = {
+    "BTC": "UBTC/USDC",
+    "UBTC": "UBTC/USDC",
+    "ETH": "UETH/USDC",
+    "UETH": "UETH/USDC",
+    "ZEC": "UZEC/USDC",
+    "UZEC": "UZEC/USDC",
+}
+
 
 @dataclass(frozen=True)
 class HyperliquidOrderTicket:
@@ -192,6 +201,29 @@ class HyperliquidExecutionAdapter:
         )
 
         return exchange.cancel(coin, order_id)
+
+
+def normalize_hyperliquid_spot_market(symbol: str) -> str:
+    market = symbol.strip().upper()
+
+    if market.startswith("HL:"):
+        market = market[3:]
+
+    for suffix in ("-PERP-SHORT", "-PERP", "-SPOT"):
+        if market.endswith(suffix):
+            market = market[: -len(suffix)]
+
+    if market.startswith("@"):
+        return market
+
+    if "/" in market:
+        base, quote = market.split("/", 1)
+        if quote != "USDC":
+            raise ValueError("Hyperliquid Cockpit spot orders currently expect USDC-quoted spot markets.")
+        return SPOT_EXECUTION_ALIASES.get(base, f"{base}/USDC")
+
+    return SPOT_EXECUTION_ALIASES.get(market, f"{market}/USDC")
+
 
 def normalize_hyperliquid_coin(symbol: str) -> str:
     coin = symbol.strip().upper()

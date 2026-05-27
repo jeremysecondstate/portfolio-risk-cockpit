@@ -12,6 +12,7 @@ from app.brokers.hyperliquid.trading import (
     HyperliquidOrderTicket,
     HyperliquidTradingConfig,
     normalize_hyperliquid_coin,
+    normalize_hyperliquid_spot_market,
 )
 from app.core.order_models import OrderSide, OrderType, TimeInForce
 from app.ui import polished_theme
@@ -26,6 +27,9 @@ HYPERLIQUID_ADDRESS_ENV_KEYS = ("HYPE_WALLET_ADDRESS", "HYPERLIQUID_USER_ADDRESS
 def install_hyperliquid_trading_extension(app_cls: Type[tk.Tk]) -> None:
     """Add a venue selector and guarded Hyperliquid ticket workflow."""
 
+    app_cls.submit_cockpit_selected_venue = _submit_cockpit_selected_venue  # type: ignore[attr-defined]
+    app_cls.show_hyperliquid_spot_live_submit_safety_review = _show_hyperliquid_spot_live_submit_safety_review  # type: ignore[attr-defined]
+    app_cls.parse_hyperliquid_spot_ticket = _parse_hyperliquid_spot_ticket  # type: ignore[attr-defined]
     app_cls.submit_selected_venue = _submit_selected_venue  # type: ignore[attr-defined]
     app_cls.cancel_selected_order = _cancel_selected_order  # type: ignore[attr-defined]
     app_cls.cancel_hyperliquid_order_guarded = _cancel_hyperliquid_order_guarded  # type: ignore[attr-defined]
@@ -158,7 +162,7 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     _grid_action_button(live_group, 0, 0, "Recent Orders", self.load_selected_recent_orders)
     _grid_action_button(live_group, 0, 1, "Open Only", self.load_selected_open_orders_only)
     _grid_action_button(live_group, 1, 0, "Cancel Order", self.cancel_selected_order, "Danger.TButton")
-    _grid_action_button(live_group, 1, 1, "LIVE Submit", self.submit_selected_venue, "Danger.TButton")
+    _grid_action_button(live_group, 1, 1, "LIVE Submit", self.submit_cockpit_selected_venue, "Danger.TButton")
 
     status_bar = ttk.Frame(ticket, style="Panel.TFrame")
     status_bar.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(10, 0))
@@ -207,6 +211,35 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
         wraplength=560,
         style="Subtle.TLabel",
     ).pack(anchor=tk.W)
+
+
+def _show_hyperliquid_spot_live_submit_safety_review(self: tk.Tk) -> None:
+    try:
+        ticket = self.parse_hyperliquid_spot_ticket()
+        config = HyperliquidTradingConfig()
+        self._set_preview_text(config.live_review_text(ticket))
+        result = HyperliquidExecutionAdapter().submit(ticket)
+        self.hyperliquid_status_var.set("Hyperliquid spot: submit attempted")
+        self._set_preview_text(
+            "HYPERLIQUID SPOT LIVE SUBMIT RESULT\n"
+            "===================================\n\n"
+            f"{result}\n\n"
+            "Refreshing Hyperliquid account snapshot..."
+        )
+        try:
+            self.sync_hyperliquid_account()
+        except Exception:
+            pass
+    except Exception as exc:
+        self.hyperliquid_status_var.set("Hyperliquid spot: live blocked")
+        messagebox.showerror("Hyperliquid spot live submit blocked", str(exc))
+
+
+def _submit_cockpit_selected_venue(self: tk.Tk) -> None:
+    if _selected_venue_is_hyperliquid(self):
+        self.show_hyperliquid_spot_live_submit_safety_review()
+        return
+    self.submit_live_schwab_order_guarded()
 
 
 def _selected_venue_is_hyperliquid(self: tk.Tk) -> bool:
@@ -489,6 +522,41 @@ def _parse_hyperliquid_ticket(self: tk.Tk) -> HyperliquidOrderTicket:
         limit_price=limit_price,
         tif=tif,
         reduce_only=bool(self.hyperliquid_reduce_only_var.get()),
+    )
+
+
+def _parse_hyperliquid_spot_ticket(self: tk.Tk) -> HyperliquidOrderTicket:
+    # Prefer Symbol because Cockpit spot UI shows ZEC/USDC there.
+    # Fall back to HL Coin for quick typing like "zec".
+    coin_source = self.symbol_var.get().strip() or self.hyperliquid_coin_var.get().strip()
+    coin = normalize_hyperliquid_spot_market(coin_source)
+
+    side = self.side_var.get().strip().lower()
+    if side not in {"buy", "sell"}:
+        raise ValueError("Hyperliquid spot side must be buy or sell.")
+
+    try:
+        size = float(self.quantity_var.get().strip().replace(",", ""))
+        limit_price = float(self.limit_price_var.get().strip().replace(",", ""))
+    except ValueError as exc:
+        raise ValueError("Hyperliquid spot size and limit price must be numbers.") from exc
+
+    if size <= 0:
+        raise ValueError("Hyperliquid spot size must be positive.")
+    if limit_price <= 0:
+        raise ValueError("Hyperliquid spot limit price must be positive.")
+
+    tif = self.hyperliquid_tif_var.get().strip() or "Gtc"
+    if tif not in HYPERLIQUID_TIFS:
+        raise ValueError("Hyperliquid TIF must be Alo, Ioc, or Gtc.")
+
+    return HyperliquidOrderTicket(
+        coin=coin,
+        is_buy=side == "buy",
+        size=size,
+        limit_price=limit_price,
+        tif=tif,
+        reduce_only=False,  # spot should not be reduce-only
     )
 
 
