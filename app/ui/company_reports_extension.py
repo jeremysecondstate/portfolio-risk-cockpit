@@ -9,6 +9,7 @@ from app.analytics.fundamental_analysis import (
     format_earnings_snapshot,
     format_fundamental_analysis,
 )
+from app.analytics.report_calendar import format_next_report_watch_line
 from app.data.sec_edgar import SecEdgarClient, SecFiling, cache_status_line, normalize_ticker
 
 REPORT_FORMS = ("10-K", "10-Q", "8-K")
@@ -127,8 +128,10 @@ def _show_earnings_snapshot(self: tk.Tk) -> None:
         symbol = _symbol_from_ticket(self)
         client = SecEdgarClient()
         company, payload = client.get_companyfacts(symbol)
+        filings = client.recent_filings(symbol, forms=REPORT_FORMS, limit=18)
         report = analyze_company_facts(company, payload)
-        self._set_preview_text(format_earnings_snapshot(report) + "\n\n" + cache_status_line())
+        text = _with_next_report_watch(format_earnings_snapshot(report), filings)
+        self._set_preview_text(text + "\n\n" + cache_status_line())
     except Exception as exc:
         messagebox.showerror("Earnings snapshot failed", str(exc))
 
@@ -138,14 +141,29 @@ def _show_fundamental_analysis(self: tk.Tk) -> None:
         symbol = _symbol_from_ticket(self)
         client = SecEdgarClient()
         company, payload = client.get_companyfacts(symbol)
+        filings = client.recent_filings(symbol, forms=REPORT_FORMS, limit=18)
         report = analyze_company_facts(company, payload)
-        self._set_preview_text(format_fundamental_analysis(report) + "\n\n" + cache_status_line())
+        text = _with_next_report_watch(format_fundamental_analysis(report), filings)
+        self._set_preview_text(text + "\n\n" + cache_status_line())
     except Exception as exc:
         messagebox.showerror("Fundamental analysis failed", str(exc))
 
 
 def _symbol_from_ticket(self: tk.Tk) -> str:
     return normalize_ticker(self.symbol_var.get())
+
+
+def _with_next_report_watch(report_text: str, filings: list[SecFiling]) -> str:
+    line = format_next_report_watch_line(filings)
+    marker = "\nLatest reported fundamentals:\n"
+    if marker in report_text:
+        return report_text.replace(marker, f"\n{line}\n\nLatest reported fundamentals:\n", 1)
+
+    marker = "\nQuarterly trend table:\n"
+    if marker in report_text:
+        return report_text.replace(marker, f"\n{line}\n\nQuarterly trend table:\n", 1)
+
+    return report_text + "\n\n" + line
 
 
 def _format_filings_report(symbol: str, filings: list[SecFiling]) -> str:
@@ -164,6 +182,7 @@ def _format_filings_report(symbol: str, filings: list[SecFiling]) -> str:
         "",
         f"Company: {company.title}",
         f"CIK: {company.cik}",
+        format_next_report_watch_line(filings),
         "Forms: 10-K, 10-Q, 8-K",
         "",
         "Recent filings:",
