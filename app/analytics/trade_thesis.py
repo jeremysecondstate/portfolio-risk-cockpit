@@ -208,20 +208,24 @@ def _option_structure_lines(
     calls = _rank_candidates([candidate for candidate in option_context.candidates if candidate.side == "call"], target=resistance)
     puts = _rank_candidates([candidate for candidate in option_context.candidates if candidate.side == "put"], target=support)
     best_call = calls[0] if calls else None
-    second_call = calls[1] if len(calls) > 1 else None
     best_put = puts[0] if puts else None
-    second_put = puts[1] if len(puts) > 1 else None
 
     lines = []
     if "bullish" in bias or "constructive" in bias:
         lines.append(_candidate_line("Bullish candidate", best_call))
-        if best_call and second_call:
-            lines.append(_spread_line("Bull call debit spread idea", best_call, second_call))
+        short_call = _spread_short_leg(best_call, calls, spread_type="bull_call", target=resistance)
+        if best_call and short_call:
+            lines.append(_spread_line("Bull call debit spread idea", best_call, short_call))
+        elif best_call:
+            lines.append("- Bull call debit spread idea: no higher-strike same-expiry call was found in the loaded chain rows.")
         lines.append("- Prefer defined-risk structures if implied volatility/spreads are wide or if earnings timing is close.")
     elif "bearish" in bias or "cautious" in bias:
         lines.append(_candidate_line("Bearish candidate", best_put))
-        if best_put and second_put:
-            lines.append(_spread_line("Bear put debit spread idea", best_put, second_put))
+        short_put = _spread_short_leg(best_put, puts, spread_type="bear_put", target=support)
+        if best_put and short_put:
+            lines.append(_spread_line("Bear put debit spread idea", best_put, short_put))
+        elif best_put:
+            lines.append("- Bear put debit spread idea: no lower-strike same-expiry put was found in the loaded chain rows.")
         lines.append("- Prefer defined-risk puts/spreads over open-ended short exposure.")
     else:
         lines.append(_candidate_line("Upside watch candidate", best_call))
@@ -237,11 +241,54 @@ def _rank_candidates(candidates: list[OptionChainCandidate], *, target: float | 
 
 
 def _candidate_score(candidate: OptionChainCandidate, target: float | None) -> tuple[float, float, int]:
-    ask = candidate.ask if candidate.ask is not None and candidate.ask > 0 else 9999.0
     spread = _spread(candidate)
     target_distance = abs(candidate.strike - target) if target is not None else 0.0
     volume_rank = -(candidate.volume or 0)
     return (target_distance, spread, volume_rank if isinstance(volume_rank, int) else 0)
+
+
+def _spread_short_leg(
+    long_leg: OptionChainCandidate | None,
+    candidates: list[OptionChainCandidate],
+    *,
+    spread_type: str,
+    target: float | None,
+) -> OptionChainCandidate | None:
+    """Pick a valid same-expiry short leg for a vertical debit spread.
+
+    Bull call spread: buy lower-strike call, sell a higher-strike call.
+    Bear put spread: buy higher-strike put, sell a lower-strike put.
+    """
+
+    if long_leg is None:
+        return None
+
+    if spread_type == "bull_call":
+        valid_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.expiration == long_leg.expiration and candidate.strike > long_leg.strike
+        ]
+    elif spread_type == "bear_put":
+        valid_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.expiration == long_leg.expiration and candidate.strike < long_leg.strike
+        ]
+    else:
+        valid_candidates = []
+
+    if not valid_candidates:
+        return None
+
+    return sorted(
+        valid_candidates,
+        key=lambda candidate: (
+            abs(candidate.strike - target) if target is not None else abs(candidate.strike - long_leg.strike),
+            _spread(candidate),
+            -(candidate.volume or 0),
+        ),
+    )[0]
 
 
 def _candidate_line(label: str, candidate: OptionChainCandidate | None) -> str:
@@ -261,10 +308,22 @@ def _spread_line(label: str, long_leg: OptionChainCandidate, short_leg: OptionCh
     net_debit = max(long_debit - short_credit, 0.0)
     width = abs(short_leg.strike - long_leg.strike)
     max_reward = max(width - net_debit, 0.0)
+    breakeven = _vertical_spread_breakeven(long_leg, net_debit)
+    max_loss_dollars = net_debit * 100
+    max_reward_dollars = max_reward * 100
     return (
-        f"- {label}: buy {long_leg.strike:g}, sell {short_leg.strike:g} same expiry if liquid; "
-        f"rough net debit ${net_debit:,.2f}, width ${width:,.2f}, max reward before fees/slippage about ${max_reward:,.2f}."
+        f"- {label}: buy {long_leg.strike:g}, sell {short_leg.strike:g} {short_leg.side.upper()} same expiry if liquid; "
+        f"rough net debit ${net_debit:,.2f}, width ${width:,.2f}, breakeven {_format_optional_money(breakeven)}, "
+        f"max loss about ${max_loss_dollars:,.0f}/contract, max reward before fees/slippage about ${max_reward_dollars:,.0f}/contract."
     )
+
+
+def _vertical_spread_breakeven(long_leg: OptionChainCandidate, net_debit: float) -> float | None:
+    if long_leg.side == "call":
+        return long_leg.strike + net_debit
+    if long_leg.side == "put":
+        return long_leg.strike - net_debit
+    return None
 
 
 def _spread(candidate: OptionChainCandidate) -> float:
