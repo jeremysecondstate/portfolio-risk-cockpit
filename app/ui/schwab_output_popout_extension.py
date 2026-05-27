@@ -63,7 +63,7 @@ def _open_schwab_output_popout(self: tk.Tk) -> None:
                 existing.deiconify()
                 existing.lift()
                 existing.focus_force()
-                self.refresh_schwab_output_popout()
+                self.refresh_schwab_output_popout(force=True)
                 return
         except tk.TclError:
             pass
@@ -80,10 +80,10 @@ def _open_schwab_output_popout(self: tk.Tk) -> None:
     toolbar.columnconfigure(0, weight=1)
     ttk.Label(
         toolbar,
-        text="Resizable Schwab output mirror. Refreshes automatically while open.",
+        text="Resizable Schwab output mirror. It updates only when the source output changes, so your scroll position stays put.",
         style="Subtle.TLabel",
     ).grid(row=0, column=0, sticky="w")
-    ttk.Button(toolbar, text="Refresh", command=self.refresh_schwab_output_popout).grid(row=0, column=1, sticky="e", padx=(8, 0))
+    ttk.Button(toolbar, text="Refresh", command=lambda: self.refresh_schwab_output_popout(force=True)).grid(row=0, column=1, sticky="e", padx=(8, 0))
 
     body = ttk.Frame(window, padding=(10, 0, 10, 10))
     body.grid(row=1, column=0, sticky="nsew")
@@ -110,18 +110,20 @@ def _open_schwab_output_popout(self: tk.Tk) -> None:
 
     self.schwab_output_popout_window = window
     self.schwab_output_popout_text = text
+    self.schwab_output_popout_last_content = None
 
     def _on_close() -> None:
         self.schwab_output_popout_window = None
         self.schwab_output_popout_text = None
+        self.schwab_output_popout_last_content = None
         window.destroy()
 
     window.protocol("WM_DELETE_WINDOW", _on_close)
-    self.refresh_schwab_output_popout()
+    self.refresh_schwab_output_popout(force=True)
     _schedule_popout_refresh(self)
 
 
-def _refresh_schwab_output_popout(self: tk.Tk) -> None:
+def _refresh_schwab_output_popout(self: tk.Tk, *, force: bool = False) -> None:
     source = getattr(self, "schwab_trading_preview_text", None)
     target = getattr(self, "schwab_output_popout_text", None)
     if source is None or target is None:
@@ -129,10 +131,19 @@ def _refresh_schwab_output_popout(self: tk.Tk) -> None:
 
     try:
         content = source.get("1.0", tk.END)
+        last_content = getattr(self, "schwab_output_popout_last_content", None)
+        if not force and content == last_content:
+            return
+
+        current_yview = target.yview()
+        top_fraction = current_yview[0] if current_yview else 0.0
+
         target.configure(state=tk.NORMAL)
         target.delete("1.0", tk.END)
         target.insert(tk.END, content)
         target.configure(state=tk.DISABLED)
+        target.yview_moveto(top_fraction)
+        self.schwab_output_popout_last_content = content
     except tk.TclError:
         return
 
