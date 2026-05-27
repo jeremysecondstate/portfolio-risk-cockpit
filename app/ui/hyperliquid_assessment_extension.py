@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tkinter as tk
 from tkinter import messagebox, simpledialog
 from typing import Type
@@ -11,6 +12,8 @@ from app.brokers.hyperliquid.client import (
     portfolio_from_hyperliquid_snapshot,
 )
 
+HYPERLIQUID_ADDRESS_ENV_KEYS = ("HYPE_WALLET_ADDRESS", "HYPERLIQUID_USER_ADDRESS")
+
 
 def install_hyperliquid_assessment_extension(app_cls: Type[tk.Tk]) -> None:
     """Append a position/risk assessment to every Hyperliquid account sync."""
@@ -18,15 +21,29 @@ def install_hyperliquid_assessment_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls.sync_hyperliquid_account = _sync_hyperliquid_account_with_assessment  # type: ignore[method-assign]
 
 
-def _sync_hyperliquid_account_with_assessment(self: tk.Tk) -> None:
-    """Read Hyperliquid balances/positions, merge them, and show an exposure assessment."""
+def _hyperliquid_address_from_env() -> str:
+    for key in HYPERLIQUID_ADDRESS_ENV_KEYS:
+        value = os.getenv(key, "").strip()
+        if value:
+            return value
+    return ""
 
-    default_address = __import__("os").getenv("HYPERLIQUID_USER_ADDRESS", "").strip()
-    address = default_address or simpledialog.askstring(
-        "Hyperliquid Sync",
-        "Enter your Hyperliquid master/sub-account wallet address.\n\n"
-        "Use the account address, not the API/agent wallet address.",
-    )
+
+def _sync_hyperliquid_account_with_assessment(self: tk.Tk) -> None:
+    """Read Hyperliquid balances/positions, merge them, and show an exposure assessment.
+
+    Preserve the existing one-click flow: if HYPE_WALLET_ADDRESS or
+    HYPERLIQUID_USER_ADDRESS is present in .env, do not prompt.
+    """
+
+    address = _hyperliquid_address_from_env()
+    if not address:
+        address = simpledialog.askstring(
+            "Hyperliquid Sync",
+            "Enter your Hyperliquid master/sub-account wallet address.\n\n"
+            "Tip: save HYPE_WALLET_ADDRESS=0x... in .env to skip this prompt.\n\n"
+            "Use the account address, not the API/agent wallet address.",
+        )
     if not address:
         return
 
@@ -42,9 +59,14 @@ def _sync_hyperliquid_account_with_assessment(self: tk.Tk) -> None:
         self.last_hyperliquid_cash_adjustment = hyperliquid_portfolio.cash
         self.refresh_portfolio()
 
+        if hasattr(self, "hyperliquid_status_var"):
+            self.hyperliquid_status_var.set("Hyperliquid: synced")
+
         raw_report = format_hyperliquid_snapshot(snapshot, hyperliquid_portfolio)
         assessment = format_hyperliquid_position_assessment(snapshot, hyperliquid_portfolio)
         self._set_preview_text(f"{raw_report}\n\n{assessment}")
         messagebox.showinfo("Hyperliquid synced", hyperliquid_source_message)
     except Exception as exc:
+        if hasattr(self, "hyperliquid_status_var"):
+            self.hyperliquid_status_var.set("Hyperliquid: sync failed")
         messagebox.showerror("Hyperliquid sync failed", str(exc))
