@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 import os
 from typing import Any
 
@@ -12,6 +13,7 @@ SPOT_EXECUTION_ALIASES = {
     "ZEC": "UZEC/USDC",
     "UZEC": "UZEC/USDC",
 }
+HYPERLIQUID_MAX_PRICE_SIGNIFICANT_FIGURES = 5
 
 
 @dataclass(frozen=True)
@@ -143,9 +145,10 @@ class HyperliquidExecutionAdapter:
     """Fast guarded execution adapter with local SDK hooks."""
 
     def submit(self, ticket: HyperliquidOrderTicket) -> Any:
+        normalized_ticket = normalize_hyperliquid_ticket_limit_price(ticket)
         config = HyperliquidTradingConfig()
-        config.validate_for_live(ticket)
-        return self._local_signed_submit(ticket)
+        config.validate_for_live(normalized_ticket)
+        return self._local_signed_submit(normalized_ticket)
 
     def cancel(self, coin: str, order_id: int) -> Any:
         config = HyperliquidTradingConfig()
@@ -201,6 +204,58 @@ class HyperliquidExecutionAdapter:
         )
 
         return exchange.cancel(coin, order_id)
+
+
+def normalize_hyperliquid_ticket_limit_price(ticket: HyperliquidOrderTicket) -> HyperliquidOrderTicket:
+    normalized_price = normalize_hyperliquid_limit_price(ticket.limit_price, is_buy=ticket.is_buy)
+    if normalized_price == ticket.limit_price:
+        return ticket
+    return HyperliquidOrderTicket(
+        coin=ticket.coin,
+        is_buy=ticket.is_buy,
+        size=ticket.size,
+        limit_price=normalized_price,
+        tif=ticket.tif,
+        reduce_only=ticket.reduce_only,
+    )
+
+
+def normalize_hyperliquid_limit_price(price: float, *, is_buy: bool) -> float:
+    """Round a limit price onto Hyperliquid's accepted price grid.
+
+    Hyperliquid rejects prices that are not on the exchange tick grid. A practical
+    rule that avoids the common rejection is to round to the allowed 5-significant-
+    figure price increment, rounding buys down and sells up so the adjustment does
+    not make the user's limit more aggressive.
+    """
+
+    try:
+        decimal_price = Decimal(str(price))
+    except InvalidOperation as exc:
+        raise ValueError("Hyperliquid limit price must be a number.") from exc
+    if decimal_price <= 0:
+        raise ValueError("Hyperliquid limit price must be positive.")
+
+    tick = _hyperliquid_price_tick(decimal_price)
+    if tick <= 0:
+        return float(decimal_price)
+    quotient = decimal_price / tick
+    rounding = ROUND_FLOOR if is_buy else ROUND_CEILING
+    normalized = quotient.to_integral_value(rounding=rounding) * tick
+    return float(normalized)
+
+
+def format_hyperliquid_limit_price(price: float) -> str:
+    text = format(Decimal(str(price)).normalize(), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _hyperliquid_price_tick(price: Decimal) -> Decimal:
+    adjusted = price.adjusted()
+    exponent = adjusted - HYPERLIQUID_MAX_PRICE_SIGNIFICANT_FIGURES + 1
+    return Decimal("1").scaleb(exponent)
 
 
 def normalize_hyperliquid_spot_market(symbol: str) -> str:
