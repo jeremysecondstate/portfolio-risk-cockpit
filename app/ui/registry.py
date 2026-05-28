@@ -16,6 +16,7 @@ from app.ui.hyperliquid_perp_ticket_use_mid_fix import install_hyperliquid_perp_
 from app.ui.hyperliquid_submit_no_autosync_fix import install_hyperliquid_submit_no_autosync_fix
 from app.ui.hyperliquid_symbol_alias_extension import install_hyperliquid_symbol_alias_extension
 from app.ui.hyperliquid_trading_extension import install_hyperliquid_trading_extension
+from app.ui.options_candidate_actionability_extension import install_options_candidate_actionability_extension
 from app.ui.options_core_math_extension import install_options_core_math_extension
 from app.ui.options_lab_extension import install_options_lab_extension
 from app.ui.options_resizable_layout_extension import install_options_resizable_layout_extension
@@ -74,3 +75,4 @@ def install_ui_extensions(app_cls: Type[tk.Tk]) -> None:
     install_company_reports_extension(app_cls)
     install_unified_trade_thesis_extension(app_cls)
     install_unified_trade_thesis_next_checks_extension(app_cls)
+    install_options_candidate_actionability_extension(app_cls)
