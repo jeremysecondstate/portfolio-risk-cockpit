@@ -45,7 +45,11 @@ def _build_bullish_ticket(symbol: str, option_context: OptionChainContext, spot_
     calls = [candidate for candidate in option_context.candidates if candidate.side == "call" and candidate.ask_or_mark > 0]
     if not calls:
         return None
-    long_leg = sorted(calls, key=lambda candidate: (abs(candidate.strike - spot_price), candidate.spread, -(candidate.volume or 0)))[0]
+
+    # Match the Options planning layer: for upside-favored theses, prefer the nearest
+    # loaded call strike above spot/resistance, then choose the tighter/more liquid expiry.
+    long_target = _nearest_directional_strike(calls, spot_price, prefer_above=True)
+    long_leg = sorted(calls, key=lambda candidate: _long_leg_score(candidate, long_target, spot_price))[0]
     short_candidates = [
         candidate
         for candidate in calls
@@ -72,7 +76,10 @@ def _build_bullish_ticket(symbol: str, option_context: OptionChainContext, spot_
             breakeven=breakeven,
             max_loss=debit * 100,
             max_reward=None,
-            summary=f"Long call: buy {long_leg.expiration} {long_leg.strike:g} CALL; breakeven about ${breakeven:,.2f}.",
+            summary=(
+                f"Long call: buy {long_leg.expiration} {long_leg.strike:g} CALL; "
+                f"breakeven about ${breakeven:,.2f}. Matches the Options planning layer candidate."
+            ),
         )
 
     debit = max(long_leg.ask_or_mark - short_leg.bid_or_mark, 0.0)
@@ -98,7 +105,8 @@ def _build_bullish_ticket(symbol: str, option_context: OptionChainContext, spot_
         max_reward=max_reward,
         summary=(
             f"Bull call debit spread: buy {long_leg.strike:g} CALL / sell {short_leg.strike:g} CALL "
-            f"{long_leg.expiration}; breakeven about ${breakeven:,.2f}."
+            f"{long_leg.expiration}; breakeven about ${breakeven:,.2f}. "
+            "Matches the Options planning layer candidate."
         ),
     )
 
@@ -107,7 +115,11 @@ def _build_bearish_ticket(symbol: str, option_context: OptionChainContext, spot_
     puts = [candidate for candidate in option_context.candidates if candidate.side == "put" and candidate.ask_or_mark > 0]
     if not puts:
         return None
-    long_leg = sorted(puts, key=lambda candidate: (abs(candidate.strike - spot_price), candidate.spread, -(candidate.volume or 0)))[0]
+
+    # Match the Options planning layer: for downside-favored theses, prefer the nearest
+    # loaded put strike below spot/support, then choose the tighter/more liquid expiry.
+    long_target = _nearest_directional_strike(puts, spot_price, prefer_above=False)
+    long_leg = sorted(puts, key=lambda candidate: _long_leg_score(candidate, long_target, spot_price))[0]
     short_candidates = [
         candidate
         for candidate in puts
@@ -134,7 +146,10 @@ def _build_bearish_ticket(symbol: str, option_context: OptionChainContext, spot_
             breakeven=breakeven,
             max_loss=debit * 100,
             max_reward=None,
-            summary=f"Long put: buy {long_leg.expiration} {long_leg.strike:g} PUT; breakeven about ${breakeven:,.2f}.",
+            summary=(
+                f"Long put: buy {long_leg.expiration} {long_leg.strike:g} PUT; "
+                f"breakeven about ${breakeven:,.2f}. Matches the Options planning layer candidate."
+            ),
         )
 
     debit = max(long_leg.ask_or_mark - short_leg.bid_or_mark, 0.0)
@@ -160,8 +175,27 @@ def _build_bearish_ticket(symbol: str, option_context: OptionChainContext, spot_
         max_reward=max_reward,
         summary=(
             f"Bear put debit spread: buy {long_leg.strike:g} PUT / sell {short_leg.strike:g} PUT "
-            f"{long_leg.expiration}; breakeven about ${breakeven:,.2f}."
+            f"{long_leg.expiration}; breakeven about ${breakeven:,.2f}. "
+            "Matches the Options planning layer candidate."
         ),
+    )
+
+
+def _nearest_directional_strike(candidates: list[OptionChainCandidate], spot_price: float, *, prefer_above: bool) -> float:
+    strikes = sorted({candidate.strike for candidate in candidates if candidate.strike > 0})
+    if prefer_above:
+        directional = [strike for strike in strikes if strike > spot_price]
+        return directional[0] if directional else min(strikes, key=lambda strike: abs(strike - spot_price))
+    directional = [strike for strike in strikes if strike < spot_price]
+    return directional[-1] if directional else min(strikes, key=lambda strike: abs(strike - spot_price))
+
+
+def _long_leg_score(candidate: OptionChainCandidate, target: float, spot_price: float) -> tuple[float, float, int, float]:
+    return (
+        abs(candidate.strike - target),
+        candidate.spread,
+        -(candidate.volume or 0),
+        abs(candidate.strike - spot_price),
     )
 
 
