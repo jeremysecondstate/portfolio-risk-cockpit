@@ -8,6 +8,7 @@ from app.analytics.trade_thesis import OptionChainCandidate, OptionChainContext
 @dataclass(frozen=True)
 class ThesisOptionTicket:
     symbol: str
+    underlying_price: float
     strategy: str
     action: str
     option_type: str
@@ -61,6 +62,7 @@ def _build_bullish_ticket(symbol: str, option_context: OptionChainContext, spot_
         breakeven = long_leg.strike + debit
         return ThesisOptionTicket(
             symbol=symbol,
+            underlying_price=spot_price,
             strategy="Long Call",
             action="Buy",
             option_type="Call",
@@ -88,6 +90,7 @@ def _build_bullish_ticket(symbol: str, option_context: OptionChainContext, spot_
     max_reward = max(width - debit, 0.0) * 100
     return ThesisOptionTicket(
         symbol=symbol,
+        underlying_price=spot_price,
         strategy="Vertical Debit Spread",
         action="Buy",
         option_type="Call",
@@ -131,6 +134,7 @@ def _build_bearish_ticket(symbol: str, option_context: OptionChainContext, spot_
         breakeven = long_leg.strike - debit
         return ThesisOptionTicket(
             symbol=symbol,
+            underlying_price=spot_price,
             strategy="Long Put",
             action="Buy",
             option_type="Put",
@@ -158,6 +162,7 @@ def _build_bearish_ticket(symbol: str, option_context: OptionChainContext, spot_
     max_reward = max(width - debit, 0.0) * 100
     return ThesisOptionTicket(
         symbol=symbol,
+        underlying_price=spot_price,
         strategy="Vertical Debit Spread",
         action="Buy",
         option_type="Put",
