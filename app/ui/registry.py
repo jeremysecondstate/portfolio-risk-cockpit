@@ -32,6 +32,7 @@ from app.ui.thesis_option_ticket_extension import install_thesis_option_ticket_e
 from app.ui.trade_setup_extension import install_trade_setup_extension
 from app.ui.unified_refresh_extension import install_unified_refresh_extension
 from app.ui.unified_trade_thesis_extension import install_unified_trade_thesis_extension
+from app.ui.unified_trade_thesis_next_checks_extension import install_unified_trade_thesis_next_checks_extension
 from app.ui.venue_mid_extension import install_venue_mid_extension
 
 
@@ -72,3 +73,4 @@ def install_ui_extensions(app_cls: Type[tk.Tk]) -> None:
     install_hyperliquid_assessment_extension(app_cls)
     install_company_reports_extension(app_cls)
     install_unified_trade_thesis_extension(app_cls)
+    install_unified_trade_thesis_next_checks_extension(app_cls)
