@@ -3,7 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 import unittest
 
-from app.brokers.hyperliquid.client import HyperliquidSnapshot, portfolio_from_hyperliquid_snapshot
+from app.brokers.hyperliquid.client import (
+    HyperliquidSnapshot,
+    format_hyperliquid_snapshot,
+    portfolio_from_hyperliquid_snapshot,
+)
 
 
 def _snapshot(
@@ -46,6 +50,52 @@ class HyperliquidPortfolioTests(unittest.TestCase):
         self.assertEqual(position.cost_basis, 3682.40)
         self.assertEqual(position.unrealized_profit_loss, 0.0)
         self.assertEqual(position.unrealized_profit_loss_percent, 0.0)
+
+    def test_spot_zero_entry_notional_is_treated_as_unknown_cost(self) -> None:
+        snapshot = _snapshot(
+            spot_state={
+                "balances": [
+                    {
+                        "coin": "BTC",
+                        "total": "0.050062",
+                        "usdValue": "3679.04",
+                        "entryNtl": "0",
+                    }
+                ]
+            }
+        )
+
+        portfolio, _message = portfolio_from_hyperliquid_snapshot(snapshot)
+        position = portfolio.positions["BTC-SPOT"]
+        report = format_hyperliquid_snapshot(snapshot, portfolio)
+
+        self.assertAlmostEqual(position.average_cost, 73489.5, delta=0.25)
+        self.assertAlmostEqual(position.last_price, 73489.5, delta=0.25)
+        self.assertEqual(position.unrealized_profit_loss, 0.0)
+        self.assertEqual(position.unrealized_profit_loss_percent, 0.0)
+        self.assertIn("entry $3,679.04", report)
+        self.assertIn("P&L $0.00 (+0.00%)", report)
+
+    def test_spot_real_cost_basis_still_calculates_pnl(self) -> None:
+        snapshot = _snapshot(
+            spot_state={
+                "balances": [
+                    {
+                        "coin": "ZEC",
+                        "total": "3.08864",
+                        "costBasis": "1917.57",
+                        "usdValue": "1692.43",
+                    }
+                ]
+            }
+        )
+
+        portfolio, _message = portfolio_from_hyperliquid_snapshot(snapshot)
+        position = portfolio.positions["ZEC-SPOT"]
+
+        self.assertEqual(position.cost_basis, 1917.57)
+        self.assertEqual(position.market_value, 1692.43)
+        self.assertEqual(position.unrealized_profit_loss, -225.14)
 
     def test_perp_pnl_uses_hyperliquid_unrealized_pnl(self) -> None:
         snapshot = _snapshot(

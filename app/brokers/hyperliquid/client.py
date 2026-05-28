@@ -242,14 +242,18 @@ def format_hyperliquid_snapshot(snapshot: HyperliquidSnapshot, portfolio: Portfo
                 token_index=token_index,
                 reference_price=reference_price,
             )
-            pnl = (current_value - entry_ntl) if current_value is not None and entry_ntl is not None else None
-            pnl_percent = (pnl / entry_ntl * 100) if pnl is not None and entry_ntl and entry_ntl > 0 else None
             spot_price = (current_value / total) if current_value is not None and total and total > ZERO_EPSILON else _spot_mid_price(
                 coin,
                 snapshot,
                 token_index=token_index,
                 reference_price=reference_price,
             )
+            if current_value is None and spot_price is not None and total and total > ZERO_EPSILON:
+                current_value = total * spot_price
+            if coin not in CASH_LIKE_COINS and entry_ntl is None and current_value is not None:
+                entry_ntl = current_value
+            pnl = (current_value - entry_ntl) if current_value is not None and entry_ntl is not None else None
+            pnl_percent = (pnl / entry_ntl * 100) if pnl is not None and entry_ntl and entry_ntl > 0 else None
             lines.append(
                 f"- {coin}: total {_format_optional_number(total)}, "
                 f"held {_format_optional_number(hold)}, "
@@ -348,14 +352,17 @@ def _spot_position_from_hyperliquid(raw_balance: dict[str, Any], snapshot: Hyper
     if current_value is None and mid_price is not None:
         current_value = quantity * mid_price
 
-    average_cost = (entry_notional / quantity) if entry_notional is not None and quantity > ZERO_EPSILON else None
-
     if coin in CASH_LIKE_COINS:
         return None, CashPosition(coin, round(current_value or quantity, 2), "Hyperliquid")
 
+    average_cost = (entry_notional / quantity) if entry_notional is not None and quantity > ZERO_EPSILON else None
     last_price = (
         (current_value / quantity) if current_value is not None and quantity > ZERO_EPSILON else None
     ) or mid_price or average_cost or 0.0
+    if entry_notional is None and current_value is not None:
+        entry_notional = current_value
+        average_cost = entry_notional / quantity if quantity > ZERO_EPSILON else None
+
     open_profit_loss = (
         current_value - entry_notional
         if current_value is not None and entry_notional is not None
@@ -402,11 +409,11 @@ def _spot_current_value(
 
 def _spot_entry_notional(raw_balance: dict[str, Any], quantity: float | None) -> float | None:
     entry_notional = _first_number(raw_balance, SPOT_ENTRY_NOTIONAL_KEYS)
-    if entry_notional is not None:
+    if entry_notional is not None and entry_notional > ZERO_EPSILON:
         return entry_notional
 
     average_cost = _first_number(raw_balance, SPOT_AVERAGE_COST_KEYS)
-    if average_cost is not None and quantity is not None and quantity > ZERO_EPSILON:
+    if average_cost is not None and average_cost > ZERO_EPSILON and quantity is not None and quantity > ZERO_EPSILON:
         return average_cost * quantity
 
     return None
