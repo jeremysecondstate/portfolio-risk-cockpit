@@ -23,8 +23,10 @@ from app.ui.options_resizable_layout_extension import install_options_resizable_
 from app.ui.options_what_if_enhancement_extension import install_options_what_if_enhancement_extension
 from app.ui.polished_theme import install_polished_cockpit_theme
 from app.ui.schwab_live_status_extension import install_schwab_live_status_extension
+from app.ui.schwab_mechanical_submit_extension import install_schwab_mechanical_submit_extension
 from app.ui.schwab_option_chain_extension import install_schwab_option_chain_extension
 from app.ui.schwab_option_chain_visible_fix import install_schwab_option_chain_visible_fix
+from app.ui.schwab_option_order_payload_extension import install_schwab_option_order_payload_extension
 from app.ui.schwab_options_what_if_scenario_extension import install_schwab_options_what_if_scenario_extension
 from app.ui.schwab_output_popout_extension import install_schwab_output_popout_extension
 from app.ui.schwab_sync_report_extension import install_schwab_sync_report_extension
@@ -76,3 +78,5 @@ def install_ui_extensions(app_cls: Type[tk.Tk]) -> None:
     install_unified_trade_thesis_extension(app_cls)
     install_unified_trade_thesis_next_checks_extension(app_cls)
     install_options_candidate_actionability_extension(app_cls)
+    install_schwab_option_order_payload_extension(app_cls)
+    install_schwab_mechanical_submit_extension(app_cls)
