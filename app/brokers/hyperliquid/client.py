@@ -39,17 +39,6 @@ SPOT_ENTRY_NOTIONAL_KEYS = (
     "purchaseValue",
 )
 SPOT_AVERAGE_COST_KEYS = ("avgEntryPx", "averageEntryPrice", "avgCost", "averageCost")
-SPOT_PNL_KEYS = (
-    "unrealizedPnl",
-    "unrealizedPnlUsd",
-    "unrealizedProfitLoss",
-    "openPnl",
-    "pnl",
-    "PNL",
-    "profitAndLoss",
-    "spotPnl",
-    "uPnl",
-)
 
 
 @dataclass(frozen=True)
@@ -253,12 +242,7 @@ def format_hyperliquid_snapshot(snapshot: HyperliquidSnapshot, portfolio: Portfo
                 token_index=token_index,
                 reference_price=reference_price,
             )
-            direct_pnl = _spot_direct_pnl(raw_balance)
-            pnl = direct_pnl if direct_pnl is not None else (
-                (current_value - entry_ntl) if current_value is not None and entry_ntl is not None else None
-            )
-            if entry_ntl is None and current_value is not None and pnl is not None:
-                entry_ntl = current_value - pnl
+            pnl = (current_value - entry_ntl) if current_value is not None and entry_ntl is not None else None
             pnl_percent = (pnl / entry_ntl * 100) if pnl is not None and entry_ntl and entry_ntl > 0 else None
             spot_price = (current_value / total) if current_value is not None and total and total > ZERO_EPSILON else _spot_mid_price(
                 coin,
@@ -292,7 +276,7 @@ def format_hyperliquid_snapshot(snapshot: HyperliquidSnapshot, portfolio: Portfo
     lines.extend(
         [
             "",
-            "Spot P&L is read-only: it uses Hyperliquid's spot P&L field when present, otherwise current value minus entry notional.",
+            "Spot P&L is read-only: current value minus entry notional.",
             "Spot prices resolve through Hyperliquid spot metadata when allMids only exposes @-indexed spot markets.",
             "API/agent wallets are only needed for future signed actions.",
         ]
@@ -345,7 +329,6 @@ def _spot_position_from_hyperliquid(raw_balance: dict[str, Any], snapshot: Hyper
 
     token_index = _spot_token_index_from_balance(raw_balance)
     entry_notional = _spot_entry_notional(raw_balance, quantity)
-    direct_pnl = _spot_direct_pnl(raw_balance)
     reference_price = _reference_price(entry_notional, quantity)
     current_value = _spot_current_value(
         coin,
@@ -365,9 +348,6 @@ def _spot_position_from_hyperliquid(raw_balance: dict[str, Any], snapshot: Hyper
     if current_value is None and mid_price is not None:
         current_value = quantity * mid_price
 
-    if entry_notional is None and current_value is not None and direct_pnl is not None:
-        entry_notional = current_value - direct_pnl
-
     average_cost = (entry_notional / quantity) if entry_notional is not None and quantity > ZERO_EPSILON else None
 
     if coin in CASH_LIKE_COINS:
@@ -376,8 +356,10 @@ def _spot_position_from_hyperliquid(raw_balance: dict[str, Any], snapshot: Hyper
     last_price = (
         (current_value / quantity) if current_value is not None and quantity > ZERO_EPSILON else None
     ) or mid_price or average_cost or 0.0
-    open_profit_loss = direct_pnl if direct_pnl is not None else (
-        (current_value - entry_notional) if current_value is not None and entry_notional is not None else None
+    open_profit_loss = (
+        current_value - entry_notional
+        if current_value is not None and entry_notional is not None
+        else None
     )
 
     return (
@@ -428,10 +410,6 @@ def _spot_entry_notional(raw_balance: dict[str, Any], quantity: float | None) ->
         return average_cost * quantity
 
     return None
-
-
-def _spot_direct_pnl(raw_balance: dict[str, Any]) -> float | None:
-    return _first_number(raw_balance, SPOT_PNL_KEYS)
 
 
 def _spot_token_index_from_balance(raw_balance: dict[str, Any]) -> int | None:
