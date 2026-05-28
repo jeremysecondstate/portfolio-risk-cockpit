@@ -24,6 +24,8 @@ def _use_current_thesis_option_ticket(self: tk.Tk) -> None:
 
     self.symbol_var.set(ticket.symbol)
     self.options_symbol_var.set(ticket.symbol)
+    if hasattr(ticket, "underlying_price") and ticket.underlying_price > 0:
+        self.options_underlying_price_var.set(_format_number(ticket.underlying_price))
     self.options_strategy_var.set(ticket.strategy)
     self.options_action_var.set(ticket.action)
     self.options_expiration_var.set(ticket.expiration)
@@ -90,10 +92,12 @@ def _ensure_options_vars_exist(self: tk.Tk) -> None:
 
 
 def _fill_context_defaults(self: tk.Tk) -> None:
+    # Prefer the option-specific underlying first. The stock-ticket Entry/Limit may be
+    # a separate stock order value and should not overwrite the thesis option's spot.
     underlying = _first_float(
-        getattr(self, "limit_price_var", tk.StringVar(value="")).get(),
-        getattr(self, "estimated_price_var", tk.StringVar(value="")).get(),
         getattr(self, "options_underlying_price_var", tk.StringVar(value="")).get(),
+        getattr(self, "estimated_price_var", tk.StringVar(value="")).get(),
+        getattr(self, "limit_price_var", tk.StringVar(value="")).get(),
     )
     if underlying is not None and underlying > 0:
         self.options_underlying_price_var.set(_format_number(underlying))
