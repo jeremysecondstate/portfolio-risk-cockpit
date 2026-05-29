@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import os
 from typing import Any
@@ -52,6 +52,14 @@ class HyperliquidSnapshot:
     all_mids: dict[str, Any]
     spot_meta_and_asset_ctxs: Any
     fetched_at: datetime
+    user_fills: list[dict[str, Any]] = field(default_factory=list)
+    user_non_funding_ledger_updates: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class SpotCostBasis:
+    quantity: float = 0.0
+    cost_basis: float = 0.0
 
 
 class HyperliquidInfoClient:
@@ -86,6 +94,14 @@ class HyperliquidInfoClient:
         open_orders = self.post_info({"type": "openOrders", "user": normalized_user}) if include_open_orders else []
         all_mids = self._safe_post_info({"type": "allMids"}, default={})
         spot_meta_and_asset_ctxs = self._safe_post_info({"type": "spotMetaAndAssetCtxs"}, default=None)
+        user_fills = self._safe_post_info(
+            {"type": "userFills", "user": normalized_user, "aggregateByTime": False},
+            default=[],
+        )
+        user_non_funding_ledger_updates = self._safe_post_info(
+            {"type": "userNonFundingLedgerUpdates", "user": normalized_user, "startTime": 0},
+            default=[],
+        )
 
         if not isinstance(clearinghouse_state, dict):
             raise RuntimeError("Unexpected Hyperliquid clearinghouseState response shape.")
@@ -95,6 +111,10 @@ class HyperliquidInfoClient:
             open_orders = []
         if not isinstance(all_mids, dict):
             all_mids = {}
+        if not isinstance(user_fills, list):
+            user_fills = []
+        if not isinstance(user_non_funding_ledger_updates, list):
+            user_non_funding_ledger_updates = []
 
         return HyperliquidSnapshot(
             user=normalized_user,
@@ -104,6 +124,10 @@ class HyperliquidInfoClient:
             all_mids=all_mids,
             spot_meta_and_asset_ctxs=spot_meta_and_asset_ctxs,
             fetched_at=datetime.now(),
+            user_fills=[fill for fill in user_fills if isinstance(fill, dict)],
+            user_non_funding_ledger_updates=[
+                update for update in user_non_funding_ledger_updates if isinstance(update, dict)
+            ],
         )
 
     def _safe_post_info(self, payload: dict[str, Any], default: Any) -> Any:
@@ -132,6 +156,7 @@ def portfolio_from_hyperliquid_snapshot(snapshot: HyperliquidSnapshot) -> tuple[
     positions: dict[str, Position] = {}
     cash_positions: dict[str, CashPosition] = {}
     perp_notional = 0.0
+    reconstructed_spot_basis = _reconstruct_spot_cost_basis(snapshot)
 
     for raw_position in _asset_positions(snapshot.clearinghouse_state):
         position = _perp_position_from_hyperliquid(raw_position)
@@ -143,7 +168,11 @@ def portfolio_from_hyperliquid_snapshot(snapshot: HyperliquidSnapshot) -> tuple[
     spot_cash = 0.0
     spot_positions_value = 0.0
     for raw_balance in _spot_balances(snapshot.spot_state):
-        position, cash_position = _spot_position_from_hyperliquid(raw_balance, snapshot)
+        position, cash_position = _spot_position_from_hyperliquid(
+            raw_balance,
+            snapshot,
+            reconstructed_spot_basis=reconstructed_spot_basis,
+        )
         if cash_position is not None:
             cash_positions[f"{cash_position.symbol}:HYPERLIQUID"] = cash_position
             spot_cash += cash_position.amount
@@ -173,6 +202,7 @@ def format_hyperliquid_snapshot(snapshot: HyperliquidSnapshot, portfolio: Portfo
     margin_summary = state.get("marginSummary") or state.get("crossMarginSummary") or {}
     withdrawable = _to_float(state.get("withdrawable"))
     account_value = _perp_account_value(state)
+    reconstructed_spot_basis = _reconstruct_spot_cost_basis(snapshot)
 
     lines = [
         "HYPERLIQUID PORTFOLIO SYNC",
@@ -232,7 +262,7 @@ def format_hyperliquid_snapshot(snapshot: HyperliquidSnapshot, portfolio: Portfo
             total = _first_number(raw_balance, ("total", "balance", "amount"))
             hold = _first_number(raw_balance, ("hold", "held", "locked"))
             token_index = _spot_token_index_from_balance(raw_balance)
-            entry_ntl = _spot_entry_notional(raw_balance, total)
+            entry_ntl = _spot_api_entry_notional(raw_balance, total)
             reference_price = _reference_price(entry_ntl, total)
             current_value = _spot_current_value(
                 coin,
@@ -250,8 +280,14 @@ def format_hyperliquid_snapshot(snapshot: HyperliquidSnapshot, portfolio: Portfo
             )
             if current_value is None and spot_price is not None and total and total > ZERO_EPSILON:
                 current_value = total * spot_price
-            if coin not in CASH_LIKE_COINS and entry_ntl is None and current_value is not None:
-                entry_ntl = current_value
+            entry_ntl = _spot_entry_notional(
+                coin,
+                total,
+                raw_balance,
+                snapshot,
+                current_value,
+                reconstructed_spot_basis=reconstructed_spot_basis,
+            )
             pnl = (current_value - entry_ntl) if current_value is not None and entry_ntl is not None else None
             pnl_percent = (pnl / entry_ntl * 100) if pnl is not None and entry_ntl and entry_ntl > 0 else None
             lines.append(
@@ -325,14 +361,20 @@ def _perp_position_from_hyperliquid(raw_position: dict[str, Any]) -> Position | 
     )
 
 
-def _spot_position_from_hyperliquid(raw_balance: dict[str, Any], snapshot: HyperliquidSnapshot) -> tuple[Position | None, CashPosition | None]:
+def _spot_position_from_hyperliquid(
+    raw_balance: dict[str, Any],
+    snapshot: HyperliquidSnapshot,
+    *,
+    reconstructed_spot_basis: dict[str, SpotCostBasis] | None = None,
+) -> tuple[Position | None, CashPosition | None]:
     coin = str(raw_balance.get("coin") or raw_balance.get("token") or "").strip().upper()
     quantity = _first_number(raw_balance, ("total", "balance", "amount")) or 0.0
     if not coin or quantity <= ZERO_EPSILON:
         return None, None
 
     token_index = _spot_token_index_from_balance(raw_balance)
-    entry_notional = _spot_entry_notional(raw_balance, quantity)
+    api_entry_notional = _spot_api_entry_notional(raw_balance, quantity)
+    entry_notional = api_entry_notional
     reference_price = _reference_price(entry_notional, quantity)
     current_value = _spot_current_value(
         coin,
@@ -355,13 +397,18 @@ def _spot_position_from_hyperliquid(raw_balance: dict[str, Any], snapshot: Hyper
     if coin in CASH_LIKE_COINS:
         return None, CashPosition(coin, round(current_value or quantity, 2), "Hyperliquid")
 
+    entry_notional = _spot_entry_notional(
+        coin,
+        quantity,
+        raw_balance,
+        snapshot,
+        current_value,
+        reconstructed_spot_basis=reconstructed_spot_basis,
+    )
     average_cost = (entry_notional / quantity) if entry_notional is not None and quantity > ZERO_EPSILON else None
     last_price = (
         (current_value / quantity) if current_value is not None and quantity > ZERO_EPSILON else None
     ) or mid_price or average_cost or 0.0
-    if entry_notional is None and current_value is not None:
-        entry_notional = current_value
-        average_cost = entry_notional / quantity if quantity > ZERO_EPSILON else None
 
     open_profit_loss = (
         current_value - entry_notional
@@ -407,7 +454,35 @@ def _spot_current_value(
     return None
 
 
-def _spot_entry_notional(raw_balance: dict[str, Any], quantity: float | None) -> float | None:
+def _spot_entry_notional(
+    coin: str,
+    quantity: float | None,
+    raw_balance: dict[str, Any],
+    snapshot: HyperliquidSnapshot,
+    current_value: float | None,
+    *,
+    reconstructed_spot_basis: dict[str, SpotCostBasis] | None = None,
+) -> float | None:
+    history_basis = _spot_history_entry_notional(
+        coin,
+        quantity,
+        snapshot,
+        reconstructed_spot_basis=reconstructed_spot_basis,
+    )
+    if history_basis is not None:
+        return history_basis
+
+    api_entry_notional = _spot_api_entry_notional(raw_balance, quantity)
+    if api_entry_notional is not None:
+        return api_entry_notional
+
+    if coin not in CASH_LIKE_COINS and current_value is not None:
+        return current_value
+
+    return None
+
+
+def _spot_api_entry_notional(raw_balance: dict[str, Any], quantity: float | None) -> float | None:
     entry_notional = _first_number(raw_balance, SPOT_ENTRY_NOTIONAL_KEYS)
     if entry_notional is not None and entry_notional > ZERO_EPSILON:
         return entry_notional
@@ -417,6 +492,151 @@ def _spot_entry_notional(raw_balance: dict[str, Any], quantity: float | None) ->
         return average_cost * quantity
 
     return None
+
+
+def _spot_history_entry_notional(
+    coin: str,
+    quantity: float | None,
+    snapshot: HyperliquidSnapshot,
+    *,
+    reconstructed_spot_basis: dict[str, SpotCostBasis] | None = None,
+) -> float | None:
+    if quantity is None or quantity <= ZERO_EPSILON:
+        return None
+
+    basis_by_coin = reconstructed_spot_basis
+    if basis_by_coin is None:
+        basis_by_coin = _reconstruct_spot_cost_basis(snapshot)
+
+    basis = basis_by_coin.get(_canonical_spot_coin(coin))
+    if basis is None or basis.quantity <= ZERO_EPSILON or basis.cost_basis <= ZERO_EPSILON:
+        return None
+    if not _spot_quantities_match(basis.quantity, quantity):
+        return None
+    return basis.cost_basis
+
+
+def _reconstruct_spot_cost_basis(snapshot: HyperliquidSnapshot) -> dict[str, SpotCostBasis]:
+    basis_by_coin: dict[str, SpotCostBasis] = {}
+    for fill in sorted(snapshot.user_fills, key=_fill_sort_key):
+        parsed = _spot_fill(fill, snapshot)
+        if parsed is None:
+            continue
+
+        coin, is_buy, quantity, notional, fee, fee_token = parsed
+        basis = basis_by_coin.setdefault(coin, SpotCostBasis())
+        fee_token = _canonical_spot_coin(fee_token)
+        usdc_fee = fee if fee_token in CASH_LIKE_COINS else 0.0
+
+        if is_buy:
+            basis.quantity += quantity
+            basis.cost_basis += notional + usdc_fee
+            continue
+
+        if basis.quantity <= ZERO_EPSILON:
+            continue
+        sold_quantity = min(quantity, basis.quantity)
+        basis.cost_basis -= basis.cost_basis * (sold_quantity / basis.quantity)
+        basis.quantity -= sold_quantity
+        if basis.quantity <= ZERO_EPSILON:
+            basis.quantity = 0.0
+            basis.cost_basis = 0.0
+
+    return basis_by_coin
+
+
+def _spot_fill(fill: dict[str, Any], snapshot: HyperliquidSnapshot) -> tuple[str, bool, float, float, float, str] | None:
+    coin = _spot_fill_coin(fill, snapshot)
+    if coin is None or coin in CASH_LIKE_COINS:
+        return None
+
+    side = str(fill.get("side") or "").strip().upper()
+    is_buy = side in {"B", "BUY"}
+    is_sell = side in {"A", "S", "SELL", "ASK"}
+    if not is_buy and not is_sell:
+        return None
+
+    quantity = _first_number(fill, ("sz", "size", "quantity", "qty"))
+    price = _first_number(fill, ("px", "price"))
+    if quantity is None or price is None or quantity <= ZERO_EPSILON or price <= ZERO_EPSILON:
+        return None
+
+    notional = _first_number(fill, ("notional", "ntl", "usdc", "usdValue"))
+    if notional is None or notional <= ZERO_EPSILON:
+        notional = quantity * price
+
+    fee = _first_number(fill, ("fee", "feeUsd", "feeUSDC")) or 0.0
+    fee_token = str(fill.get("feeToken") or fill.get("feeCoin") or "USDC")
+    return coin, is_buy, quantity, notional, fee, fee_token
+
+
+def _spot_fill_coin(fill: dict[str, Any], snapshot: HyperliquidSnapshot) -> str | None:
+    raw_coin = str(fill.get("coin") or fill.get("symbol") or fill.get("market") or "").strip().upper()
+    if not raw_coin:
+        return None
+    if raw_coin.startswith("@"):
+        return _spot_market_base_coin(raw_coin, snapshot)
+
+    separator = "/" if "/" in raw_coin else "-" if "-" in raw_coin else ""
+    if not separator:
+        return None
+
+    base, quote = raw_coin.split(separator, 1)
+    if quote != "USDC":
+        return None
+    return _canonical_spot_coin(base)
+
+
+def _spot_market_base_coin(market_key: str, snapshot: HyperliquidSnapshot) -> str | None:
+    market_index = _to_int(market_key.lstrip("@"))
+    payload = snapshot.spot_meta_and_asset_ctxs
+    if market_index is None or not isinstance(payload, list) or not payload:
+        return None
+
+    meta = payload[0]
+    universe = meta.get("universe") if isinstance(meta, dict) else None
+    tokens = meta.get("tokens") if isinstance(meta, dict) else None
+    if not isinstance(universe, list):
+        return None
+
+    token_names_by_index = _spot_token_names_by_index(tokens)
+    for fallback_index, asset in enumerate(universe):
+        if not isinstance(asset, dict):
+            continue
+        asset_index = _to_int(asset.get("index"))
+        if asset_index not in {market_index, None} and fallback_index != market_index:
+            continue
+        if asset_index is None and fallback_index != market_index:
+            continue
+        base_index = _spot_market_base_token_index(asset)
+        base_names = token_names_by_index.get(base_index, set()) if base_index is not None else set()
+        if base_names:
+            return _canonical_spot_coin(sorted(base_names)[0])
+        market_names = _spot_market_names(asset, token_names_by_index)
+        for name in sorted(market_names):
+            if "/" in name or "-" in name:
+                return _canonical_spot_coin(name.replace("-", "/").split("/", 1)[0])
+    return None
+
+
+def _canonical_spot_coin(coin: str) -> str:
+    normalized = coin.strip().upper()
+    for canonical, aliases in SPOT_COIN_ALIASES.items():
+        if normalized in aliases:
+            return canonical if not canonical.startswith("U") else aliases[-1]
+    return normalized
+
+
+def _spot_quantities_match(reconstructed_quantity: float, current_quantity: float) -> bool:
+    tolerance = max(0.000001, abs(current_quantity) * 0.0001)
+    return abs(reconstructed_quantity - current_quantity) <= tolerance
+
+
+def _fill_sort_key(fill: dict[str, Any]) -> tuple[float, float]:
+    return (
+        _to_float(fill.get("time") or fill.get("timestamp")) or 0.0,
+        _to_float(fill.get("tid") or fill.get("oid")) or 0.0,
+    )
 
 
 def _spot_token_index_from_balance(raw_balance: dict[str, Any]) -> int | None:

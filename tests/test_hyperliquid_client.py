@@ -15,6 +15,7 @@ def _snapshot(
     clearinghouse_state: dict | None = None,
     spot_state: dict | None = None,
     all_mids: dict | None = None,
+    user_fills: list[dict] | None = None,
 ) -> HyperliquidSnapshot:
     return HyperliquidSnapshot(
         user="0x0000000000000000000000000000000000000000",
@@ -24,6 +25,7 @@ def _snapshot(
         all_mids=all_mids or {},
         spot_meta_and_asset_ctxs=None,
         fetched_at=datetime(2026, 5, 28, 15, 30, 0),
+        user_fills=user_fills or [],
     )
 
 
@@ -96,6 +98,85 @@ class HyperliquidPortfolioTests(unittest.TestCase):
         self.assertEqual(position.cost_basis, 1917.57)
         self.assertEqual(position.market_value, 1692.43)
         self.assertEqual(position.unrealized_profit_loss, -225.14)
+
+    def test_spot_buy_history_creates_cost_basis_and_pnl(self) -> None:
+        snapshot = _snapshot(
+            spot_state={
+                "balances": [
+                    {
+                        "coin": "BTC",
+                        "total": "0.1",
+                        "usdValue": "110.00",
+                        "entryNtl": "0",
+                    }
+                ]
+            },
+            user_fills=[
+                {
+                    "time": 1,
+                    "coin": "BTC/USDC",
+                    "side": "B",
+                    "sz": "0.1",
+                    "px": "1000",
+                    "fee": "1",
+                    "feeToken": "USDC",
+                }
+            ],
+        )
+
+        portfolio, _message = portfolio_from_hyperliquid_snapshot(snapshot)
+        position = portfolio.positions["BTC-SPOT"]
+
+        self.assertEqual(position.cost_basis, 101.00)
+        self.assertEqual(position.market_value, 110.00)
+        self.assertEqual(position.unrealized_profit_loss, 9.00)
+        self.assertEqual(position.unrealized_profit_loss_percent, 8.91)
+
+    def test_spot_buy_then_partial_sell_updates_remaining_basis(self) -> None:
+        snapshot = _snapshot(
+            spot_state={
+                "balances": [
+                    {
+                        "coin": "BTC",
+                        "total": "0.1",
+                        "usdValue": "120.00",
+                    }
+                ]
+            },
+            user_fills=[
+                {"time": 1, "coin": "BTC/USDC", "side": "B", "sz": "0.2", "px": "1000"},
+                {"time": 2, "coin": "BTC/USDC", "side": "A", "sz": "0.1", "px": "1100"},
+            ],
+        )
+
+        portfolio, _message = portfolio_from_hyperliquid_snapshot(snapshot)
+        position = portfolio.positions["BTC-SPOT"]
+
+        self.assertEqual(position.cost_basis, 100.00)
+        self.assertEqual(position.market_value, 120.00)
+        self.assertEqual(position.unrealized_profit_loss, 20.00)
+        self.assertEqual(position.unrealized_profit_loss_percent, 20.00)
+
+    def test_spot_direct_deposit_without_trade_history_stays_neutral(self) -> None:
+        snapshot = _snapshot(
+            spot_state={
+                "balances": [
+                    {
+                        "coin": "BTC",
+                        "total": "0.05",
+                        "usdValue": "500.00",
+                    }
+                ]
+            }
+        )
+
+        portfolio, _message = portfolio_from_hyperliquid_snapshot(snapshot)
+        position = portfolio.positions["BTC-SPOT"]
+
+        self.assertEqual(position.cost_basis, 500.00)
+        self.assertEqual(position.market_value, 500.00)
+        self.assertEqual(position.unrealized_profit_loss, 0.0)
+        self.assertEqual(position.unrealized_profit_loss_percent, 0.0)
 
     def test_perp_pnl_uses_hyperliquid_unrealized_pnl(self) -> None:
         snapshot = _snapshot(
