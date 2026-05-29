@@ -16,7 +16,7 @@ from app.brokers.paper import PaperBroker
 from app.brokers.schwab.account_adapter import portfolio_from_schwab_account
 from app.brokers.schwab.session import SchwabSession
 from app.brokers.schwab.token_store import clear_token_payload
-from app.core.order_models import OrderSide, OrderType, TimeInForce
+from app.core.order_models import SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, OrderSide, OrderType, TimeInForce
 from app.core.portfolio import Portfolio, Position
 from app.ui.dashboard import PortfolioRiskCockpitApp
 
@@ -72,7 +72,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         ticket.columnconfigure(3, weight=1)
 
         self._grid_row(ticket, 0, "Symbol", ttk.Entry(ticket, textvariable=self.symbol_var), "Side", ttk.Combobox(ticket, textvariable=self.side_var, values=[s.value for s in OrderSide], state="readonly"))
-        self._grid_row(ticket, 1, "Order type", ttk.Combobox(ticket, textvariable=self.order_type_var, values=[o.value for o in OrderType], state="readonly"), "Time", ttk.Combobox(ticket, textvariable=self.time_in_force_var, values=[t.value for t in TimeInForce], state="readonly"))
+        self._grid_row(ticket, 1, "Order type", ttk.Combobox(ticket, textvariable=self.order_type_var, values=[o.value for o in OrderType], state="readonly"), "Time", ttk.Combobox(ticket, textvariable=self.time_in_force_var, values=SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, state="readonly"))
         self._grid_row(ticket, 2, "Quantity", ttk.Entry(ticket, textvariable=self.quantity_var), "Entry / Limit", ttk.Entry(ticket, textvariable=self.limit_price_var))
         self._grid_row(ticket, 3, "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var))
         ttk.Label(ticket, text="Cancel order ID").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=6)

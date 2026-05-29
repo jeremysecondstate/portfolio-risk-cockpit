@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import messagebox
 from typing import Any, Callable, Type
 
+from app.core.order_models import TimeInForce, normalize_time_in_force
 from app.ui import account_sources_fix, options_lab
 
 _installed = False
@@ -69,8 +70,8 @@ def _sync_integrated_options_values(self: tk.Tk) -> None:
     order_type = _get_var(self, "order_type_var").strip().upper()
     _set_var(self, "options_order_type_var", order_type if order_type in options_lab.ORDER_TYPES else "LIMIT")
 
-    tif = _get_var(self, "time_in_force_var").strip().lower()
-    _set_var(self, "options_tif_var", "GTC" if tif == "gtc" else "Day")
+    tif = normalize_time_in_force(_get_var(self, "time_in_force_var"))
+    _set_var(self, "options_tif_var", "GTC" if tif in {TimeInForce.GTC, TimeInForce.GTC_EXT} else "Day")
 
     quantity = _get_var(self, "quantity_var").strip()
     if quantity:

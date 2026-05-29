@@ -284,7 +284,7 @@ def _use_selected_schwab_option(self: tk.Tk, option_type: str) -> None:
         self.options_symbol_var.set(symbol)
     self.side_var.set("buy")
     self.order_type_var.set("limit")
-    self.time_in_force_var.set("day")
+    self.time_in_force_var.set("Day")
     self.options_action_var.set("Buy")
     self.options_strategy_var.set("Long Put" if option_type == "put" else "Long Call")
     self.options_type_var.set("Put" if option_type == "put" else "Call")

@@ -16,7 +16,15 @@ from tkinter import ttk, messagebox
 
 from app.brokers.paper import PaperBroker
 from app.core.order_checklist import build_manual_order_checklist
-from app.core.order_models import OrderRequest, OrderSide, OrderType, TimeInForce
+from app.core.order_models import (
+    SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES,
+    OrderRequest,
+    OrderSide,
+    OrderType,
+    TimeInForce,
+    normalize_time_in_force,
+    schwab_equity_session_duration,
+)
 from app.core.position_sizing import calculate_position_size
 
 load_dotenv()
@@ -148,7 +156,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
         ticket.columnconfigure(3, weight=1)
 
         self._grid_row(ticket, 0, "Symbol", ttk.Entry(ticket, textvariable=self.symbol_var), "Side", ttk.Combobox(ticket, textvariable=self.side_var, values=[s.value for s in OrderSide], state="readonly"))
-        self._grid_row(ticket, 1, "Order type", ttk.Combobox(ticket, textvariable=self.order_type_var, values=[o.value for o in OrderType], state="readonly"), "Time", ttk.Combobox(ticket, textvariable=self.time_in_force_var, values=[t.value for t in TimeInForce], state="readonly"))
+        self._grid_row(ticket, 1, "Order type", ttk.Combobox(ticket, textvariable=self.order_type_var, values=[o.value for o in OrderType], state="readonly"), "Time", ttk.Combobox(ticket, textvariable=self.time_in_force_var, values=SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, state="readonly"))
         self._grid_row(ticket, 2, "Quantity", ttk.Entry(ticket, textvariable=self.quantity_var), "Est. price", ttk.Entry(ticket, textvariable=self.estimated_price_var))
         self._grid_row(ticket, 3, "Limit price", ttk.Entry(ticket, textvariable=self.limit_price_var), "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var))
         self._grid_row(ticket, 4, "Risk % cash", ttk.Entry(ticket, textvariable=self.risk_percent_var))
@@ -188,11 +196,12 @@ class PortfolioRiskCockpitApp(tk.Tk):
 
     def build_schwab_order_json_from_ui(self) -> dict:
         order = self._parse_order()
+        session, duration = schwab_equity_session_duration(order.time_in_force)
 
         schwab_order = {
             "orderType": order.order_type.value.upper(),
-            "session": "NORMAL",
-            "duration": order.time_in_force.value.upper(),
+            "session": session,
+            "duration": duration,
             "orderStrategyType": "SINGLE",
             "orderLegCollection": [
                 {
@@ -779,7 +788,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
             estimated_price=float(self.estimated_price_var.get()),
             limit_price=optional_float(self.limit_price_var.get()),
             stop_price=optional_float(self.stop_price_var.get()),
-            time_in_force=TimeInForce(self.time_in_force_var.get()),
+            time_in_force=normalize_time_in_force(self.time_in_force_var.get()),
             confirmation_text=self.confirmation_var.get(),
         )
 

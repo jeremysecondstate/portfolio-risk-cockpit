@@ -13,7 +13,7 @@ from app.analytics.technical_analysis import (
 from app.analytics.trade_setup import calculate_support_resistance
 from app.brokers.hyperliquid.client import HyperliquidInfoClient
 from app.brokers.hyperliquid.trading import normalize_hyperliquid_coin
-from app.core.order_models import OrderSide, OrderType, TimeInForce
+from app.core.order_models import SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, OrderSide, OrderType, TimeInForce
 from app.ui.options_lab import build_options_lab_tab, run_options_what_if
 from app.ui.polished_theme import _make_paned
 
@@ -814,7 +814,7 @@ def _build_schwab_trading_tab(
         "Order type",
         ttk.Combobox(ticket, textvariable=self.order_type_var, values=[o.value for o in OrderType], state="readonly"),
         "Time",
-        ttk.Combobox(ticket, textvariable=self.time_in_force_var, values=[t.value for t in TimeInForce], state="readonly"),
+        ttk.Combobox(ticket, textvariable=self.time_in_force_var, values=SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, state="readonly"),
     )
     self._grid_row(ticket, 2, "Quantity", ttk.Entry(ticket, textvariable=self.quantity_var), "Entry / Limit", ttk.Entry(ticket, textvariable=self.limit_price_var))
     self._grid_row(ticket, 3, "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var), "DELETE ME", ttk.Entry(ticket, textvariable=self.confirmation_var))

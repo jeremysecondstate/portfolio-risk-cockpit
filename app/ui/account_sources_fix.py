@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Callable, Type
 
+from app.core.order_models import SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, TimeInForce, normalize_time_in_force
 from app.ui.options_lab import (
     OPTION_TYPES,
     ORDER_TYPES,
@@ -132,7 +133,7 @@ def _rebuild_schwab_ticket_side_by_side(self: tk.Tk, ticket: ttk.LabelFrame) -> 
         "Order type",
         ttk.Combobox(stock, textvariable=self.order_type_var, values=["market", "limit", "stop", "stop_limit"], state="readonly"),
         "Time",
-        ttk.Combobox(stock, textvariable=self.time_in_force_var, values=["day", "gtc"], state="readonly"),
+        ttk.Combobox(stock, textvariable=self.time_in_force_var, values=SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, state="readonly"),
     )
     self._grid_row(stock, 2, "Quantity", ttk.Entry(stock, textvariable=self.quantity_var), "Entry / Limit", ttk.Entry(stock, textvariable=self.limit_price_var))
     self._grid_row(
@@ -266,8 +267,8 @@ def _sync_integrated_options_values(self: tk.Tk) -> None:
     order_type = self.order_type_var.get().strip().upper()
     self.options_order_type_var.set(order_type if order_type in ORDER_TYPES else "LIMIT")
 
-    tif = self.time_in_force_var.get().strip().lower()
-    self.options_tif_var.set("GTC" if tif == "gtc" else "Day")
+    tif = normalize_time_in_force(self.time_in_force_var.get())
+    self.options_tif_var.set("GTC" if tif in {TimeInForce.GTC, TimeInForce.GTC_EXT} else "Day")
 
     quantity = self.quantity_var.get().strip()
     if quantity:
