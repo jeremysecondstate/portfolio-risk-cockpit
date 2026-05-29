@@ -19,6 +19,8 @@ from app.analytics.stock_research import (
 )
 from app.analytics.research_scoring import (
     build_decision_readout,
+    direction_strength_label,
+    risk_heat_label,
     scenario_impact_bar_value,
     score_earnings_risk,
     score_macro_text,
@@ -140,6 +142,8 @@ class StockResearchAnalyticsTests(unittest.TestCase):
         self.assertEqual(readout.overall.label, "Bullish")
         self.assertEqual(readout.position_impact.label, "Small")
         self.assertIn(readout.action_bias.label, {"Add Carefully", "Watch"})
+        self.assertEqual(len(readout.top_things), 3)
+        self.assertIn("Bias", readout.operator_view)
 
     def test_macro_and_earnings_risk_mappings(self) -> None:
         self.assertLess(score_macro_text("Inflation hotter and policy hawkish."), 0)
@@ -164,6 +168,12 @@ class StockResearchAnalyticsTests(unittest.TestCase):
 
         self.assertAlmostEqual(scenario_impact_bar_value(down, 0.01), -100.0)
         self.assertAlmostEqual(scenario_impact_bar_value(up, 0.01), 100.0)
+
+    def test_friendly_meter_labels_are_readable(self) -> None:
+        self.assertEqual(direction_strength_label(87), "Very Strong")
+        self.assertEqual(direction_strength_label(-12), "Leaning Bearish")
+        self.assertEqual(risk_heat_label(78), "Hot")
+        self.assertEqual(risk_heat_label(46), "Medium")
 
     def test_missing_data_produces_unknown_or_info_badges(self) -> None:
         indicators = calculate_advanced_indicators("SPY", [])

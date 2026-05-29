@@ -43,6 +43,8 @@ class ResearchDecisionReadout:
     macro_good: list[str]
     macro_bad: list[str]
     macro_watch: list[str]
+    top_things: list[str]
+    operator_view: dict[str, str]
 
 
 def build_decision_readout(
@@ -83,6 +85,8 @@ def build_decision_readout(
     matters = what_matters(indicators, context, earnings_risk, macro_backdrop)
     changes_view = what_changes_view(indicators, context, macro_backdrop)
     macro_good, macro_bad, macro_watch = macro_bullets(macro_text, macro_backdrop)
+    top_things = top_three_things(overall, risk_level, macro_backdrop, indicators)
+    operator_view = build_operator_view(action_bias, position_impact, indicators, context, macro_backdrop)
 
     return ResearchDecisionReadout(
         technical_score=technical_score,
@@ -112,6 +116,8 @@ def build_decision_readout(
         macro_good=macro_good,
         macro_bad=macro_bad,
         macro_watch=macro_watch,
+        top_things=top_things,
+        operator_view=operator_view,
     )
 
 
@@ -233,6 +239,34 @@ def scenario_impact_bar_value(row: ScenarioRow, max_abs_impact: float | None = N
     return _clamp((row.portfolio_pnl_impact / denominator) * 100, -100, 100)
 
 
+def direction_strength_label(score: float) -> str:
+    if score >= 70:
+        return "Very Strong"
+    if score >= 35:
+        return "Strong"
+    if score >= 12:
+        return "Leaning Bullish"
+    if score <= -70:
+        return "Very Weak"
+    if score <= -35:
+        return "Weak"
+    if score <= -12:
+        return "Leaning Bearish"
+    return "Mixed"
+
+
+def risk_heat_label(score: float) -> str:
+    if score >= 85:
+        return "Very Hot"
+    if score >= 70:
+        return "Hot"
+    if score >= 55:
+        return "Medium-Hot"
+    if score >= 35:
+        return "Medium"
+    return "Cool"
+
+
 def simple_summary(
     overall: BadgeReadout,
     risk_level: BadgeReadout,
@@ -314,6 +348,66 @@ def macro_bullets(text: str, macro_backdrop: BadgeReadout) -> tuple[list[str], l
     if not watch:
         watch.append("Watch the next official inflation, labor, and Treasury releases.")
     return good, bad, watch
+
+
+def top_three_things(
+    overall: BadgeReadout,
+    risk_level: BadgeReadout,
+    macro_backdrop: BadgeReadout,
+    indicators: AdvancedIndicatorSnapshot,
+) -> list[str]:
+    positive = "Chart constructive" if overall.label == "Bullish" else "Setup is still mixed"
+    if indicators.trend == "bullish":
+        positive = "Trend is above key averages"
+    elif indicators.momentum == "improving":
+        positive = "Momentum is improving"
+
+    risk = f"Risk is {risk_level.label.lower()}"
+    if macro_backdrop.label == "Headwind":
+        risk = "Macro is a headwind"
+    elif indicators.volatility == "elevated":
+        risk = "Volatility is hot"
+
+    if indicators.resistance:
+        trigger = f"Break above ${indicators.resistance:,.2f} improves setup"
+    elif indicators.support:
+        trigger = f"Lose ${indicators.support:,.2f} and risk worsens"
+    else:
+        trigger = "Need cleaner price history for key levels"
+    return [positive, risk, trigger]
+
+
+def build_operator_view(
+    action_bias: BadgeReadout,
+    position_impact: BadgeReadout,
+    indicators: AdvancedIndicatorSnapshot,
+    context: PortfolioSymbolContext,
+    macro_backdrop: BadgeReadout,
+) -> dict[str, str]:
+    entry = (
+        f"Confirmation above ${indicators.resistance:,.2f}"
+        if indicators.resistance
+        else "Wait for a cleaner confirmation level"
+    )
+    risk_line = (
+        f"Risk worsens below ${indicators.support:,.2f}"
+        if indicators.support
+        else "No clean risk line from current candles"
+    )
+    danger = "Macro/rates are the main drag." if macro_backdrop.label == "Headwind" else "Mixed technicals are the main uncertainty."
+    if indicators.volatility == "elevated":
+        danger = "Volatility is hot, so bad entries can move fast."
+    if not context.is_held:
+        danger = "Not held yet; this is a watchlist setup."
+    upside = entry if indicators.resistance else "Fresh highs or improving momentum would help."
+    return {
+        "Bias": action_bias.label,
+        "Entry / confirmation": entry,
+        "Risk line": risk_line,
+        "Position impact": position_impact.label,
+        "Main danger": danger,
+        "Main upside trigger": upside,
+    }
 
 
 def _direction_badge(title: str, score: float, *, bullish: str, neutral: str, bearish: str) -> BadgeReadout:

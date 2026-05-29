@@ -27,14 +27,26 @@ def clear_children(parent: tk.Widget) -> None:
 
 
 class MetricCard(tk.Frame):
-    def __init__(self, parent: tk.Widget, readout: BadgeReadout, *, width: int = 150, height: int = 92) -> None:
+    def __init__(
+        self,
+        parent: tk.Widget,
+        readout: BadgeReadout,
+        *,
+        width: int = 150,
+        height: int = 92,
+        prominent: bool = False,
+    ) -> None:
         colors = STATUS_COLORS.get(readout.status, STATUS_COLORS["neutral"])
-        super().__init__(parent, bg=colors["bg"], highlightbackground=BORDER, highlightthickness=1, width=width, height=height)
+        super().__init__(parent, bg=colors["bg"], highlightbackground=colors["bar"], highlightthickness=2 if prominent else 1, width=width, height=height)
         self.grid_propagate(False)
-        self.columnconfigure(0, weight=1)
-        tk.Label(self, text=readout.title.upper(), bg=colors["bg"], fg=MUTED, font=("Segoe UI", 8, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 0))
-        tk.Label(self, text=readout.label, bg=colors["bg"], fg=colors["fg"], font=("Segoe UI", 13, "bold"), anchor="w").grid(row=1, column=0, sticky="ew", padx=10, pady=(2, 0))
-        tk.Label(self, text=readout.why, bg=colors["bg"], fg=TEXT, font=("Segoe UI", 8), wraplength=width - 20, justify=tk.LEFT, anchor="nw").grid(row=2, column=0, sticky="nsew", padx=10, pady=(3, 8))
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(2, weight=1)
+        tk.Frame(self, bg=colors["bar"], width=5).grid(row=0, column=0, rowspan=3, sticky="nsw")
+        title_font = ("Segoe UI", 8, "bold")
+        label_font = ("Segoe UI", 16 if prominent else 13, "bold")
+        tk.Label(self, text=readout.title.upper(), bg=colors["bg"], fg=MUTED, font=title_font, anchor="w").grid(row=0, column=1, sticky="ew", padx=12, pady=(9, 0))
+        tk.Label(self, text=readout.label, bg=colors["bg"], fg=colors["fg"], font=label_font, anchor="w").grid(row=1, column=1, sticky="ew", padx=12, pady=(2, 0))
+        tk.Label(self, text=readout.why, bg=colors["bg"], fg=TEXT, font=("Segoe UI", 8), wraplength=width - 28, justify=tk.LEFT, anchor="nw").grid(row=2, column=1, sticky="nsew", padx=12, pady=(4, 10))
 
 
 class ScoreBadge(tk.Frame):
@@ -130,13 +142,27 @@ class ScenarioImpactBars(tk.Canvas):
             self.create_text(width - 8, y, text=display, anchor="ne", fill=color, font=("Segoe UI", 8, "bold"))
 
 
-def metric_grid(parent: tk.Widget, readouts: list[BadgeReadout], *, columns: int = 4) -> None:
+def metric_grid(parent: tk.Widget, readouts: list[BadgeReadout], *, columns: int = 4, prominent_indexes: set[int] | None = None) -> None:
     clear_children(parent)
+    prominent_indexes = prominent_indexes or set()
     for column in range(columns):
         parent.columnconfigure(column, weight=1, uniform="metric_cards")
     for index, readout in enumerate(readouts):
-        card = MetricCard(parent, readout)
+        card = MetricCard(parent, readout, prominent=index in prominent_indexes, height=102 if index in prominent_indexes else 92)
         card.grid(row=index // columns, column=index % columns, sticky="nsew", padx=(0 if index % columns == 0 else 8, 0), pady=(0, 8))
+
+
+def labeled_value_grid(parent: tk.Widget, rows: dict[str, str], *, columns: int = 3) -> None:
+    clear_children(parent)
+    for column in range(columns):
+        parent.columnconfigure(column, weight=1, uniform="label_value")
+    for index, (label, value) in enumerate(rows.items()):
+        colors = STATUS_COLORS["neutral"]
+        cell = tk.Frame(parent, bg="#ffffff", highlightbackground=BORDER, highlightthickness=1)
+        cell.grid(row=index // columns, column=index % columns, sticky="nsew", padx=(0 if index % columns == 0 else 8, 0), pady=(0, 8))
+        cell.columnconfigure(0, weight=1)
+        tk.Label(cell, text=label.upper(), bg="#ffffff", fg=MUTED, font=("Segoe UI", 8, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=10, pady=(7, 0))
+        tk.Label(cell, text=value, bg="#ffffff", fg=colors["fg"], font=("Segoe UI", 10, "bold"), anchor="w", wraplength=260, justify=tk.LEFT).grid(row=1, column=0, sticky="ew", padx=10, pady=(3, 8))
 
 
 def freshness_badges(parent: tk.Widget, statuses: list) -> None:

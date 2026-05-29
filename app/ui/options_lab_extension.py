@@ -1043,7 +1043,7 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     _add_workspace_button(actions, row=0, column=1, text="Perp What-If", command=hyperliquid_action("perp", "run_hyperliquid_perp_what_if"), style="Accent.TButton")
     _add_workspace_button(actions, row=0, column=2, text="Preview Perp Ticket", command=hyperliquid_action("perp", "preview_hyperliquid_ticket", "preview_order"))
     _add_workspace_button(actions, row=1, column=0, text="Sync Account", command=hyperliquid_action("perp", "sync_hyperliquid_account"))
-    _add_workspace_button(actions, row=1, column=1, text="Tech Analysis", command=hyperliquid_action("perp", "show_technical_analysis"))
+    _add_workspace_button(actions, row=1, column=1, text="Tech Analysis", command=hyperliquid_action("perp", "show_hyperliquid_crypto_research_workspace", "show_technical_analysis"))
     _add_workspace_button(actions, row=1, column=2, text="Position Size", command=hyperliquid_action("perp", "show_position_size"))
     _add_workspace_button(actions, row=2, column=0, text="Recent Orders", command=hyperliquid_action("perp", "load_selected_recent_orders", "load_hyperliquid_open_orders"))
     _add_workspace_button(actions, row=2, column=1, text="Open Only", command=hyperliquid_action("perp", "load_selected_open_orders_only", "load_hyperliquid_open_orders"))

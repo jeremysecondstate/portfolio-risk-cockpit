@@ -9,7 +9,14 @@ from typing import Any, Type
 
 from app.analytics.earnings_release import analyze_earnings_release, format_earnings_release_digest
 from app.analytics.fundamental_analysis import analyze_company_facts, format_fundamental_analysis
-from app.analytics.research_scoring import BadgeReadout, ResearchDecisionReadout, build_decision_readout, scenario_impact_bar_value
+from app.analytics.research_scoring import (
+    BadgeReadout,
+    ResearchDecisionReadout,
+    build_decision_readout,
+    direction_strength_label,
+    risk_heat_label,
+    scenario_impact_bar_value,
+)
 from app.analytics.stock_research import (
     AdvancedIndicatorSnapshot,
     DataSourceStatus,
@@ -25,7 +32,7 @@ from app.analytics.stock_research import (
 from app.analytics.technical_analysis import candles_from_price_history
 from app.data.sec_edgar import SecEdgarClient, normalize_ticker
 from app.macro.releases import build_macro_report
-from app.ui.research_widgets import Checklist, ScenarioImpactBars, ScoreMeter, clear_children, freshness_badges, metric_grid
+from app.ui.research_widgets import Checklist, ScenarioImpactBars, ScoreMeter, clear_children, freshness_badges, labeled_value_grid, metric_grid
 from app.ui.schwab_output_popout_extension import _apply_report_tags
 
 REPORT_FORMS = ("10-K", "10-Q", "8-K")
@@ -176,8 +183,10 @@ def _build_research_right_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     glance.columnconfigure(0, weight=1)
     self.schwab_research_glance_cards = ttk.Frame(glance, style="Panel.TFrame")
     self.schwab_research_glance_cards.grid(row=0, column=0, sticky="ew")
+    self.schwab_research_top_strip = ttk.Frame(glance, style="Panel.TFrame")
+    self.schwab_research_top_strip.grid(row=1, column=0, sticky="ew", pady=(6, 0))
     meters = ttk.Frame(glance, style="Panel.TFrame")
-    meters.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+    meters.grid(row=2, column=0, sticky="ew", pady=(6, 0))
     meters.columnconfigure((0, 1), weight=1)
     self.schwab_research_bull_bear_meter = ScoreMeter(meters)
     self.schwab_research_bull_bear_meter.grid(row=0, column=0, sticky="ew", padx=(0, 8))
@@ -203,19 +212,22 @@ def _build_research_right_panel(self: tk.Tk, parent: ttk.Frame) -> None:
 def _overview_tab(notebook: ttk.Notebook) -> ttk.Frame:
     frame = ttk.Frame(notebook, style="Panel.TFrame", padding=10)
     frame.columnconfigure(0, weight=1)
-    frame.rowconfigure(4, weight=1)
+    frame.rowconfigure(5, weight=1)
     frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.cards.grid(row=0, column=0, sticky="ew")
+    frame.operator = ttk.LabelFrame(frame, text="Operator View", style="Card.TLabelframe")  # type: ignore[attr-defined]
+    frame.operator.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+    frame.operator.columnconfigure(0, weight=1)  # type: ignore[attr-defined]
     frame.summary = ttk.LabelFrame(frame, text="Plain-English Summary", style="Card.TLabelframe")  # type: ignore[attr-defined]
-    frame.summary.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+    frame.summary.grid(row=2, column=0, sticky="ew", pady=(8, 0))
     frame.summary.columnconfigure(0, weight=1)  # type: ignore[attr-defined]
     frame.checks = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
-    frame.checks.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+    frame.checks.grid(row=3, column=0, sticky="ew", pady=(8, 0))
     frame.checks.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
     frame.freshness = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
-    frame.freshness.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+    frame.freshness.grid(row=4, column=0, sticky="ew", pady=(8, 0))
     frame.detail_text = _detail_text(frame)  # type: ignore[attr-defined]
-    frame.detail_text.grid(row=4, column=0, sticky="nsew", pady=(8, 0))  # type: ignore[attr-defined]
+    frame.detail_text.grid(row=5, column=0, sticky="nsew", pady=(8, 0))  # type: ignore[attr-defined]
     notebook.add(frame, text="Overview")
     return frame
 
@@ -533,9 +545,19 @@ def _render_at_glance(self: tk.Tk, payload: _ResearchPayload) -> None:
             decision.action_bias,
         ],
         columns=4,
+        prominent_indexes={0, 3},
     )
-    self.schwab_research_bull_bear_meter.set_score(decision.technical_score, mode="direction", label=f"Bull/Bear: {decision.technical_score:.0f}")
-    self.schwab_research_risk_meter.set_score(decision.risk_score, mode="risk", label=f"Risk: {decision.risk_score:.0f}/100")
+    labeled_value_grid(
+        self.schwab_research_top_strip,
+        {
+            "Best thing": decision.top_things[0],
+            "Biggest risk": decision.top_things[1],
+            "Key trigger": decision.top_things[2],
+        },
+        columns=3,
+    )
+    self.schwab_research_bull_bear_meter.set_score(decision.technical_score, mode="direction", label=f"Bullishness: {direction_strength_label(decision.technical_score)} ({decision.technical_score:.0f})")
+    self.schwab_research_risk_meter.set_score(decision.risk_score, mode="risk", label=f"Risk Heat: {risk_heat_label(decision.risk_score)} ({decision.risk_score:.0f}/100)")
 
 
 def _render_overview(self: tk.Tk, payload: _ResearchPayload) -> None:
@@ -554,7 +576,9 @@ def _render_overview(self: tk.Tk, payload: _ResearchPayload) -> None:
             decision.macro_backdrop,
         ],
         columns=4,
+        prominent_indexes={0, 3},
     )
+    labeled_value_grid(frame.operator, decision.operator_view, columns=3)  # type: ignore[attr-defined]
     clear_children(frame.summary)  # type: ignore[attr-defined]
     for index, sentence in enumerate(decision.summary):
         ttk.Label(frame.summary, text=sentence, style="Subtle.TLabel", wraplength=980, justify=tk.LEFT).grid(row=index, column=0, sticky="ew", padx=10, pady=(6 if index == 0 else 2, 2))  # type: ignore[attr-defined]
@@ -597,9 +621,9 @@ def _render_technicals(self: tk.Tk, payload: _ResearchPayload) -> None:
         ],
         columns=4,
     )
-    frame.bull_meter.set_score(decision.technical_score, mode="direction", label=f"Technical score {decision.technical_score:.0f}")  # type: ignore[attr-defined]
-    frame.momentum_meter.set_score(decision.momentum_score, mode="direction", label=f"Momentum score {decision.momentum_score:.0f}")  # type: ignore[attr-defined]
-    frame.risk_meter.set_score(decision.risk_score, mode="risk", label=f"Risk score {decision.risk_score:.0f}")  # type: ignore[attr-defined]
+    frame.bull_meter.set_score(decision.technical_score, mode="direction", label=f"Bullishness: {direction_strength_label(decision.technical_score)} ({decision.technical_score:.0f})")  # type: ignore[attr-defined]
+    frame.momentum_meter.set_score(decision.momentum_score, mode="direction", label=f"Momentum: {direction_strength_label(decision.momentum_score)} ({decision.momentum_score:.0f})")  # type: ignore[attr-defined]
+    frame.risk_meter.set_score(decision.risk_score, mode="risk", label=f"Risk Heat: {risk_heat_label(decision.risk_score)} ({decision.risk_score:.0f})")  # type: ignore[attr-defined]
     tree = frame.indicator_tree  # type: ignore[attr-defined]
     for row_id in tree.get_children():
         tree.delete(row_id)
