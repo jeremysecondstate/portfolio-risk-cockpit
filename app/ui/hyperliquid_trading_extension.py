@@ -41,17 +41,26 @@ def install_hyperliquid_trading_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls.show_hyperliquid_live_submit_safety_review = _show_hyperliquid_live_submit_safety_review  # type: ignore[attr-defined]
     app_cls.parse_hyperliquid_ticket = _parse_hyperliquid_ticket  # type: ignore[attr-defined]
     app_cls.on_trading_venue_changed = _on_trading_venue_changed  # type: ignore[attr-defined]
+    app_cls.apply_hyperliquid_quantity_percent = _apply_hyperliquid_quantity_percent  # type: ignore[attr-defined]
 
 
 def _ensure_hyperliquid_vars(self: tk.Tk) -> None:
-    if hasattr(self, "trade_venue_var"):
-        return
-    self.trade_venue_var = tk.StringVar(value="Schwab")
-    self.hyperliquid_coin_var = tk.StringVar(value="")
-    self.hyperliquid_tif_var = tk.StringVar(value="Gtc")
-    self.hyperliquid_reduce_only_var = tk.BooleanVar(value=False)
-    self.hyperliquid_status_var = tk.StringVar(value="Hyperliquid: preview only")
-    self.hyperliquid_open_order_coin_by_oid = {}
+    if not hasattr(self, "trade_venue_var"):
+        self.trade_venue_var = tk.StringVar(value="Schwab")
+    if not hasattr(self, "hyperliquid_coin_var"):
+        self.hyperliquid_coin_var = tk.StringVar(value="")
+    if not hasattr(self, "hyperliquid_tif_var"):
+        self.hyperliquid_tif_var = tk.StringVar(value="Gtc")
+    if not hasattr(self, "hyperliquid_reduce_only_var"):
+        self.hyperliquid_reduce_only_var = tk.BooleanVar(value=False)
+    if not hasattr(self, "hyperliquid_status_var"):
+        self.hyperliquid_status_var = tk.StringVar(value="Hyperliquid: preview only")
+    if not hasattr(self, "hyperliquid_open_order_coin_by_oid"):
+        self.hyperliquid_open_order_coin_by_oid = {}
+    if not hasattr(self, "hyperliquid_size_percent_var"):
+        self.hyperliquid_size_percent_var = tk.DoubleVar(value=0.0)
+    if not hasattr(self, "hyperliquid_size_status_var"):
+        self.hyperliquid_size_status_var = tk.StringVar(value="Size helper: sync Hyperliquid, then choose a %")
 
 
 def _build_action_group(parent: ttk.Frame, title: str, column: int) -> ttk.LabelFrame:
@@ -109,7 +118,7 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     ticket_shell = ttk.Frame(stack, style="Canvas.TFrame")
     preview_shell = ttk.Frame(stack, style="Canvas.TFrame")
     explainer_shell = ttk.Frame(stack, style="Canvas.TFrame")
-    stack.add(ticket_shell, minsize=330, stretch="never")
+    stack.add(ticket_shell, minsize=370, stretch="never")
     stack.add(preview_shell, minsize=200, stretch="always")
     stack.add(explainer_shell, minsize=78, stretch="never")
 
@@ -132,21 +141,22 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     self._grid_row(ticket, 1, "Symbol", ttk.Entry(ticket, textvariable=self.symbol_var), "Side", ttk.Combobox(ticket, textvariable=self.side_var, values=[s.value for s in OrderSide], state="readonly"))
     self._grid_row(ticket, 2, "Order type", ttk.Combobox(ticket, textvariable=self.order_type_var, values=[o.value for o in OrderType], state="readonly"), "Time", ttk.Combobox(ticket, textvariable=self.time_in_force_var, values=[t.value for t in TimeInForce], state="readonly"))
     self._grid_row(ticket, 3, "Quantity", ttk.Entry(ticket, textvariable=self.quantity_var), "Entry / Limit", ttk.Entry(ticket, textvariable=self.limit_price_var))
-    self._grid_row(ticket, 4, "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var), "Use Mid", ttk.Button(ticket, text="Use Mid", command=lambda: _use_mid_from_cockpit(self), style="Accent.TButton"))
+    _grid_hyperliquid_size_controls(ticket, self, row=4)
+    self._grid_row(ticket, 5, "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var), "Use Mid", ttk.Button(ticket, text="Use Mid", command=lambda: _use_mid_from_cockpit(self), style="Accent.TButton"))
     self._grid_row(
         ticket,
-        5,
+        6,
         "HL TIF",
         ttk.Combobox(ticket, textvariable=self.hyperliquid_tif_var, values=HYPERLIQUID_TIFS, state="readonly"),
         "HL Reduce-only",
         ttk.Checkbutton(ticket, variable=self.hyperliquid_reduce_only_var),
     )
 
-    ttk.Label(ticket, text="Cancel order ID", style="Subtle.TLabel").grid(row=6, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
-    ttk.Entry(ticket, textvariable=self.cancel_order_id_var).grid(row=6, column=1, columnspan=3, sticky="ew", pady=(8, 0))
+    ttk.Label(ticket, text="Cancel order ID", style="Subtle.TLabel").grid(row=7, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+    ttk.Entry(ticket, textvariable=self.cancel_order_id_var).grid(row=7, column=1, columnspan=3, sticky="ew", pady=(8, 0))
 
     actions = ttk.Frame(ticket, style="Panel.TFrame")
-    actions.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+    actions.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(14, 0))
     actions.columnconfigure((0, 1, 2), weight=1, uniform="action_groups")
 
     connect_group = _build_action_group(actions, "Connections", 0)
@@ -165,7 +175,7 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     _grid_action_button(live_group, 1, 1, "LIVE Submit", self.submit_cockpit_selected_venue, "Danger.TButton")
 
     status_bar = ttk.Frame(ticket, style="Panel.TFrame")
-    status_bar.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(10, 0))
+    status_bar.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(10, 0))
     status_bar.columnconfigure((0, 1, 2, 3), weight=1)
     ttk.Label(status_bar, textvariable=self.schwab_status_var, style="Chip.TLabel").grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=(4, 0))
     ttk.Label(status_bar, textvariable=self.schwab_preview_status_var, style="Chip.TLabel").grid(row=0, column=1, sticky="ew", padx=(0, 6), pady=(4, 0))
@@ -213,6 +223,46 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     ).pack(anchor=tk.W)
 
 
+def _grid_hyperliquid_size_controls(parent: ttk.LabelFrame, self: tk.Tk, row: int) -> None:
+    ttk.Label(parent, text="Size %", style="Subtle.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=6)
+
+    controls = ttk.Frame(parent, style="Panel.TFrame")
+    controls.grid(row=row, column=1, columnspan=3, sticky="ew", pady=6)
+    controls.columnconfigure(0, weight=1)
+
+    scale = ttk.Scale(
+        controls,
+        from_=0,
+        to=100,
+        orient=tk.HORIZONTAL,
+        variable=self.hyperliquid_size_percent_var,
+        command=lambda _value: _apply_hyperliquid_quantity_percent(self),
+    )
+    scale.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+
+    for column, percent in enumerate((25, 50, 75), start=1):
+        ttk.Button(
+            controls,
+            text=f"{percent}%",
+            command=lambda value=percent: _apply_hyperliquid_quantity_percent(self, value),
+        ).grid(row=0, column=column, sticky="ew", padx=(0, 6))
+
+    ttk.Button(
+        controls,
+        text="Max",
+        command=lambda: _apply_hyperliquid_quantity_percent(self, 100),
+        style="Accent.TButton",
+    ).grid(row=0, column=4, sticky="ew")
+
+    ttk.Label(controls, textvariable=self.hyperliquid_size_status_var, style="Subtle.TLabel").grid(
+        row=1,
+        column=0,
+        columnspan=5,
+        sticky="w",
+        pady=(3, 0),
+    )
+
+
 def _show_hyperliquid_spot_live_submit_safety_review(self: tk.Tk) -> None:
     try:
         ticket = self.parse_hyperliquid_spot_ticket()
@@ -244,6 +294,98 @@ def _submit_cockpit_selected_venue(self: tk.Tk) -> None:
 
 def _selected_venue_is_hyperliquid(self: tk.Tk) -> bool:
     return getattr(self, "trade_venue_var", tk.StringVar(value="Schwab")).get() == "Hyperliquid"
+
+
+def _apply_hyperliquid_quantity_percent(self: tk.Tk, percent: float | None = None) -> None:
+    _ensure_hyperliquid_vars(self)
+    if percent is not None:
+        self.hyperliquid_size_percent_var.set(float(percent))
+    percent_value = max(0.0, min(100.0, float(self.hyperliquid_size_percent_var.get())))
+
+    try:
+        max_size, basis = _hyperliquid_max_spot_size(self)
+    except Exception as exc:
+        self.hyperliquid_size_status_var.set(f"Size helper: {exc}")
+        return
+
+    if max_size <= 0:
+        self.hyperliquid_size_status_var.set(f"Size helper: no available {basis}")
+        return
+
+    size = max_size * (percent_value / 100.0)
+    self.quantity_var.set(_format_hyperliquid_size(size))
+    self.hyperliquid_size_status_var.set(
+        f"Size helper: {percent_value:.0f}% of {basis} = {_format_hyperliquid_size(size)}"
+    )
+
+
+def _hyperliquid_max_spot_size(self: tk.Tk) -> tuple[float, str]:
+    if not _selected_venue_is_hyperliquid(self):
+        raise ValueError("switch Venue to Hyperliquid")
+
+    market = normalize_hyperliquid_spot_market(
+        self.symbol_var.get().strip() or self.hyperliquid_coin_var.get().strip()
+    )
+    base = _display_spot_base(market)
+    side = self.side_var.get().strip().lower()
+
+    if side == "sell":
+        quantity = _hyperliquid_spot_balance(self, base)
+        return quantity, f"{base} spot balance"
+
+    if side == "buy":
+        limit_price = _positive_float(self.limit_price_var.get())
+        if limit_price is None:
+            raise ValueError("enter a positive limit price first")
+        usdc = _hyperliquid_usdc_balance(self)
+        return usdc / limit_price, f"USDC balance at ${limit_price:,.4f}"
+
+    raise ValueError("choose buy or sell")
+
+
+def _hyperliquid_spot_balance(self: tk.Tk, base: str) -> float:
+    portfolio = self.broker.get_portfolio()
+    for position in portfolio.positions.values():
+        symbol = _display_spot_base(position.symbol)
+        position_type = str(getattr(position, "asset_type", "")).strip().lower()
+        if symbol == base and (position_type == "spot" or position.symbol.upper().endswith("-SPOT")):
+            return max(float(position.quantity), 0.0)
+    return 0.0
+
+
+def _hyperliquid_usdc_balance(self: tk.Tk) -> float:
+    portfolio = self.broker.get_portfolio()
+    for cash in portfolio.cash_positions.values():
+        if cash.symbol.strip().upper() == "USDC" and "HYPERLIQUID" in cash.source.strip().upper():
+            return max(float(cash.amount), 0.0)
+    return 0.0
+
+
+def _display_spot_base(symbol: str) -> str:
+    clean = symbol.strip().upper()
+    if clean.startswith("HL:"):
+        clean = clean[3:]
+    if "/" in clean:
+        clean = clean.split("/", 1)[0]
+    for suffix in ("-SPOT", "-PERP-SHORT", "-PERP"):
+        if clean.endswith(suffix):
+            clean = clean[: -len(suffix)]
+    if clean.startswith("U") and len(clean) > 1:
+        clean = clean[1:]
+    return clean
+
+
+def _positive_float(value: str) -> float | None:
+    try:
+        number = float(value.strip().replace(",", ""))
+    except ValueError:
+        return None
+    return number if number > 0 else None
+
+
+def _format_hyperliquid_size(value: float) -> str:
+    text = f"{value:.8f}".rstrip("0").rstrip(".")
+    return text or "0"
 
 
 def _load_selected_recent_orders(self: tk.Tk) -> None:
