@@ -65,6 +65,8 @@ def _ensure_hyperliquid_vars(self: tk.Tk) -> None:
         self.hyperliquid_size_percent_var = tk.DoubleVar(value=0.0)
     if not hasattr(self, "hyperliquid_size_status_var"):
         self.hyperliquid_size_status_var = tk.StringVar(value="Sync Hyperliquid, then choose a size %")
+    if not hasattr(self, "hyperliquid_size_unit_var"):
+        self.hyperliquid_size_unit_var = tk.StringVar(value="")
 
 
 def _configure_compact_ticket_styles(self: tk.Tk) -> None:
@@ -156,7 +158,7 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     )
     self._grid_row(ticket, 1, "Symbol", ttk.Entry(ticket, textvariable=self.symbol_var), "Side", ttk.Combobox(ticket, textvariable=self.side_var, values=[s.value for s in OrderSide], state="readonly"))
     self._grid_row(ticket, 2, "Order type", ttk.Combobox(ticket, textvariable=self.order_type_var, values=[o.value for o in OrderType], state="readonly"), "Time", ttk.Combobox(ticket, textvariable=self.time_in_force_var, values=[t.value for t in TimeInForce], state="readonly"))
-    self._grid_row(ticket, 3, "Quantity", ttk.Entry(ticket, textvariable=self.quantity_var), "Entry / Limit", ttk.Entry(ticket, textvariable=self.limit_price_var))
+    _grid_hyperliquid_quantity_row(ticket, self, row=3)
     _grid_hyperliquid_size_controls(ticket, self, row=4)
     self._grid_row(ticket, 5, "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var), "Use Mid", ttk.Button(ticket, text="Use Mid", command=lambda: _use_mid_from_cockpit(self), style="Accent.TButton"))
     self._grid_row(
@@ -201,6 +203,8 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
 
     venue_combo = ticket.grid_slaves(row=0, column=1)[0]
     venue_combo.bind("<<ComboboxSelected>>", lambda _event: self.on_trading_venue_changed())
+    self.symbol_var.trace_add("write", lambda *_args: _sync_hyperliquid_size_unit(self))
+    self.hyperliquid_coin_var.trace_add("write", lambda *_args: _sync_hyperliquid_size_unit(self))
     self.after_idle(self.on_trading_venue_changed)
 
     results = ttk.LabelFrame(preview_shell, text="Analysis + Instructions", style="Card.TLabelframe")
@@ -238,6 +242,28 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
         wraplength=560,
         style="Subtle.TLabel",
     ).pack(anchor=tk.W)
+
+
+def _grid_hyperliquid_quantity_row(parent: ttk.LabelFrame, self: tk.Tk, row: int) -> None:
+    ttk.Label(parent, text="Quantity", style="Subtle.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=6)
+    quantity_controls = ttk.Frame(parent, style="Panel.TFrame")
+    quantity_controls.grid(row=row, column=1, sticky="ew", pady=6)
+    quantity_controls.columnconfigure(0, weight=1)
+
+    ttk.Entry(quantity_controls, textvariable=self.quantity_var).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+    unit_combo = ttk.Combobox(
+        quantity_controls,
+        textvariable=self.hyperliquid_size_unit_var,
+        values=_hyperliquid_size_unit_values(self),
+        state="readonly",
+        width=8,
+    )
+    unit_combo.configure(postcommand=lambda: _refresh_hyperliquid_size_unit_combo(self, unit_combo))
+    unit_combo.grid(row=0, column=1, sticky="ew")
+
+    ttk.Label(parent, text="Entry / Limit", style="Subtle.TLabel").grid(row=row, column=2, sticky="w", padx=(16, 8), pady=6)
+    ttk.Entry(parent, textvariable=self.limit_price_var).grid(row=row, column=3, sticky="ew", pady=6)
+    _sync_hyperliquid_size_unit(self)
 
 
 def _grid_hyperliquid_size_controls(parent: ttk.LabelFrame, self: tk.Tk, row: int) -> None:
@@ -331,9 +357,10 @@ def _apply_hyperliquid_quantity_percent(self: tk.Tk, percent: float | None = Non
         return
 
     size = max_size * (percent_value / 100.0)
-    self.quantity_var.set(_format_hyperliquid_size(size))
+    displayed_size, unit = _display_size_for_selected_unit(self, size)
+    self.quantity_var.set(_format_hyperliquid_size(displayed_size))
     self.hyperliquid_size_status_var.set(
-        f"Size helper: {percent_value:.0f}% of {basis} = {_format_hyperliquid_size(size)}"
+        f"Size helper: {percent_value:.0f}% of {basis} = {_format_hyperliquid_size(displayed_size)} {unit}"
     )
 
 
@@ -377,6 +404,62 @@ def _hyperliquid_usdc_balance(self: tk.Tk) -> float:
         if cash.symbol.strip().upper() == "USDC" and "HYPERLIQUID" in cash.source.strip().upper():
             return max(float(cash.amount), 0.0)
     return 0.0
+
+
+def _hyperliquid_size_unit_values(self: tk.Tk) -> list[str]:
+    base = _current_hyperliquid_base_symbol(self)
+    return [base, "USDC"] if base else ["Coin", "USDC"]
+
+
+def _refresh_hyperliquid_size_unit_combo(self: tk.Tk, combo: ttk.Combobox) -> None:
+    values = _hyperliquid_size_unit_values(self)
+    combo.configure(values=values)
+    _sync_hyperliquid_size_unit(self)
+
+
+def _sync_hyperliquid_size_unit(self: tk.Tk) -> None:
+    if not hasattr(self, "hyperliquid_size_unit_var"):
+        return
+    values = _hyperliquid_size_unit_values(self)
+    current = self.hyperliquid_size_unit_var.get().strip().upper()
+    if current not in values:
+        self.hyperliquid_size_unit_var.set(values[0])
+
+
+def _selected_size_unit(self: tk.Tk) -> str:
+    _sync_hyperliquid_size_unit(self)
+    return self.hyperliquid_size_unit_var.get().strip().upper()
+
+
+def _display_size_for_selected_unit(self: tk.Tk, coin_size: float) -> tuple[float, str]:
+    unit = _selected_size_unit(self)
+    if unit == "USDC":
+        limit_price = _positive_float(self.limit_price_var.get()) or 0.0
+        return coin_size * limit_price, unit
+    return coin_size, unit
+
+
+def _spot_size_from_quantity_input(self: tk.Tk, raw_quantity: float, limit_price: float) -> float:
+    unit = _selected_size_unit(self)
+    if unit != "USDC":
+        return raw_quantity
+    if limit_price <= 0:
+        raise ValueError("A positive limit price is required when Quantity is in USDC.")
+    return raw_quantity / limit_price
+
+
+def _current_hyperliquid_base_symbol(self: tk.Tk) -> str:
+    symbol_source = ""
+    if hasattr(self, "symbol_var"):
+        symbol_source = self.symbol_var.get().strip()
+    if not symbol_source and hasattr(self, "hyperliquid_coin_var"):
+        symbol_source = self.hyperliquid_coin_var.get().strip()
+    if not symbol_source:
+        return ""
+    try:
+        return _display_spot_base(normalize_hyperliquid_spot_market(symbol_source))
+    except Exception:
+        return _display_spot_base(symbol_source)
 
 
 def _display_spot_base(symbol: str) -> str:
@@ -950,11 +1033,12 @@ def _parse_hyperliquid_spot_ticket(self: tk.Tk) -> HyperliquidOrderTicket:
         raise ValueError("Hyperliquid spot side must be buy or sell.")
 
     try:
-        size = float(self.quantity_var.get().strip().replace(",", ""))
+        raw_size = float(self.quantity_var.get().strip().replace(",", ""))
         limit_price = float(self.limit_price_var.get().strip().replace(",", ""))
     except ValueError as exc:
         raise ValueError("Hyperliquid spot size and limit price must be numbers.") from exc
 
+    size = _spot_size_from_quantity_input(self, raw_size, limit_price)
     if size <= 0:
         raise ValueError("Hyperliquid spot size must be positive.")
     if limit_price <= 0:
