@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 import os
 import tkinter as tk
@@ -9,6 +10,7 @@ from typing import Any, Type
 from app.brokers.hyperliquid.client import HyperliquidInfoClient
 from app.brokers.hyperliquid.trading import (
     HyperliquidExecutionAdapter,
+    HyperliquidOrderEditTicket,
     HyperliquidOrderTicket,
     HyperliquidTriggerTicket,
     HyperliquidTradingConfig,
@@ -24,6 +26,32 @@ from app.ui.polished_theme import _make_paned
 TRADING_VENUES = ["Schwab", "Hyperliquid"]
 HYPERLIQUID_TIFS = ["Alo", "Ioc", "Gtc"]
 HYPERLIQUID_ADDRESS_ENV_KEYS = ("HYPE_WALLET_ADDRESS", "HYPERLIQUID_USER_ADDRESS")
+
+
+@dataclass(frozen=True)
+class HyperliquidOpenOrder:
+    raw: dict[str, Any]
+    oid: str
+    context: str
+    order_kind: str
+    coin: str
+    side: str
+    direction: str
+    size: float
+    size_label: str
+    close_position: bool
+    original_size_label: str
+    order_value_label: str
+    price_label: str
+    limit_price: float
+    reduce_only: bool
+    is_trigger: bool
+    trigger_condition: str
+    trigger_price: float | None
+    trigger_kind: str
+    is_market_trigger: bool
+    tif: str
+    tpsl_label: str
 
 
 def install_hyperliquid_trading_extension(app_cls: Type[tk.Tk]) -> None:
@@ -81,6 +109,8 @@ def _configure_compact_ticket_styles(self: tk.Tk) -> None:
     style.configure("Compact.Card.TLabelframe", background=polished_theme.PANEL, bordercolor=polished_theme.BORDER, relief="solid", padding=8)
     style.configure("Compact.Card.TLabelframe.Label", background=polished_theme.PANEL, foreground=polished_theme.TEXT, font=("Segoe UI", 10, "bold"))
     style.configure("Compact.TButton", padding=(6, 5), font=("Segoe UI", 9))
+    style.configure("Body.TLabel", background=polished_theme.PANEL, foreground=polished_theme.TEXT)
+    style.configure("Mono.TLabel", background=polished_theme.PANEL, foreground=polished_theme.TEXT, font=("Consolas", 9))
     style.configure("CompactAccent.TButton", background=polished_theme.ACCENT, foreground="#ffffff", padding=(6, 5), font=("Segoe UI", 9, "bold"))
     style.map("CompactAccent.TButton", background=[("active", polished_theme.ACCENT_DARK), ("pressed", polished_theme.ACCENT_DARK)], foreground=[("active", "#ffffff")])
     style.configure("CompactDanger.TButton", background="#fee2e2", foreground=polished_theme.DANGER, padding=(6, 5), font=("Segoe UI", 9, "bold"))
@@ -686,26 +716,36 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
         self.trade_venue_var.set("Hyperliquid")
 
     cached_order = _selected_hyperliquid_order(self)
+    normalized_order = normalize_hyperliquid_open_order(cached_order) if cached_order else None
     raw_order_id = self.cancel_order_id_var.get().strip()
-    if not raw_order_id and cached_order is not None:
-        raw_order_id = str(cached_order.get("oid") or "")
+    if not raw_order_id and normalized_order is not None:
+        raw_order_id = normalized_order.oid
 
-    market = _order_market_for_edit(self, cached_order)
-    context = _order_edit_context(self, cached_order, market)
-    side = _order_side_for_edit(cached_order, self.side_var.get())
-    size = str((cached_order or {}).get("sz") or (cached_order or {}).get("size") or self.quantity_var.get()).strip()
-    price = str((cached_order or {}).get("limitPx") or (cached_order or {}).get("price") or self.limit_price_var.get()).strip()
-    tif = str((cached_order or {}).get("tif") or (cached_order or {}).get("timeInForce") or self.hyperliquid_tif_var.get() or "Gtc")
-    reduce_only = bool((cached_order or {}).get("reduceOnly", (cached_order or {}).get("reduce_only", self.hyperliquid_reduce_only_var.get())))
+    market = normalized_order.coin if normalized_order else _order_market_for_edit(self, cached_order)
+    context = normalized_order.context if normalized_order else _order_edit_context(self, cached_order, market)
+    side = normalized_order.side if normalized_order else _order_side_for_edit(cached_order, self.side_var.get())
+    size = _format_hyperliquid_size(normalized_order.size) if normalized_order else str((cached_order or {}).get("sz") or (cached_order or {}).get("size") or self.quantity_var.get()).strip()
+    price = (
+        _format_hyperliquid_size(normalized_order.limit_price)
+        if normalized_order
+        else str((cached_order or {}).get("limitPx") or (cached_order or {}).get("price") or self.limit_price_var.get()).strip()
+    )
+    tif = normalized_order.tif if normalized_order else str((cached_order or {}).get("tif") or (cached_order or {}).get("timeInForce") or self.hyperliquid_tif_var.get() or "Gtc")
+    reduce_only = normalized_order.reduce_only if normalized_order else bool((cached_order or {}).get("reduceOnly", (cached_order or {}).get("reduce_only", self.hyperliquid_reduce_only_var.get())))
+    close_position = normalized_order.close_position if normalized_order else False
+    is_trigger = normalized_order.is_trigger if normalized_order else False
+    trigger_price = "" if normalized_order is None or normalized_order.trigger_price is None else _format_hyperliquid_size(normalized_order.trigger_price)
+    trigger_kind = normalized_order.trigger_kind if normalized_order else "sl"
+    is_market_trigger = normalized_order.is_market_trigger if normalized_order else False
 
     dialog = tk.Toplevel(self)
     dialog.title("Edit Hyperliquid Order")
     dialog.transient(self)
     dialog.resizable(False, False)
 
-    shell = ttk.Frame(dialog, style="Panel.TFrame", padding=14)
+    shell = ttk.Frame(dialog, style="Panel.TFrame", padding=16)
     shell.pack(fill=tk.BOTH, expand=True)
-    shell.columnconfigure(1, weight=1)
+    shell.columnconfigure(0, weight=1)
 
     order_id_var = tk.StringVar(value=raw_order_id)
     market_var = tk.StringVar(value=market)
@@ -714,25 +754,48 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
     price_var = tk.StringVar(value=price)
     tif_var = tk.StringVar(value=tif if tif in HYPERLIQUID_TIFS else "Gtc")
     context_var = tk.StringVar(value=context)
+    order_kind_var = tk.StringVar(value=normalized_order.order_kind if normalized_order else "Limit")
     reduce_only_var = tk.BooleanVar(value=reduce_only if context == "Perp" else False)
+    size_mode_var = tk.StringVar(value="Close Position" if close_position else "Numeric size")
+    trigger_enabled_var = tk.BooleanVar(value=is_trigger)
+    trigger_price_var = tk.StringVar(value=trigger_price)
+    trigger_kind_var = tk.StringVar(value=trigger_kind)
+    market_trigger_var = tk.BooleanVar(value=is_market_trigger)
     mid_status_var = tk.StringVar(value="")
 
-    fields = [
-        ("Order type", ttk.Combobox(shell, textvariable=context_var, values=["Spot", "Perp"], state="readonly")),
-        ("Order ID", ttk.Entry(shell, textvariable=order_id_var)),
-        ("Market", ttk.Entry(shell, textvariable=market_var)),
-        ("Side", ttk.Combobox(shell, textvariable=side_var, values=["buy", "sell"], state="readonly")),
-        ("Size", ttk.Entry(shell, textvariable=size_var)),
-        ("TIF", ttk.Combobox(shell, textvariable=tif_var, values=HYPERLIQUID_TIFS, state="readonly")),
-    ]
-    for row, (label, widget) in enumerate(fields[:4]):
-        ttk.Label(shell, text=label, style="Subtle.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 10), pady=5)
-        widget.grid(row=row, column=1, sticky="ew", pady=5)
+    summary = ttk.LabelFrame(shell, text="Order Summary", style="Card.TLabelframe")
+    summary.grid(row=0, column=0, sticky="ew")
+    for column in range(4):
+        summary.columnconfigure(column, weight=1)
+    _summary_cell(summary, 0, 0, "Order ID", raw_order_id or "--")
+    _summary_cell(summary, 0, 1, "Kind", order_kind_var.get())
+    _summary_cell(summary, 0, 2, "Direction", normalized_order.direction if normalized_order else side)
+    _summary_cell(summary, 0, 3, "Size", normalized_order.size_label if normalized_order else size)
+    _summary_cell(summary, 1, 0, "Price", normalized_order.price_label if normalized_order else price)
+    _summary_cell(summary, 1, 1, "Trigger", normalized_order.trigger_condition if normalized_order else "--")
+    _summary_cell(summary, 1, 2, "Reduce-only", "Yes" if reduce_only else "No")
+    _summary_cell(summary, 1, 3, "TP/SL", normalized_order.tpsl_label if normalized_order else "--")
 
-    price_row = 4
-    ttk.Label(shell, text="Limit price", style="Subtle.TLabel").grid(row=price_row, column=0, sticky="w", padx=(0, 10), pady=5)
-    price_controls = ttk.Frame(shell, style="Panel.TFrame")
-    price_controls.grid(row=price_row, column=1, sticky="ew", pady=5)
+    editable = ttk.LabelFrame(shell, text="Editable Fields", style="Card.TLabelframe")
+    editable.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+    editable.columnconfigure(1, weight=1)
+
+    editable_fields = [
+        ("Venue", ttk.Combobox(editable, textvariable=context_var, values=["Spot", "Perp"], state="readonly")),
+        ("Order ID", ttk.Entry(editable, textvariable=order_id_var)),
+        ("Coin / Market", ttk.Entry(editable, textvariable=market_var)),
+        ("Side", ttk.Combobox(editable, textvariable=side_var, values=["buy", "sell"], state="readonly")),
+        ("Size mode", ttk.Combobox(editable, textvariable=size_mode_var, values=["Numeric size", "Close Position"], state="readonly")),
+        ("Numeric size", ttk.Entry(editable, textvariable=size_var)),
+    ]
+    for row, (label, widget) in enumerate(editable_fields):
+        ttk.Label(editable, text=label, style="Subtle.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 10), pady=4)
+        widget.grid(row=row, column=1, sticky="ew", pady=4)
+
+    price_row = len(editable_fields)
+    ttk.Label(editable, text="Limit price", style="Subtle.TLabel").grid(row=price_row, column=0, sticky="w", padx=(0, 10), pady=4)
+    price_controls = ttk.Frame(editable, style="Panel.TFrame")
+    price_controls.grid(row=price_row, column=1, sticky="ew", pady=4)
     price_controls.columnconfigure(0, weight=1)
     ttk.Entry(price_controls, textvariable=price_var).grid(row=0, column=0, sticky="ew", padx=(0, 8))
     ttk.Button(
@@ -743,33 +806,55 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
     ).grid(row=0, column=1, sticky="ew")
     ttk.Label(price_controls, textvariable=mid_status_var, style="Subtle.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(3, 0))
 
-    for row, (label, widget) in enumerate(fields[4:], start=5):
-        ttk.Label(shell, text=label, style="Subtle.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 10), pady=5)
-        widget.grid(row=row, column=1, sticky="ew", pady=5)
+    ttk.Label(editable, text="TIF", style="Subtle.TLabel").grid(row=price_row + 1, column=0, sticky="w", padx=(0, 10), pady=4)
+    tif_combo = ttk.Combobox(editable, textvariable=tif_var, values=HYPERLIQUID_TIFS, state="readonly")
+    tif_combo.grid(row=price_row + 1, column=1, sticky="ew", pady=4)
 
-    reduce_only_check = ttk.Checkbutton(shell, text="Reduce-only", variable=reduce_only_var)
-    reduce_only_check.grid(row=len(fields) + 1, column=1, sticky="w", pady=5)
+    trigger = ttk.LabelFrame(shell, text="Trigger / TP-SL", style="Card.TLabelframe")
+    trigger.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+    trigger.columnconfigure(1, weight=1)
+    ttk.Checkbutton(trigger, text="Trigger order", variable=trigger_enabled_var).grid(row=0, column=0, sticky="w", pady=4)
+    ttk.Combobox(trigger, textvariable=trigger_kind_var, values=["sl", "tp"], state="readonly").grid(row=0, column=1, sticky="ew", pady=4)
+    ttk.Label(trigger, text="Trigger price", style="Subtle.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=4)
+    ttk.Entry(trigger, textvariable=trigger_price_var).grid(row=1, column=1, sticky="ew", pady=4)
+    ttk.Checkbutton(trigger, text="Market when triggered", variable=market_trigger_var).grid(row=2, column=1, sticky="w", pady=4)
+
+    advanced = ttk.LabelFrame(shell, text="Advanced", style="Card.TLabelframe")
+    advanced.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+    advanced.columnconfigure(0, weight=1)
+    reduce_only_check = ttk.Checkbutton(advanced, text="Reduce-only", variable=reduce_only_var)
+    reduce_only_check.grid(row=0, column=0, sticky="w", pady=4)
 
     def refresh_context_fields(*_args: Any) -> None:
         if context_var.get() == "Spot":
             reduce_only_var.set(False)
             reduce_only_check.configure(state="disabled")
+            if size_mode_var.get() == "Close Position":
+                size_mode_var.set("Numeric size")
         else:
             reduce_only_check.configure(state="normal")
+        close_mode = size_mode_var.get() == "Close Position"
+        trigger_state = "normal" if trigger_enabled_var.get() else "disabled"
+        tif_combo.configure(state="disabled" if trigger_enabled_var.get() else "readonly")
+        if close_mode:
+            trigger_enabled_var.set(True)
+            trigger_state = "normal"
 
     context_var.trace_add("write", refresh_context_fields)
+    size_mode_var.trace_add("write", refresh_context_fields)
+    trigger_enabled_var.trace_add("write", refresh_context_fields)
     refresh_context_fields()
 
     note = ttk.Label(
         shell,
-        text="Edits are live Hyperliquid modify-order requests. Use Open first to preload active order details.",
+        text="Normal limit orders use modify. Trigger / close-position orders preserve reduce-only and trigger fields; if Hyperliquid rejects a direct modify, use Cancel plus TP/SL to replace it.",
         style="Subtle.TLabel",
-        wraplength=420,
+        wraplength=520,
     )
-    note.grid(row=len(fields) + 2, column=0, columnspan=2, sticky="w", pady=(8, 2))
+    note.grid(row=4, column=0, sticky="w", pady=(10, 2))
 
     buttons = ttk.Frame(shell, style="Panel.TFrame")
-    buttons.grid(row=len(fields) + 3, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+    buttons.grid(row=5, column=0, sticky="ew", pady=(12, 0))
     buttons.columnconfigure((0, 1), weight=1)
 
     def submit_edit() -> None:
@@ -782,11 +867,23 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
             tif_var.get(),
             context_var.get(),
             reduce_only_var.get(),
+            size_mode_var.get(),
+            trigger_enabled_var.get(),
+            trigger_price_var.get(),
+            trigger_kind_var.get(),
+            market_trigger_var.get(),
             dialog,
         )
 
     ttk.Button(buttons, text="Close", command=dialog.destroy).grid(row=0, column=0, sticky="ew", padx=(0, 8))
     ttk.Button(buttons, text="Confirm Edit", command=submit_edit, style="CompactDanger.TButton").grid(row=0, column=1, sticky="ew")
+
+
+def _summary_cell(parent: ttk.Frame, row: int, column: int, label: str, value: str) -> None:
+    cell = ttk.Frame(parent, style="Panel.TFrame")
+    cell.grid(row=row, column=column, sticky="ew", padx=(0 if column == 0 else 8, 0), pady=3)
+    ttk.Label(cell, text=label.upper(), style="Subtle.TLabel").pack(anchor="w")
+    ttk.Label(cell, text=value or "--", style="Mono.TLabel").pack(anchor="w")
 
 
 def _fill_edit_dialog_mid_price(
@@ -796,6 +893,8 @@ def _fill_edit_dialog_mid_price(
         from app.ui.hyperliquid_cockpit_spot_mid_extension import _format_price, _lookup_hyperliquid_spot_mid
 
         if context_var.get() == "Perp":
+            from app.ui.options_lab_extension import _lookup_hyperliquid_mid
+
             coin = normalize_hyperliquid_coin(market_var.get())
             mid = _lookup_hyperliquid_mid(coin)
             basis = "allMids"
@@ -815,6 +914,145 @@ def _normalize_mid_lookup_market(raw_market: str) -> str:
     if market.startswith("@"):
         return market
     return normalize_hyperliquid_spot_market(market)
+
+
+def normalize_hyperliquid_open_order(raw_order: dict[str, Any] | None) -> HyperliquidOpenOrder:
+    order = raw_order or {}
+    oid = str(order.get("oid") or "")
+    coin = str(order.get("coin") or "").strip()
+    context = "Spot" if coin.startswith("@") or "/" in coin else "Perp"
+    side = _order_side_for_edit(order, "buy")
+    reduce_only = _as_bool(order.get("reduceOnly", order.get("reduce_only", False)))
+    is_trigger = _as_bool(order.get("isTrigger", False)) or _optional_order_float(order.get("triggerPx")) is not None
+    order_type = str(order.get("orderType") or order.get("type") or ("Stop Market" if is_trigger else "Limit")).strip() or "Limit"
+    trigger_price = _optional_order_float(order.get("triggerPx"))
+    is_market_trigger = is_trigger and ("market" in order_type.lower() or _price_is_market(order))
+    close_position = reduce_only and is_trigger and (_optional_order_float(order.get("sz")) or 0.0) <= 0
+    size = 0.0 if close_position else (_optional_order_float(order.get("sz")) or _optional_order_float(order.get("size")) or 0.0)
+    limit_price = _optional_order_float(order.get("limitPx")) or _optional_order_float(order.get("price")) or trigger_price or 0.0
+    tif = str(order.get("tif") or order.get("timeInForce") or "Gtc")
+    trigger_condition = _trigger_condition_label(order, trigger_price)
+    trigger_kind = _trigger_kind_from_order(order, side, trigger_condition)
+    direction = _direction_label(side, reduce_only, close_position)
+    size_label = "Close Position" if close_position else _format_hyperliquid_size(size)
+    price_label = "Market" if is_market_trigger else _format_order_price_label(limit_price)
+    original_size = order.get("origSz", order.get("origSize"))
+    original_size_label = "--" if original_size in (None, "") else str(original_size)
+    order_value_label = _order_value_label(order, size, limit_price, close_position)
+    tpsl_label = _tpsl_label(order, trigger_kind, is_trigger)
+
+    return HyperliquidOpenOrder(
+        raw=order,
+        oid=oid,
+        context=context,
+        order_kind=order_type,
+        coin=coin,
+        side=side,
+        direction=direction,
+        size=size,
+        size_label=size_label,
+        close_position=close_position,
+        original_size_label=original_size_label,
+        order_value_label=order_value_label,
+        price_label=price_label,
+        limit_price=limit_price,
+        reduce_only=reduce_only,
+        is_trigger=is_trigger,
+        trigger_condition=trigger_condition,
+        trigger_price=trigger_price,
+        trigger_kind=trigger_kind,
+        is_market_trigger=is_market_trigger,
+        tif=tif,
+        tpsl_label=tpsl_label,
+    )
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    return text in {"1", "true", "yes", "y"}
+
+
+def _optional_order_float(value: Any) -> float | None:
+    if value in (None, "", "--"):
+        return None
+    try:
+        return float(str(value).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _price_is_market(order: dict[str, Any]) -> bool:
+    raw_price = str(order.get("price") or order.get("limitPx") or "").strip().lower()
+    return raw_price == "market"
+
+
+def _trigger_condition_label(order: dict[str, Any], trigger_price: float | None) -> str:
+    existing = str(order.get("triggerCondition") or "").strip()
+    if existing:
+        return existing
+    if trigger_price is None:
+        return "--"
+    return f"Price above {_format_hyperliquid_size(trigger_price)}" if _trigger_is_price_above(order) else f"Price below {_format_hyperliquid_size(trigger_price)}"
+
+
+def _trigger_is_price_above(order: dict[str, Any]) -> bool:
+    condition = str(order.get("triggerCondition") or "").lower()
+    if "above" in condition:
+        return True
+    if "below" in condition:
+        return False
+    side = _order_side_for_edit(order, "buy")
+    reduce_only = _as_bool(order.get("reduceOnly", order.get("reduce_only", False)))
+    return side == "buy" and reduce_only
+
+
+def _trigger_kind_from_order(order: dict[str, Any], side: str, trigger_condition: str) -> str:
+    raw_type = str(order.get("orderType") or order.get("type") or "").lower()
+    raw_tpsl = str(order.get("tpsl") or order.get("tpSl") or "").lower()
+    if "take" in raw_type or raw_tpsl == "tp":
+        return "tp"
+    if "stop" in raw_type or raw_tpsl == "sl":
+        return "sl"
+    if "above" in trigger_condition.lower() and side == "buy":
+        return "sl"
+    if "below" in trigger_condition.lower() and side == "sell":
+        return "sl"
+    return "tp"
+
+
+def _direction_label(side: str, reduce_only: bool, close_position: bool) -> str:
+    if reduce_only and close_position:
+        return "Close Short" if side == "buy" else "Close Long"
+    if reduce_only:
+        return "Reduce Short" if side == "buy" else "Reduce Long"
+    return "Buy" if side == "buy" else "Sell"
+
+
+def _format_order_price_label(value: float) -> str:
+    return "--" if value <= 0 else _format_hyperliquid_size(value)
+
+
+def _order_value_label(order: dict[str, Any], size: float, price: float, close_position: bool) -> str:
+    for key in ("orderValue", "orderValueUsd", "value"):
+        if order.get(key) not in (None, ""):
+            return str(order[key])
+    if close_position or size <= 0 or price <= 0:
+        return "--"
+    return f"{size * price:,.2f} USDC"
+
+
+def _tpsl_label(order: dict[str, Any], trigger_kind: str, is_trigger: bool) -> str:
+    if _as_bool(order.get("isPositionTpsl", False)):
+        return "TP" if trigger_kind == "tp" else "SL"
+    if is_trigger:
+        return "TP" if trigger_kind == "tp" else "SL"
+    return "--"
+
+
+def _format_optional_trigger_price(value: float | None) -> str:
+    return "--" if value is None else f"${value:,.4f}"
 
 
 def _selected_hyperliquid_order(self: tk.Tk) -> dict[str, Any] | None:
@@ -869,6 +1107,11 @@ def _edit_hyperliquid_order_guarded(
     raw_tif: str,
     raw_context: str = "Spot",
     reduce_only: bool = False,
+    raw_size_mode: str = "Numeric size",
+    is_trigger: bool = False,
+    raw_trigger_price: str = "",
+    raw_trigger_kind: str = "sl",
+    is_market_trigger: bool = False,
     dialog: tk.Toplevel | None = None,
 ) -> None:
     try:
@@ -882,18 +1125,34 @@ def _edit_hyperliquid_order_guarded(
         side = raw_side.strip().lower()
         if side not in {"buy", "sell"}:
             raise ValueError("Side must be buy or sell.")
-        size = float(raw_size.strip().replace(",", ""))
-        limit_price = float(raw_limit_price.strip().replace(",", ""))
+        close_position = raw_size_mode == "Close Position"
+        size = 0.0 if close_position else float(raw_size.strip().replace(",", ""))
+        trigger_price = float(raw_trigger_price.strip().replace(",", "")) if is_trigger else None
+        limit_price = (
+            trigger_price
+            if is_trigger and is_market_trigger and trigger_price is not None
+            else float(raw_limit_price.strip().replace(",", ""))
+        )
         tif = raw_tif.strip() or "Gtc"
-        if tif not in HYPERLIQUID_TIFS:
+        if not is_trigger and tif not in HYPERLIQUID_TIFS:
             raise ValueError("TIF must be Alo, Ioc, or Gtc.")
-        ticket = HyperliquidOrderTicket(
+        if close_position and not is_trigger:
+            raise ValueError("Numeric size is not required for Close Position stop orders, but Close Position edits must remain trigger/TP-SL orders.")
+        if is_trigger and trigger_price is None:
+            raise ValueError("Trigger edits require a trigger price.")
+        trigger_kind = raw_trigger_kind.strip().lower() or "sl"
+        ticket = HyperliquidOrderEditTicket(
             coin=market,
             is_buy=side == "buy",
             size=size,
             limit_price=limit_price,
             tif=tif,
             reduce_only=bool(reduce_only) if raw_context == "Perp" else False,
+            is_trigger=is_trigger,
+            trigger_price=trigger_price,
+            trigger_kind=trigger_kind,
+            is_market_trigger=is_market_trigger,
+            close_position=close_position,
         )
     except Exception as exc:
         messagebox.showerror("Hyperliquid edit blocked", str(exc))
@@ -901,7 +1160,7 @@ def _edit_hyperliquid_order_guarded(
 
     config = HyperliquidTradingConfig()
     try:
-        config.validate_for_live(ticket)
+        config.validate_edit_for_live(ticket)
     except Exception as exc:
         self._set_preview_text(
             "HYPERLIQUID EDIT BLOCKED\n"
@@ -922,8 +1181,9 @@ def _edit_hyperliquid_order_guarded(
         f"Order ID: {order_id}\n"
         f"Market: {ticket.coin}\n"
         f"Side: {ticket.side_label}\n"
-        f"New size: {ticket.size:g}\n"
-        f"New limit price: ${ticket.limit_price:,.4f}\n"
+        f"New size: {ticket.size_label}\n"
+        f"New price: ${ticket.wire_limit_price:,.4f}\n"
+        f"Trigger: {'yes' if ticket.is_trigger else 'no'}\n"
         f"TIF: {ticket.tif}\n"
         f"Reduce-only: {'yes' if ticket.reduce_only else 'no'}\n\n"
         "Continue?",
@@ -932,13 +1192,14 @@ def _edit_hyperliquid_order_guarded(
         return
 
     try:
-        result = HyperliquidExecutionAdapter().modify_order(order_id, ticket)
+        result = HyperliquidExecutionAdapter().modify_order_edit(order_id, ticket)
         self.cancel_order_id_var.set(str(order_id))
         self.symbol_var.set(_display_spot_base(ticket.coin))
         self.hyperliquid_coin_var.set(_display_spot_base(ticket.coin))
         self.side_var.set("buy" if ticket.is_buy else "sell")
-        self.quantity_var.set(_format_hyperliquid_size(ticket.size))
-        self.limit_price_var.set(_format_hyperliquid_size(ticket.limit_price))
+        if not ticket.close_position:
+            self.quantity_var.set(_format_hyperliquid_size(ticket.size))
+        self.limit_price_var.set(_format_hyperliquid_size(ticket.wire_limit_price))
         self.hyperliquid_tif_var.set(ticket.tif)
         self.hyperliquid_status_var.set("Hyperliquid: edit attempted")
         self._set_preview_text(
@@ -947,8 +1208,10 @@ def _edit_hyperliquid_order_guarded(
             f"Order ID: {order_id}\n"
             f"Market: {ticket.coin}\n"
             f"Side: {ticket.side_label}\n"
-            f"Size: {ticket.size:g}\n"
-            f"Limit price: ${ticket.limit_price:,.4f}\n\n"
+            f"Size: {ticket.size_label}\n"
+            f"Price: ${ticket.wire_limit_price:,.4f}\n"
+            f"Trigger: {'yes' if ticket.is_trigger else 'no'}\n"
+            f"Trigger price: {_format_optional_trigger_price(ticket.trigger_price)}\n\n"
             f"Reduce-only: {'yes' if ticket.reduce_only else 'no'}\n\n"
             f"Response:\n{result}\n\n"
             "Refreshing Hyperliquid open orders..."
@@ -1022,6 +1285,22 @@ def _show_hyperliquid_position_tpsl_dialog(self: tk.Tk) -> None:
         ttk.Label(shell, textvariable=var, style="Body.TLabel").grid(row=row, column=1, sticky="ew", pady=4)
 
     row = len(readonly_lines)
+    existing = _matching_tpsl_orders(self, coin)
+    if existing:
+        existing_frame = ttk.LabelFrame(shell, text="Existing TP/SL", style="Card.TLabelframe")
+        existing_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 4))
+        existing_frame.columnconfigure(0, weight=1)
+        for existing_row, order in enumerate(existing):
+            label = f"{order.tpsl_label}: {order.trigger_condition} · {order.size_label} · oid {order.oid}"
+            ttk.Label(existing_frame, text=label, style="Subtle.TLabel").grid(row=existing_row, column=0, sticky="w", pady=3)
+            ttk.Button(
+                existing_frame,
+                text="Cancel",
+                command=lambda oid=order.oid: _cancel_tpsl_from_dialog(self, oid),
+                style="CompactDanger.TButton",
+            ).grid(row=existing_row, column=1, sticky="ew", padx=(8, 0), pady=3)
+        row += 1
+
     ttk.Label(shell, text="TP price", style="Subtle.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 10), pady=5)
     ttk.Entry(shell, textvariable=tp_var).grid(row=row, column=1, sticky="ew", pady=5)
     row += 1
@@ -1184,6 +1463,22 @@ def _current_hyperliquid_perp_position(self: tk.Tk, coin: str) -> tuple[Any, boo
     if long_position is not None:
         return long_position, False
     raise ValueError(f"No active Hyperliquid perp position found for {coin}.")
+
+
+def _matching_tpsl_orders(self: tk.Tk, coin: str) -> list[HyperliquidOpenOrder]:
+    normalized_coin = normalize_hyperliquid_coin(coin)
+    orders = getattr(self, "hyperliquid_open_order_by_oid", {})
+    matches: list[HyperliquidOpenOrder] = []
+    for order in orders.values():
+        normalized = normalize_hyperliquid_open_order(order)
+        if normalize_hyperliquid_coin(normalized.coin) == normalized_coin and normalized.is_trigger and normalized.reduce_only:
+            matches.append(normalized)
+    return matches
+
+
+def _cancel_tpsl_from_dialog(self: tk.Tk, order_id: str) -> None:
+    self.cancel_order_id_var.set(order_id)
+    self.cancel_hyperliquid_order_guarded()
 
 
 def _lookup_hyperliquid_perp_mid(coin: str) -> float:
@@ -1357,26 +1652,28 @@ def _format_hyperliquid_open_orders(
     if not open_orders:
         lines.append("- None")
     else:
-        for index, order in enumerate(open_orders, start=1):
-            coin = _display_order_coin(order.get("coin", "UNKNOWN"), selected_coin)
-            side = _display_order_side(order.get("side", "UNKNOWN"))
-            size = order.get("sz", order.get("size", "?"))
-            price = order.get("limitPx", order.get("price", "?"))
-            oid = order.get("oid", "?")
-            tif = order.get("tif") or order.get("timeInForce") or "--"
-            reduce_only = order.get("reduceOnly", order.get("reduce_only", False))
-            lines.extend(
-                [
-                    f"Order {index}",
-                    f"- Market: {coin}",
-                    f"- Side: {side}",
-                    f"- Size: {size}",
-                    f"- Limit price: {price}",
-                    f"- Order ID: {oid}",
-                    f"- TIF: {tif}",
-                    f"- Reduce-only: {reduce_only}",
-                    "",
-                ]
+        rows = [normalize_hyperliquid_open_order(order) for order in open_orders]
+        header = (
+            f"{'Time':<17} {'Type':<13} {'Coin':<10} {'Direction':<13} {'Size':<15} "
+            f"{'Original':<10} {'Order Value':<15} {'Price':<11} {'RO':<4} {'Trigger Conditions':<22} {'TP/SL':<6} {'OID':<12}"
+        )
+        lines.append(header)
+        lines.append("-" * len(header))
+        for row in rows:
+            coin = _display_order_coin(row.coin or "UNKNOWN", selected_coin)
+            lines.append(
+                f"{_order_time_label(row.raw):<17} "
+                f"{row.order_kind:<13.13} "
+                f"{coin:<10.10} "
+                f"{row.direction:<13.13} "
+                f"{row.size_label:<15.15} "
+                f"{row.original_size_label:<10.10} "
+                f"{row.order_value_label:<15.15} "
+                f"{row.price_label:<11.11} "
+                f"{'Yes' if row.reduce_only else '--':<4} "
+                f"{row.trigger_condition:<22.22} "
+                f"{row.tpsl_label:<6.6} "
+                f"{row.oid:<12.12}"
             )
 
     lines.extend(
@@ -1386,6 +1683,17 @@ def _format_hyperliquid_open_orders(
         ]
     )
     return "\n".join(lines)
+
+
+def _order_time_label(order: dict[str, Any]) -> str:
+    raw_time = order.get("timestamp")
+    try:
+        timestamp = int(raw_time)
+    except (TypeError, ValueError):
+        return "--"
+    if timestamp > 10_000_000_000:
+        timestamp = timestamp // 1000
+    return datetime.fromtimestamp(timestamp).strftime("%m/%d %H:%M:%S")
 
 
 def _display_order_coin(raw_coin: Any, selected_coin: str) -> str:
