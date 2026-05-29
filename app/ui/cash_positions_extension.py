@@ -289,6 +289,8 @@ def _ensure_split_positions_table(self: tk.Tk) -> None:
     for table in pnl_tables.values():
         _configure_position_table_headings(table)
 
+    _bind_position_ticket_shortcuts(self)
+
 
 def _widget_alive(widget: tk.Widget) -> bool:
     try:
@@ -324,6 +326,85 @@ def _bind_synced_table_scroll(self: tk.Tk, table: ttk.Treeview) -> None:
 
     for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
         table.bind(sequence, _on_mousewheel, add="+")
+
+
+def _bind_position_ticket_shortcuts(self: tk.Tk) -> None:
+    for table in _all_position_tables(self):
+        table.bind("<ButtonRelease-1>", lambda event, app=self, source=table: _load_ticket_from_position_click(app, source, event), add="+")
+        table.bind("<Motion>", lambda event, source=table: _update_position_cursor(source, event), add="+")
+        table.bind("<Leave>", lambda _event, source=table: source.configure(cursor=""), add="+")
+
+
+def _update_position_cursor(table: ttk.Treeview, event: tk.Event) -> None:
+    row_id = table.identify_row(event.y)
+    table.configure(cursor="hand2" if row_id else "")
+
+
+def _load_ticket_from_position_click(self: tk.Tk, table: ttk.Treeview, event: tk.Event) -> None:
+    row_id = table.identify_row(event.y)
+    if not row_id:
+        return
+
+    values = _row_values_by_column(self.positions_table, row_id)
+    symbol = values.get("symbol", "").strip()
+    asset_type = values.get("asset_type", "").strip()
+    if not symbol or asset_type.lower() == "cash":
+        return
+
+    ticket_symbol = _ticket_symbol_from_position(symbol)
+    if not ticket_symbol:
+        return
+
+    self.symbol_var.set(ticket_symbol)
+
+    if _position_is_hyperliquid(asset_type, symbol):
+        if hasattr(self, "trade_venue_var"):
+            self.trade_venue_var.set("Hyperliquid")
+        if hasattr(self, "hyperliquid_coin_var"):
+            self.hyperliquid_coin_var.set(ticket_symbol)
+        if hasattr(self, "on_trading_venue_changed"):
+            try:
+                self.on_trading_venue_changed()
+            except Exception:
+                pass
+    else:
+        if hasattr(self, "trade_venue_var"):
+            self.trade_venue_var.set("Schwab")
+        if hasattr(self, "hyperliquid_coin_var"):
+            self.hyperliquid_coin_var.set("")
+
+
+def _row_values_by_column(table: ttk.Treeview, row_id: str) -> dict[str, str]:
+    raw_values = table.item(row_id, "values")
+    return {
+        str(column): str(raw_values[index])
+        for index, column in enumerate(table["columns"])
+        if index < len(raw_values)
+    }
+
+
+def _position_is_hyperliquid(asset_type: str, symbol: str) -> bool:
+    normalized_type = asset_type.strip().lower()
+    normalized_symbol = symbol.strip().upper()
+    return (
+        normalized_type.startswith("perp")
+        or normalized_type == "spot"
+        or normalized_type == "hyperliquid"
+        or normalized_symbol.endswith("-SPOT")
+        or "-PERP" in normalized_symbol
+    )
+
+
+def _ticket_symbol_from_position(symbol: str) -> str:
+    clean = symbol.strip().upper()
+    if clean.startswith("HL:"):
+        clean = clean[3:]
+    if "(" in clean:
+        clean = clean.split("(", 1)[0].strip()
+    for suffix in ("-PERP-SHORT", "-PERP", "-SPOT"):
+        if clean.endswith(suffix):
+            clean = clean[: -len(suffix)]
+    return clean
 
 
 def _clear_positions_tables(self: tk.Tk) -> None:
