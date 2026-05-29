@@ -41,6 +41,7 @@ def install_hyperliquid_trading_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls.load_selected_open_orders_only = _load_selected_open_orders_only  # type: ignore[attr-defined]
     app_cls.load_hyperliquid_open_orders = _load_hyperliquid_open_orders  # type: ignore[attr-defined]
     app_cls.preview_hyperliquid_ticket = _preview_hyperliquid_ticket  # type: ignore[attr-defined]
+    app_cls.preview_hyperliquid_spot_ticket = _preview_hyperliquid_spot_ticket  # type: ignore[attr-defined]
     app_cls.show_hyperliquid_live_submit_safety_review = _show_hyperliquid_live_submit_safety_review  # type: ignore[attr-defined]
     app_cls.parse_hyperliquid_ticket = _parse_hyperliquid_ticket  # type: ignore[attr-defined]
     app_cls.on_trading_venue_changed = _on_trading_venue_changed  # type: ignore[attr-defined]
@@ -1068,6 +1069,17 @@ def _preview_hyperliquid_ticket(self: tk.Tk) -> None:
     except Exception as exc:
         self.hyperliquid_status_var.set("Hyperliquid: preview failed")
         messagebox.showerror("Hyperliquid preview failed", str(exc))
+
+
+def _preview_hyperliquid_spot_ticket(self: tk.Tk) -> None:
+    try:
+        ticket = self.parse_hyperliquid_spot_ticket()
+        config = HyperliquidTradingConfig()
+        self.hyperliquid_status_var.set("Hyperliquid spot: preview ready")
+        self._set_preview_text(config.preview_text(ticket))
+    except Exception as exc:
+        self.hyperliquid_status_var.set("Hyperliquid spot: preview failed")
+        messagebox.showerror("Hyperliquid spot preview failed", str(exc))
 
 
 def _show_hyperliquid_live_submit_safety_review(self: tk.Tk) -> None:

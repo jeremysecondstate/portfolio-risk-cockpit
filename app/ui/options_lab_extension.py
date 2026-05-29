@@ -293,8 +293,8 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     ttk.Label(
         header,
         text=(
-            "Dedicated Hyperliquid execution surface for HYPE/BTC-style perp tickets. "
-            "This keeps perp-only controls away from Schwab stock and option workflows."
+            "Dedicated Hyperliquid execution surface for spot and perp tickets. "
+            "This keeps crypto controls away from Schwab stock and option workflows."
         ),
         style="Subtle.TLabel",
         wraplength=1120,
@@ -316,14 +316,85 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
 
     ticket_shell = ttk.Frame(workspace, style="Canvas.TFrame")
     output_shell = ttk.Frame(workspace, style="Canvas.TFrame")
-    workspace.add(ticket_shell, minsize=540, stretch="never")
+    workspace.add(ticket_shell, minsize=760, stretch="always")
     workspace.add(output_shell, minsize=520, stretch="always")
 
-    ticket = ttk.LabelFrame(ticket_shell, text="Hyperliquid Perp Ticket", style="Card.TLabelframe")
-    ticket.pack(fill=tk.BOTH, expand=True)
-    ticket.columnconfigure(1, weight=1)
-    ticket.columnconfigure(3, weight=1)
+    hyperliquid_output_frame = ttk.LabelFrame(output_shell, text="Hyperliquid Analysis + Order Output", style="Card.TLabelframe")
+    hyperliquid_output_frame.pack(fill=tk.BOTH, expand=True)
+    self.hyperliquid_trading_preview_text = _workspace_text(hyperliquid_output_frame)
 
+    def hyperliquid_action(*names: str) -> Callable[[], None]:
+        return lambda: _run_workspace_action(
+            self,
+            venue="Hyperliquid",
+            preview_widget=self.hyperliquid_trading_preview_text,
+            command=_first_available_command(self, *names),
+        )
+
+    from app.ui import hyperliquid_trading_extension as hyperliquid_ui
+
+    hyperliquid_ui._ensure_hyperliquid_vars(self)
+    hyperliquid_ui._configure_compact_ticket_styles(self)
+
+    tickets = ttk.Frame(ticket_shell, style="Canvas.TFrame")
+    tickets.pack(fill=tk.BOTH, expand=True)
+    for column in range(2):
+        tickets.columnconfigure(column, weight=1, uniform="hyperliquid_tickets")
+    tickets.rowconfigure(0, weight=1)
+
+    spot_ticket = ttk.LabelFrame(tickets, text="Hyperliquid Spot Ticket", style="Card.TLabelframe")
+    spot_ticket.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+    spot_ticket.columnconfigure(1, weight=1)
+    spot_ticket.columnconfigure(3, weight=1)
+
+    perp_ticket = ttk.LabelFrame(tickets, text="Hyperliquid Perp Ticket", style="Card.TLabelframe")
+    perp_ticket.grid(row=0, column=1, sticky="nsew")
+    perp_ticket.columnconfigure(1, weight=1)
+    perp_ticket.columnconfigure(3, weight=1)
+
+    self._grid_row(spot_ticket, 0, "Market", ttk.Entry(spot_ticket, textvariable=self.symbol_var), "HL Coin", ttk.Entry(spot_ticket, textvariable=self.hyperliquid_coin_var))
+    self._grid_row(
+        spot_ticket,
+        1,
+        "Side",
+        ttk.Combobox(spot_ticket, textvariable=self.side_var, values=[s.value for s in OrderSide], state="readonly"),
+        "Order type",
+        ttk.Combobox(spot_ticket, textvariable=self.order_type_var, values=[o.value for o in OrderType], state="readonly"),
+    )
+    hyperliquid_ui._grid_hyperliquid_quantity_row(spot_ticket, self, 2)
+    hyperliquid_ui._grid_hyperliquid_size_controls(spot_ticket, self, 3)
+    self._grid_row(
+        spot_ticket,
+        4,
+        "Stop price",
+        ttk.Entry(spot_ticket, textvariable=self.stop_price_var),
+        "Use Mid",
+        ttk.Button(spot_ticket, text="Use Mid", command=hyperliquid_action("use_hyperliquid_cockpit_spot_mid_market"), style="Accent.TButton"),
+    )
+    self._grid_row(
+        spot_ticket,
+        5,
+        "HL TIF",
+        ttk.Combobox(spot_ticket, textvariable=self.hyperliquid_tif_var, values=["Alo", "Ioc", "Gtc"], state="readonly"),
+        "",
+        ttk.Frame(spot_ticket, style="Canvas.TFrame"),
+    )
+    ttk.Label(spot_ticket, text="Cancel order ID", style="Subtle.TLabel").grid(row=6, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+    ttk.Entry(spot_ticket, textvariable=self.cancel_order_id_var).grid(row=6, column=1, columnspan=3, sticky="ew", pady=(8, 0))
+
+    spot_actions = ttk.LabelFrame(spot_ticket, text="Spot Actions", style="Card.TLabelframe")
+    spot_actions.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+    for column in range(3):
+        spot_actions.columnconfigure(column, weight=1, uniform="hyperliquid_spot_actions")
+
+    _add_workspace_button(spot_actions, row=0, column=0, text="Use Mid", command=hyperliquid_action("use_hyperliquid_cockpit_spot_mid_market"), style="Accent.TButton")
+    _add_workspace_button(spot_actions, row=0, column=1, text="Preview Spot", command=hyperliquid_action("preview_hyperliquid_spot_ticket"), style="Accent.TButton")
+    _add_workspace_button(spot_actions, row=0, column=2, text="Open Orders", command=hyperliquid_action("load_hyperliquid_open_orders"))
+    _add_workspace_button(spot_actions, row=1, column=0, text="Edit Order", command=hyperliquid_action("show_hyperliquid_order_edit_dialog"))
+    _add_workspace_button(spot_actions, row=1, column=1, text="Cancel Order", command=hyperliquid_action("cancel_hyperliquid_order_guarded"), style="Danger.TButton")
+    _add_workspace_button(spot_actions, row=1, column=2, text="LIVE Submit", command=hyperliquid_action("show_hyperliquid_spot_live_submit_safety_review"), style="Danger.TButton")
+
+    ticket = perp_ticket
     self._grid_row(ticket, 0, "Coin", ttk.Entry(ticket, textvariable=self.hyperliquid_coin_var), "Symbol", ttk.Entry(ticket, textvariable=self.symbol_var))
     self._grid_row(
         ticket,
@@ -342,22 +413,10 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     ttk.Label(ticket, text="Cancel order ID", style="Subtle.TLabel").grid(row=7, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
     ttk.Entry(ticket, textvariable=self.cancel_order_id_var).grid(row=7, column=1, columnspan=3, sticky="ew", pady=(8, 0))
 
-    hyperliquid_output_frame = ttk.LabelFrame(output_shell, text="Hyperliquid Analysis + Order Output", style="Card.TLabelframe")
-    hyperliquid_output_frame.pack(fill=tk.BOTH, expand=True)
-    self.hyperliquid_trading_preview_text = _workspace_text(hyperliquid_output_frame)
-
     actions = ttk.LabelFrame(ticket, text="Hyperliquid Actions", style="Card.TLabelframe")
     actions.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(14, 0))
     for column in range(3):
         actions.columnconfigure(column, weight=1, uniform="hyperliquid_actions")
-
-    def hyperliquid_action(*names: str) -> Callable[[], None]:
-        return lambda: _run_workspace_action(
-            self,
-            venue="Hyperliquid",
-            preview_widget=self.hyperliquid_trading_preview_text,
-            command=_first_available_command(self, *names),
-        )
 
     _add_workspace_button(actions, row=0, column=0, text="Use Mid", command=hyperliquid_action("use_hyperliquid_mid_market"), style="Accent.TButton")
     _add_workspace_button(actions, row=0, column=1, text="Perp What-If", command=hyperliquid_action("run_hyperliquid_perp_what_if"), style="Accent.TButton")
