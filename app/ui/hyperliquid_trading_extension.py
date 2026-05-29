@@ -33,6 +33,8 @@ def install_hyperliquid_trading_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls.submit_selected_venue = _submit_selected_venue  # type: ignore[attr-defined]
     app_cls.cancel_selected_order = _cancel_selected_order  # type: ignore[attr-defined]
     app_cls.cancel_hyperliquid_order_guarded = _cancel_hyperliquid_order_guarded  # type: ignore[attr-defined]
+    app_cls.show_hyperliquid_order_edit_dialog = _show_hyperliquid_order_edit_dialog  # type: ignore[attr-defined]
+    app_cls.edit_hyperliquid_order_guarded = _edit_hyperliquid_order_guarded  # type: ignore[attr-defined]
     app_cls.load_selected_recent_orders = _load_selected_recent_orders  # type: ignore[attr-defined]
     app_cls._build_order_panel = _build_order_panel_with_hyperliquid  # type: ignore[method-assign]
     app_cls.load_selected_open_orders_only = _load_selected_open_orders_only  # type: ignore[attr-defined]
@@ -57,6 +59,8 @@ def _ensure_hyperliquid_vars(self: tk.Tk) -> None:
         self.hyperliquid_status_var = tk.StringVar(value="Hyperliquid: preview only")
     if not hasattr(self, "hyperliquid_open_order_coin_by_oid"):
         self.hyperliquid_open_order_coin_by_oid = {}
+    if not hasattr(self, "hyperliquid_open_order_by_oid"):
+        self.hyperliquid_open_order_by_oid = {}
     if not hasattr(self, "hyperliquid_size_percent_var"):
         self.hyperliquid_size_percent_var = tk.DoubleVar(value=0.0)
     if not hasattr(self, "hyperliquid_size_status_var"):
@@ -183,8 +187,9 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
 
     _grid_action_button(live_group, 0, 0, "Recent", self.load_selected_recent_orders)
     _grid_action_button(live_group, 0, 1, "Open", self.load_selected_open_orders_only)
-    _grid_action_button(live_group, 1, 0, "Cancel", self.cancel_selected_order, "CompactDanger.TButton")
-    _grid_action_button(live_group, 1, 1, "Submit", self.submit_cockpit_selected_venue, "CompactDanger.TButton")
+    _grid_action_button(live_group, 1, 0, "Edit", self.show_hyperliquid_order_edit_dialog)
+    _grid_action_button(live_group, 1, 1, "Cancel", self.cancel_selected_order, "CompactDanger.TButton")
+    _grid_action_button(live_group, 2, 0, "Submit", self.submit_cockpit_selected_venue, "CompactDanger.TButton", columnspan=2)
 
     status_bar = ttk.Frame(ticket, style="Panel.TFrame")
     status_bar.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(10, 0))
@@ -422,6 +427,216 @@ def _cancel_selected_order(self: tk.Tk) -> None:
     self.show_cancel_order_placeholder()
 
 
+def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
+    _ensure_hyperliquid_vars(self)
+    if not _selected_venue_is_hyperliquid(self):
+        self.trade_venue_var.set("Hyperliquid")
+
+    cached_order = _selected_hyperliquid_order(self)
+    raw_order_id = self.cancel_order_id_var.get().strip()
+    if not raw_order_id and cached_order is not None:
+        raw_order_id = str(cached_order.get("oid") or "")
+
+    market = _order_market_for_edit(self, cached_order)
+    side = _order_side_for_edit(cached_order, self.side_var.get())
+    size = str((cached_order or {}).get("sz") or (cached_order or {}).get("size") or self.quantity_var.get()).strip()
+    price = str((cached_order or {}).get("limitPx") or (cached_order or {}).get("price") or self.limit_price_var.get()).strip()
+    tif = str((cached_order or {}).get("tif") or (cached_order or {}).get("timeInForce") or self.hyperliquid_tif_var.get() or "Gtc")
+
+    dialog = tk.Toplevel(self)
+    dialog.title("Edit Hyperliquid Order")
+    dialog.transient(self)
+    dialog.resizable(False, False)
+
+    shell = ttk.Frame(dialog, style="Panel.TFrame", padding=14)
+    shell.pack(fill=tk.BOTH, expand=True)
+    shell.columnconfigure(1, weight=1)
+
+    order_id_var = tk.StringVar(value=raw_order_id)
+    market_var = tk.StringVar(value=market)
+    side_var = tk.StringVar(value=side)
+    size_var = tk.StringVar(value=size)
+    price_var = tk.StringVar(value=price)
+    tif_var = tk.StringVar(value=tif if tif in HYPERLIQUID_TIFS else "Gtc")
+
+    fields = [
+        ("Order ID", ttk.Entry(shell, textvariable=order_id_var)),
+        ("Market", ttk.Entry(shell, textvariable=market_var)),
+        ("Side", ttk.Combobox(shell, textvariable=side_var, values=["buy", "sell"], state="readonly")),
+        ("Size", ttk.Entry(shell, textvariable=size_var)),
+        ("Limit price", ttk.Entry(shell, textvariable=price_var)),
+        ("TIF", ttk.Combobox(shell, textvariable=tif_var, values=HYPERLIQUID_TIFS, state="readonly")),
+    ]
+    for row, (label, widget) in enumerate(fields):
+        ttk.Label(shell, text=label, style="Subtle.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 10), pady=5)
+        widget.grid(row=row, column=1, sticky="ew", pady=5)
+
+    note = ttk.Label(
+        shell,
+        text="Edits are live Hyperliquid modify-order requests. Use Open first to preload active order details.",
+        style="Subtle.TLabel",
+        wraplength=420,
+    )
+    note.grid(row=len(fields), column=0, columnspan=2, sticky="w", pady=(8, 2))
+
+    buttons = ttk.Frame(shell, style="Panel.TFrame")
+    buttons.grid(row=len(fields) + 1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+    buttons.columnconfigure((0, 1), weight=1)
+
+    def submit_edit() -> None:
+        self.edit_hyperliquid_order_guarded(
+            order_id_var.get(),
+            market_var.get(),
+            side_var.get(),
+            size_var.get(),
+            price_var.get(),
+            tif_var.get(),
+            dialog,
+        )
+
+    ttk.Button(buttons, text="Close", command=dialog.destroy).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+    ttk.Button(buttons, text="Confirm Edit", command=submit_edit, style="CompactDanger.TButton").grid(row=0, column=1, sticky="ew")
+
+
+def _selected_hyperliquid_order(self: tk.Tk) -> dict[str, Any] | None:
+    orders = getattr(self, "hyperliquid_open_order_by_oid", {})
+    raw_order_id = self.cancel_order_id_var.get().strip()
+    if raw_order_id and raw_order_id in orders:
+        return orders[raw_order_id]
+    if orders:
+        first_order_id = sorted(orders)[0]
+        self.cancel_order_id_var.set(first_order_id)
+        return orders[first_order_id]
+    return None
+
+
+def _order_market_for_edit(self: tk.Tk, order: dict[str, Any] | None) -> str:
+    raw_market = str((order or {}).get("coin") or "").strip()
+    if raw_market:
+        return raw_market
+    symbol_source = self.symbol_var.get().strip() or self.hyperliquid_coin_var.get().strip()
+    return normalize_hyperliquid_spot_market(symbol_source) if symbol_source else ""
+
+
+def _order_side_for_edit(order: dict[str, Any] | None, fallback: str) -> str:
+    raw_side = str((order or {}).get("side") or fallback or "").strip().upper()
+    if raw_side in {"B", "BUY"}:
+        return "buy"
+    if raw_side in {"A", "S", "SELL"}:
+        return "sell"
+    return "buy"
+
+
+def _edit_hyperliquid_order_guarded(
+    self: tk.Tk,
+    raw_order_id: str,
+    raw_market: str,
+    raw_side: str,
+    raw_size: str,
+    raw_limit_price: str,
+    raw_tif: str,
+    dialog: tk.Toplevel | None = None,
+) -> None:
+    try:
+        order_id = int(raw_order_id.strip())
+    except ValueError:
+        messagebox.showerror("Hyperliquid edit blocked", "Hyperliquid order ID must be a number.")
+        return
+
+    try:
+        market = _normalize_edit_market(raw_market)
+        side = raw_side.strip().lower()
+        if side not in {"buy", "sell"}:
+            raise ValueError("Side must be buy or sell.")
+        size = float(raw_size.strip().replace(",", ""))
+        limit_price = float(raw_limit_price.strip().replace(",", ""))
+        tif = raw_tif.strip() or "Gtc"
+        if tif not in HYPERLIQUID_TIFS:
+            raise ValueError("TIF must be Alo, Ioc, or Gtc.")
+        ticket = HyperliquidOrderTicket(
+            coin=market,
+            is_buy=side == "buy",
+            size=size,
+            limit_price=limit_price,
+            tif=tif,
+            reduce_only=False,
+        )
+    except Exception as exc:
+        messagebox.showerror("Hyperliquid edit blocked", str(exc))
+        return
+
+    config = HyperliquidTradingConfig()
+    try:
+        config.validate_for_live(ticket)
+    except Exception as exc:
+        self._set_preview_text(
+            "HYPERLIQUID EDIT BLOCKED\n"
+            "========================\n\n"
+            f"{exc}\n\n"
+            "Required local .env gates:\n"
+            "- HYPE_WALLET_ADDRESS\n"
+            "- HYPE_API_ADDRESS\n"
+            "- HYPE_API_SECRET\n"
+            "- HYPERLIQUID_ENABLE_LIVE_ORDERS=true\n\n"
+        )
+        messagebox.showerror("Hyperliquid edit blocked", str(exc))
+        return
+
+    ok = messagebox.askyesno(
+        "FINAL HYPERLIQUID ORDER EDIT CONFIRMATION",
+        "This will modify a LIVE Hyperliquid order.\n\n"
+        f"Order ID: {order_id}\n"
+        f"Market: {ticket.coin}\n"
+        f"Side: {ticket.side_label}\n"
+        f"New size: {ticket.size:g}\n"
+        f"New limit price: ${ticket.limit_price:,.4f}\n"
+        f"TIF: {ticket.tif}\n\n"
+        "Continue?",
+    )
+    if not ok:
+        return
+
+    try:
+        result = HyperliquidExecutionAdapter().modify_order(order_id, ticket)
+        self.cancel_order_id_var.set(str(order_id))
+        self.symbol_var.set(_display_spot_base(ticket.coin))
+        self.hyperliquid_coin_var.set(_display_spot_base(ticket.coin))
+        self.side_var.set("buy" if ticket.is_buy else "sell")
+        self.quantity_var.set(_format_hyperliquid_size(ticket.size))
+        self.limit_price_var.set(_format_hyperliquid_size(ticket.limit_price))
+        self.hyperliquid_tif_var.set(ticket.tif)
+        self.hyperliquid_status_var.set("Hyperliquid: edit attempted")
+        self._set_preview_text(
+            "HYPERLIQUID EDIT ORDER RESULT\n"
+            "=============================\n\n"
+            f"Order ID: {order_id}\n"
+            f"Market: {ticket.coin}\n"
+            f"Side: {ticket.side_label}\n"
+            f"Size: {ticket.size:g}\n"
+            f"Limit price: ${ticket.limit_price:,.4f}\n\n"
+            f"Response:\n{result}\n\n"
+            "Refreshing Hyperliquid open orders..."
+        )
+        if dialog is not None:
+            dialog.destroy()
+        try:
+            self.load_hyperliquid_open_orders(title="HYPERLIQUID OPEN ORDERS AFTER EDIT")
+        except Exception:
+            pass
+    except Exception as exc:
+        self.hyperliquid_status_var.set("Hyperliquid: edit failed")
+        messagebox.showerror("Hyperliquid edit failed", str(exc))
+
+
+def _normalize_edit_market(raw_market: str) -> str:
+    market = raw_market.strip().upper()
+    if not market:
+        raise ValueError("Enter a Hyperliquid market.")
+    if market.startswith("@"):
+        return market
+    return normalize_hyperliquid_spot_market(market)
+
+
 def _hyperliquid_cancel_coin_for_order(self: tk.Tk, order_id: str) -> str:
     cached_orders = getattr(self, "hyperliquid_open_order_coin_by_oid", {})
     cached_coin = cached_orders.get(order_id)
@@ -536,6 +751,11 @@ def _load_hyperliquid_open_orders(self: tk.Tk, title: str = "HYPERLIQUID OPEN OR
             str(order.get("oid")): str(order.get("coin"))
             for order in snapshot.open_orders
             if order.get("oid") is not None and order.get("coin")
+        }
+        self.hyperliquid_open_order_by_oid = {
+            str(order.get("oid")): order
+            for order in snapshot.open_orders
+            if order.get("oid") is not None
         }
         selected_coin = getattr(self, "hyperliquid_coin_var", tk.StringVar(value="")).get().strip()
         _address, source_key = _hyperliquid_env_address()
