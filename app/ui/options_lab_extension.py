@@ -25,6 +25,7 @@ def install_options_lab_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls.use_current_cockpit_source_portfolio = _use_current_cockpit_source_portfolio  # type: ignore[attr-defined]
     app_cls.use_hyperliquid_mid_market = _use_hyperliquid_mid_market  # type: ignore[attr-defined]
     app_cls.run_hyperliquid_perp_what_if = _run_hyperliquid_perp_what_if  # type: ignore[attr-defined]
+    app_cls.update_workspace_holdings_tables = _update_workspace_holdings_tables  # type: ignore[attr-defined]
 
 
 def _build_layout_with_options_lab(self: tk.Tk) -> None:
@@ -158,11 +159,205 @@ def _workspace_text(parent: ttk.Frame) -> tk.Text:
     return text
 
 
+def _workspace_holdings_table(parent: ttk.Frame) -> ttk.Treeview:
+    columns = ("symbol", "type", "qty", "last", "value", "pnl")
+    table = ttk.Treeview(parent, columns=columns, show="headings", height=6, selectmode="browse")
+    headings = {
+        "symbol": ("Symbol", 90, tk.W),
+        "type": ("Type", 80, tk.W),
+        "qty": ("Qty", 90, tk.E),
+        "last": ("Last", 90, tk.E),
+        "value": ("Value", 100, tk.E),
+        "pnl": ("P&L", 100, tk.E),
+    }
+    for column, (label, width, anchor) in headings.items():
+        table.heading(column, text=label)
+        table.column(column, width=width, anchor=anchor, stretch=True)
+    table.pack(fill=tk.BOTH, expand=True)
+    table.tag_configure("positive", foreground="#047857")
+    table.tag_configure("negative", foreground="#b91c1c")
+    table.tag_configure("cash", foreground="#334155")
+    return table
+
+
 def _set_workspace_text(widget: tk.Text, content: str) -> None:
     widget.configure(state=tk.NORMAL)
     widget.delete("1.0", tk.END)
     widget.insert(tk.END, content)
     widget.configure(state=tk.DISABLED)
+
+
+def _bind_workspace_holdings_click(self: tk.Tk, table: ttk.Treeview, venue: str) -> None:
+    table.bind("<ButtonRelease-1>", lambda event, app=self, source=table, selected_venue=venue: _load_workspace_ticket_from_holding(app, source, event, selected_venue), add="+")
+    table.bind("<Motion>", lambda event, source=table: source.configure(cursor="hand2" if source.identify_row(event.y) else ""), add="+")
+    table.bind("<Leave>", lambda _event, source=table: source.configure(cursor=""), add="+")
+
+
+def _load_workspace_ticket_from_holding(self: tk.Tk, table: ttk.Treeview, event: tk.Event, venue: str) -> None:
+    row_id = table.identify_row(event.y)
+    if not row_id:
+        return
+
+    raw_values = table.item(row_id, "values")
+    columns = tuple(table["columns"])
+    values = {str(column): str(raw_values[index]) for index, column in enumerate(columns) if index < len(raw_values)}
+    symbol = values.get("symbol", "").strip()
+    asset_type = values.get("type", "").strip()
+    if not symbol or asset_type.lower() == "cash":
+        return
+
+    ticket_symbol = _workspace_ticket_symbol(symbol)
+    if not ticket_symbol:
+        return
+
+    if venue == "Hyperliquid":
+        self.trade_venue_var.set("Hyperliquid")
+        self.symbol_var.set(ticket_symbol)
+        self.hyperliquid_coin_var.set(ticket_symbol)
+        is_perp = asset_type.lower().startswith("perp") or "-PERP" in symbol.upper()
+        if is_perp:
+            if hasattr(self, "hyperliquid_workspace_active_ticket_var"):
+                self.hyperliquid_workspace_active_ticket_var.set("perp")
+            if hasattr(self, "hyperliquid_perp_coin_var"):
+                self.hyperliquid_perp_coin_var.set(ticket_symbol)
+            if hasattr(self, "hyperliquid_perp_symbol_var"):
+                self.hyperliquid_perp_symbol_var.set(ticket_symbol)
+        else:
+            if hasattr(self, "hyperliquid_workspace_active_ticket_var"):
+                self.hyperliquid_workspace_active_ticket_var.set("spot")
+            if hasattr(self, "hyperliquid_spot_symbol_var"):
+                self.hyperliquid_spot_symbol_var.set(ticket_symbol)
+            if hasattr(self, "hyperliquid_spot_coin_var"):
+                self.hyperliquid_spot_coin_var.set(ticket_symbol)
+        return
+
+    self.trade_venue_var.set("Schwab")
+    self.symbol_var.set(ticket_symbol)
+    if hasattr(self, "hyperliquid_coin_var"):
+        self.hyperliquid_coin_var.set("")
+    if hasattr(self, "options_symbol_var"):
+        self.options_symbol_var.set(ticket_symbol)
+
+
+def _workspace_ticket_symbol(symbol: str) -> str:
+    clean = symbol.strip().upper()
+    if clean.startswith("HL:"):
+        clean = clean[3:]
+    if "(" in clean:
+        clean = clean.split("(", 1)[0].strip()
+    for suffix in ("-PERP-SHORT", "-PERP", "-SPOT"):
+        if clean.endswith(suffix):
+            clean = clean[: -len(suffix)]
+    return clean
+
+
+def _update_workspace_holdings_tables(self: tk.Tk, portfolio=None) -> None:
+    portfolio = portfolio or self.broker.get_portfolio()
+    schwab_table = getattr(self, "schwab_workspace_holdings_table", None)
+    hyperliquid_table = getattr(self, "hyperliquid_workspace_holdings_table", None)
+    if schwab_table is not None:
+        _populate_workspace_holdings_table(schwab_table, _workspace_holding_rows(portfolio, "Schwab"))
+    if hyperliquid_table is not None:
+        _populate_workspace_holdings_table(hyperliquid_table, _workspace_holding_rows(portfolio, "Hyperliquid"))
+
+
+def _populate_workspace_holdings_table(table: ttk.Treeview, rows: list[dict[str, object]]) -> None:
+    for row_id in table.get_children():
+        table.delete(row_id)
+    for index, row in enumerate(rows):
+        pnl = row.get("pnl")
+        tag = "cash" if str(row.get("type", "")).lower() == "cash" else "positive" if isinstance(pnl, (int, float)) and pnl > 0 else "negative" if isinstance(pnl, (int, float)) and pnl < 0 else ""
+        table.insert(
+            "",
+            tk.END,
+            iid=f"holding_{index}",
+            values=(
+                row.get("symbol", ""),
+                row.get("type", ""),
+                row.get("qty", ""),
+                row.get("last", ""),
+                row.get("value", ""),
+                row.get("pnl_text", ""),
+            ),
+            tags=(tag,) if tag else (),
+        )
+
+
+def _workspace_holding_rows(portfolio, venue: str) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    total_value = max(portfolio.total_value, 0.01)
+
+    if venue == "Hyperliquid":
+        for cash in portfolio.display_cash_positions():
+            if "HYPERLIQUID" not in cash.source.upper():
+                continue
+            rows.append(
+                {
+                    "symbol": cash.display_symbol,
+                    "type": "Cash",
+                    "qty": f"{cash.quantity:g}",
+                    "last": _fmt_money(cash.last_price),
+                    "value": _fmt_money(cash.market_value),
+                    "pnl": None,
+                    "pnl_text": "--",
+                }
+            )
+
+    for symbol, position in sorted(portfolio.positions.items()):
+        asset_type = str(getattr(position, "asset_type", "") or _workspace_asset_type(symbol))
+        is_hyperliquid = _workspace_is_hyperliquid(asset_type, symbol)
+        if venue == "Hyperliquid" and not is_hyperliquid:
+            continue
+        if venue == "Schwab" and is_hyperliquid:
+            continue
+        rows.append(
+            {
+                "symbol": position.symbol,
+                "type": asset_type,
+                "qty": f"{position.quantity:g}",
+                "last": _fmt_money(position.last_price),
+                "value": _fmt_money(position.market_value),
+                "pnl": position.unrealized_profit_loss,
+                "pnl_text": _fmt_money(position.unrealized_profit_loss),
+                "weight": position.market_value / total_value,
+            }
+        )
+
+    return sorted(rows, key=lambda row: (str(row["type"]) == "Cash", -abs(_money_value(str(row["value"]))), str(row["symbol"])))
+
+
+def _workspace_asset_type(symbol: str) -> str:
+    clean = symbol.upper()
+    if clean.endswith("-PERP-SHORT"):
+        return "Perp Short"
+    if clean.endswith("-PERP"):
+        return "Perp Long"
+    if clean.endswith("-SPOT"):
+        return "Spot"
+    return "Equity"
+
+
+def _workspace_is_hyperliquid(asset_type: str, symbol: str) -> bool:
+    normalized_type = asset_type.strip().lower()
+    normalized_symbol = symbol.strip().upper()
+    return (
+        normalized_type == "spot"
+        or normalized_type.startswith("perp")
+        or normalized_type == "hyperliquid"
+        or normalized_symbol.endswith("-SPOT")
+        or "-PERP" in normalized_symbol
+    )
+
+
+def _fmt_money(value: float) -> str:
+    return f"${value:,.2f}"
+
+
+def _money_value(value: str) -> float:
+    try:
+        return float(value.replace("$", "").replace(",", ""))
+    except ValueError:
+        return 0.0
 
 
 def _first_available_command(self: tk.Tk, *names: str) -> Callable[[], None]:
@@ -464,7 +659,19 @@ def _build_schwab_trading_tab(
     ttk.Label(ticket, text="Cancel order ID", style="Subtle.TLabel").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
     ttk.Entry(ticket, textvariable=self.cancel_order_id_var).grid(row=4, column=1, columnspan=3, sticky="ew", pady=(8, 0))
 
-    schwab_output_frame = ttk.LabelFrame(output_shell, text="Schwab Analysis + Order Output", style="Card.TLabelframe")
+    output_stack = _make_paned(output_shell, tk.VERTICAL)
+    output_stack.pack(fill=tk.BOTH, expand=True)
+    holdings_shell = ttk.Frame(output_stack, style="Canvas.TFrame")
+    analysis_shell = ttk.Frame(output_stack, style="Canvas.TFrame")
+    output_stack.add(holdings_shell, minsize=150, stretch="never")
+    output_stack.add(analysis_shell, minsize=360, stretch="always")
+
+    schwab_holdings_frame = ttk.LabelFrame(holdings_shell, text="Schwab Holdings", style="Card.TLabelframe")
+    schwab_holdings_frame.pack(fill=tk.BOTH, expand=True)
+    self.schwab_workspace_holdings_table = _workspace_holdings_table(schwab_holdings_frame)
+    _bind_workspace_holdings_click(self, self.schwab_workspace_holdings_table, "Schwab")
+
+    schwab_output_frame = ttk.LabelFrame(analysis_shell, text="Schwab Analysis + Order Output", style="Card.TLabelframe")
     schwab_output_frame.pack(fill=tk.BOTH, expand=True)
     self.schwab_trading_preview_text = _workspace_text(schwab_output_frame)
 
@@ -547,7 +754,19 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     workspace.add(ticket_shell, minsize=760, stretch="always")
     workspace.add(output_shell, minsize=520, stretch="always")
 
-    hyperliquid_output_frame = ttk.LabelFrame(output_shell, text="Hyperliquid Analysis + Order Output", style="Card.TLabelframe")
+    output_stack = _make_paned(output_shell, tk.VERTICAL)
+    output_stack.pack(fill=tk.BOTH, expand=True)
+    holdings_shell = ttk.Frame(output_stack, style="Canvas.TFrame")
+    analysis_shell = ttk.Frame(output_stack, style="Canvas.TFrame")
+    output_stack.add(holdings_shell, minsize=170, stretch="never")
+    output_stack.add(analysis_shell, minsize=360, stretch="always")
+
+    hyperliquid_holdings_frame = ttk.LabelFrame(holdings_shell, text="Hyperliquid Balances", style="Card.TLabelframe")
+    hyperliquid_holdings_frame.pack(fill=tk.BOTH, expand=True)
+    self.hyperliquid_workspace_holdings_table = _workspace_holdings_table(hyperliquid_holdings_frame)
+    _bind_workspace_holdings_click(self, self.hyperliquid_workspace_holdings_table, "Hyperliquid")
+
+    hyperliquid_output_frame = ttk.LabelFrame(analysis_shell, text="Hyperliquid Analysis + Order Output", style="Card.TLabelframe")
     hyperliquid_output_frame.pack(fill=tk.BOTH, expand=True)
     self.hyperliquid_trading_preview_text = _workspace_text(hyperliquid_output_frame)
 

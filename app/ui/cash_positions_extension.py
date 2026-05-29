@@ -238,6 +238,9 @@ def _refresh_portfolio_with_cash_rows(self: tk.Tk) -> None:
     update_console = getattr(self, "update_cockpit_risk_console", None)
     if callable(update_console):
         update_console(portfolio)
+    update_workspace_holdings = getattr(self, "update_workspace_holdings_tables", None)
+    if callable(update_workspace_holdings):
+        update_workspace_holdings(portfolio)
 
 
 def _ensure_split_positions_table(self: tk.Tk) -> None:
