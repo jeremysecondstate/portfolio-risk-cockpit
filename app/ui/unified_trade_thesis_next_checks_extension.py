@@ -11,6 +11,7 @@ from app.analytics.technical_analysis import analyze_candles, candles_from_price
 from app.analytics.thesis_option_ticket import ThesisOptionTicket, build_thesis_option_ticket
 from app.analytics.trade_thesis import OptionChainCandidate, OptionChainContext, format_unified_trade_thesis, option_context_from_rows
 from app.data.sec_edgar import SecEdgarClient, SecFiling, normalize_ticker
+from app.macro.releases import build_macro_report
 
 REPORT_FORMS = ("10-K", "10-Q", "8-K")
 
@@ -25,12 +26,21 @@ def install_unified_trade_thesis_next_checks_extension(app_cls: Type[tk.Tk]) -> 
     """Make Tech Analysis execute and fold the old suggested checks into the thesis."""
 
     app_cls.show_technical_analysis = _show_unified_trade_thesis_with_next_checks  # type: ignore[method-assign]
+    app_cls.refresh_macro_data = _refresh_macro_data  # type: ignore[attr-defined]
+
+
+def _refresh_macro_data(self: tk.Tk) -> None:
+    self._set_preview_text(_macro_report_or_error(force_refresh=True))
+    if hasattr(self, "schwab_preview_status_var"):
+        self.schwab_preview_status_var.set("Last Schwab preview: macro refreshed")
 
 
 def _show_unified_trade_thesis_with_next_checks(self: tk.Tk) -> None:
     symbol = self.symbol_var.get().strip().upper()
     if not symbol:
-        messagebox.showerror("Unified thesis failed", "Enter a symbol first.")
+        self._set_preview_text(_macro_report_or_error())
+        if hasattr(self, "schwab_preview_status_var"):
+            self.schwab_preview_status_var.set("Last Schwab preview: macro only")
         return
 
     try:
@@ -106,10 +116,34 @@ def _show_unified_trade_thesis_with_next_checks(self: tk.Tk) -> None:
         )
 
         self.schwab_status_var.set("Schwab session: connected")
-        self._set_preview_text(report)
+        self._set_preview_text(_append_macro_report(report))
     except Exception as exc:
         self.current_thesis_option_ticket = None
-        messagebox.showerror("Unified thesis failed", str(exc))
+        try:
+            self._set_preview_text(
+                "Symbol / technical readout unavailable\n"
+                f"- {exc}\n\n"
+                f"{_macro_report_or_error()}"
+            )
+        except Exception:
+            messagebox.showerror("Unified thesis failed", str(exc))
+
+
+def _append_macro_report(symbol_report: str) -> str:
+    return f"{symbol_report.rstrip()}\n\n{_macro_report_or_error()}"
+
+
+def _macro_report_or_error(*, force_refresh: bool = False) -> str:
+    try:
+        return build_macro_report(force_refresh=force_refresh)
+    except Exception as exc:
+        return (
+            "Official Macro Snapshot\n"
+            f"Fetched: unavailable\n\n"
+            "Macro source status:\n"
+            f"- unavailable/error: {exc}\n"
+            "- Symbol-level technical analysis, if available above, remains valid independently of this macro fetch."
+        )
 
 
 def _replace_suggested_next_checks(

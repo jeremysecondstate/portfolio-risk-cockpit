@@ -197,15 +197,16 @@ def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
     _add_action_button(actions, row=0, column=0, text="Connect Schwab", command=schwab_action("connect_schwab", "run_schwab_preview"))
     _add_action_button(actions, row=0, column=1, text="Refresh Account", command=schwab_action("refresh_schwab_account", "refresh_portfolio"))
     _add_action_button(actions, row=0, column=2, text="Tech Analysis", command=schwab_action("show_technical_analysis"))
-    _add_action_button(actions, row=1, column=0, text="Preview Risk", command=schwab_action("preview_order"), style="Accent.TButton")
+    _add_action_button(actions, row=1, column=0, text="Macro Refresh", command=schwab_action("refresh_macro_data"))
     _add_action_button(actions, row=1, column=1, text="Preview Schwab Order", command=schwab_action("run_schwab_preview"))
     _add_action_button(actions, row=1, column=2, text="Position Size", command=schwab_action("show_position_size"))
-    _add_action_button(actions, row=2, column=0, text="Recent Orders", command=schwab_action("load_selected_recent_orders", "load_schwab_open_orders"))
+    _add_action_button(actions, row=2, column=0, text="Preview Risk", command=schwab_action("preview_order"), style="Accent.TButton")
     _add_action_button(actions, row=2, column=1, text="Open Only", command=schwab_action("load_selected_open_orders_only", "load_schwab_open_orders_only"))
     _add_action_button(actions, row=2, column=2, text="Options What-If", command=lambda app=self: _run_schwab_integrated_options_what_if(app), style="Accent.TButton")
-    _add_action_button(actions, row=3, column=0, text="Cancel Order", command=schwab_action("cancel_selected_order", "show_cancel_order_placeholder"), style="Danger.TButton")
+    _add_action_button(actions, row=3, column=0, text="Recent Orders", command=schwab_action("load_selected_recent_orders", "load_schwab_open_orders"))
     _add_action_button(actions, row=3, column=1, text="Live Safety", command=schwab_action("show_live_submit_safety_review"))
     _add_action_button(actions, row=3, column=2, text="LIVE Submit", command=schwab_action("submit_selected_venue", "submit_live_schwab_order_guarded"), style="Danger.TButton")
+    _add_action_button(actions, row=4, column=0, text="Cancel Order", command=schwab_action("cancel_selected_order", "show_cancel_order_placeholder"), style="Danger.TButton")
 
 
 def _add_action_button(parent: ttk.Frame, *, row: int, column: int, text: str, command: Callable[[], None], style: str = "TButton") -> None:
