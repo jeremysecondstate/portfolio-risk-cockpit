@@ -146,7 +146,7 @@ class HyperliquidExecutionAdapter:
     """Fast guarded execution adapter with local SDK hooks."""
 
     def submit(self, ticket: HyperliquidOrderTicket) -> Any:
-        normalized_ticket = normalize_hyperliquid_ticket_for_wire(ticket)
+        normalized_ticket = normalize_hyperliquid_ticket_limit_price(ticket)
         config = HyperliquidTradingConfig()
         config.validate_for_live(normalized_ticket)
         return self._local_signed_submit(normalized_ticket)
@@ -164,7 +164,7 @@ class HyperliquidExecutionAdapter:
         return self._local_signed_cancel(normalized_coin, order_id)
 
     def modify_order(self, order_id: int, ticket: HyperliquidOrderTicket) -> Any:
-        normalized_ticket = normalize_hyperliquid_ticket_for_wire(ticket)
+        normalized_ticket = normalize_hyperliquid_ticket_limit_price(ticket)
         config = HyperliquidTradingConfig()
         config.validate_for_live(normalized_ticket)
         if order_id <= 0:
@@ -186,14 +186,15 @@ class HyperliquidExecutionAdapter:
             constants.MAINNET_API_URL,
             account_address=wallet_address,
         )
+        normalized_ticket = normalize_hyperliquid_ticket_size_for_exchange(ticket, exchange)
 
         return exchange.order(
-            ticket.coin,
-            ticket.is_buy,
-            ticket.size,
-            ticket.limit_price,
-            ticket.order_type_payload(),
-            reduce_only=ticket.reduce_only,
+            normalized_ticket.coin,
+            normalized_ticket.is_buy,
+            normalized_ticket.size,
+            normalized_ticket.limit_price,
+            normalized_ticket.order_type_payload(),
+            reduce_only=normalized_ticket.reduce_only,
         )
 
     def _local_signed_cancel(self, coin: str, order_id: int) -> Any:
@@ -229,15 +230,16 @@ class HyperliquidExecutionAdapter:
             constants.MAINNET_API_URL,
             account_address=wallet_address,
         )
+        normalized_ticket = normalize_hyperliquid_ticket_size_for_exchange(ticket, exchange)
 
         return exchange.modify_order(
             order_id,
-            ticket.coin,
-            ticket.is_buy,
-            ticket.size,
-            ticket.limit_price,
-            ticket.order_type_payload(),
-            reduce_only=ticket.reduce_only,
+            normalized_ticket.coin,
+            normalized_ticket.is_buy,
+            normalized_ticket.size,
+            normalized_ticket.limit_price,
+            normalized_ticket.order_type_payload(),
+            reduce_only=normalized_ticket.reduce_only,
         )
 
 
@@ -270,7 +272,34 @@ def normalize_hyperliquid_ticket_for_wire(ticket: HyperliquidOrderTicket) -> Hyp
     )
 
 
-def normalize_hyperliquid_size(size: float) -> float:
+def normalize_hyperliquid_ticket_size_for_exchange(ticket: HyperliquidOrderTicket, exchange: Any) -> HyperliquidOrderTicket:
+    decimals = _hyperliquid_size_decimals_for_exchange(ticket.coin, exchange)
+    normalized_size = normalize_hyperliquid_size(ticket.size, max_decimals=decimals)
+    if normalized_size == ticket.size:
+        return ticket
+    return HyperliquidOrderTicket(
+        coin=ticket.coin,
+        is_buy=ticket.is_buy,
+        size=normalized_size,
+        limit_price=ticket.limit_price,
+        tif=ticket.tif,
+        reduce_only=ticket.reduce_only,
+    )
+
+
+def _hyperliquid_size_decimals_for_exchange(coin: str, exchange: Any) -> int:
+    info = exchange.info
+    mapped_coin = info.name_to_coin.get(coin, coin)
+    asset = info.coin_to_asset.get(mapped_coin)
+    if asset is None:
+        return HYPERLIQUID_MAX_SIZE_DECIMALS
+    decimals = info.asset_to_sz_decimals.get(asset)
+    if decimals is None:
+        return HYPERLIQUID_MAX_SIZE_DECIMALS
+    return int(decimals)
+
+
+def normalize_hyperliquid_size(size: float, max_decimals: int = HYPERLIQUID_MAX_SIZE_DECIMALS) -> float:
     try:
         decimal_size = Decimal(str(size))
     except InvalidOperation as exc:
@@ -278,7 +307,8 @@ def normalize_hyperliquid_size(size: float) -> float:
     if decimal_size <= 0:
         raise ValueError("Hyperliquid size must be positive.")
 
-    quant = Decimal("1").scaleb(-HYPERLIQUID_MAX_SIZE_DECIMALS)
+    decimals = max(0, min(HYPERLIQUID_MAX_SIZE_DECIMALS, int(max_decimals)))
+    quant = Decimal("1").scaleb(-decimals)
     normalized = decimal_size.quantize(quant, rounding=ROUND_FLOOR)
     if normalized <= 0:
         raise ValueError("Hyperliquid size is too small after exchange precision rounding.")
