@@ -253,16 +253,16 @@ def _workspace_holdings_table(parent: ttk.Frame) -> ttk.Treeview:
 
 def _workspace_open_orders_table(parent: ttk.Frame) -> ttk.Treeview:
     columns = ("time", "type", "coin", "direction", "size", "price", "ro", "trigger", "tpsl", "oid")
-    table = ttk.Treeview(parent, columns=columns, show="headings", height=5, selectmode="browse")
+    table = ttk.Treeview(parent, columns=columns, show="headings", height=7, selectmode="browse")
     headings = {
         "time": ("Time", 110, tk.W),
         "type": ("Type", 92, tk.W),
         "coin": ("Coin", 72, tk.W),
-        "direction": ("Direction", 96, tk.W),
-        "size": ("Size", 102, tk.E),
-        "price": ("Price", 86, tk.E),
+        "direction": ("Dir", 96, tk.W),
+        "size": ("Size", 112, tk.E),
+        "price": ("Price", 90, tk.E),
         "ro": ("RO", 44, tk.CENTER),
-        "trigger": ("Trigger", 126, tk.W),
+        "trigger": ("Trigger", 150, tk.W),
         "tpsl": ("TP/SL", 54, tk.CENTER),
         "oid": ("OID", 96, tk.E),
     }
@@ -918,12 +918,17 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
 
     output_stack = _make_paned(output_shell, tk.VERTICAL)
     output_stack.pack(fill=tk.BOTH, expand=True)
-    holdings_shell = ttk.Frame(output_stack, style="Canvas.TFrame")
-    orders_shell = ttk.Frame(output_stack, style="Canvas.TFrame")
+    account_shell = ttk.Frame(output_stack, style="Canvas.TFrame")
     analysis_shell = ttk.Frame(output_stack, style="Canvas.TFrame")
-    output_stack.add(holdings_shell, minsize=170, stretch="never")
-    output_stack.add(orders_shell, minsize=150, stretch="never")
-    output_stack.add(analysis_shell, minsize=300, stretch="always")
+    output_stack.add(account_shell, minsize=250, stretch="never")
+    output_stack.add(analysis_shell, minsize=320, stretch="always")
+
+    account_tabs = ttk.Notebook(account_shell)
+    account_tabs.pack(fill=tk.BOTH, expand=True)
+    holdings_shell = ttk.Frame(account_tabs, style="Panel.TFrame", padding=10)
+    orders_shell = ttk.Frame(account_tabs, style="Panel.TFrame", padding=10)
+    account_tabs.add(holdings_shell, text="Balances")
+    account_tabs.add(orders_shell, text="Open Orders")
 
     hyperliquid_holdings_frame = ttk.LabelFrame(holdings_shell, text="Hyperliquid Balances", style="Card.TLabelframe")
     hyperliquid_holdings_frame.pack(fill=tk.BOTH, expand=True)
