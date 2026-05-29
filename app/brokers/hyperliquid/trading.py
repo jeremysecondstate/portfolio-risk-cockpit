@@ -38,6 +38,42 @@ class HyperliquidOrderTicket:
         return {"limit": {"tif": self.tif}}
 
 
+@dataclass(frozen=True)
+class HyperliquidTriggerTicket:
+    coin: str
+    is_buy: bool
+    size: float
+    trigger_price: float
+    tpsl: str
+    is_market: bool = True
+    limit_price: float | None = None
+
+    @property
+    def wire_limit_price(self) -> float:
+        return self.limit_price if self.limit_price is not None else self.trigger_price
+
+    @property
+    def side_label(self) -> str:
+        return "BUY" if self.is_buy else "SELL"
+
+    @property
+    def notional(self) -> float:
+        return round(self.size * self.trigger_price, 2)
+
+    @property
+    def kind_label(self) -> str:
+        return "take profit" if self.tpsl == "tp" else "stop loss"
+
+    def order_type_payload(self) -> dict[str, Any]:
+        return {
+            "trigger": {
+                "triggerPx": self.trigger_price,
+                "isMarket": self.is_market,
+                "tpsl": self.tpsl,
+            }
+        }
+
+
 class HyperliquidTradingConfig:
     """Local environment readiness for Hyperliquid ticket workflow."""
 
@@ -76,6 +112,22 @@ class HyperliquidTradingConfig:
             raise ValueError("HYPE_API_SECRET is missing from local .env.")
         if not self.live_enabled:
             raise PermissionError("Set HYPERLIQUID_ENABLE_LIVE_ORDERS=true in .env before live Hyperliquid submit.")
+
+    def validate_trigger_for_live(self, ticket: HyperliquidTriggerTicket) -> None:
+        self.validate_for_live_action()
+        if ticket.size <= 0:
+            raise ValueError("Hyperliquid trigger size must be positive.")
+        if ticket.trigger_price <= 0:
+            raise ValueError("Hyperliquid trigger price must be positive.")
+        if ticket.wire_limit_price <= 0:
+            raise ValueError("Hyperliquid trigger limit price must be positive.")
+        if ticket.tpsl not in {"tp", "sl"}:
+            raise ValueError("Hyperliquid trigger must be take-profit or stop-loss.")
+        if ticket.notional > self.max_live_notional:
+            raise PermissionError(
+                f"Estimated trigger notional ${ticket.notional:,.2f} exceeds "
+                f"HYPERLIQUID_MAX_LIVE_ORDER_DOLLARS=${self.max_live_notional:,.2f}."
+            )
 
     def preview_text(self, ticket: HyperliquidOrderTicket) -> str:
         return "\n".join(
@@ -171,6 +223,15 @@ class HyperliquidExecutionAdapter:
             raise ValueError("Hyperliquid edit requires a positive order ID.")
         return self._local_signed_modify(order_id, normalized_ticket)
 
+    def place_position_tpsl(self, tickets: list[HyperliquidTriggerTicket]) -> Any:
+        if not tickets:
+            raise ValueError("Enter at least one TP or SL trigger price.")
+        normalized_tickets = [normalize_hyperliquid_trigger_ticket_for_wire(ticket) for ticket in tickets]
+        config = HyperliquidTradingConfig()
+        for ticket in normalized_tickets:
+            config.validate_trigger_for_live(ticket)
+        return self._local_signed_position_tpsl(normalized_tickets)
+
     def _local_signed_submit(self, ticket: HyperliquidOrderTicket) -> Any:
         from eth_account import Account
         from hyperliquid.exchange import Exchange
@@ -242,6 +303,35 @@ class HyperliquidExecutionAdapter:
             reduce_only=normalized_ticket.reduce_only,
         )
 
+    def _local_signed_position_tpsl(self, tickets: list[HyperliquidTriggerTicket]) -> Any:
+        from eth_account import Account
+        from hyperliquid.exchange import Exchange
+        from hyperliquid.utils import constants
+
+        api_secret = os.getenv("HYPE_API_SECRET", "").strip()
+        wallet_address = os.getenv("HYPE_WALLET_ADDRESS", "").strip()
+
+        api_wallet = Account.from_key(api_secret)
+
+        exchange = Exchange(
+            api_wallet,
+            constants.MAINNET_API_URL,
+            account_address=wallet_address,
+        )
+        normalized_tickets = [normalize_hyperliquid_trigger_ticket_size_for_exchange(ticket, exchange) for ticket in tickets]
+        order_requests = [
+            {
+                "coin": ticket.coin,
+                "is_buy": ticket.is_buy,
+                "sz": ticket.size,
+                "limit_px": ticket.wire_limit_price,
+                "order_type": ticket.order_type_payload(),
+                "reduce_only": True,
+            }
+            for ticket in normalized_tickets
+        ]
+        return exchange.bulk_orders(order_requests, grouping="positionTpsl")
+
 
 def normalize_hyperliquid_ticket_limit_price(ticket: HyperliquidOrderTicket) -> HyperliquidOrderTicket:
     normalized_price = normalize_hyperliquid_limit_price(ticket.limit_price, is_buy=ticket.is_buy)
@@ -284,6 +374,49 @@ def normalize_hyperliquid_ticket_size_for_exchange(ticket: HyperliquidOrderTicke
         limit_price=ticket.limit_price,
         tif=ticket.tif,
         reduce_only=ticket.reduce_only,
+    )
+
+
+def normalize_hyperliquid_trigger_ticket_for_wire(ticket: HyperliquidTriggerTicket) -> HyperliquidTriggerTicket:
+    normalized_trigger_price = normalize_hyperliquid_limit_price(ticket.trigger_price, is_buy=ticket.is_buy)
+    normalized_limit_price = (
+        normalize_hyperliquid_limit_price(ticket.limit_price, is_buy=ticket.is_buy)
+        if ticket.limit_price is not None
+        else None
+    )
+    normalized_size = normalize_hyperliquid_size(ticket.size)
+    if (
+        normalized_trigger_price == ticket.trigger_price
+        and normalized_limit_price == ticket.limit_price
+        and normalized_size == ticket.size
+    ):
+        return ticket
+    return HyperliquidTriggerTicket(
+        coin=ticket.coin,
+        is_buy=ticket.is_buy,
+        size=normalized_size,
+        trigger_price=normalized_trigger_price,
+        tpsl=ticket.tpsl,
+        is_market=ticket.is_market,
+        limit_price=normalized_limit_price,
+    )
+
+
+def normalize_hyperliquid_trigger_ticket_size_for_exchange(
+    ticket: HyperliquidTriggerTicket, exchange: Any
+) -> HyperliquidTriggerTicket:
+    decimals = _hyperliquid_size_decimals_for_exchange(ticket.coin, exchange)
+    normalized_size = normalize_hyperliquid_size(ticket.size, max_decimals=decimals)
+    if normalized_size == ticket.size:
+        return ticket
+    return HyperliquidTriggerTicket(
+        coin=ticket.coin,
+        is_buy=ticket.is_buy,
+        size=normalized_size,
+        trigger_price=ticket.trigger_price,
+        tpsl=ticket.tpsl,
+        is_market=ticket.is_market,
+        limit_price=ticket.limit_price,
     )
 
 

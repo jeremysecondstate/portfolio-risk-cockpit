@@ -91,7 +91,13 @@ class HyperliquidInfoClient:
         normalized_user = normalize_hyperliquid_address(user)
         clearinghouse_state = self.post_info({"type": "clearinghouseState", "user": normalized_user})
         spot_state = self.post_info({"type": "spotClearinghouseState", "user": normalized_user})
-        open_orders = self.post_info({"type": "openOrders", "user": normalized_user}) if include_open_orders else []
+        open_orders = (
+            self._safe_post_info({"type": "frontendOpenOrders", "user": normalized_user}, default=None)
+            if include_open_orders
+            else []
+        )
+        if open_orders is None and include_open_orders:
+            open_orders = self.post_info({"type": "openOrders", "user": normalized_user})
         all_mids = self._safe_post_info({"type": "allMids"}, default={})
         spot_meta_and_asset_ctxs = self._safe_post_info({"type": "spotMetaAndAssetCtxs"}, default=None)
         user_fills = self._safe_post_info(
