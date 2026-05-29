@@ -11,6 +11,7 @@ from app.brokers.hyperliquid.trading import (
     HyperliquidExecutionAdapter,
     HyperliquidOrderTicket,
     HyperliquidTradingConfig,
+    normalize_hyperliquid_size,
     normalize_hyperliquid_coin,
     normalize_hyperliquid_spot_market,
 )
@@ -445,7 +446,7 @@ def _spot_size_from_quantity_input(self: tk.Tk, raw_quantity: float, limit_price
         return raw_quantity
     if limit_price <= 0:
         raise ValueError("A positive limit price is required when Quantity is in USDC.")
-    return raw_quantity / limit_price
+    return normalize_hyperliquid_size(raw_quantity / limit_price)
 
 
 def _current_hyperliquid_base_symbol(self: tk.Tk) -> str:
