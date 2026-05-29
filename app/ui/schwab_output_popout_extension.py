@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import ttk
+import re
 from typing import Type
 
 REPORT_BG = "#f8fafc"
@@ -107,7 +108,7 @@ def _open_schwab_output_popout(self: tk.Tk) -> None:
     text = tk.Text(
         body,
         wrap=tk.WORD,
-        font=REPORT_MONO_FONT,
+        font=REPORT_FONT,
         padx=18,
         pady=16,
         relief=tk.FLAT,
@@ -159,6 +160,7 @@ def _refresh_schwab_output_popout(self: tk.Tk, *, force: bool = False) -> None:
         target.configure(state=tk.NORMAL)
         target.delete("1.0", tk.END)
         target.insert(tk.END, content)
+        _apply_report_tags(target, content)
         target.configure(state=tk.DISABLED)
         target.yview_moveto(top_fraction)
         self.schwab_output_popout_last_content = content
@@ -186,7 +188,7 @@ def _schedule_popout_refresh(self: tk.Tk) -> None:
 def _style_report_text(text: tk.Text) -> None:
     try:
         text.configure(
-            font=REPORT_MONO_FONT,
+            font=REPORT_FONT,
             padx=18,
             pady=16,
             relief=tk.FLAT,
@@ -199,5 +201,65 @@ def _style_report_text(text: tk.Text) -> None:
             spacing2=1,
             spacing3=6,
         )
+        _configure_report_tags(text)
+        text._apply_report_style = lambda content, widget=text: _apply_report_tags(widget, content)  # type: ignore[attr-defined]
     except tk.TclError:
         return
+
+
+def _configure_report_tags(text: tk.Text) -> None:
+    text.tag_configure("report_title", font=("Segoe UI", 13, "bold"), foreground="#0f172a", spacing1=2, spacing3=8)
+    text.tag_configure("section_title", font=("Segoe UI", 10, "bold"), foreground="#1d4ed8", spacing1=6, spacing3=3)
+    text.tag_configure("bullet", lmargin1=18, lmargin2=34, foreground="#1f2937")
+    text.tag_configure("muted", foreground="#64748b")
+    text.tag_configure("separator", foreground="#cbd5e1", font=("Segoe UI", 7))
+    text.tag_configure("mono", font=REPORT_MONO_FONT, foreground="#1f2937")
+
+
+def _apply_report_tags(text: tk.Text, content: str) -> None:
+    try:
+        _configure_report_tags(text)
+        for tag in ("report_title", "section_title", "bullet", "muted", "separator", "mono"):
+            text.tag_remove(tag, "1.0", tk.END)
+        table_mode = False
+        for index, line in enumerate(content.splitlines(), start=1):
+            start = f"{index}.0"
+            end = f"{index}.end"
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if re.fullmatch(r"[=\-]{5,}", stripped):
+                text.tag_add("separator", start, end)
+                table_mode = False
+                continue
+            if index == 1:
+                text.tag_add("report_title", start, end)
+                continue
+            if stripped.startswith(("- ", "* ")):
+                text.tag_add("bullet", start, end)
+                continue
+            if stripped.endswith(":") or _looks_like_section_heading(stripped):
+                text.tag_add("section_title", start, end)
+                table_mode = False
+                continue
+            if _looks_like_table_line(stripped) or (table_mode and re.search(r"\s{2,}", line)):
+                text.tag_add("mono", start, end)
+                table_mode = True
+                continue
+            if ":" in stripped and len(stripped.split(":", 1)[0]) <= 22:
+                text.tag_add("muted", start, f"{index}.{len(line.split(':', 1)[0]) + 1}")
+    except tk.TclError:
+        return
+
+
+def _looks_like_section_heading(value: str) -> bool:
+    if not value or value.startswith(("-", "{", "[")):
+        return False
+    letters = [char for char in value if char.isalpha()]
+    return bool(letters) and sum(char.isupper() for char in letters) >= max(4, int(len(letters) * 0.65)) and len(value) <= 64
+
+
+def _looks_like_table_line(value: str) -> bool:
+    if value.startswith(("{", "[", "'")):
+        return True
+    return len(value) > 45 and bool(re.search(r"\s{3,}", value))

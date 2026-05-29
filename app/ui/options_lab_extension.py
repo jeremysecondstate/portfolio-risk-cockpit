@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import re
 import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import Callable, Type
+from typing import Any, Callable, Type
 
 from app.analytics.technical_analysis import (
     analyze_candles,
@@ -145,18 +146,88 @@ def _workspace_text(parent: ttk.Frame) -> tk.Text:
         parent,
         height=18,
         wrap=tk.WORD,
-        font=("Cascadia Mono", 10),
-        padx=14,
-        pady=12,
+        font=("Segoe UI", 10),
+        padx=18,
+        pady=16,
         relief=tk.FLAT,
         borderwidth=0,
-        background="#0b1120",
-        foreground="#dbeafe",
-        insertbackground="#dbeafe",
-        selectbackground="#1d4ed8",
+        background="#f8fafc",
+        foreground="#0f172a",
+        insertbackground="#0f172a",
+        selectbackground="#bfdbfe",
+        spacing1=3,
+        spacing2=1,
+        spacing3=6,
     )
+    _configure_workspace_report_tags(text)
+    text._apply_report_style = lambda content, widget=text: _apply_workspace_report_tags(widget, content)  # type: ignore[attr-defined]
     text.pack(fill=tk.BOTH, expand=True)
     return text
+
+
+def _configure_workspace_report_tags(text: tk.Text) -> None:
+    text.tag_configure("report_title", font=("Segoe UI", 13, "bold"), foreground="#0f172a", spacing1=2, spacing3=8)
+    text.tag_configure("section_title", font=("Segoe UI", 10, "bold"), foreground="#1d4ed8", spacing1=6, spacing3=3)
+    text.tag_configure("body", font=("Segoe UI", 10), foreground="#0f172a")
+    text.tag_configure("bullet", lmargin1=18, lmargin2=34, foreground="#1f2937")
+    text.tag_configure("muted", foreground="#64748b")
+    text.tag_configure("separator", foreground="#cbd5e1", font=("Segoe UI", 7))
+    text.tag_configure("mono", font=("Cascadia Mono", 9), foreground="#1f2937")
+
+
+def _apply_workspace_report_tags(text: tk.Text, content: str) -> None:
+    try:
+        _configure_workspace_report_tags(text)
+        for tag in ("report_title", "section_title", "body", "bullet", "muted", "separator", "mono"):
+            text.tag_remove(tag, "1.0", tk.END)
+
+        lines = content.splitlines()
+        table_mode = False
+        for index, line in enumerate(lines, start=1):
+            start = f"{index}.0"
+            end = f"{index}.end"
+            stripped = line.strip()
+            if not stripped:
+                continue
+            text.tag_add("body", start, end)
+            if re.fullmatch(r"[=\-]{5,}", stripped):
+                text.tag_add("separator", start, end)
+                table_mode = False
+                continue
+            if index == 1 and stripped:
+                text.tag_add("report_title", start, end)
+                continue
+            if _looks_like_table_line(stripped):
+                text.tag_add("mono", start, end)
+                table_mode = True
+                continue
+            if stripped.startswith(("- ", "* ")):
+                text.tag_add("bullet", start, end)
+                continue
+            if table_mode and re.search(r"\s{2,}", line):
+                text.tag_add("mono", start, end)
+                continue
+            if stripped.endswith(":") or (_looks_like_section_heading(stripped) and len(stripped) <= 64):
+                text.tag_add("section_title", start, end)
+                table_mode = False
+                continue
+            if ":" in stripped and len(stripped.split(":", 1)[0]) <= 22:
+                text.tag_add("muted", start, f"{index}.{len(line.split(':', 1)[0]) + 1}")
+    except tk.TclError:
+        return
+
+
+def _looks_like_section_heading(value: str) -> bool:
+    if not value or value.startswith(("-", "{", "[")):
+        return False
+    letters = [char for char in value if char.isalpha()]
+    return bool(letters) and sum(char.isupper() for char in letters) >= max(4, int(len(letters) * 0.65))
+
+
+def _looks_like_table_line(value: str) -> bool:
+    if value.startswith(("{", "[", "'")):
+        return True
+    return len(value) > 45 and bool(re.search(r"\s{3,}", value))
 
 
 def _workspace_holdings_table(parent: ttk.Frame) -> ttk.Treeview:
@@ -180,10 +251,38 @@ def _workspace_holdings_table(parent: ttk.Frame) -> ttk.Treeview:
     return table
 
 
+def _workspace_open_orders_table(parent: ttk.Frame) -> ttk.Treeview:
+    columns = ("time", "type", "coin", "direction", "size", "price", "ro", "trigger", "tpsl", "oid")
+    table = ttk.Treeview(parent, columns=columns, show="headings", height=5, selectmode="browse")
+    headings = {
+        "time": ("Time", 110, tk.W),
+        "type": ("Type", 92, tk.W),
+        "coin": ("Coin", 72, tk.W),
+        "direction": ("Direction", 96, tk.W),
+        "size": ("Size", 102, tk.E),
+        "price": ("Price", 86, tk.E),
+        "ro": ("RO", 44, tk.CENTER),
+        "trigger": ("Trigger", 126, tk.W),
+        "tpsl": ("TP/SL", 54, tk.CENTER),
+        "oid": ("OID", 96, tk.E),
+    }
+    for column, (label, width, anchor) in headings.items():
+        table.heading(column, text=label)
+        table.column(column, width=width, anchor=anchor, stretch=column in {"trigger", "direction", "size"})
+    table.pack(fill=tk.BOTH, expand=True)
+    table.tag_configure("buy", foreground="#047857")
+    table.tag_configure("sell", foreground="#b91c1c")
+    table.tag_configure("trigger", foreground="#7c3aed")
+    return table
+
+
 def _set_workspace_text(widget: tk.Text, content: str) -> None:
     widget.configure(state=tk.NORMAL)
     widget.delete("1.0", tk.END)
     widget.insert(tk.END, content)
+    styler = getattr(widget, "_apply_report_style", None)
+    if callable(styler):
+        styler(content)
     widget.configure(state=tk.DISABLED)
 
 
@@ -191,6 +290,40 @@ def _bind_workspace_holdings_click(self: tk.Tk, table: ttk.Treeview, venue: str)
     table.bind("<ButtonRelease-1>", lambda event, app=self, source=table, selected_venue=venue: _load_workspace_ticket_from_holding(app, source, event, selected_venue), add="+")
     table.bind("<Motion>", lambda event, source=table: source.configure(cursor="hand2" if source.identify_row(event.y) else ""), add="+")
     table.bind("<Leave>", lambda _event, source=table: source.configure(cursor=""), add="+")
+
+
+def _bind_workspace_open_orders_click(self: tk.Tk, table: ttk.Treeview) -> None:
+    table.bind("<ButtonRelease-1>", lambda event, app=self, source=table: _load_workspace_ticket_from_open_order(app, source, event), add="+")
+    table.bind("<Motion>", lambda event, source=table: source.configure(cursor="hand2" if source.identify_row(event.y) else ""), add="+")
+    table.bind("<Leave>", lambda _event, source=table: source.configure(cursor=""), add="+")
+
+
+def _load_workspace_ticket_from_open_order(self: tk.Tk, table: ttk.Treeview, event: tk.Event) -> None:
+    row_id = table.identify_row(event.y)
+    if not row_id:
+        return
+    raw_values = table.item(row_id, "values")
+    columns = tuple(table["columns"])
+    values = {str(column): str(raw_values[index]) for index, column in enumerate(columns) if index < len(raw_values)}
+    order_id = values.get("oid", "").strip()
+    coin = _workspace_ticket_symbol(values.get("coin", ""))
+    direction = values.get("direction", "").strip().lower()
+    if order_id:
+        if hasattr(self, "cancel_order_id_var"):
+            self.cancel_order_id_var.set(order_id)
+        if hasattr(self, "hyperliquid_spot_cancel_order_id_var"):
+            self.hyperliquid_spot_cancel_order_id_var.set(order_id)
+        if hasattr(self, "hyperliquid_perp_cancel_order_id_var"):
+            self.hyperliquid_perp_cancel_order_id_var.set(order_id)
+    if not coin:
+        return
+    self.trade_venue_var.set("Hyperliquid")
+    if hasattr(self, "hyperliquid_workspace_active_ticket_var"):
+        self.hyperliquid_workspace_active_ticket_var.set("perp" if "close" in direction else "spot")
+    for var_name in ("symbol_var", "hyperliquid_coin_var", "hyperliquid_spot_symbol_var", "hyperliquid_spot_coin_var", "hyperliquid_perp_symbol_var", "hyperliquid_perp_coin_var"):
+        var = getattr(self, var_name, None)
+        if var is not None:
+            var.set(coin)
 
 
 def _load_workspace_ticket_from_holding(self: tk.Tk, table: ttk.Treeview, event: tk.Event, venue: str) -> None:
@@ -278,6 +411,35 @@ def _populate_workspace_holdings_table(table: ttk.Treeview, rows: list[dict[str,
                 row.get("last", ""),
                 row.get("value", ""),
                 row.get("pnl_text", ""),
+            ),
+            tags=(tag,) if tag else (),
+        )
+
+
+def _populate_workspace_open_orders_table(table: ttk.Treeview, open_orders: list[dict[str, Any]]) -> None:
+    from app.ui import hyperliquid_trading_extension as hyperliquid_ui
+
+    for row_id in table.get_children():
+        table.delete(row_id)
+    for index, raw_order in enumerate(open_orders):
+        order = hyperliquid_ui.normalize_hyperliquid_open_order(raw_order)
+        direction = order.direction or order.side
+        tag = "trigger" if order.is_trigger else "buy" if "buy" in direction.lower() else "sell" if "sell" in direction.lower() or "short" in direction.lower() else ""
+        table.insert(
+            "",
+            tk.END,
+            iid=f"open_order_{index}",
+            values=(
+                hyperliquid_ui._order_time_label(order.raw),
+                order.order_kind,
+                _workspace_ticket_symbol(hyperliquid_ui._display_order_coin(order.coin, "")),
+                direction,
+                order.size_label,
+                order.price_label,
+                "Yes" if order.reduce_only else "--",
+                order.trigger_condition or "N/A",
+                order.tpsl_label or "--",
+                order.oid,
             ),
             tags=(tag,) if tag else (),
         )
@@ -757,14 +919,21 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     output_stack = _make_paned(output_shell, tk.VERTICAL)
     output_stack.pack(fill=tk.BOTH, expand=True)
     holdings_shell = ttk.Frame(output_stack, style="Canvas.TFrame")
+    orders_shell = ttk.Frame(output_stack, style="Canvas.TFrame")
     analysis_shell = ttk.Frame(output_stack, style="Canvas.TFrame")
     output_stack.add(holdings_shell, minsize=170, stretch="never")
-    output_stack.add(analysis_shell, minsize=360, stretch="always")
+    output_stack.add(orders_shell, minsize=150, stretch="never")
+    output_stack.add(analysis_shell, minsize=300, stretch="always")
 
     hyperliquid_holdings_frame = ttk.LabelFrame(holdings_shell, text="Hyperliquid Balances", style="Card.TLabelframe")
     hyperliquid_holdings_frame.pack(fill=tk.BOTH, expand=True)
     self.hyperliquid_workspace_holdings_table = _workspace_holdings_table(hyperliquid_holdings_frame)
     _bind_workspace_holdings_click(self, self.hyperliquid_workspace_holdings_table, "Hyperliquid")
+
+    hyperliquid_orders_frame = ttk.LabelFrame(orders_shell, text="Hyperliquid Open Orders", style="Card.TLabelframe")
+    hyperliquid_orders_frame.pack(fill=tk.BOTH, expand=True)
+    self.hyperliquid_workspace_open_orders_table = _workspace_open_orders_table(hyperliquid_orders_frame)
+    _bind_workspace_open_orders_click(self, self.hyperliquid_workspace_open_orders_table)
 
     hyperliquid_output_frame = ttk.LabelFrame(analysis_shell, text="Hyperliquid Analysis + Order Output", style="Card.TLabelframe")
     hyperliquid_output_frame.pack(fill=tk.BOTH, expand=True)

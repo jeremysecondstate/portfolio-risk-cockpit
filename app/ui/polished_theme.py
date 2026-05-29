@@ -503,4 +503,7 @@ def _set_preview_text(self: tk.Tk, content: str) -> None:
     self.preview_text.configure(state=tk.NORMAL)
     self.preview_text.delete("1.0", tk.END)
     self.preview_text.insert(tk.END, content)
+    styler = getattr(self.preview_text, "_apply_report_style", None)
+    if callable(styler):
+        styler(content)
     self.preview_text.configure(state=tk.DISABLED)

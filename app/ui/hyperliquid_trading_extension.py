@@ -1610,6 +1610,14 @@ def _load_hyperliquid_open_orders(self: tk.Tk, title: str = "HYPERLIQUID OPEN OR
             for order in snapshot.open_orders
             if order.get("oid") is not None
         }
+        orders_table = getattr(self, "hyperliquid_workspace_open_orders_table", None)
+        if orders_table is not None:
+            try:
+                from app.ui.options_lab_extension import _populate_workspace_open_orders_table
+
+                _populate_workspace_open_orders_table(orders_table, snapshot.open_orders)
+            except Exception:
+                pass
         selected_coin = getattr(self, "hyperliquid_coin_var", tk.StringVar(value="")).get().strip()
         _address, source_key = _hyperliquid_env_address()
         self.hyperliquid_status_var.set(f"Hyperliquid: {len(snapshot.open_orders)} open orders")

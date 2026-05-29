@@ -70,6 +70,14 @@ def _sync_hyperliquid_account(self: tk.Tk) -> None:
     try:
         client = HyperliquidInfoClient()
         snapshot = client.fetch_snapshot(address)
+        orders_table = getattr(self, "hyperliquid_workspace_open_orders_table", None)
+        if orders_table is not None:
+            try:
+                from app.ui.options_lab_extension import _populate_workspace_open_orders_table
+
+                _populate_workspace_open_orders_table(orders_table, snapshot.open_orders)
+            except Exception:
+                pass
         hyperliquid_portfolio, hyperliquid_source_message = portfolio_from_hyperliquid_snapshot(snapshot)
         merged_portfolio = self._merge_hyperliquid_portfolio(hyperliquid_portfolio)
 
