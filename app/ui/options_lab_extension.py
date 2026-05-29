@@ -92,6 +92,51 @@ def _ensure_execution_workspace_vars(self: tk.Tk) -> None:
         self.hyperliquid_leverage_var = tk.StringVar(value="1")
     if not hasattr(self, "hyperliquid_fee_rate_var"):
         self.hyperliquid_fee_rate_var = tk.StringVar(value="0.045")
+    if not hasattr(self, "hyperliquid_workspace_active_ticket_var"):
+        self.hyperliquid_workspace_active_ticket_var = tk.StringVar(value="spot")
+
+    _ensure_string_var(self, "hyperliquid_spot_symbol_var", getattr(self, "symbol_var", tk.StringVar(value="")).get())
+    _ensure_string_var(self, "hyperliquid_spot_coin_var", getattr(self, "hyperliquid_coin_var", tk.StringVar(value="")).get())
+    _ensure_string_var(self, "hyperliquid_spot_side_var", getattr(self, "side_var", tk.StringVar(value=OrderSide.BUY.value)).get())
+    _ensure_string_var(self, "hyperliquid_spot_order_type_var", getattr(self, "order_type_var", tk.StringVar(value=OrderType.LIMIT.value)).get())
+    _ensure_string_var(self, "hyperliquid_spot_quantity_var", getattr(self, "quantity_var", tk.StringVar(value="1")).get())
+    _ensure_string_var(self, "hyperliquid_spot_limit_price_var", getattr(self, "limit_price_var", tk.StringVar(value="")).get())
+    _ensure_string_var(self, "hyperliquid_spot_stop_price_var", getattr(self, "stop_price_var", tk.StringVar(value="")).get())
+    _ensure_string_var(self, "hyperliquid_spot_tif_var", getattr(self, "hyperliquid_tif_var", tk.StringVar(value="Gtc")).get())
+    _ensure_string_var(self, "hyperliquid_spot_cancel_order_id_var", getattr(self, "cancel_order_id_var", tk.StringVar(value="")).get())
+    _ensure_string_var(self, "hyperliquid_spot_size_unit_var", getattr(self, "hyperliquid_size_unit_var", tk.StringVar(value="")).get())
+    _ensure_double_var(self, "hyperliquid_spot_size_percent_var", getattr(self, "hyperliquid_size_percent_var", tk.DoubleVar(value=0.0)).get())
+    _ensure_string_var(self, "hyperliquid_spot_size_status_var", "Sync Hyperliquid, then choose a size %")
+
+    _ensure_string_var(self, "hyperliquid_perp_coin_var", getattr(self, "hyperliquid_coin_var", tk.StringVar(value="")).get())
+    _ensure_string_var(self, "hyperliquid_perp_symbol_var", getattr(self, "symbol_var", tk.StringVar(value="")).get())
+    _ensure_string_var(self, "hyperliquid_perp_side_var", getattr(self, "side_var", tk.StringVar(value=OrderSide.BUY.value)).get())
+    _ensure_string_var(self, "hyperliquid_perp_order_type_var", getattr(self, "order_type_var", tk.StringVar(value=OrderType.LIMIT.value)).get())
+    _ensure_string_var(self, "hyperliquid_perp_quantity_var", getattr(self, "quantity_var", tk.StringVar(value="1")).get())
+    _ensure_string_var(self, "hyperliquid_perp_limit_price_var", getattr(self, "limit_price_var", tk.StringVar(value="")).get())
+    _ensure_string_var(self, "hyperliquid_perp_target_price_var", getattr(self, "hyperliquid_target_price_var", tk.StringVar(value="")).get())
+    _ensure_string_var(self, "hyperliquid_perp_stop_price_var", getattr(self, "stop_price_var", tk.StringVar(value="")).get())
+    _ensure_string_var(self, "hyperliquid_perp_tif_var", getattr(self, "hyperliquid_tif_var", tk.StringVar(value="Gtc")).get())
+    _ensure_string_var(self, "hyperliquid_perp_cancel_order_id_var", getattr(self, "cancel_order_id_var", tk.StringVar(value="")).get())
+    _ensure_string_var(self, "hyperliquid_perp_leverage_var", getattr(self, "hyperliquid_leverage_var", tk.StringVar(value="1")).get())
+    _ensure_string_var(self, "hyperliquid_perp_fee_rate_var", getattr(self, "hyperliquid_fee_rate_var", tk.StringVar(value="0.045")).get())
+    _ensure_bool_var(self, "hyperliquid_perp_reduce_only_var", getattr(self, "hyperliquid_reduce_only_var", tk.BooleanVar(value=False)).get())
+    _ensure_bool_var(self, "hyperliquid_perp_attach_tpsl_var", getattr(self, "hyperliquid_attach_tpsl_var", tk.BooleanVar(value=False)).get())
+
+
+def _ensure_string_var(self: tk.Tk, name: str, default: str) -> None:
+    if not hasattr(self, name):
+        setattr(self, name, tk.StringVar(value=default))
+
+
+def _ensure_double_var(self: tk.Tk, name: str, default: float) -> None:
+    if not hasattr(self, name):
+        setattr(self, name, tk.DoubleVar(value=float(default or 0.0)))
+
+
+def _ensure_bool_var(self: tk.Tk, name: str, default: bool) -> None:
+    if not hasattr(self, name):
+        setattr(self, name, tk.BooleanVar(value=bool(default)))
 
 
 def _workspace_text(parent: ttk.Frame) -> tk.Text:
@@ -153,6 +198,94 @@ def _run_workspace_action(
     command()
 
 
+def _run_hyperliquid_ticket_action(
+    self: tk.Tk,
+    *,
+    ticket_kind: str,
+    preview_widget: tk.Text,
+    command: Callable[[], None],
+) -> None:
+    _sync_hyperliquid_ticket_to_shared(self, ticket_kind)
+    try:
+        _run_workspace_action(
+            self,
+            venue="Hyperliquid",
+            preview_widget=preview_widget,
+            command=command,
+        )
+    finally:
+        _sync_hyperliquid_ticket_from_shared(self, ticket_kind)
+
+
+def _sync_hyperliquid_ticket_to_shared(self: tk.Tk, ticket_kind: str) -> None:
+    _ensure_execution_workspace_vars(self)
+    self.hyperliquid_workspace_active_ticket_var.set(ticket_kind)
+    if ticket_kind == "spot":
+        self.symbol_var.set(self.hyperliquid_spot_symbol_var.get())
+        self.hyperliquid_coin_var.set(self.hyperliquid_spot_coin_var.get())
+        self.side_var.set(self.hyperliquid_spot_side_var.get())
+        self.order_type_var.set(self.hyperliquid_spot_order_type_var.get())
+        self.quantity_var.set(self.hyperliquid_spot_quantity_var.get())
+        self.limit_price_var.set(self.hyperliquid_spot_limit_price_var.get())
+        self.stop_price_var.set(self.hyperliquid_spot_stop_price_var.get())
+        self.hyperliquid_tif_var.set(self.hyperliquid_spot_tif_var.get())
+        self.cancel_order_id_var.set(self.hyperliquid_spot_cancel_order_id_var.get())
+        self.hyperliquid_size_unit_var.set(self.hyperliquid_spot_size_unit_var.get())
+        self.hyperliquid_size_percent_var.set(self.hyperliquid_spot_size_percent_var.get())
+        self.hyperliquid_size_status_var.set(self.hyperliquid_spot_size_status_var.get())
+        return
+
+    self.hyperliquid_coin_var.set(self.hyperliquid_perp_coin_var.get())
+    self.symbol_var.set(self.hyperliquid_perp_symbol_var.get())
+    self.side_var.set(self.hyperliquid_perp_side_var.get())
+    self.order_type_var.set(self.hyperliquid_perp_order_type_var.get())
+    self.quantity_var.set(self.hyperliquid_perp_quantity_var.get())
+    self.limit_price_var.set(self.hyperliquid_perp_limit_price_var.get())
+    self.hyperliquid_target_price_var.set(self.hyperliquid_perp_target_price_var.get())
+    self.hyperliquid_bad_price_var.set(self.hyperliquid_perp_stop_price_var.get())
+    self.stop_price_var.set(self.hyperliquid_perp_stop_price_var.get())
+    self.hyperliquid_tif_var.set(self.hyperliquid_perp_tif_var.get())
+    self.cancel_order_id_var.set(self.hyperliquid_perp_cancel_order_id_var.get())
+    self.hyperliquid_leverage_var.set(self.hyperliquid_perp_leverage_var.get())
+    self.hyperliquid_fee_rate_var.set(self.hyperliquid_perp_fee_rate_var.get())
+    self.hyperliquid_reduce_only_var.set(self.hyperliquid_perp_reduce_only_var.get())
+    if hasattr(self, "hyperliquid_attach_tpsl_var"):
+        self.hyperliquid_attach_tpsl_var.set(self.hyperliquid_perp_attach_tpsl_var.get())
+
+
+def _sync_hyperliquid_ticket_from_shared(self: tk.Tk, ticket_kind: str) -> None:
+    if ticket_kind == "spot":
+        self.hyperliquid_spot_symbol_var.set(self.symbol_var.get())
+        self.hyperliquid_spot_coin_var.set(self.hyperliquid_coin_var.get())
+        self.hyperliquid_spot_side_var.set(self.side_var.get())
+        self.hyperliquid_spot_order_type_var.set(self.order_type_var.get())
+        self.hyperliquid_spot_quantity_var.set(self.quantity_var.get())
+        self.hyperliquid_spot_limit_price_var.set(self.limit_price_var.get())
+        self.hyperliquid_spot_stop_price_var.set(self.stop_price_var.get())
+        self.hyperliquid_spot_tif_var.set(self.hyperliquid_tif_var.get())
+        self.hyperliquid_spot_cancel_order_id_var.set(self.cancel_order_id_var.get())
+        self.hyperliquid_spot_size_unit_var.set(self.hyperliquid_size_unit_var.get())
+        self.hyperliquid_spot_size_percent_var.set(self.hyperliquid_size_percent_var.get())
+        self.hyperliquid_spot_size_status_var.set(self.hyperliquid_size_status_var.get())
+        return
+
+    self.hyperliquid_perp_coin_var.set(self.hyperliquid_coin_var.get())
+    self.hyperliquid_perp_symbol_var.set(self.symbol_var.get())
+    self.hyperliquid_perp_side_var.set(self.side_var.get())
+    self.hyperliquid_perp_order_type_var.set(self.order_type_var.get())
+    self.hyperliquid_perp_quantity_var.set(self.quantity_var.get())
+    self.hyperliquid_perp_limit_price_var.set(self.limit_price_var.get())
+    self.hyperliquid_perp_target_price_var.set(self.hyperliquid_target_price_var.get())
+    self.hyperliquid_perp_stop_price_var.set(self.stop_price_var.get() or self.hyperliquid_bad_price_var.get())
+    self.hyperliquid_perp_tif_var.set(self.hyperliquid_tif_var.get())
+    self.hyperliquid_perp_cancel_order_id_var.set(self.cancel_order_id_var.get())
+    self.hyperliquid_perp_leverage_var.set(self.hyperliquid_leverage_var.get())
+    self.hyperliquid_perp_fee_rate_var.set(self.hyperliquid_fee_rate_var.get())
+    self.hyperliquid_perp_reduce_only_var.set(self.hyperliquid_reduce_only_var.get())
+    if hasattr(self, "hyperliquid_attach_tpsl_var"):
+        self.hyperliquid_perp_attach_tpsl_var.set(self.hyperliquid_attach_tpsl_var.get())
+
+
 def _add_workspace_button(
     parent: ttk.Frame,
     *,
@@ -172,6 +305,101 @@ def _add_workspace_button(
         pady=(0 if row == 0 else 8, 8),
         ipady=2,
     )
+
+
+def _grid_hyperliquid_workspace_spot_quantity_row(parent: ttk.LabelFrame, self: tk.Tk, row: int) -> None:
+    ttk.Label(parent, text="Quantity", style="Subtle.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=6)
+    quantity_controls = ttk.Frame(parent, style="Panel.TFrame")
+    quantity_controls.grid(row=row, column=1, sticky="ew", pady=6)
+    quantity_controls.columnconfigure(0, weight=1)
+
+    ttk.Entry(quantity_controls, textvariable=self.hyperliquid_spot_quantity_var).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+    unit_combo = ttk.Combobox(
+        quantity_controls,
+        textvariable=self.hyperliquid_spot_size_unit_var,
+        values=_hyperliquid_workspace_spot_size_unit_values(self),
+        state="readonly",
+        width=8,
+    )
+    unit_combo.configure(postcommand=lambda: _refresh_hyperliquid_workspace_spot_size_unit_combo(self, unit_combo))
+    unit_combo.grid(row=0, column=1, sticky="ew")
+
+    ttk.Label(parent, text="Entry / Limit", style="Subtle.TLabel").grid(row=row, column=2, sticky="w", padx=(16, 8), pady=6)
+    ttk.Entry(parent, textvariable=self.hyperliquid_spot_limit_price_var).grid(row=row, column=3, sticky="ew", pady=6)
+    _sync_hyperliquid_workspace_spot_size_unit(self)
+
+
+def _grid_hyperliquid_workspace_spot_size_controls(parent: ttk.LabelFrame, self: tk.Tk, row: int) -> None:
+    ttk.Label(parent, text="Size %", style="Subtle.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=6)
+    controls = ttk.Frame(parent, style="Panel.TFrame")
+    controls.grid(row=row, column=1, columnspan=3, sticky="ew", pady=6)
+    controls.columnconfigure(0, weight=1)
+
+    ttk.Scale(
+        controls,
+        from_=0,
+        to=100,
+        orient=tk.HORIZONTAL,
+        variable=self.hyperliquid_spot_size_percent_var,
+        command=lambda _value: _apply_hyperliquid_workspace_spot_percent(self),
+    ).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+
+    for column, percent in enumerate((25, 50, 75), start=1):
+        ttk.Button(
+            controls,
+            text=f"{percent}%",
+            command=lambda value=percent: _apply_hyperliquid_workspace_spot_percent(self, value),
+            style="Compact.TButton",
+        ).grid(row=0, column=column, sticky="ew", padx=(0, 6))
+
+    ttk.Button(
+        controls,
+        text="Max",
+        command=lambda: _apply_hyperliquid_workspace_spot_percent(self, 100),
+        style="CompactAccent.TButton",
+    ).grid(row=0, column=4, sticky="ew")
+    ttk.Label(controls, textvariable=self.hyperliquid_spot_size_status_var, style="Subtle.TLabel").grid(
+        row=1,
+        column=0,
+        columnspan=5,
+        sticky="w",
+        pady=(3, 0),
+    )
+
+
+def _apply_hyperliquid_workspace_spot_percent(self: tk.Tk, percent: float | None = None) -> None:
+    _sync_hyperliquid_ticket_to_shared(self, "spot")
+    try:
+        if hasattr(self, "apply_hyperliquid_quantity_percent"):
+            self.apply_hyperliquid_quantity_percent(percent)
+    finally:
+        _sync_hyperliquid_ticket_from_shared(self, "spot")
+
+
+def _hyperliquid_workspace_spot_size_unit_values(self: tk.Tk) -> list[str]:
+    base = _hyperliquid_workspace_spot_base(self)
+    return ["USDC", base] if base and base != "USDC" else ["USDC"]
+
+
+def _refresh_hyperliquid_workspace_spot_size_unit_combo(self: tk.Tk, combo: ttk.Combobox) -> None:
+    values = _hyperliquid_workspace_spot_size_unit_values(self)
+    combo.configure(values=values)
+    _sync_hyperliquid_workspace_spot_size_unit(self)
+
+
+def _sync_hyperliquid_workspace_spot_size_unit(self: tk.Tk) -> None:
+    values = _hyperliquid_workspace_spot_size_unit_values(self)
+    current = self.hyperliquid_spot_size_unit_var.get().strip().upper()
+    if current not in {value.upper() for value in values}:
+        self.hyperliquid_spot_size_unit_var.set(values[0])
+
+
+def _hyperliquid_workspace_spot_base(self: tk.Tk) -> str:
+    raw = self.hyperliquid_spot_symbol_var.get().strip() or self.hyperliquid_spot_coin_var.get().strip()
+    base = raw.upper().replace("-SPOT", "")
+    if "/" in base:
+        base = base.split("/", 1)[0]
+    return base
 
 
 def _build_schwab_trading_tab(
@@ -323,10 +551,10 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     hyperliquid_output_frame.pack(fill=tk.BOTH, expand=True)
     self.hyperliquid_trading_preview_text = _workspace_text(hyperliquid_output_frame)
 
-    def hyperliquid_action(*names: str) -> Callable[[], None]:
-        return lambda: _run_workspace_action(
+    def hyperliquid_action(ticket_kind: str, *names: str) -> Callable[[], None]:
+        return lambda: _run_hyperliquid_ticket_action(
             self,
-            venue="Hyperliquid",
+            ticket_kind=ticket_kind,
             preview_widget=self.hyperliquid_trading_preview_text,
             command=_first_available_command(self, *names),
         )
@@ -352,83 +580,83 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     perp_ticket.columnconfigure(1, weight=1)
     perp_ticket.columnconfigure(3, weight=1)
 
-    self._grid_row(spot_ticket, 0, "Market", ttk.Entry(spot_ticket, textvariable=self.symbol_var), "HL Coin", ttk.Entry(spot_ticket, textvariable=self.hyperliquid_coin_var))
+    self._grid_row(spot_ticket, 0, "Market", ttk.Entry(spot_ticket, textvariable=self.hyperliquid_spot_symbol_var), "HL Coin", ttk.Entry(spot_ticket, textvariable=self.hyperliquid_spot_coin_var))
     self._grid_row(
         spot_ticket,
         1,
         "Side",
-        ttk.Combobox(spot_ticket, textvariable=self.side_var, values=[s.value for s in OrderSide], state="readonly"),
+        ttk.Combobox(spot_ticket, textvariable=self.hyperliquid_spot_side_var, values=[s.value for s in OrderSide], state="readonly"),
         "Order type",
-        ttk.Combobox(spot_ticket, textvariable=self.order_type_var, values=[o.value for o in OrderType], state="readonly"),
+        ttk.Combobox(spot_ticket, textvariable=self.hyperliquid_spot_order_type_var, values=[o.value for o in OrderType], state="readonly"),
     )
-    hyperliquid_ui._grid_hyperliquid_quantity_row(spot_ticket, self, 2)
-    hyperliquid_ui._grid_hyperliquid_size_controls(spot_ticket, self, 3)
+    _grid_hyperliquid_workspace_spot_quantity_row(spot_ticket, self, 2)
+    _grid_hyperliquid_workspace_spot_size_controls(spot_ticket, self, 3)
     self._grid_row(
         spot_ticket,
         4,
         "Stop price",
-        ttk.Entry(spot_ticket, textvariable=self.stop_price_var),
+        ttk.Entry(spot_ticket, textvariable=self.hyperliquid_spot_stop_price_var),
         "Use Mid",
-        ttk.Button(spot_ticket, text="Use Mid", command=hyperliquid_action("use_hyperliquid_cockpit_spot_mid_market"), style="Accent.TButton"),
+        ttk.Button(spot_ticket, text="Use Mid", command=hyperliquid_action("spot", "use_hyperliquid_cockpit_spot_mid_market"), style="Accent.TButton"),
     )
     self._grid_row(
         spot_ticket,
         5,
         "HL TIF",
-        ttk.Combobox(spot_ticket, textvariable=self.hyperliquid_tif_var, values=["Alo", "Ioc", "Gtc"], state="readonly"),
+        ttk.Combobox(spot_ticket, textvariable=self.hyperliquid_spot_tif_var, values=["Alo", "Ioc", "Gtc"], state="readonly"),
         "",
         ttk.Frame(spot_ticket, style="Canvas.TFrame"),
     )
     ttk.Label(spot_ticket, text="Cancel order ID", style="Subtle.TLabel").grid(row=6, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
-    ttk.Entry(spot_ticket, textvariable=self.cancel_order_id_var).grid(row=6, column=1, columnspan=3, sticky="ew", pady=(8, 0))
+    ttk.Entry(spot_ticket, textvariable=self.hyperliquid_spot_cancel_order_id_var).grid(row=6, column=1, columnspan=3, sticky="ew", pady=(8, 0))
 
     spot_actions = ttk.LabelFrame(spot_ticket, text="Spot Actions", style="Card.TLabelframe")
     spot_actions.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(14, 0))
     for column in range(3):
         spot_actions.columnconfigure(column, weight=1, uniform="hyperliquid_spot_actions")
 
-    _add_workspace_button(spot_actions, row=0, column=0, text="Use Mid", command=hyperliquid_action("use_hyperliquid_cockpit_spot_mid_market"), style="Accent.TButton")
-    _add_workspace_button(spot_actions, row=0, column=1, text="Preview Spot", command=hyperliquid_action("preview_hyperliquid_spot_ticket"), style="Accent.TButton")
-    _add_workspace_button(spot_actions, row=0, column=2, text="Open Orders", command=hyperliquid_action("load_hyperliquid_open_orders"))
-    _add_workspace_button(spot_actions, row=1, column=0, text="Edit Order", command=hyperliquid_action("show_hyperliquid_order_edit_dialog"))
-    _add_workspace_button(spot_actions, row=1, column=1, text="Cancel Order", command=hyperliquid_action("cancel_hyperliquid_order_guarded"), style="Danger.TButton")
-    _add_workspace_button(spot_actions, row=1, column=2, text="LIVE Submit", command=hyperliquid_action("show_hyperliquid_spot_live_submit_safety_review"), style="Danger.TButton")
+    _add_workspace_button(spot_actions, row=0, column=0, text="Use Mid", command=hyperliquid_action("spot", "use_hyperliquid_cockpit_spot_mid_market"), style="Accent.TButton")
+    _add_workspace_button(spot_actions, row=0, column=1, text="Preview Spot", command=hyperliquid_action("spot", "preview_hyperliquid_spot_ticket"), style="Accent.TButton")
+    _add_workspace_button(spot_actions, row=0, column=2, text="Open Orders", command=hyperliquid_action("spot", "load_hyperliquid_open_orders"))
+    _add_workspace_button(spot_actions, row=1, column=0, text="Edit Order", command=hyperliquid_action("spot", "show_hyperliquid_order_edit_dialog"))
+    _add_workspace_button(spot_actions, row=1, column=1, text="Cancel Order", command=hyperliquid_action("spot", "cancel_hyperliquid_order_guarded"), style="Danger.TButton")
+    _add_workspace_button(spot_actions, row=1, column=2, text="LIVE Submit", command=hyperliquid_action("spot", "show_hyperliquid_spot_live_submit_safety_review"), style="Danger.TButton")
 
     ticket = perp_ticket
-    self._grid_row(ticket, 0, "Coin", ttk.Entry(ticket, textvariable=self.hyperliquid_coin_var), "Symbol", ttk.Entry(ticket, textvariable=self.symbol_var))
+    self._grid_row(ticket, 0, "Coin", ttk.Entry(ticket, textvariable=self.hyperliquid_perp_coin_var), "Symbol", ttk.Entry(ticket, textvariable=self.hyperliquid_perp_symbol_var))
     self._grid_row(
         ticket,
         1,
         "Direction",
-        ttk.Combobox(ticket, textvariable=self.side_var, values=[s.value for s in OrderSide], state="readonly"),
+        ttk.Combobox(ticket, textvariable=self.hyperliquid_perp_side_var, values=[s.value for s in OrderSide], state="readonly"),
         "Order type",
-        ttk.Combobox(ticket, textvariable=self.order_type_var, values=[o.value for o in OrderType], state="readonly"),
+        ttk.Combobox(ticket, textvariable=self.hyperliquid_perp_order_type_var, values=[o.value for o in OrderType], state="readonly"),
     )
-    self._grid_row(ticket, 2, "Size", ttk.Entry(ticket, textvariable=self.quantity_var), "Entry / Limit", ttk.Entry(ticket, textvariable=self.limit_price_var))
-    self._grid_row(ticket, 3, "Target price", ttk.Entry(ticket, textvariable=self.hyperliquid_target_price_var), "Pain price", ttk.Entry(ticket, textvariable=self.hyperliquid_bad_price_var))
+    self._grid_row(ticket, 2, "Size", ttk.Entry(ticket, textvariable=self.hyperliquid_perp_quantity_var), "Entry / Limit", ttk.Entry(ticket, textvariable=self.hyperliquid_perp_limit_price_var))
+    self._grid_row(ticket, 3, "Target price", ttk.Entry(ticket, textvariable=self.hyperliquid_perp_target_price_var), "Pain price", ttk.Entry(ticket, textvariable=self.hyperliquid_perp_stop_price_var))
     self._grid_row(ticket, 4, "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var), "DELETE ME", ttk.Entry(ticket, textvariable=self.confirmation_var))
-    self._grid_row(ticket, 5, "HL TIF", ttk.Combobox(ticket, textvariable=self.hyperliquid_tif_var, values=["Alo", "Ioc", "Gtc"], state="readonly"), "Reduce-only", ttk.Checkbutton(ticket, variable=self.hyperliquid_reduce_only_var),
+    self._grid_row(ticket, 5, "HL TIF", ttk.Combobox(ticket, textvariable=self.hyperliquid_perp_tif_var, values=["Alo", "Ioc", "Gtc"], state="readonly"), "Reduce-only", ttk.Checkbutton(ticket, variable=self.hyperliquid_perp_reduce_only_var),
     )
-    self._grid_row(ticket, 6, "Leverage x", ttk.Entry(ticket, textvariable=self.hyperliquid_leverage_var), "Fee % / side", ttk.Entry(ticket, textvariable=self.hyperliquid_fee_rate_var))
+    self._grid_row(ticket, 6, "Leverage x", ttk.Entry(ticket, textvariable=self.hyperliquid_perp_leverage_var), "Fee % / side", ttk.Entry(ticket, textvariable=self.hyperliquid_perp_fee_rate_var))
     ttk.Label(ticket, text="Cancel order ID", style="Subtle.TLabel").grid(row=7, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
-    ttk.Entry(ticket, textvariable=self.cancel_order_id_var).grid(row=7, column=1, columnspan=3, sticky="ew", pady=(8, 0))
+    ttk.Entry(ticket, textvariable=self.hyperliquid_perp_cancel_order_id_var).grid(row=7, column=1, columnspan=3, sticky="ew", pady=(8, 0))
 
     actions = ttk.LabelFrame(ticket, text="Hyperliquid Actions", style="Card.TLabelframe")
     actions.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(14, 0))
     for column in range(3):
         actions.columnconfigure(column, weight=1, uniform="hyperliquid_actions")
 
-    _add_workspace_button(actions, row=0, column=0, text="Use Mid", command=hyperliquid_action("use_hyperliquid_mid_market"), style="Accent.TButton")
-    _add_workspace_button(actions, row=0, column=1, text="Perp What-If", command=hyperliquid_action("run_hyperliquid_perp_what_if"), style="Accent.TButton")
-    _add_workspace_button(actions, row=0, column=2, text="Preview Perp Ticket", command=hyperliquid_action("preview_hyperliquid_ticket", "preview_order"))
-    _add_workspace_button(actions, row=1, column=0, text="Sync Account", command=hyperliquid_action("sync_hyperliquid_account"))
-    _add_workspace_button(actions, row=1, column=1, text="Tech Analysis", command=hyperliquid_action("show_technical_analysis"))
-    _add_workspace_button(actions, row=1, column=2, text="Position Size", command=hyperliquid_action("show_position_size"))
-    _add_workspace_button(actions, row=2, column=0, text="Recent Orders", command=hyperliquid_action("load_selected_recent_orders", "load_hyperliquid_open_orders"))
-    _add_workspace_button(actions, row=2, column=1, text="Open Only", command=hyperliquid_action("load_selected_open_orders_only", "load_hyperliquid_open_orders"))
-    _add_workspace_button(actions, row=2, column=2, text="Live Safety", command=hyperliquid_action("show_hyperliquid_live_submit_safety_review"))
-    _add_workspace_button(actions, row=3, column=0, text="Cancel Order", command=hyperliquid_action("cancel_selected_order", "cancel_hyperliquid_order_guarded"), style="Danger.TButton")
-    _add_workspace_button(actions, row=3, column=1, text="LIVE Submit", command=hyperliquid_action("submit_selected_venue"), style="Danger.TButton", columnspan=2)
+    _add_workspace_button(actions, row=0, column=0, text="Use Mid", command=hyperliquid_action("perp", "use_hyperliquid_mid_market"), style="Accent.TButton")
+    _add_workspace_button(actions, row=0, column=1, text="Perp What-If", command=hyperliquid_action("perp", "run_hyperliquid_perp_what_if"), style="Accent.TButton")
+    _add_workspace_button(actions, row=0, column=2, text="Preview Perp Ticket", command=hyperliquid_action("perp", "preview_hyperliquid_ticket", "preview_order"))
+    _add_workspace_button(actions, row=1, column=0, text="Sync Account", command=hyperliquid_action("perp", "sync_hyperliquid_account"))
+    _add_workspace_button(actions, row=1, column=1, text="Tech Analysis", command=hyperliquid_action("perp", "show_technical_analysis"))
+    _add_workspace_button(actions, row=1, column=2, text="Position Size", command=hyperliquid_action("perp", "show_position_size"))
+    _add_workspace_button(actions, row=2, column=0, text="Recent Orders", command=hyperliquid_action("perp", "load_selected_recent_orders", "load_hyperliquid_open_orders"))
+    _add_workspace_button(actions, row=2, column=1, text="Open Only", command=hyperliquid_action("perp", "load_selected_open_orders_only", "load_hyperliquid_open_orders"))
+    _add_workspace_button(actions, row=2, column=2, text="Live Safety", command=hyperliquid_action("perp", "show_hyperliquid_live_submit_safety_review"))
+    _add_workspace_button(actions, row=3, column=0, text="Cancel Order", command=hyperliquid_action("perp", "cancel_selected_order", "cancel_hyperliquid_order_guarded"), style="Danger.TButton")
+    _add_workspace_button(actions, row=3, column=1, text="LIVE Submit", command=hyperliquid_action("perp", "submit_selected_venue"), style="Danger.TButton", columnspan=2)
 
     status = ttk.Frame(ticket, style="Panel.TFrame")
     status.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(8, 0))

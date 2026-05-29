@@ -44,15 +44,15 @@ def _patch_grid_row(app_cls: type[tk.Tk]) -> None:
             if left_label == "Target price" and right_label == "Pain price":
                 left_label = "TP Price"
                 right_label = "SL Price"
-                right_widget = ttk.Entry(parent, textvariable=self.stop_price_var)
+                right_widget = ttk.Entry(parent, textvariable=_var(self, "hyperliquid_perp_stop_price_var", self.stop_price_var))
             elif left_label == "Stop price" and right_label == _DELETE_ME:
                 left_label = "Leverage x"
-                left_widget = ttk.Entry(parent, textvariable=self.hyperliquid_leverage_var)
+                left_widget = ttk.Entry(parent, textvariable=_var(self, "hyperliquid_perp_leverage_var", self.hyperliquid_leverage_var))
                 right_label = "Use Mid"
                 right_widget = _make_hyperliquid_use_mid_button(self, parent)
             elif left_label == "Leverage x" and right_label == "Fee % / side":
                 left_label = "Attach TP/SL"
-                left_widget = ttk.Checkbutton(parent, variable=self.hyperliquid_attach_tpsl_var)
+                left_widget = ttk.Checkbutton(parent, variable=_var(self, "hyperliquid_perp_attach_tpsl_var", self.hyperliquid_attach_tpsl_var))
         elif right_label == _DELETE_ME:
             if title == "Schwab Stock / ETF Ticket":
                 right_label = "Use Mid"
@@ -107,6 +107,10 @@ def _patch_layout_after_build(app_cls: type[tk.Tk]) -> None:
 def _patch_hyperliquid_actions(app_cls: type[tk.Tk]) -> None:
     app_cls.preview_hyperliquid_ticket = _preview_hyperliquid_ticket_overview  # type: ignore[attr-defined]
     app_cls.run_hyperliquid_perp_what_if = _run_hyperliquid_perp_what_if_clean  # type: ignore[attr-defined]
+
+
+def _var(self: tk.Tk, name: str, fallback: Any) -> Any:
+    return getattr(self, name, fallback)
 
 
 def _remove_delete_me_controls(self: tk.Tk) -> None:
@@ -392,9 +396,9 @@ def _make_hyperliquid_use_mid_button(self: tk.Tk, parent: tk.Widget) -> ttk.Butt
     return ttk.Button(
         parent,
         text="Use Mid",
-        command=lambda: options_lab_extension._run_workspace_action(
+        command=lambda: options_lab_extension._run_hyperliquid_ticket_action(
             self,
-            venue="Hyperliquid",
+            ticket_kind="perp",
             preview_widget=self.hyperliquid_trading_preview_text,
             command=options_lab_extension._first_available_command(self, "use_hyperliquid_mid_market"),
         ),

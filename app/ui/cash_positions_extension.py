@@ -362,6 +362,7 @@ def _load_ticket_from_position_click(self: tk.Tk, table: ttk.Treeview, event: tk
             self.trade_venue_var.set("Hyperliquid")
         if hasattr(self, "hyperliquid_coin_var"):
             self.hyperliquid_coin_var.set(ticket_symbol)
+        _fill_hyperliquid_workspace_ticket(self, asset_type, symbol, ticket_symbol)
         if hasattr(self, "on_trading_venue_changed"):
             try:
                 self.on_trading_venue_changed()
@@ -372,6 +373,28 @@ def _load_ticket_from_position_click(self: tk.Tk, table: ttk.Treeview, event: tk
             self.trade_venue_var.set("Schwab")
         if hasattr(self, "hyperliquid_coin_var"):
             self.hyperliquid_coin_var.set("")
+
+
+def _fill_hyperliquid_workspace_ticket(self: tk.Tk, asset_type: str, symbol: str, ticket_symbol: str) -> None:
+    normalized_type = asset_type.strip().lower()
+    normalized_symbol = symbol.strip().upper()
+    is_perp = normalized_type.startswith("perp") or "-PERP" in normalized_symbol
+
+    if is_perp:
+        if hasattr(self, "hyperliquid_workspace_active_ticket_var"):
+            self.hyperliquid_workspace_active_ticket_var.set("perp")
+        if hasattr(self, "hyperliquid_perp_coin_var"):
+            self.hyperliquid_perp_coin_var.set(ticket_symbol)
+        if hasattr(self, "hyperliquid_perp_symbol_var"):
+            self.hyperliquid_perp_symbol_var.set(ticket_symbol)
+        return
+
+    if hasattr(self, "hyperliquid_workspace_active_ticket_var"):
+        self.hyperliquid_workspace_active_ticket_var.set("spot")
+    if hasattr(self, "hyperliquid_spot_symbol_var"):
+        self.hyperliquid_spot_symbol_var.set(ticket_symbol)
+    if hasattr(self, "hyperliquid_spot_coin_var"):
+        self.hyperliquid_spot_coin_var.set(ticket_symbol)
 
 
 def _row_values_by_column(table: ttk.Treeview, row_id: str) -> dict[str, str]:
