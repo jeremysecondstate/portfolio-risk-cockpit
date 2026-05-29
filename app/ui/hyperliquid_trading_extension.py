@@ -42,6 +42,7 @@ def install_hyperliquid_trading_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls.load_hyperliquid_open_orders = _load_hyperliquid_open_orders  # type: ignore[attr-defined]
     app_cls.preview_hyperliquid_ticket = _preview_hyperliquid_ticket  # type: ignore[attr-defined]
     app_cls.preview_hyperliquid_spot_ticket = _preview_hyperliquid_spot_ticket  # type: ignore[attr-defined]
+    app_cls.run_hyperliquid_spot_what_if = _run_hyperliquid_spot_what_if  # type: ignore[attr-defined]
     app_cls.show_hyperliquid_live_submit_safety_review = _show_hyperliquid_live_submit_safety_review  # type: ignore[attr-defined]
     app_cls.parse_hyperliquid_ticket = _parse_hyperliquid_ticket  # type: ignore[attr-defined]
     app_cls.on_trading_venue_changed = _on_trading_venue_changed  # type: ignore[attr-defined]
@@ -157,8 +158,8 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     actions.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(18, 0))
     actions.columnconfigure((0, 1, 2), weight=1, uniform="risk_console_actions")
     _grid_action_button(actions, 0, 0, "Refresh View", self.refresh_portfolio, "CompactAccent.TButton")
-    _grid_action_button(actions, 0, 1, "Sync Schwab", self.refresh_schwab_account)
-    _grid_action_button(actions, 0, 2, "Sync Hyperliquid", self.sync_hyperliquid_account)
+    _grid_action_button(actions, 0, 1, "Sync Schwab", lambda: _run_then_update_risk_console(self, self.refresh_schwab_account))
+    _grid_action_button(actions, 0, 2, "Sync Hyperliquid", lambda: _run_then_update_risk_console(self, self.sync_hyperliquid_account))
 
     status_bar = ttk.Frame(summary, style="Panel.TFrame")
     status_bar.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(10, 0))
@@ -202,6 +203,11 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     )
     self.preview_text.pack(fill=tk.BOTH, expand=True)
     self.cockpit_risk_console_text = self.preview_text
+    _update_cockpit_risk_console(self, self.broker.get_portfolio())
+
+
+def _run_then_update_risk_console(self: tk.Tk, command) -> None:
+    command()
     _update_cockpit_risk_console(self, self.broker.get_portfolio())
 
 
@@ -1244,6 +1250,129 @@ def _preview_hyperliquid_spot_ticket(self: tk.Tk) -> None:
     except Exception as exc:
         self.hyperliquid_status_var.set("Hyperliquid spot: preview failed")
         messagebox.showerror("Hyperliquid spot preview failed", str(exc))
+
+
+def _run_hyperliquid_spot_what_if(self: tk.Tk) -> None:
+    try:
+        ticket = self.parse_hyperliquid_spot_ticket()
+        portfolio = self.broker.get_portfolio()
+        total_value = max(portfolio.total_value, 0.01)
+        coin = _spot_ticket_base_coin(ticket.coin)
+        exposure = _portfolio_coin_exposures(portfolio).get(
+            coin,
+            {
+                "spot_value": 0.0,
+                "spot_quantity": 0.0,
+                "perp_signed": 0.0,
+                "perp_notional": 0.0,
+                "perp_quantity": 0.0,
+            },
+        )
+
+        signed_order_value = ticket.size * ticket.limit_price * (1 if ticket.is_buy else -1)
+        current_spot_value = float(exposure["spot_value"])
+        current_spot_quantity = float(exposure["spot_quantity"])
+        current_perp_signed = float(exposure["perp_signed"])
+        current_perp_quantity = float(exposure["perp_quantity"])
+        projected_spot_value = max(0.0, current_spot_value + signed_order_value)
+        projected_spot_quantity = max(0.0, current_spot_quantity + (ticket.size if ticket.is_buy else -ticket.size))
+        projected_net = projected_spot_value + current_perp_signed
+        hedge_gap = abs(current_perp_signed) - current_spot_value if current_perp_signed < 0 else 0.0
+        remaining_gap = abs(current_perp_signed) - projected_spot_value if current_perp_signed < 0 else 0.0
+        stop_price = _positive_float(getattr(self, "stop_price_var", tk.StringVar(value="")).get())
+        stop_lines = _spot_stop_lines(ticket, projected_spot_quantity, stop_price)
+
+        side_word = "BUY" if ticket.is_buy else "SELL"
+        perp_direction = "short" if current_perp_signed < 0 else "long" if current_perp_signed > 0 else "flat"
+        self.hyperliquid_status_var.set("Hyperliquid spot: what-if ready")
+        self._set_preview_text(
+            "HYPERLIQUID SPOT WHAT-IF\n"
+            "========================\n\n"
+            "No order was submitted. This models how the spot ticket changes current spot/perp exposure.\n\n"
+            "Proposed spot order:\n"
+            f"- {side_word} {_format_hyperliquid_size(ticket.size)} {coin} at ${ticket.limit_price:,.4f}\n"
+            f"- Order value: {_money(abs(signed_order_value))}\n"
+            f"- Time in force: {ticket.tif}\n\n"
+            "Current exposure:\n"
+            f"- Spot: {_format_hyperliquid_size(current_spot_quantity)} {coin}, value {_money(current_spot_value)}\n"
+            f"- Perp: {_format_hyperliquid_size(abs(current_perp_quantity))} {coin}, {_money(abs(current_perp_signed))} {perp_direction} notional\n"
+            f"- Current net read: {_signed_money(current_spot_value + current_perp_signed)} ({abs(current_spot_value + current_perp_signed) / total_value:.1%} of portfolio)\n\n"
+            "After proposed spot order:\n"
+            f"- Projected spot: {_format_hyperliquid_size(projected_spot_quantity)} {coin}, value {_money(projected_spot_value)}\n"
+            f"- Projected net read: {_signed_money(projected_net)} ({abs(projected_net) / total_value:.1%} of portfolio)\n"
+            f"- Hedge readout: {_spot_what_if_readout(current_perp_signed, current_spot_value, projected_spot_value)}\n"
+            f"{_spot_gap_text(hedge_gap, remaining_gap, ticket.limit_price)}"
+            f"{stop_lines}\n"
+            "Interpretation:\n"
+            f"- {_spot_what_if_interpretation(ticket.is_buy, current_perp_signed, current_spot_value, projected_spot_value)}\n"
+            "- This is a hedge/exposure view only; confirm live liquidity, fees, open orders, and whether the perp is intentionally directional before trading."
+        )
+    except Exception as exc:
+        self.hyperliquid_status_var.set("Hyperliquid spot: what-if failed")
+        messagebox.showerror("Hyperliquid spot what-if failed", str(exc))
+
+
+def _spot_ticket_base_coin(market: str) -> str:
+    clean = market.strip().upper().replace("-SPOT", "")
+    if "/" in clean:
+        clean = clean.split("/", 1)[0]
+    if clean.startswith("@"):
+        return clean
+    return clean
+
+
+def _spot_gap_text(hedge_gap: float, remaining_gap: float, price: float) -> str:
+    if hedge_gap <= 0:
+        return ""
+    needed_now = hedge_gap / price if price > 0 else 0.0
+    needed_after = max(0.0, remaining_gap) / price if price > 0 else 0.0
+    return (
+        f"- Spot needed to fully offset current short perp: {_money(hedge_gap)} "
+        f"({_format_hyperliquid_size(needed_now)} coin at this price)\n"
+        f"- Remaining short-perp gap after ticket: {_money(max(0.0, remaining_gap))} "
+        f"({_format_hyperliquid_size(needed_after)} coin at this price)\n"
+    )
+
+
+def _spot_stop_lines(ticket: HyperliquidOrderTicket, projected_spot_quantity: float, stop_price: float | None) -> str:
+    if stop_price is None or stop_price <= 0:
+        return "\n"
+    if stop_price >= ticket.limit_price and ticket.is_buy:
+        note = "Stop is above/equal entry for a spot buy; check that this is intentional."
+    else:
+        order_risk = (ticket.limit_price - stop_price) * ticket.size if ticket.is_buy else (stop_price - ticket.limit_price) * ticket.size
+        projected_risk = max(0.0, ticket.limit_price - stop_price) * projected_spot_quantity
+        note = f"Approx spot downside to stop on this ticket: {_money(max(0.0, order_risk))}; projected spot downside: {_money(projected_risk)}."
+    return f"- Stop reference: ${stop_price:,.4f}. {note}\n\n"
+
+
+def _spot_what_if_readout(perp_signed: float, current_spot: float, projected_spot: float) -> str:
+    if abs(perp_signed) <= 0.01:
+        return "No active perp to hedge; spot ticket is directional spot exposure."
+    if perp_signed > 0:
+        return "Long perp plus spot is stacked long exposure." if projected_spot > current_spot else "Spot sale reduces spot, but long perp remains directional."
+    coverage = projected_spot / abs(perp_signed) if abs(perp_signed) > 0 else 0.0
+    if coverage >= 1.25:
+        return "Spot would more than cover the short perp."
+    if coverage >= 0.75:
+        return "Spot would roughly hedge the short perp."
+    if coverage >= 0.25:
+        return "Spot would partially hedge the short perp."
+    return "Short perp remains much larger than spot."
+
+
+def _spot_what_if_interpretation(is_buy: bool, perp_signed: float, current_spot: float, projected_spot: float) -> str:
+    if abs(perp_signed) <= 0.01:
+        return "With no matching perp, this spot ticket mainly changes outright coin exposure."
+    if perp_signed < 0:
+        if is_buy:
+            return "Buying spot moves the account toward a hedged short-perp posture."
+        return "Selling spot removes hedge against the short perp and makes net exposure more short."
+    if is_buy:
+        return "Buying spot adds to an already long perp posture, so directional exposure increases."
+    if projected_spot < current_spot:
+        return "Selling spot reduces spot exposure, but the long perp remains the main directional position."
+    return "The spot ticket does not materially change the long-perp posture."
 
 
 def _show_hyperliquid_live_submit_safety_review(self: tk.Tk) -> None:

@@ -616,11 +616,12 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
         spot_actions.columnconfigure(column, weight=1, uniform="hyperliquid_spot_actions")
 
     _add_workspace_button(spot_actions, row=0, column=0, text="Use Mid", command=hyperliquid_action("spot", "use_hyperliquid_cockpit_spot_mid_market"), style="Accent.TButton")
-    _add_workspace_button(spot_actions, row=0, column=1, text="Preview Spot", command=hyperliquid_action("spot", "preview_hyperliquid_spot_ticket"), style="Accent.TButton")
-    _add_workspace_button(spot_actions, row=0, column=2, text="Open Orders", command=hyperliquid_action("spot", "load_hyperliquid_open_orders"))
-    _add_workspace_button(spot_actions, row=1, column=0, text="Edit Order", command=hyperliquid_action("spot", "show_hyperliquid_order_edit_dialog"))
-    _add_workspace_button(spot_actions, row=1, column=1, text="Cancel Order", command=hyperliquid_action("spot", "cancel_hyperliquid_order_guarded"), style="Danger.TButton")
-    _add_workspace_button(spot_actions, row=1, column=2, text="LIVE Submit", command=hyperliquid_action("spot", "show_hyperliquid_spot_live_submit_safety_review"), style="Danger.TButton")
+    _add_workspace_button(spot_actions, row=0, column=1, text="Spot What-If", command=hyperliquid_action("spot", "run_hyperliquid_spot_what_if"), style="Accent.TButton")
+    _add_workspace_button(spot_actions, row=0, column=2, text="Preview Spot", command=hyperliquid_action("spot", "preview_hyperliquid_spot_ticket"))
+    _add_workspace_button(spot_actions, row=1, column=0, text="Open Orders", command=hyperliquid_action("spot", "load_hyperliquid_open_orders"))
+    _add_workspace_button(spot_actions, row=1, column=1, text="Edit Order", command=hyperliquid_action("spot", "show_hyperliquid_order_edit_dialog"))
+    _add_workspace_button(spot_actions, row=1, column=2, text="Cancel Order", command=hyperliquid_action("spot", "cancel_hyperliquid_order_guarded"), style="Danger.TButton")
+    _add_workspace_button(spot_actions, row=2, column=0, text="LIVE Submit", command=hyperliquid_action("spot", "show_hyperliquid_spot_live_submit_safety_review"), style="Danger.TButton", columnspan=3)
 
     ticket = perp_ticket
     self._grid_row(ticket, 0, "Coin", ttk.Entry(ticket, textvariable=self.hyperliquid_perp_coin_var), "Symbol", ttk.Entry(ticket, textvariable=self.hyperliquid_perp_symbol_var))
@@ -641,7 +642,7 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     ttk.Label(ticket, text="Cancel order ID", style="Subtle.TLabel").grid(row=7, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
     ttk.Entry(ticket, textvariable=self.hyperliquid_perp_cancel_order_id_var).grid(row=7, column=1, columnspan=3, sticky="ew", pady=(8, 0))
 
-    actions = ttk.LabelFrame(ticket, text="Hyperliquid Actions", style="Card.TLabelframe")
+    actions = ttk.LabelFrame(ticket, text="Perp Actions", style="Card.TLabelframe")
     actions.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(14, 0))
     for column in range(3):
         actions.columnconfigure(column, weight=1, uniform="hyperliquid_actions")
@@ -670,6 +671,7 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
         "HYPERLIQUID TRADING WORKSPACE\n"
         "=============================\n\n"
         "Use Mid pulls the current Hyperliquid allMids price into Entry / Limit.\n\n"
+        "Spot What-If compares the spot ticket against the matching perp exposure so you can see whether a spot add/sell hedges or stacks the current position.\n\n"
         "Perp What-If compares your target and pain prices against the entry. It estimates gross P&L, fees, net P&L, account-risk-style ROI on margin, and a rough liquidation line.\n\n"
         "The rough liquidation line ignores maintenance margin, funding, slippage, partial fills, and account-wide margin. Treat it as a planning warning, not an exchange quote.",
     )
