@@ -32,7 +32,7 @@ from app.analytics.stock_research import (
 from app.analytics.technical_analysis import candles_from_price_history
 from app.data.sec_edgar import SecEdgarClient, normalize_ticker
 from app.macro.releases import build_macro_report
-from app.ui.research_widgets import Checklist, ScenarioImpactBars, ScoreMeter, clear_children, freshness_badges, labeled_value_grid, metric_grid
+from app.ui.research_widgets import Checklist, ScenarioImpactBars, ScoreMeter, ScrollableFrame, clear_children, freshness_badges, labeled_value_grid, metric_grid
 from app.ui.schwab_output_popout_extension import _apply_report_tags
 
 REPORT_FORMS = ("10-K", "10-Q", "8-K")
@@ -71,8 +71,8 @@ def _open_schwab_research_workspace(self: tk.Tk) -> None:
 
     window = tk.Toplevel(self)
     window.title("Schwab Research + Risk Workspace")
-    window.geometry("1220x780")
-    window.minsize(940, 580)
+    window.geometry("1280x820")
+    window.minsize(1020, 640)
     window.columnconfigure(0, weight=1)
     window.rowconfigure(1, weight=1)
     self.schwab_research_window = window
@@ -95,9 +95,9 @@ def _open_schwab_research_workspace(self: tk.Tk) -> None:
 
     left = ttk.Frame(body, style="Panel.TFrame", padding=10)
     right = ttk.Frame(body, style="Panel.TFrame", padding=10)
-    body.add(left, minsize=360, stretch="never")
-    body.add(right, minsize=620, stretch="always")
-    window.after_idle(lambda: body.sash_place(0, 390, 0))
+    body.add(left, minsize=330, stretch="never")
+    body.add(right, minsize=680, stretch="always")
+    window.after_idle(lambda: body.sash_place(0, 370, 0))
 
     _build_research_left_panel(self, left)
     _build_research_right_panel(self, right)
@@ -209,10 +209,18 @@ def _build_research_right_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     self.schwab_research_macro_text = self.schwab_research_macro_frame.detail_text  # type: ignore[attr-defined]
 
 
-def _overview_tab(notebook: ttk.Notebook) -> ttk.Frame:
-    frame = ttk.Frame(notebook, style="Panel.TFrame", padding=10)
+def _scrollable_tab(notebook: ttk.Notebook, title: str) -> ttk.Frame:
+    outer = ScrollableFrame(notebook, padding=10)
+    frame = outer.body
     frame.columnconfigure(0, weight=1)
-    frame.rowconfigure(5, weight=1)
+    frame._scrollable_outer = outer  # type: ignore[attr-defined]
+    notebook.add(outer, text=title)
+    return frame
+
+
+def _overview_tab(notebook: ttk.Notebook) -> ttk.Frame:
+    frame = _scrollable_tab(notebook, "Overview")
+    frame.columnconfigure(0, weight=1)
     frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.cards.grid(row=0, column=0, sticky="ew")
     frame.operator = ttk.LabelFrame(frame, text="Operator View", style="Card.TLabelframe")  # type: ignore[attr-defined]
@@ -227,22 +235,19 @@ def _overview_tab(notebook: ttk.Notebook) -> ttk.Frame:
     frame.freshness = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.freshness.grid(row=4, column=0, sticky="ew", pady=(8, 0))
     frame.detail_text = _detail_text(frame)  # type: ignore[attr-defined]
-    frame.detail_text.grid(row=5, column=0, sticky="nsew", pady=(8, 0))  # type: ignore[attr-defined]
-    notebook.add(frame, text="Overview")
+    frame.detail_text.grid(row=5, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
     return frame
 
 
 def _section_summary_tab(notebook: ttk.Notebook, title: str) -> ttk.Frame:
-    frame = ttk.Frame(notebook, style="Panel.TFrame", padding=10)
+    frame = _scrollable_tab(notebook, title)
     frame.columnconfigure(0, weight=1)
-    frame.rowconfigure(2, weight=1)
     frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.cards.grid(row=0, column=0, sticky="ew")
     frame.checks = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.checks.grid(row=1, column=0, sticky="ew", pady=(8, 0))
     frame.detail_text = _detail_text(frame)  # type: ignore[attr-defined]
-    frame.detail_text.grid(row=2, column=0, sticky="nsew", pady=(8, 0))  # type: ignore[attr-defined]
-    notebook.add(frame, text=title)
+    frame.detail_text.grid(row=2, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
     return frame
 
 
@@ -269,8 +274,7 @@ def _report_tab(notebook: ttk.Notebook, title: str) -> tk.Text:
 
 
 def _technicals_tab(notebook: ttk.Notebook) -> ttk.Frame:
-    frame = ttk.Frame(notebook, style="Panel.TFrame", padding=10)
-    frame.rowconfigure(3, weight=1)
+    frame = _scrollable_tab(notebook, "Technicals")
     frame.columnconfigure(0, weight=1)
     frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.cards.grid(row=0, column=0, sticky="ew")
@@ -283,23 +287,27 @@ def _technicals_tab(notebook: ttk.Notebook) -> ttk.Frame:
     frame.momentum_meter.grid(row=0, column=1, sticky="ew", padx=(0, 8))  # type: ignore[attr-defined]
     frame.risk_meter = ScoreMeter(frame.meters)  # type: ignore[attr-defined]
     frame.risk_meter.grid(row=0, column=2, sticky="ew")  # type: ignore[attr-defined]
-    tree = ttk.Treeview(frame, columns=("metric", "value", "read"), show="headings", height=12)
+    tree_box = ttk.Frame(frame, style="Panel.TFrame")
+    tree_box.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+    tree_box.columnconfigure(0, weight=1)
+    tree = ttk.Treeview(tree_box, columns=("metric", "value", "read"), show="headings", height=9)
     for column, label, width in (("metric", "Metric", 160), ("value", "Value", 140), ("read", "Readout", 360)):
         tree.heading(column, text=label)
         tree.column(column, width=width, anchor=tk.W if column != "value" else tk.E, stretch=True)
-    tree.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+    tree.grid(row=0, column=0, sticky="ew")
+    y_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
+    y_scroll.grid(row=0, column=1, sticky="ns")
+    tree.configure(yscrollcommand=y_scroll.set)
     text = tk.Text(frame, height=8, wrap=tk.WORD, font=("Segoe UI", 10), padx=14, pady=10, relief=tk.FLAT, borderwidth=0, background="#f8fafc")
-    text.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
+    text.grid(row=3, column=0, sticky="ew", pady=(10, 0))
     frame.indicator_tree = tree  # type: ignore[attr-defined]
     frame.technical_notes_text = text  # type: ignore[attr-defined]
-    notebook.add(frame, text="Technicals")
     return frame
 
 
 def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
-    frame = ttk.Frame(notebook, style="Panel.TFrame", padding=10)
+    frame = _scrollable_tab(notebook, "Risk Scenarios")
     frame.columnconfigure(0, weight=1)
-    frame.rowconfigure(3, weight=1)
     controls = ttk.Frame(frame, style="Panel.TFrame")
     controls.grid(row=0, column=0, sticky="ew", pady=(0, 8))
     ttk.Label(controls, text="Custom move %", style="Subtle.TLabel").grid(row=0, column=0, sticky="w")
@@ -311,7 +319,10 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     frame.cards.grid(row=1, column=0, sticky="ew", pady=(0, 8))
     frame.impact_bars = ScenarioImpactBars(frame, height=128)  # type: ignore[attr-defined]
     frame.impact_bars.grid(row=2, column=0, sticky="ew", pady=(0, 8))  # type: ignore[attr-defined]
-    tree = ttk.Treeview(frame, columns=("scenario", "price", "pnl", "impact", "portfolio"), show="headings", height=10)
+    tree_box = ttk.Frame(frame, style="Panel.TFrame")
+    tree_box.grid(row=3, column=0, sticky="ew")
+    tree_box.columnconfigure(0, weight=1)
+    tree = ttk.Treeview(tree_box, columns=("scenario", "price", "pnl", "impact", "portfolio"), show="headings", height=7)
     for column, label, width in (
         ("scenario", "Scenario", 100),
         ("price", "Symbol Price", 130),
@@ -323,12 +334,14 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
         tree.column(column, width=width, anchor=tk.E if column != "scenario" else tk.W, stretch=True)
     tree.tag_configure("positive", foreground="#047857")
     tree.tag_configure("negative", foreground="#b91c1c")
-    tree.grid(row=3, column=0, sticky="nsew")
+    tree.grid(row=0, column=0, sticky="ew")
+    y_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
+    y_scroll.grid(row=0, column=1, sticky="ns")
+    tree.configure(yscrollcommand=y_scroll.set)
     note = tk.Text(frame, height=7, wrap=tk.WORD, font=("Segoe UI", 10), padx=14, pady=10, relief=tk.FLAT, borderwidth=0, background="#f8fafc")
     note.grid(row=4, column=0, sticky="ew", pady=(10, 0))
     frame.scenario_tree = tree  # type: ignore[attr-defined]
     frame.scenario_note_text = note  # type: ignore[attr-defined]
-    notebook.add(frame, text="Risk Scenarios")
     return frame
 
 

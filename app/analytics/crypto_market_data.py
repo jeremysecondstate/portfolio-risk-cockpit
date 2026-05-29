@@ -35,25 +35,27 @@ class CryptoCandleResult:
     status: str
     fetched_at: str
     message: str = ""
+    timeframe: str = "1d"
 
 
-Provider = Callable[[str, int, int], CryptoCandleResult]
+Provider = Callable[[str, int, int, str], CryptoCandleResult]
 
 
-def fetch_crypto_candles(symbol: str, *, days: int = 365, timeout_seconds: int = 8) -> CryptoCandleResult:
+def fetch_crypto_candles(symbol: str, *, days: int = 365, timeout_seconds: int = 8, timeframe: str = "1d") -> CryptoCandleResult:
     clean = normalize_crypto_symbol(symbol)
-    cached = load_cached_crypto_candles(clean)
+    timeframe = normalize_timeframe(timeframe)
+    cached = load_cached_crypto_candles(clean, timeframe=timeframe)
     if cached and time.time() - cached.get("cached_at", 0) <= CRYPTO_CANDLE_CACHE_TTL_SECONDS:
-        return _result_from_cache(clean, cached, status="fresh/cache")
+        return _result_from_cache(clean, cached, status="fresh/cache", timeframe=timeframe)
 
     providers: list[Provider] = [fetch_coinbase_candles, fetch_kraken_candles, fetch_coingecko_candles]
-    result = fetch_crypto_candles_with_fallback(clean, providers, days=days, timeout_seconds=timeout_seconds)
+    result = fetch_crypto_candles_with_fallback(clean, providers, days=days, timeout_seconds=timeout_seconds, timeframe=timeframe)
     if result.candles:
         save_cached_crypto_candles(clean, result)
         return result
     if cached:
-        cached_result = _result_from_cache(clean, cached, status="stale")
-        return CryptoCandleResult(clean, cached_result.candles, cached_result.source, "stale", _now(), f"{result.message}; using stale cached candles.")
+        cached_result = _result_from_cache(clean, cached, status="stale", timeframe=timeframe)
+        return CryptoCandleResult(clean, cached_result.candles, cached_result.source, "stale", _now(), f"{result.message}; using stale cached candles.", timeframe)
     return result
 
 
@@ -63,49 +65,56 @@ def fetch_crypto_candles_with_fallback(
     *,
     days: int = 365,
     timeout_seconds: int = 8,
+    timeframe: str = "1d",
 ) -> CryptoCandleResult:
     clean = normalize_crypto_symbol(symbol)
+    timeframe = normalize_timeframe(timeframe)
     errors: list[str] = []
     for provider in providers:
         try:
-            result = provider(clean, days, timeout_seconds)
+            result = provider(clean, days, timeout_seconds, timeframe)
         except Exception as exc:
             errors.append(f"{provider.__name__}: {exc}")
             continue
         if result.candles:
             return result
         errors.append(f"{result.source}: {result.message or result.status}")
-    return CryptoCandleResult(clean, [], "Crypto candles", "error", _now(), "; ".join(errors) or "No candle provider returned data.")
+    return CryptoCandleResult(clean, [], "Crypto candles", "error", _now(), "; ".join(errors) or "No candle provider returned data.", timeframe)
 
 
-def fetch_coinbase_candles(symbol: str, days: int, timeout_seconds: int) -> CryptoCandleResult:
+def fetch_coinbase_candles(symbol: str, days: int, timeout_seconds: int, timeframe: str = "1d") -> CryptoCandleResult:
     clean = normalize_crypto_symbol(symbol)
     product = f"{clean}-USD"
-    granularity = 86_400
+    timeframe = normalize_timeframe(timeframe)
+    granularity = {"15m": 900, "1h": 3_600, "4h": 14_400, "1d": 86_400}[timeframe]
     url = f"https://api.exchange.coinbase.com/products/{urllib.parse.quote(product)}/candles?granularity={granularity}"
     payload = _fetch_json(url, timeout_seconds)
     candles = parse_coinbase_candles(payload)
-    return CryptoCandleResult(clean, candles[-days:], "Coinbase public candles", "fresh", _now(), f"{product} daily candles.")
+    return CryptoCandleResult(clean, candles[-days:], "Coinbase public candles", "fresh", _now(), f"{product} {timeframe} candles.", timeframe)
 
 
-def fetch_kraken_candles(symbol: str, days: int, timeout_seconds: int) -> CryptoCandleResult:
+def fetch_kraken_candles(symbol: str, days: int, timeout_seconds: int, timeframe: str = "1d") -> CryptoCandleResult:
     clean = normalize_crypto_symbol(symbol)
+    timeframe = normalize_timeframe(timeframe)
     pair = "XBTUSD" if clean == "BTC" else f"{clean}USD"
-    url = f"https://api.kraken.com/0/public/OHLC?pair={urllib.parse.quote(pair)}&interval=1440"
+    interval = {"15m": 15, "1h": 60, "4h": 240, "1d": 1440}[timeframe]
+    url = f"https://api.kraken.com/0/public/OHLC?pair={urllib.parse.quote(pair)}&interval={interval}"
     payload = _fetch_json(url, timeout_seconds)
     candles = parse_kraken_ohlc(payload)
-    return CryptoCandleResult(clean, candles[-days:], "Kraken public OHLC", "fresh", _now(), f"{pair} daily candles.")
+    return CryptoCandleResult(clean, candles[-days:], "Kraken public OHLC", "fresh", _now(), f"{pair} {timeframe} candles.", timeframe)
 
 
-def fetch_coingecko_candles(symbol: str, days: int, timeout_seconds: int) -> CryptoCandleResult:
+def fetch_coingecko_candles(symbol: str, days: int, timeout_seconds: int, timeframe: str = "1d") -> CryptoCandleResult:
     clean = normalize_crypto_symbol(symbol)
+    timeframe = normalize_timeframe(timeframe)
     coin_id = COINGECKO_IDS.get(clean)
     if not coin_id:
         raise ValueError(f"No CoinGecko id mapping for {clean}.")
-    url = f"https://api.coingecko.com/api/v3/coins/{urllib.parse.quote(coin_id)}/market_chart?vs_currency=usd&days={days}&interval=daily"
+    interval = "&interval=daily" if timeframe == "1d" else ""
+    url = f"https://api.coingecko.com/api/v3/coins/{urllib.parse.quote(coin_id)}/market_chart?vs_currency=usd&days={days}{interval}"
     payload = _fetch_json(url, timeout_seconds)
     candles = parse_coingecko_market_chart(payload)
-    return CryptoCandleResult(clean, candles[-days:], "CoinGecko market chart", "fresh", _now(), f"{coin_id} daily market chart.")
+    return CryptoCandleResult(clean, candles[-days:], "CoinGecko market chart", "fresh", _now(), f"{coin_id} {timeframe} market chart.", timeframe)
 
 
 def parse_coinbase_candles(payload: Any) -> list[Candle]:
@@ -184,12 +193,22 @@ def normalize_crypto_symbol(symbol: str) -> str:
     return text.split("-")[0].strip()
 
 
-def load_cached_crypto_candles(symbol: str) -> dict[str, Any] | None:
+def normalize_timeframe(timeframe: str) -> str:
+    value = str(timeframe or "1d").strip().lower()
+    return value if value in {"15m", "1h", "4h", "1d"} else "1d"
+
+
+def _cache_key(symbol: str, timeframe: str) -> str:
+    return f"{normalize_crypto_symbol(symbol)}:{normalize_timeframe(timeframe)}"
+
+
+def load_cached_crypto_candles(symbol: str, *, timeframe: str = "1d") -> dict[str, Any] | None:
     try:
         payload = json.loads(CRYPTO_CANDLE_CACHE_PATH.read_text(encoding="utf-8"))
     except Exception:
         return None
-    cached = payload.get(normalize_crypto_symbol(symbol))
+    clean = normalize_crypto_symbol(symbol)
+    cached = payload.get(_cache_key(clean, timeframe)) or payload.get(clean)
     return cached if isinstance(cached, dict) else None
 
 
@@ -199,10 +218,11 @@ def save_cached_crypto_candles(symbol: str, result: CryptoCandleResult) -> None:
         payload = json.loads(CRYPTO_CANDLE_CACHE_PATH.read_text(encoding="utf-8"))
     except Exception:
         payload = {}
-    payload[normalize_crypto_symbol(symbol)] = {
+    payload[_cache_key(symbol, result.timeframe)] = {
         "cached_at": time.time(),
         "source": result.source,
         "fetched_at": result.fetched_at,
+        "timeframe": result.timeframe,
         "candles": [
             {
                 "datetime_ms": candle.datetime_ms,
@@ -218,7 +238,7 @@ def save_cached_crypto_candles(symbol: str, result: CryptoCandleResult) -> None:
     CRYPTO_CANDLE_CACHE_PATH.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _result_from_cache(symbol: str, cached: dict[str, Any], *, status: str) -> CryptoCandleResult:
+def _result_from_cache(symbol: str, cached: dict[str, Any], *, status: str, timeframe: str = "1d") -> CryptoCandleResult:
     candles: list[Candle] = []
     for item in cached.get("candles") or []:
         if not isinstance(item, dict):
@@ -227,7 +247,8 @@ def _result_from_cache(symbol: str, cached: dict[str, Any], *, status: str) -> C
             candles.append(Candle(int(item["datetime_ms"]), float(item["open"]), float(item["high"]), float(item["low"]), float(item["close"]), float(item.get("volume") or 0.0)))
         except Exception:
             continue
-    return CryptoCandleResult(symbol, candles, str(cached.get("source") or "Crypto candle cache"), status, str(cached.get("fetched_at") or _now()), "Loaded cached candles.")
+    cached_timeframe = normalize_timeframe(str(cached.get("timeframe") or timeframe))
+    return CryptoCandleResult(symbol, candles, str(cached.get("source") or "Crypto candle cache"), status, str(cached.get("fetched_at") or _now()), "Loaded cached candles.", cached_timeframe)
 
 
 def _fetch_json(url: str, timeout_seconds: int) -> Any:

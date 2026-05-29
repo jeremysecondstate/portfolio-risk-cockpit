@@ -26,6 +26,45 @@ def clear_children(parent: tk.Widget) -> None:
         child.destroy()
 
 
+class ScrollableFrame(ttk.Frame):
+    """A native scrollable container for dashboard tabs that can grow tall."""
+
+    def __init__(self, parent: tk.Widget, *, padding: int | tuple[int, ...] = 0, style: str = "Panel.TFrame") -> None:
+        super().__init__(parent, style=style)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0, background=PANEL_BG)
+        self.scrollbar = ttk.Scrollbar(self, orient=tk.VERTICAL, command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.scrollbar.grid(row=0, column=1, sticky="ns")
+
+        self.body = ttk.Frame(self.canvas, style=style, padding=padding)
+        self._window = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
+        self.body.bind("<Configure>", self._on_body_configure, add="+")
+        self.canvas.bind("<Configure>", self._on_canvas_configure, add="+")
+        self.canvas.bind("<Enter>", self._bind_mousewheel, add="+")
+        self.canvas.bind("<Leave>", self._unbind_mousewheel, add="+")
+        self.body.bind("<Enter>", self._bind_mousewheel, add="+")
+        self.body.bind("<Leave>", self._unbind_mousewheel, add="+")
+
+    def _on_body_configure(self, _event: tk.Event) -> None:
+        self.canvas.configure(scrollregion=self.canvas.bbox("all") or (0, 0, 0, 0))
+
+    def _on_canvas_configure(self, event: tk.Event) -> None:
+        self.canvas.itemconfigure(self._window, width=event.width)
+
+    def _bind_mousewheel(self, _event: tk.Event | None = None) -> None:
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
+
+    def _unbind_mousewheel(self, _event: tk.Event | None = None) -> None:
+        self.canvas.unbind_all("<MouseWheel>")
+
+    def _on_mousewheel(self, event: tk.Event) -> None:
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+
 class MetricCard(tk.Frame):
     def __init__(
         self,

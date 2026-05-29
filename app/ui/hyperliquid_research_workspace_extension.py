@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from tkinter import messagebox, ttk
 from typing import Any, Type
 
-from app.analytics.crypto_market_data import CryptoCandleResult, fetch_crypto_candles, normalize_crypto_symbol
+from app.analytics.crypto_market_data import CryptoCandleResult, fetch_crypto_candles, normalize_crypto_symbol, normalize_timeframe
 from app.analytics.crypto_research import (
     CryptoDecisionReadout,
     CryptoExposure,
@@ -17,7 +17,7 @@ from app.analytics.crypto_research import (
 )
 from app.analytics.research_scoring import direction_strength_label, risk_heat_label
 from app.analytics.stock_research import AdvancedIndicatorSnapshot, DataSourceStatus, calculate_advanced_indicators
-from app.ui.research_widgets import Checklist, ScenarioImpactBars, ScoreMeter, clear_children, freshness_badges, labeled_value_grid, metric_grid
+from app.ui.research_widgets import Checklist, ScenarioImpactBars, ScoreMeter, ScrollableFrame, clear_children, freshness_badges, labeled_value_grid, metric_grid
 
 
 class _ScrollableDetailText:
@@ -74,14 +74,15 @@ def _open_hyperliquid_research_workspace(self: tk.Tk) -> None:
 
     window = tk.Toplevel(self)
     window.title("Hyperliquid Crypto Research + Risk Workspace")
-    window.geometry("1240x780")
-    window.minsize(980, 600)
+    window.geometry("1360x840")
+    window.minsize(1080, 660)
     window.columnconfigure(0, weight=1)
     window.rowconfigure(1, weight=1)
     self.hyperliquid_research_window = window
 
     self.hyperliquid_research_coin_var = tk.StringVar(value=_initial_coin(self))
     self.hyperliquid_research_status_var = tk.StringVar(value="Choose a synced crypto asset or enter a coin, then run analysis.")
+    self.hyperliquid_research_timeframe_var = tk.StringVar(value="4h")
 
     header = ttk.Frame(window, padding=(12, 10), style="Panel.TFrame")
     header.grid(row=0, column=0, sticky="ew")
@@ -94,9 +95,9 @@ def _open_hyperliquid_research_workspace(self: tk.Tk) -> None:
     body.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
     left = ttk.Frame(body, style="Panel.TFrame", padding=10)
     right = ttk.Frame(body, style="Panel.TFrame", padding=10)
-    body.add(left, minsize=360, stretch="never")
+    body.add(left, minsize=330, stretch="never")
     body.add(right, minsize=640, stretch="always")
-    window.after_idle(lambda: body.sash_place(0, 390, 0))
+    window.after_idle(lambda: body.sash_place(0, 370, 0))
 
     _build_left_panel(self, left)
     _build_right_panel(self, right)
@@ -113,6 +114,7 @@ def _open_hyperliquid_research_workspace(self: tk.Tk) -> None:
 
 def _build_left_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     parent.columnconfigure(0, weight=1)
+    parent.rowconfigure(2, weight=1)
     parent.rowconfigure(3, weight=1)
 
     summary = ttk.LabelFrame(parent, text="Synced Hyperliquid Account", style="Card.TLabelframe")
@@ -130,7 +132,9 @@ def _build_left_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     selector.columnconfigure(1, weight=1)
     ttk.Label(selector, text="Coin", style="Subtle.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
     ttk.Entry(selector, textvariable=self.hyperliquid_research_coin_var).grid(row=0, column=1, sticky="ew")
-    ttk.Button(selector, text="Run Analysis", command=lambda app=self: _run_crypto_research(app), style="Accent.TButton").grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+    ttk.Label(selector, text="Timeframe", style="Subtle.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+    ttk.Combobox(selector, textvariable=self.hyperliquid_research_timeframe_var, values=("15m", "1h", "4h", "1d"), state="readonly", width=8).grid(row=1, column=1, sticky="w", pady=(8, 0))
+    ttk.Button(selector, text="Run Analysis", command=lambda app=self: _run_crypto_research(app), style="Accent.TButton").grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
     balances = ttk.LabelFrame(parent, text="Spot + Perp Exposure", style="Card.TLabelframe")
     balances.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
@@ -211,13 +215,21 @@ def _build_right_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     self.hyperliquid_crypto_scenarios_frame = _scenarios_tab(notebook)
     self.hyperliquid_crypto_orders_frame = _orders_tab(notebook)
     self.hyperliquid_crypto_news_frame = _summary_tab(notebook, "News / Sentiment")
-    self.hyperliquid_crypto_sources_frame = _summary_tab(notebook, "Market Data Sources")
+    self.hyperliquid_crypto_sources_frame = _sources_tab(notebook)
+
+
+def _scrollable_tab(notebook: ttk.Notebook, title: str) -> ttk.Frame:
+    outer = ScrollableFrame(notebook, padding=10)
+    frame = outer.body
+    frame.columnconfigure(0, weight=1)
+    frame._scrollable_outer = outer  # type: ignore[attr-defined]
+    notebook.add(outer, text=title)
+    return frame
 
 
 def _summary_tab(notebook: ttk.Notebook, title: str) -> ttk.Frame:
-    frame = ttk.Frame(notebook, style="Panel.TFrame", padding=10)
+    frame = _scrollable_tab(notebook, title)
     frame.columnconfigure(0, weight=1)
-    frame.rowconfigure(3, weight=1)
     frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.cards.grid(row=0, column=0, sticky="ew")
     frame.checks = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
@@ -225,80 +237,126 @@ def _summary_tab(notebook: ttk.Notebook, title: str) -> ttk.Frame:
     frame.freshness = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.freshness.grid(row=2, column=0, sticky="ew", pady=(8, 0))
     frame.detail_text = _detail_text(frame)  # type: ignore[attr-defined]
-    frame.detail_text.grid(row=3, column=0, sticky="nsew", pady=(8, 0))  # type: ignore[attr-defined]
-    notebook.add(frame, text=title)
+    frame.detail_text.grid(row=3, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
     return frame
 
 
 def _technicals_tab(notebook: ttk.Notebook) -> ttk.Frame:
-    frame = ttk.Frame(notebook, style="Panel.TFrame", padding=10)
+    frame = _scrollable_tab(notebook, "Technicals")
     frame.columnconfigure(0, weight=1)
-    frame.rowconfigure(2, weight=1)
     frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.cards.grid(row=0, column=0, sticky="ew")
-    tree = ttk.Treeview(frame, columns=("metric", "value", "read"), show="headings", height=13)
+    tree_box = ttk.Frame(frame, style="Panel.TFrame")
+    tree_box.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+    tree_box.columnconfigure(0, weight=1)
+    tree = ttk.Treeview(tree_box, columns=("metric", "value", "read"), show="headings", height=9)
     for column, label, width in (("metric", "Metric", 150), ("value", "Value", 130), ("read", "Read", 360)):
         tree.heading(column, text=label)
         tree.column(column, width=width, anchor=tk.W if column != "value" else tk.E, stretch=True)
-    tree.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+    tree.grid(row=0, column=0, sticky="ew")
+    tree_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
+    tree_scroll.grid(row=0, column=1, sticky="ns")
+    tree.configure(yscrollcommand=tree_scroll.set)
     frame.detail_text = _detail_text(frame)  # type: ignore[attr-defined]
-    frame.detail_text.grid(row=2, column=0, sticky="nsew", pady=(8, 0))  # type: ignore[attr-defined]
+    frame.detail_text.grid(row=2, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
     frame.indicator_tree = tree  # type: ignore[attr-defined]
-    notebook.add(frame, text="Technicals")
     return frame
 
 
 def _exposure_tab(notebook: ttk.Notebook) -> ttk.Frame:
-    frame = ttk.Frame(notebook, style="Panel.TFrame", padding=10)
+    frame = _scrollable_tab(notebook, "Spot / Perp Exposure")
     frame.columnconfigure(0, weight=1)
-    frame.rowconfigure(2, weight=1)
     frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.cards.grid(row=0, column=0, sticky="ew")
-    tree = ttk.Treeview(frame, columns=("metric", "value", "read"), show="headings", height=9)
+    tree_box = ttk.Frame(frame, style="Panel.TFrame")
+    tree_box.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+    tree_box.columnconfigure(0, weight=1)
+    tree = ttk.Treeview(tree_box, columns=("metric", "value", "read"), show="headings", height=9)
     for column, label, width in (("metric", "Metric", 180), ("value", "Value", 160), ("read", "Read", 420)):
         tree.heading(column, text=label)
         tree.column(column, width=width, anchor=tk.W if column != "value" else tk.E, stretch=True)
-    tree.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+    tree.grid(row=0, column=0, sticky="ew")
+    tree_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
+    tree_scroll.grid(row=0, column=1, sticky="ns")
+    tree.configure(yscrollcommand=tree_scroll.set)
     frame.detail_text = _detail_text(frame)  # type: ignore[attr-defined]
-    frame.detail_text.grid(row=2, column=0, sticky="nsew", pady=(8, 0))  # type: ignore[attr-defined]
+    frame.detail_text.grid(row=2, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
     frame.exposure_tree = tree  # type: ignore[attr-defined]
-    notebook.add(frame, text="Spot / Perp Exposure")
     return frame
 
 
 def _scenarios_tab(notebook: ttk.Notebook) -> ttk.Frame:
-    frame = ttk.Frame(notebook, style="Panel.TFrame", padding=10)
+    frame = _scrollable_tab(notebook, "What-If Scenarios")
     frame.columnconfigure(0, weight=1)
-    frame.rowconfigure(2, weight=1)
     frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.cards.grid(row=0, column=0, sticky="ew")
     frame.impact_bars = ScenarioImpactBars(frame, height=148)  # type: ignore[attr-defined]
     frame.impact_bars.grid(row=1, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
-    tree = ttk.Treeview(frame, columns=("scenario", "price", "spot", "perp", "net", "impact", "read"), show="headings", height=11)
+    tree_box = ttk.Frame(frame, style="Panel.TFrame")
+    tree_box.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+    tree_box.columnconfigure(0, weight=1)
+    tree = ttk.Treeview(tree_box, columns=("scenario", "price", "spot", "perp", "net", "impact", "read"), show="headings", height=9)
     for column, label, width in (("scenario", "Scenario", 90), ("price", "Price", 120), ("spot", "Spot P&L", 120), ("perp", "Perp P&L", 120), ("net", "Net P&L", 120), ("impact", "Portfolio", 100), ("read", "After Move", 170)):
         tree.heading(column, text=label)
         tree.column(column, width=width, anchor=tk.E if column not in {"scenario", "read"} else tk.W, stretch=True)
     tree.tag_configure("positive", foreground="#047857")
     tree.tag_configure("negative", foreground="#b91c1c")
-    tree.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
+    tree.grid(row=0, column=0, sticky="ew")
+    tree_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
+    tree_scroll.grid(row=0, column=1, sticky="ns")
+    tree.configure(yscrollcommand=tree_scroll.set)
     frame.scenario_tree = tree  # type: ignore[attr-defined]
-    notebook.add(frame, text="What-If Scenarios")
     return frame
 
 
 def _orders_tab(notebook: ttk.Notebook) -> ttk.Frame:
-    frame = ttk.Frame(notebook, style="Panel.TFrame", padding=10)
+    frame = _scrollable_tab(notebook, "Funding / Orders")
     frame.columnconfigure(0, weight=1)
-    frame.rowconfigure(1, weight=1)
     frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.cards.grid(row=0, column=0, sticky="ew")
-    tree = ttk.Treeview(frame, columns=("oid", "type", "coin", "direction", "size", "price", "trigger"), show="headings", height=12)
+    tree_box = ttk.Frame(frame, style="Panel.TFrame")
+    tree_box.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+    tree_box.columnconfigure(0, weight=1)
+    tree = ttk.Treeview(tree_box, columns=("oid", "type", "coin", "direction", "size", "price", "trigger"), show="headings", height=9)
     for column, label, width in (("oid", "OID", 110), ("type", "Type", 100), ("coin", "Coin", 70), ("direction", "Direction", 110), ("size", "Size", 120), ("price", "Price", 90), ("trigger", "Trigger", 160)):
         tree.heading(column, text=label)
         tree.column(column, width=width, anchor=tk.W, stretch=column in {"oid", "trigger"})
-    tree.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+    tree.grid(row=0, column=0, sticky="ew")
+    tree_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
+    tree_scroll.grid(row=0, column=1, sticky="ns")
+    tree.configure(yscrollcommand=tree_scroll.set)
     frame.orders_tree = tree  # type: ignore[attr-defined]
-    notebook.add(frame, text="Funding / Orders")
+    frame.detail_text = _detail_text(frame)  # type: ignore[attr-defined]
+    frame.detail_text.grid(row=2, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
+    return frame
+
+
+def _sources_tab(notebook: ttk.Notebook) -> ttk.Frame:
+    frame = _scrollable_tab(notebook, "Market Data Sources")
+    frame.columnconfigure(0, weight=1)
+    top = ttk.Frame(frame, style="Panel.TFrame")
+    top.grid(row=0, column=0, sticky="ew")
+    top.columnconfigure(0, weight=1)
+    frame.cards = ttk.Frame(top, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.cards.grid(row=0, column=0, sticky="ew")
+    frame.refresh_button = ttk.Button(top, text="Refresh Candles", command=lambda: None)  # type: ignore[attr-defined]
+    frame.refresh_button.grid(row=0, column=1, sticky="ne", padx=(8, 0))  # type: ignore[attr-defined]
+    tree_box = ttk.Frame(frame, style="Panel.TFrame")
+    tree_box.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+    tree_box.columnconfigure(0, weight=1)
+    tree = ttk.Treeview(tree_box, columns=("provider", "status", "timeframe", "fetched", "candles", "message"), show="headings", height=8)
+    for column, label, width in (("provider", "Provider", 170), ("status", "Status", 100), ("timeframe", "TF", 70), ("fetched", "Last fetched", 170), ("candles", "Candles", 80), ("message", "Message", 360)):
+        tree.heading(column, text=label)
+        tree.column(column, width=width, anchor=tk.W, stretch=column == "message")
+    tree.grid(row=0, column=0, sticky="ew")
+    tree_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
+    tree_scroll.grid(row=0, column=1, sticky="ns")
+    tree.configure(yscrollcommand=tree_scroll.set)
+    frame.provider_tree = tree  # type: ignore[attr-defined]
+    frame.freshness = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.freshness.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+    frame.detail_text = _detail_text(frame)  # type: ignore[attr-defined]
+    frame.detail_text.grid(row=3, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
     return frame
 
 
@@ -317,15 +375,18 @@ def _run_crypto_research(self: tk.Tk) -> None:
 
     portfolio = self.broker.get_portfolio()
     orders = _normalized_orders(self)
+    timeframe = _selected_timeframe(self)
+    days = _days_for_timeframe(timeframe)
 
     def worker() -> None:
         try:
-            candles = fetch_crypto_candles(coin, days=365)
+            candles = fetch_crypto_candles(coin, days=days, timeframe=timeframe)
             indicators = calculate_advanced_indicators(coin, candles.candles)
             exposure = build_crypto_exposure(portfolio, coin, orders)
             statuses = [
                 DataSourceStatus(candles.source, candles.status, candles.fetched_at, candles.message),
                 DataSourceStatus("Hyperliquid synced account", "fresh/cache", _now(), "Exposure loaded from current cockpit portfolio."),
+                DataSourceStatus("Hyperliquid funding", "unknown", _now(), "Funding data unavailable from current sync."),
                 DataSourceStatus("Crypto sentiment", "unknown", _now(), "Optional sentiment provider not configured."),
             ]
             scenarios = build_crypto_scenarios(exposure, indicators.latest_close)
@@ -337,6 +398,16 @@ def _run_crypto_research(self: tk.Tk) -> None:
         self.after(0, lambda result=payload: _render_crypto_payload(self, result))
 
     threading.Thread(target=worker, daemon=True).start()
+
+
+def _selected_timeframe(self: tk.Tk) -> str:
+    var = getattr(self, "hyperliquid_research_timeframe_var", None)
+    value = var.get() if var is not None else "4h"
+    return normalize_timeframe(value)
+
+
+def _days_for_timeframe(timeframe: str) -> int:
+    return {"15m": 10, "1h": 30, "4h": 120, "1d": 365}.get(normalize_timeframe(timeframe), 120)
 
 
 def _render_crypto_payload(self: tk.Tk, payload: _CryptoResearchPayload) -> None:
@@ -473,25 +544,49 @@ def _render_orders(self: tk.Tk, payload: _CryptoResearchPayload) -> None:
     metric_grid(frame.cards, [payload.decision.funding_bias, _badge("Open Orders", str(payload.exposure.open_orders), "mixed" if payload.exposure.open_orders else "good", "active orders can change risk quickly.")], columns=4)  # type: ignore[attr-defined]
     tree = frame.orders_tree  # type: ignore[attr-defined]
     _clear_tree(tree)
+    matched = False
     for order in _normalized_orders(self):
         if normalize_crypto_symbol(order.coin) != payload.coin:
             continue
+        matched = True
         tree.insert("", tk.END, values=(order.oid, order.order_kind, normalize_crypto_symbol(order.coin), order.direction, order.size_label, order.price_label, order.trigger_condition))
+    if not matched:
+        tree.insert("", tk.END, values=("--", "No open orders", payload.coin, "--", "--", "--", "No open orders for selected coin."))
+    _set_text(frame.detail_text, "\n".join([
+        "Funding / Orders:",
+        "- Funding data is unavailable from the current sync." if payload.decision.funding_bias.label == "Unknown" else f"- Funding read: {payload.decision.funding_bias.label}.",
+        "- No open orders for this selected coin." if not matched else "- Selected-coin open orders are shown above.",
+        "- Use Open Orders in the trading tab to refresh active order details.",
+    ]))  # type: ignore[attr-defined]
 
 
 def _render_news(self: tk.Tk, payload: _CryptoResearchPayload) -> None:
     frame = self.hyperliquid_crypto_news_frame
-    metric_grid(frame.cards, [payload.decision.sentiment], columns=4)  # type: ignore[attr-defined]
+    sentiment = _badge("Sentiment", "Not Configured", "info", "optional provider not configured")
+    metric_grid(frame.cards, [sentiment], columns=4)  # type: ignore[attr-defined]
     clear_children(frame.checks)  # type: ignore[attr-defined]
-    Checklist(frame.checks, "Sentiment Notes", ["WATCH: optional crypto sentiment/news provider is not configured.", "SOURCE: no paid API key is required; this section stays Unknown until a free source is added."]).grid(row=0, column=0, sticky="ew")  # type: ignore[attr-defined]
-    _set_text(frame.detail_text, "News/sentiment provider hook is available, but no source is configured yet.\n\nThe rest of the workspace still uses candles and synced Hyperliquid exposure.")  # type: ignore[attr-defined]
+    Checklist(frame.checks, "Sentiment Notes", ["INFO: optional crypto sentiment/news provider is not configured.", "SOURCE: this is not an error; candles and synced exposure still drive the read.", "WATCH: add CryptoPanic, CoinGecko, or a project-news hook later if desired."]).grid(row=0, column=0, sticky="ew")  # type: ignore[attr-defined]
+    _set_text(frame.detail_text, "Sentiment/news is intentionally marked Not Configured. The workspace remains usable with price candles, spot/perp exposure, open orders, and what-if scenarios.")  # type: ignore[attr-defined]
 
 
 def _render_sources(self: tk.Tk, payload: _CryptoResearchPayload) -> None:
     frame = self.hyperliquid_crypto_sources_frame
-    metric_grid(frame.cards, [_badge("Candles", payload.candles.status.title(), "good" if payload.candles.status.startswith("fresh") else "mixed" if payload.candles.status == "stale" else "bad", payload.candles.source), _badge("Exposure", "Synced", "good", "current cockpit portfolio snapshot"), _badge("Sentiment", "Unknown", "info", "optional provider not configured")], columns=3)  # type: ignore[attr-defined]
+    candle_status = "good" if payload.candles.status.startswith("fresh") else "mixed" if payload.candles.status == "stale" else "bad"
+    metric_grid(frame.cards, [_badge("Candles", payload.candles.status.title(), candle_status, f"{payload.candles.source}; {payload.candles.timeframe}"), _badge("Exposure", "Synced", "good", "current cockpit portfolio snapshot"), _badge("Sentiment", "Not Configured", "info", "optional provider not configured")], columns=3)  # type: ignore[attr-defined]
+    tree = frame.provider_tree  # type: ignore[attr-defined]
+    _clear_tree(tree)
+    for row in build_crypto_provider_status_rows(payload.candles):
+        tree.insert("", tk.END, values=row)
     freshness_badges(frame.freshness, payload.statuses)  # type: ignore[attr-defined]
-    _set_text(frame.detail_text, "\n".join(["Market data sources:", *[f"- {status.source}: {status.status} at {status.fetched_at}. {status.message}" for status in payload.statuses]]))  # type: ignore[attr-defined]
+    frame.refresh_button.configure(command=lambda app=self: _run_crypto_research(app))  # type: ignore[attr-defined]
+    _set_text(frame.detail_text, "\n".join([
+        "Market data sources:",
+        "- Active candle provider is listed first in the table above.",
+        "- Fallback order: Hyperliquid hook, Coinbase, Kraken, KuCoin hook, Binance hook, CoinGecko, optional CoinMarketCap.",
+        "- Missing optional providers are shown as planned/future hooks instead of errors.",
+        "",
+        *[f"- {status.source}: {status.status} at {status.fetched_at}. {status.message}" for status in payload.statuses],
+    ]))  # type: ignore[attr-defined]
 
 
 def _refresh_hyperliquid_research(self: tk.Tk) -> None:
@@ -502,6 +597,58 @@ def _refresh_hyperliquid_research(self: tk.Tk) -> None:
         except Exception as exc:
             messagebox.showerror("Hyperliquid sync failed", str(exc))
     _refresh_left_tables(self)
+
+
+def build_crypto_provider_status_rows(candles: CryptoCandleResult) -> list[tuple[str, str, str, str, str, str]]:
+    active = candles.source
+    providers = [
+        ("Hyperliquid candles", "Planned hook"),
+        ("Coinbase public candles", "Fallback"),
+        ("Kraken public OHLC", "Fallback"),
+        ("KuCoin public candles", "Planned hook"),
+        ("Binance public klines", "Planned hook"),
+        ("CoinGecko market chart", "Fallback"),
+        ("CoinMarketCap", "Optional API key"),
+    ]
+    rows: list[tuple[str, str, str, str, str, str]] = [
+        (active, candles.status.title(), candles.timeframe, candles.fetched_at, str(len(candles.candles)), candles.message)
+    ]
+    for provider, note in providers:
+        if provider == active:
+            continue
+        rows.append((provider, note, candles.timeframe, "--", "--", "Not used for this run."))
+    return rows
+
+
+def hyperliquid_cash_display_rows(cash_positions: Any) -> list[tuple[str, str, str, str, str, tuple[str, ...]]]:
+    positive_usdc = 0.0
+    negative_usdc = 0.0
+    other_rows: list[tuple[str, str, str, str, str, tuple[str, ...]]] = []
+    for cash in getattr(cash_positions, "values", lambda: [])():
+        source = str(getattr(cash, "source", "")).lower()
+        if "hyper" not in source:
+            continue
+        symbol = str(getattr(cash, "display_symbol", None) or getattr(cash, "symbol", "USDC")).upper()
+        amount = float(getattr(cash, "amount", 0.0) or 0.0)
+        if symbol in {"USDC", "USD"}:
+            if amount >= 0:
+                positive_usdc += amount
+            else:
+                negative_usdc += amount
+            continue
+        tag = ("positive",) if amount > 0 else ("negative",) if amount < 0 else ()
+        other_rows.append((symbol, "Hyperliquid Cash", _number(amount), _money(amount), "--", tag))
+
+    rows: list[tuple[str, str, str, str, str, tuple[str, ...]]] = []
+    if positive_usdc:
+        rows.append(("USDC", "Spot USDC", _number(positive_usdc), _money(positive_usdc), "--", ()))
+    if negative_usdc:
+        rows.append(("USDC", "Perp USDC / margin adj", _number(negative_usdc), _money(negative_usdc), "--", ("negative",)))
+    if positive_usdc and negative_usdc:
+        net = positive_usdc + negative_usdc
+        tag = ("positive",) if net > 0 else ("negative",) if net < 0 else ()
+        rows.append(("USDC", "Net Hyperliquid USDC", _number(net), _money(net), "--", tag))
+    return rows + other_rows
 
 
 def _refresh_left_tables(self: tk.Tk) -> None:
@@ -525,16 +672,18 @@ def _refresh_left_tables(self: tk.Tk) -> None:
             pnl = getattr(position, "unrealized_profit_loss", None)
             tag = "positive" if pnl is not None and pnl > 0 else "negative" if pnl is not None and pnl < 0 else ""
             tree.insert("", tk.END, values=(symbol, asset_type, _number(getattr(position, "quantity", None)), _money(value), _money(pnl)), tags=(tag,) if tag else ())
-        for cash in getattr(portfolio, "cash_positions", {}).values():
-            source = str(getattr(cash, "source", "")).lower()
-            if "hyper" in source:
-                tree.insert("", tk.END, values=(getattr(cash, "display_symbol", "USDC"), "Cash", _number(getattr(cash, "amount", None)), _money(getattr(cash, "amount", None)), "--"))
+        for row in hyperliquid_cash_display_rows(getattr(portfolio, "cash_positions", {})):
+            symbol, label, qty, value, pnl, tags = row
+            tree.insert("", tk.END, values=(symbol, label, qty, value, pnl), tags=tags)
     orders = _normalized_orders(self)
     order_tree = getattr(self, "hyperliquid_research_orders_tree", None)
     if order_tree is not None:
         _clear_tree(order_tree)
-        for order in orders:
-            order_tree.insert("", tk.END, values=(order.oid, normalize_crypto_symbol(order.coin), order.order_kind, order.direction, order.size_label, order.price_label))
+        if orders:
+            for order in orders:
+                order_tree.insert("", tk.END, values=(order.oid, normalize_crypto_symbol(order.coin), order.order_kind, order.direction, order.size_label, order.price_label))
+        else:
+            order_tree.insert("", tk.END, values=("--", "--", "No open orders", "--", "--", "--"))
     total = float(getattr(portfolio, "total_value", 0.0) or 0.0)
     if hasattr(self, "hyperliquid_research_value_var"):
         self.hyperliquid_research_value_var.set(f"Total {_money(total)}")
@@ -564,6 +713,9 @@ def _select_balance_row(self: tk.Tk, _event: tk.Event) -> None:
     values = tree.item(selection[0], "values")
     if not values:
         return
+    row_type = str(values[1]).lower() if len(values) > 1 else ""
+    if "cash" in row_type or "usdc" in str(values[0]).lower():
+        return
     coin = normalize_crypto_symbol(str(values[0]))
     if coin:
         self.hyperliquid_research_coin_var.set(coin)
@@ -576,7 +728,7 @@ def _select_order_row(self: tk.Tk, _event: tk.Event) -> None:
     if not selection:
         return
     values = tree.item(selection[0], "values")
-    if len(values) >= 2:
+    if len(values) >= 2 and str(values[0]) != "--":
         self.hyperliquid_research_coin_var.set(normalize_crypto_symbol(str(values[1])))
 
 

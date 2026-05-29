@@ -4,12 +4,14 @@ import math
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.analytics.crypto_market_data import (
     CryptoCandleResult,
     fetch_crypto_candles,
     fetch_crypto_candles_with_fallback,
+    normalize_timeframe,
     normalize_crypto_symbol,
     parse_coinbase_candles,
     parse_coingecko_market_chart,
@@ -18,6 +20,7 @@ from app.analytics.crypto_research import build_crypto_decision, build_crypto_ex
 from app.analytics.stock_research import calculate_advanced_indicators
 from app.analytics.technical_analysis import Candle
 from app.core.portfolio import CashPosition, Portfolio, Position
+from app.ui.hyperliquid_research_workspace_extension import build_crypto_provider_status_rows, hyperliquid_cash_display_rows
 
 
 def _sample_crypto_candles(count: int = 260) -> list[Candle]:
@@ -76,16 +79,17 @@ class CryptoMarketDataTests(unittest.TestCase):
         self.assertAlmostEqual(candles[1].volume, 2_000_000.0)
 
     def test_provider_fallback_uses_second_provider(self) -> None:
-        def failing_provider(symbol: str, days: int, timeout_seconds: int) -> CryptoCandleResult:
+        def failing_provider(symbol: str, days: int, timeout_seconds: int, timeframe: str) -> CryptoCandleResult:
             raise RuntimeError("offline")
 
-        def working_provider(symbol: str, days: int, timeout_seconds: int) -> CryptoCandleResult:
-            return CryptoCandleResult(symbol, _sample_crypto_candles(3), "Unit provider", "fresh", "now")
+        def working_provider(symbol: str, days: int, timeout_seconds: int, timeframe: str) -> CryptoCandleResult:
+            return CryptoCandleResult(symbol, _sample_crypto_candles(3), "Unit provider", "fresh", "now", timeframe=timeframe)
 
-        result = fetch_crypto_candles_with_fallback("btc", [failing_provider, working_provider])
+        result = fetch_crypto_candles_with_fallback("btc", [failing_provider, working_provider], timeframe="4h")
 
         self.assertEqual(result.source, "Unit provider")
         self.assertEqual(len(result.candles), 3)
+        self.assertEqual(result.timeframe, "4h")
 
     def test_cache_fallback_when_provider_fails(self) -> None:
         cached_result = CryptoCandleResult("BTC", _sample_crypto_candles(4), "Unit cache", "fresh", "cached")
@@ -108,6 +112,35 @@ class CryptoMarketDataTests(unittest.TestCase):
         self.assertEqual(normalize_crypto_symbol("BTC-PERP-SHORT"), "BTC")
         self.assertEqual(normalize_crypto_symbol("UBTC"), "BTC")
         self.assertEqual(normalize_crypto_symbol("hype/usdc"), "HYPE")
+
+    def test_timeframe_normalization(self) -> None:
+        self.assertEqual(normalize_timeframe("15M"), "15m")
+        self.assertEqual(normalize_timeframe("4h"), "4h")
+        self.assertEqual(normalize_timeframe("bad"), "1d")
+
+    def test_provider_status_rows_include_timeframe_and_active_provider(self) -> None:
+        result = CryptoCandleResult("BTC", _sample_crypto_candles(5), "Coinbase public candles", "fresh", "now", "BTC-USD 4h candles.", "4h")
+
+        rows = build_crypto_provider_status_rows(result)
+
+        active = rows[0]
+        self.assertEqual(active[0], "Coinbase public candles")
+        self.assertEqual(active[1], "Fresh")
+        self.assertEqual(active[2], "4h")
+        self.assertEqual(active[4], "5")
+
+    def test_hyperliquid_cash_rows_are_labeled(self) -> None:
+        cash_positions = {
+            "spot": SimpleNamespace(display_symbol="USDC", symbol="USDC", source="Hyperliquid", amount=8505.76, market_value=8505.76),
+            "margin": SimpleNamespace(display_symbol="USDC", symbol="USDC", source="Hyperliquid", amount=-8895.47, market_value=-8895.47),
+        }
+
+        rows = hyperliquid_cash_display_rows(cash_positions)
+        labels = [row[1] for row in rows]
+
+        self.assertIn("Spot USDC", labels)
+        self.assertIn("Perp USDC / margin adj", labels)
+        self.assertIn("Net Hyperliquid USDC", labels)
 
 
 class CryptoResearchAnalyticsTests(unittest.TestCase):

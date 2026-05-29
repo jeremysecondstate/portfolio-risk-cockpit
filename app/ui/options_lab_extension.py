@@ -952,6 +952,34 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
             command=_first_available_command(self, *names),
         )
 
+    def hyperliquid_workspace_action(ticket_kind: str, tab_attr: str, *names: str) -> Callable[[], None]:
+        def run() -> None:
+            _run_hyperliquid_ticket_action(
+                self,
+                ticket_kind=ticket_kind,
+                preview_widget=self.hyperliquid_trading_preview_text,
+                command=_first_available_command(self, *names),
+            )
+            opener = getattr(self, "show_hyperliquid_crypto_research_workspace", None)
+            if not callable(opener):
+                return
+            opener()
+
+            def select_tab() -> None:
+                notebook = getattr(self, "hyperliquid_research_tabs", None)
+                frame = getattr(self, tab_attr, None)
+                target = getattr(frame, "_scrollable_outer", frame)
+                if notebook is None or target is None:
+                    return
+                try:
+                    notebook.select(target)
+                except tk.TclError:
+                    pass
+
+            self.after(250, select_tab)
+
+        return run
+
     from app.ui import hyperliquid_trading_extension as hyperliquid_ui
 
     hyperliquid_ui._ensure_hyperliquid_vars(self)
@@ -1009,7 +1037,7 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
         spot_actions.columnconfigure(column, weight=1, uniform="hyperliquid_spot_actions")
 
     _add_workspace_button(spot_actions, row=0, column=0, text="Use Mid", command=hyperliquid_action("spot", "use_hyperliquid_cockpit_spot_mid_market"), style="Accent.TButton")
-    _add_workspace_button(spot_actions, row=0, column=1, text="Spot What-If", command=hyperliquid_action("spot", "run_hyperliquid_spot_what_if"), style="Accent.TButton")
+    _add_workspace_button(spot_actions, row=0, column=1, text="Spot What-If", command=hyperliquid_workspace_action("spot", "hyperliquid_crypto_scenarios_frame", "run_hyperliquid_spot_what_if"), style="Accent.TButton")
     _add_workspace_button(spot_actions, row=0, column=2, text="Preview Spot", command=hyperliquid_action("spot", "preview_hyperliquid_spot_ticket"))
     _add_workspace_button(spot_actions, row=1, column=0, text="Open Orders", command=hyperliquid_action("spot", "load_hyperliquid_open_orders"))
     _add_workspace_button(spot_actions, row=1, column=1, text="Edit Order", command=hyperliquid_action("spot", "show_hyperliquid_order_edit_dialog"))
@@ -1040,7 +1068,7 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
         actions.columnconfigure(column, weight=1, uniform="hyperliquid_actions")
 
     _add_workspace_button(actions, row=0, column=0, text="Use Mid", command=hyperliquid_action("perp", "use_hyperliquid_mid_market"), style="Accent.TButton")
-    _add_workspace_button(actions, row=0, column=1, text="Perp What-If", command=hyperliquid_action("perp", "run_hyperliquid_perp_what_if"), style="Accent.TButton")
+    _add_workspace_button(actions, row=0, column=1, text="Perp What-If", command=hyperliquid_workspace_action("perp", "hyperliquid_crypto_scenarios_frame", "run_hyperliquid_perp_what_if"), style="Accent.TButton")
     _add_workspace_button(actions, row=0, column=2, text="Preview Perp Ticket", command=hyperliquid_action("perp", "preview_hyperliquid_ticket", "preview_order"))
     _add_workspace_button(actions, row=1, column=0, text="Sync Account", command=hyperliquid_action("perp", "sync_hyperliquid_account"))
     _add_workspace_button(actions, row=1, column=1, text="Tech Analysis", command=hyperliquid_action("perp", "show_hyperliquid_crypto_research_workspace", "show_technical_analysis"))
