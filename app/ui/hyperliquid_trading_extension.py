@@ -15,7 +15,6 @@ from app.brokers.hyperliquid.trading import (
     normalize_hyperliquid_spot_market,
 )
 from app.core.order_models import OrderSide, OrderType, TimeInForce
-from app.ui.hyperliquid_cockpit_spot_mid_extension import _format_price, _lookup_hyperliquid_spot_mid
 from app.ui import polished_theme
 from app.ui.polished_theme import _make_paned
 
@@ -519,6 +518,8 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
 
 def _fill_edit_dialog_mid_price(market_var: tk.StringVar, price_var: tk.StringVar, status_var: tk.StringVar) -> None:
     try:
+        from app.ui.hyperliquid_cockpit_spot_mid_extension import _format_price, _lookup_hyperliquid_spot_mid
+
         market = _normalize_mid_lookup_market(market_var.get())
         mid, basis = _lookup_hyperliquid_spot_mid(market)
         price_var.set(_format_price(mid))
