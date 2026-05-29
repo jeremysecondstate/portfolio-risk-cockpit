@@ -60,11 +60,22 @@ def _ensure_hyperliquid_vars(self: tk.Tk) -> None:
     if not hasattr(self, "hyperliquid_size_percent_var"):
         self.hyperliquid_size_percent_var = tk.DoubleVar(value=0.0)
     if not hasattr(self, "hyperliquid_size_status_var"):
-        self.hyperliquid_size_status_var = tk.StringVar(value="Size helper: sync Hyperliquid, then choose a %")
+        self.hyperliquid_size_status_var = tk.StringVar(value="Sync Hyperliquid, then choose a size %")
+
+
+def _configure_compact_ticket_styles(self: tk.Tk) -> None:
+    style = ttk.Style(self)
+    style.configure("Compact.Card.TLabelframe", background=polished_theme.PANEL, bordercolor=polished_theme.BORDER, relief="solid", padding=8)
+    style.configure("Compact.Card.TLabelframe.Label", background=polished_theme.PANEL, foreground=polished_theme.TEXT, font=("Segoe UI", 10, "bold"))
+    style.configure("Compact.TButton", padding=(6, 5), font=("Segoe UI", 9))
+    style.configure("CompactAccent.TButton", background=polished_theme.ACCENT, foreground="#ffffff", padding=(6, 5), font=("Segoe UI", 9, "bold"))
+    style.map("CompactAccent.TButton", background=[("active", polished_theme.ACCENT_DARK), ("pressed", polished_theme.ACCENT_DARK)], foreground=[("active", "#ffffff")])
+    style.configure("CompactDanger.TButton", background="#fee2e2", foreground=polished_theme.DANGER, padding=(6, 5), font=("Segoe UI", 9, "bold"))
+    style.map("CompactDanger.TButton", background=[("active", "#fecaca")])
 
 
 def _build_action_group(parent: ttk.Frame, title: str, column: int) -> ttk.LabelFrame:
-    group = ttk.LabelFrame(parent, text=title, style="Card.TLabelframe")
+    group = ttk.LabelFrame(parent, text=title, style="Compact.Card.TLabelframe")
     group.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 8, 0))
     group.columnconfigure(0, weight=1)
     group.columnconfigure(1, weight=1)
@@ -77,7 +88,7 @@ def _grid_action_button(
     column: int,
     text: str,
     command: object,
-    style: str = "TButton",
+    style: str = "Compact.TButton",
     columnspan: int = 1,
 ) -> None:
     ttk.Button(parent, text=text, command=command, style=style).grid(
@@ -86,7 +97,7 @@ def _grid_action_button(
         columnspan=columnspan,
         sticky="ew",
         padx=(0, 6) if column == 0 and columnspan == 1 else 0,
-        pady=(4, 6) if row == 0 else (0, 4),
+        pady=(2, 3) if row == 0 else (0, 2),
     )
 
 
@@ -111,6 +122,7 @@ def _use_mid_from_cockpit(self: tk.Tk) -> None:
 
 def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     _ensure_hyperliquid_vars(self)
+    _configure_compact_ticket_styles(self)
 
     stack = _make_paned(parent, tk.VERTICAL)
     stack.pack(fill=tk.BOTH, expand=True)
@@ -118,9 +130,9 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     ticket_shell = ttk.Frame(stack, style="Canvas.TFrame")
     preview_shell = ttk.Frame(stack, style="Canvas.TFrame")
     explainer_shell = ttk.Frame(stack, style="Canvas.TFrame")
-    stack.add(ticket_shell, minsize=370, stretch="never")
-    stack.add(preview_shell, minsize=200, stretch="always")
-    stack.add(explainer_shell, minsize=78, stretch="never")
+    stack.add(ticket_shell, minsize=560, stretch="never")
+    stack.add(preview_shell, minsize=150, stretch="always")
+    stack.add(explainer_shell, minsize=58, stretch="never")
 
     ticket = ttk.LabelFrame(ticket_shell, text="Trade Planner", style="Card.TLabelframe")
     ticket.pack(fill=tk.BOTH, expand=True)
@@ -163,16 +175,16 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     plan_group = _build_action_group(actions, "Planning", 1)
     live_group = _build_action_group(actions, "Guarded Live Actions", 2)
 
-    _grid_action_button(connect_group, 0, 0, "Connect Schwab", self.connect_schwab)
-    _grid_action_button(connect_group, 0, 1, "Connect Hyperliquid", self.sync_hyperliquid_account)
-    _grid_action_button(connect_group, 1, 0, "Refresh Schwab", self.refresh_schwab_account)
-    _grid_action_button(connect_group, 1, 1, "Reset Session", self.reset_schwab_session)
-    _grid_action_button(plan_group, 1, 0, "Tech Analysis", self.show_technical_analysis, columnspan=2)
+    _grid_action_button(connect_group, 0, 0, "Schwab", self.connect_schwab)
+    _grid_action_button(connect_group, 0, 1, "Hyperliquid", self.sync_hyperliquid_account)
+    _grid_action_button(connect_group, 1, 0, "Refresh", self.refresh_schwab_account)
+    _grid_action_button(connect_group, 1, 1, "Reset", self.reset_schwab_session)
+    _grid_action_button(plan_group, 1, 0, "Tech", self.show_technical_analysis, columnspan=2)
 
-    _grid_action_button(live_group, 0, 0, "Recent Orders", self.load_selected_recent_orders)
-    _grid_action_button(live_group, 0, 1, "Open Only", self.load_selected_open_orders_only)
-    _grid_action_button(live_group, 1, 0, "Cancel Order", self.cancel_selected_order, "Danger.TButton")
-    _grid_action_button(live_group, 1, 1, "LIVE Submit", self.submit_cockpit_selected_venue, "Danger.TButton")
+    _grid_action_button(live_group, 0, 0, "Recent", self.load_selected_recent_orders)
+    _grid_action_button(live_group, 0, 1, "Open", self.load_selected_open_orders_only)
+    _grid_action_button(live_group, 1, 0, "Cancel", self.cancel_selected_order, "CompactDanger.TButton")
+    _grid_action_button(live_group, 1, 1, "Submit", self.submit_cockpit_selected_venue, "CompactDanger.TButton")
 
     status_bar = ttk.Frame(ticket, style="Panel.TFrame")
     status_bar.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(10, 0))
@@ -245,13 +257,14 @@ def _grid_hyperliquid_size_controls(parent: ttk.LabelFrame, self: tk.Tk, row: in
             controls,
             text=f"{percent}%",
             command=lambda value=percent: _apply_hyperliquid_quantity_percent(self, value),
+            style="Compact.TButton",
         ).grid(row=0, column=column, sticky="ew", padx=(0, 6))
 
     ttk.Button(
         controls,
         text="Max",
         command=lambda: _apply_hyperliquid_quantity_percent(self, 100),
-        style="Accent.TButton",
+        style="CompactAccent.TButton",
     ).grid(row=0, column=4, sticky="ew")
 
     ttk.Label(controls, textvariable=self.hyperliquid_size_status_var, style="Subtle.TLabel").grid(
