@@ -17,6 +17,14 @@ from app.analytics.stock_research import (
     save_cached_price_history,
     suggested_position_size,
 )
+from app.analytics.research_scoring import (
+    build_decision_readout,
+    scenario_impact_bar_value,
+    score_earnings_risk,
+    score_macro_text,
+    score_risk,
+    score_technicals,
+)
 from app.analytics.technical_analysis import Candle
 from app.core.portfolio import Portfolio, Position
 from app.ui.schwab_research_workspace_extension import (
@@ -112,6 +120,68 @@ class StockResearchAnalyticsTests(unittest.TestCase):
                 cached = load_cached_price_history("nvda")
 
         self.assertEqual(cached, payload)
+
+    def test_decision_score_mapping_for_bullish_low_weight_symbol(self) -> None:
+        indicators = calculate_advanced_indicators("NVDA", _sample_candles())
+        portfolio = Portfolio(cash=99_000.0, positions={"NVDA": Position("NVDA", 5, 120.0, indicators.latest_close or 200.0)})
+        context = build_portfolio_symbol_context(portfolio, "NVDA", fallback_price=indicators.latest_close)
+        rows = build_scenario_rows(context)
+
+        readout = build_decision_readout(
+            indicators=indicators,
+            context=context,
+            scenario_rows=rows,
+            earnings_text="Latest earnings release showed revenue increased and guidance reaffirmed.",
+            fundamentals_text="Revenue growth and free cash flow are positive.",
+            macro_text="Inflation cooler and rates down; macro tailwind.",
+            statuses=[DataSourceStatus("Schwab quote", "fresh", "2026-05-29T12:00:00+00:00")],
+        )
+
+        self.assertEqual(readout.overall.label, "Bullish")
+        self.assertEqual(readout.position_impact.label, "Small")
+        self.assertIn(readout.action_bias.label, {"Add Carefully", "Watch"})
+
+    def test_macro_and_earnings_risk_mappings(self) -> None:
+        self.assertLess(score_macro_text("Inflation hotter and policy hawkish."), 0)
+        self.assertGreater(score_macro_text("Inflation cooler and rates down tailwind."), 0)
+        self.assertGreaterEqual(score_earnings_risk("Next earnings soon, within 10 trading days."), 70)
+        self.assertEqual(score_earnings_risk("Earnings unavailable."), 50.0)
+
+    def test_high_risk_mapping_from_weight_and_volatility(self) -> None:
+        indicators = calculate_advanced_indicators("NOC", _sample_candles())
+        elevated = indicators.__class__(**{**indicators.__dict__, "volatility": "elevated"})
+        portfolio = Portfolio(cash=0.0, positions={"NOC": Position("NOC", 100, 100.0, elevated.latest_close or 200.0)})
+        context = build_portfolio_symbol_context(portfolio, "NOC", fallback_price=elevated.latest_close)
+
+        score = score_risk(elevated, context, 90.0, [DataSourceStatus("SEC", "fresh", "now")])
+
+        self.assertGreaterEqual(score, 70)
+
+    def test_scenario_impact_bar_value_is_normalized(self) -> None:
+        portfolio = Portfolio(cash=9_000.0, positions={"NVDA": Position("NVDA", 10, 80.0, 100.0)})
+        context = build_portfolio_symbol_context(portfolio, "NVDA", fallback_price=100.0)
+        down, up = build_scenario_rows(context, moves=(-0.10, 0.10))
+
+        self.assertAlmostEqual(scenario_impact_bar_value(down, 0.01), -100.0)
+        self.assertAlmostEqual(scenario_impact_bar_value(up, 0.01), 100.0)
+
+    def test_missing_data_produces_unknown_or_info_badges(self) -> None:
+        indicators = calculate_advanced_indicators("SPY", [])
+        context = build_portfolio_symbol_context(Portfolio(cash=10_000.0), "SPY", fallback_price=None)
+        readout = build_decision_readout(
+            indicators=indicators,
+            context=context,
+            scenario_rows=build_scenario_rows(context),
+            earnings_text="Earnings unavailable.",
+            fundamentals_text="Fundamentals unavailable.",
+            macro_text="",
+            statuses=[],
+        )
+
+        self.assertEqual(readout.trend.label, "Unknown")
+        self.assertEqual(readout.valuation.label, "Unknown")
+        self.assertTrue(readout.summary)
+        self.assertEqual(score_technicals(indicators), 0.0)
 
 
 class SchwabResearchWorkspaceHelperTests(unittest.TestCase):
