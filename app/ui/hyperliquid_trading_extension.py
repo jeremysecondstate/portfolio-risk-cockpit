@@ -15,6 +15,7 @@ from app.brokers.hyperliquid.trading import (
     normalize_hyperliquid_spot_market,
 )
 from app.core.order_models import OrderSide, OrderType, TimeInForce
+from app.ui.hyperliquid_cockpit_spot_mid_extension import _format_price, _lookup_hyperliquid_spot_mid
 from app.ui import polished_theme
 from app.ui.polished_theme import _make_paned
 
@@ -458,16 +459,34 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
     size_var = tk.StringVar(value=size)
     price_var = tk.StringVar(value=price)
     tif_var = tk.StringVar(value=tif if tif in HYPERLIQUID_TIFS else "Gtc")
+    mid_status_var = tk.StringVar(value="")
 
     fields = [
         ("Order ID", ttk.Entry(shell, textvariable=order_id_var)),
         ("Market", ttk.Entry(shell, textvariable=market_var)),
         ("Side", ttk.Combobox(shell, textvariable=side_var, values=["buy", "sell"], state="readonly")),
         ("Size", ttk.Entry(shell, textvariable=size_var)),
-        ("Limit price", ttk.Entry(shell, textvariable=price_var)),
         ("TIF", ttk.Combobox(shell, textvariable=tif_var, values=HYPERLIQUID_TIFS, state="readonly")),
     ]
-    for row, (label, widget) in enumerate(fields):
+    for row, (label, widget) in enumerate(fields[:4]):
+        ttk.Label(shell, text=label, style="Subtle.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 10), pady=5)
+        widget.grid(row=row, column=1, sticky="ew", pady=5)
+
+    price_row = 4
+    ttk.Label(shell, text="Limit price", style="Subtle.TLabel").grid(row=price_row, column=0, sticky="w", padx=(0, 10), pady=5)
+    price_controls = ttk.Frame(shell, style="Panel.TFrame")
+    price_controls.grid(row=price_row, column=1, sticky="ew", pady=5)
+    price_controls.columnconfigure(0, weight=1)
+    ttk.Entry(price_controls, textvariable=price_var).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+    ttk.Button(
+        price_controls,
+        text="Mid",
+        command=lambda: _fill_edit_dialog_mid_price(market_var, price_var, mid_status_var),
+        style="CompactAccent.TButton",
+    ).grid(row=0, column=1, sticky="ew")
+    ttk.Label(price_controls, textvariable=mid_status_var, style="Subtle.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(3, 0))
+
+    for row, (label, widget) in enumerate(fields[4:], start=5):
         ttk.Label(shell, text=label, style="Subtle.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 10), pady=5)
         widget.grid(row=row, column=1, sticky="ew", pady=5)
 
@@ -496,6 +515,25 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
 
     ttk.Button(buttons, text="Close", command=dialog.destroy).grid(row=0, column=0, sticky="ew", padx=(0, 8))
     ttk.Button(buttons, text="Confirm Edit", command=submit_edit, style="CompactDanger.TButton").grid(row=0, column=1, sticky="ew")
+
+
+def _fill_edit_dialog_mid_price(market_var: tk.StringVar, price_var: tk.StringVar, status_var: tk.StringVar) -> None:
+    try:
+        market = _normalize_mid_lookup_market(market_var.get())
+        mid, basis = _lookup_hyperliquid_spot_mid(market)
+        price_var.set(_format_price(mid))
+        status_var.set(f"Mid ${mid:,.4f} from {basis}")
+    except Exception as exc:
+        status_var.set(f"Mid failed: {exc}")
+
+
+def _normalize_mid_lookup_market(raw_market: str) -> str:
+    market = raw_market.strip().upper()
+    if not market:
+        raise ValueError("enter a market first")
+    if market.startswith("@"):
+        return market
+    return normalize_hyperliquid_spot_market(market)
 
 
 def _selected_hyperliquid_order(self: tk.Tk) -> dict[str, Any] | None:

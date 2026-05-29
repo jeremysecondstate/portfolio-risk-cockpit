@@ -51,6 +51,17 @@ def _lookup_hyperliquid_spot_mid(market: str) -> tuple[float, str]:
         raise RuntimeError("Hyperliquid allMids returned an unexpected response.")
 
     market = market.strip().upper()
+    if market.startswith("@"):
+        direct_price = _all_mids_price(all_mids, market)
+        if direct_price is not None:
+            return direct_price, f"allMids[{market}]"
+
+        meta_price = _spot_meta_mid_price(market, all_mids, spot_meta_and_asset_ctxs)
+        if meta_price is not None:
+            return meta_price
+
+        raise RuntimeError(f"No Hyperliquid spot mid-market price found for {market}.")
+
     base = market.split("/", 1)[0] if "/" in market else market
     candidates = [market, market.replace("/", "-"), base]
 
@@ -77,17 +88,20 @@ def _spot_meta_mid_price(market: str, all_mids: dict[str, Any], payload: Any) ->
         return None
 
     market = market.strip().upper()
+    requested_index = _to_int(market[1:]) if market.startswith("@") else None
     base = market.split("/", 1)[0] if "/" in market else market
     token_names_by_index = _token_names_by_index(tokens)
 
     for market_index, asset in enumerate(universe):
         if not isinstance(asset, dict):
             continue
+        asset_index = _to_int(asset.get("index"))
+        if requested_index is not None and requested_index not in {asset_index, market_index, 10000 + market_index}:
+            continue
         names = _spot_market_names(asset, token_names_by_index)
-        if market not in names and base not in names:
+        if requested_index is None and market not in names and base not in names:
             continue
 
-        asset_index = _to_int(asset.get("index"))
         candidate_keys: list[str] = []
         for name in sorted(names):
             candidate_keys.extend([name, name.replace("/", "-")])
