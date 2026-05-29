@@ -235,6 +235,9 @@ def _refresh_portfolio_with_cash_rows(self: tk.Tk) -> None:
         )
 
     polished_theme._update_risk_alerts(self, portfolio)
+    update_console = getattr(self, "update_cockpit_risk_console", None)
+    if callable(update_console):
+        update_console(portfolio)
 
 
 def _ensure_split_positions_table(self: tk.Tk) -> None:

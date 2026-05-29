@@ -46,6 +46,7 @@ def install_hyperliquid_trading_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls.parse_hyperliquid_ticket = _parse_hyperliquid_ticket  # type: ignore[attr-defined]
     app_cls.on_trading_venue_changed = _on_trading_venue_changed  # type: ignore[attr-defined]
     app_cls.apply_hyperliquid_quantity_percent = _apply_hyperliquid_quantity_percent  # type: ignore[attr-defined]
+    app_cls.update_cockpit_risk_console = _update_cockpit_risk_console  # type: ignore[attr-defined]
 
 
 def _ensure_hyperliquid_vars(self: tk.Tk) -> None:
@@ -135,81 +136,54 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
     stack = _make_paned(parent, tk.VERTICAL)
     stack.pack(fill=tk.BOTH, expand=True)
 
-    ticket_shell = ttk.Frame(stack, style="Canvas.TFrame")
-    preview_shell = ttk.Frame(stack, style="Canvas.TFrame")
-    explainer_shell = ttk.Frame(stack, style="Canvas.TFrame")
-    stack.add(ticket_shell, minsize=560, stretch="never")
-    stack.add(preview_shell, minsize=150, stretch="always")
-    stack.add(explainer_shell, minsize=58, stretch="never")
+    summary_shell = ttk.Frame(stack, style="Canvas.TFrame")
+    exposure_shell = ttk.Frame(stack, style="Canvas.TFrame")
+    console_shell = ttk.Frame(stack, style="Canvas.TFrame")
+    stack.add(summary_shell, minsize=150, stretch="never")
+    stack.add(exposure_shell, minsize=220, stretch="never")
+    stack.add(console_shell, minsize=260, stretch="always")
 
-    ticket = ttk.LabelFrame(ticket_shell, text="Trade Planner", style="Card.TLabelframe")
-    ticket.pack(fill=tk.BOTH, expand=True)
-    ticket.columnconfigure(1, weight=1)
-    ticket.columnconfigure(3, weight=1)
+    summary = ttk.LabelFrame(summary_shell, text="Portfolio Risk Console", style="Card.TLabelframe")
+    summary.pack(fill=tk.BOTH, expand=True)
+    summary.columnconfigure((0, 1, 2), weight=1)
+    self.cockpit_cash_weight_var = tk.StringVar(value="Cash weight: --")
+    self.cockpit_perp_notional_var = tk.StringVar(value="Perp notional: --")
+    self.cockpit_largest_risk_var = tk.StringVar(value="Largest risk: --")
+    ttk.Label(summary, textvariable=self.cockpit_cash_weight_var, style="MetricValue.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 10))
+    ttk.Label(summary, textvariable=self.cockpit_perp_notional_var, style="MetricValue.TLabel").grid(row=0, column=1, sticky="w", padx=(0, 10))
+    ttk.Label(summary, textvariable=self.cockpit_largest_risk_var, style="MetricValue.TLabel").grid(row=0, column=2, sticky="w")
 
-    self.estimated_price_var.set(self.limit_price_var.get())
-    self.limit_price_var.trace_add("write", lambda *_args: polished_theme._sync_single_ticket_price(self))
+    actions = ttk.Frame(summary, style="Panel.TFrame")
+    actions.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(18, 0))
+    actions.columnconfigure((0, 1, 2), weight=1, uniform="risk_console_actions")
+    _grid_action_button(actions, 0, 0, "Refresh View", self.refresh_portfolio, "CompactAccent.TButton")
+    _grid_action_button(actions, 0, 1, "Sync Schwab", self.refresh_schwab_account)
+    _grid_action_button(actions, 0, 2, "Sync Hyperliquid", self.sync_hyperliquid_account)
 
-    self._grid_row(
-        ticket,
-        0,
-        "Venue",
-        ttk.Combobox(ticket, textvariable=self.trade_venue_var, values=TRADING_VENUES, state="readonly"),
-        "HL Coin",
-        ttk.Entry(ticket, textvariable=self.hyperliquid_coin_var),
-    )
-    self._grid_row(ticket, 1, "Symbol", ttk.Entry(ticket, textvariable=self.symbol_var), "Side", ttk.Combobox(ticket, textvariable=self.side_var, values=[s.value for s in OrderSide], state="readonly"))
-    self._grid_row(ticket, 2, "Order type", ttk.Combobox(ticket, textvariable=self.order_type_var, values=[o.value for o in OrderType], state="readonly"), "Time", ttk.Combobox(ticket, textvariable=self.time_in_force_var, values=[t.value for t in TimeInForce], state="readonly"))
-    _grid_hyperliquid_quantity_row(ticket, self, row=3)
-    _grid_hyperliquid_size_controls(ticket, self, row=4)
-    self._grid_row(ticket, 5, "Stop price", ttk.Entry(ticket, textvariable=self.stop_price_var), "Use Mid", ttk.Button(ticket, text="Use Mid", command=lambda: _use_mid_from_cockpit(self), style="Accent.TButton"))
-    self._grid_row(
-        ticket,
-        6,
-        "HL TIF",
-        ttk.Combobox(ticket, textvariable=self.hyperliquid_tif_var, values=HYPERLIQUID_TIFS, state="readonly"),
-        "HL Reduce-only",
-        ttk.Checkbutton(ticket, variable=self.hyperliquid_reduce_only_var),
-    )
-
-    ttk.Label(ticket, text="Cancel order ID", style="Subtle.TLabel").grid(row=7, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
-    ttk.Entry(ticket, textvariable=self.cancel_order_id_var).grid(row=7, column=1, columnspan=3, sticky="ew", pady=(8, 0))
-
-    actions = ttk.Frame(ticket, style="Panel.TFrame")
-    actions.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(14, 0))
-    actions.columnconfigure((0, 1, 2), weight=1, uniform="action_groups")
-
-    connect_group = _build_action_group(actions, "Connections", 0)
-    plan_group = _build_action_group(actions, "Planning", 1)
-    live_group = _build_action_group(actions, "Guarded Live Actions", 2)
-
-    _grid_action_button(connect_group, 0, 0, "Schwab", self.connect_schwab)
-    _grid_action_button(connect_group, 0, 1, "Hyperliquid", self.sync_hyperliquid_account)
-    _grid_action_button(connect_group, 1, 0, "Refresh", self.refresh_schwab_account)
-    _grid_action_button(connect_group, 1, 1, "Reset", self.reset_schwab_session)
-    _grid_action_button(plan_group, 1, 0, "Tech", self.show_technical_analysis, columnspan=2)
-
-    _grid_action_button(live_group, 0, 0, "Recent", self.load_selected_recent_orders)
-    _grid_action_button(live_group, 0, 1, "Open", self.load_selected_open_orders_only)
-    _grid_action_button(live_group, 1, 0, "Edit", self.show_hyperliquid_order_edit_dialog)
-    _grid_action_button(live_group, 1, 1, "Cancel", self.cancel_selected_order, "CompactDanger.TButton")
-    _grid_action_button(live_group, 2, 0, "Submit", self.submit_cockpit_selected_venue, "CompactDanger.TButton", columnspan=2)
-
-    status_bar = ttk.Frame(ticket, style="Panel.TFrame")
-    status_bar.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(10, 0))
-    status_bar.columnconfigure((0, 1, 2, 3), weight=1)
+    status_bar = ttk.Frame(summary, style="Panel.TFrame")
+    status_bar.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+    status_bar.columnconfigure((0, 1, 2), weight=1)
     ttk.Label(status_bar, textvariable=self.schwab_status_var, style="Chip.TLabel").grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=(4, 0))
     ttk.Label(status_bar, textvariable=self.schwab_preview_status_var, style="Chip.TLabel").grid(row=0, column=1, sticky="ew", padx=(0, 6), pady=(4, 0))
-    ttk.Label(status_bar, textvariable=self.schwab_verification_status_var, style="Chip.TLabel").grid(row=0, column=2, sticky="ew", padx=(0, 6), pady=(4, 0))
-    ttk.Label(status_bar, textvariable=self.hyperliquid_status_var, style="Chip.TLabel").grid(row=0, column=3, sticky="ew", pady=(4, 0))
+    ttk.Label(status_bar, textvariable=self.hyperliquid_status_var, style="Chip.TLabel").grid(row=0, column=2, sticky="ew", pady=(4, 0))
 
-    venue_combo = ticket.grid_slaves(row=0, column=1)[0]
-    venue_combo.bind("<<ComboboxSelected>>", lambda _event: self.on_trading_venue_changed())
-    self.symbol_var.trace_add("write", lambda *_args: _sync_hyperliquid_size_unit(self))
-    self.hyperliquid_coin_var.trace_add("write", lambda *_args: _sync_hyperliquid_size_unit(self))
-    self.after_idle(self.on_trading_venue_changed)
+    exposure = ttk.LabelFrame(exposure_shell, text="Spot / Perp Exposure Map", style="Card.TLabelframe")
+    exposure.pack(fill=tk.BOTH, expand=True)
+    columns = ("coin", "spot", "perp", "net", "readout")
+    self.cockpit_exposure_table = ttk.Treeview(exposure, columns=columns, show="headings", height=7)
+    headings = {
+        "coin": ("Coin", 80, tk.W),
+        "spot": ("Spot", 110, tk.E),
+        "perp": ("Perp Notional", 120, tk.E),
+        "net": ("Net Read", 110, tk.E),
+        "readout": ("Risk Readout", 230, tk.W),
+    }
+    for column, (label, width, anchor) in headings.items():
+        self.cockpit_exposure_table.heading(column, text=label)
+        self.cockpit_exposure_table.column(column, width=width, anchor=anchor, stretch=True)
+    self.cockpit_exposure_table.pack(fill=tk.BOTH, expand=True)
 
-    results = ttk.LabelFrame(preview_shell, text="Analysis + Instructions", style="Card.TLabelframe")
+    results = ttk.LabelFrame(console_shell, text="Portfolio Analysis + Next Checks", style="Card.TLabelframe")
     results.pack(fill=tk.BOTH, expand=True)
 
     self.preview_text = tk.Text(
@@ -227,23 +201,213 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
         selectbackground="#1d4ed8",
     )
     self.preview_text.pack(fill=tk.BOTH, expand=True)
-    self._set_preview_text(
-        "Choose Schwab or Hyperliquid, create a ticket, then use the grouped planning and guarded live actions.\n\n"
-        "Recent Orders and Open Only now follow the selected venue. Schwab uses Schwab orders; Hyperliquid reads active open orders.\n\n"
-        "For Hyperliquid, Use Mid pulls the current Hyperliquid allMids price into Entry / Limit. LIVE Submit checks env readiness + max notional, then calls the local hook."
+    self.cockpit_risk_console_text = self.preview_text
+    _update_cockpit_risk_console(self, self.broker.get_portfolio())
+
+
+def _update_cockpit_risk_console(self: tk.Tk, portfolio: Any | None = None) -> None:
+    if not hasattr(self, "cockpit_risk_console_text"):
+        return
+    portfolio = portfolio or self.broker.get_portfolio()
+    total_value = max(float(getattr(portfolio, "total_value", 0.0) or 0.0), 0.01)
+    cash = float(getattr(portfolio, "cash", 0.0) or 0.0)
+    exposures = _portfolio_coin_exposures(portfolio)
+    total_perp_notional = sum(abs(row["perp_notional"]) for row in exposures.values())
+    largest = _largest_abs_position(portfolio)
+
+    if hasattr(self, "cockpit_cash_weight_var"):
+        self.cockpit_cash_weight_var.set(f"Cash weight: {cash / total_value:.1%}")
+    if hasattr(self, "cockpit_perp_notional_var"):
+        self.cockpit_perp_notional_var.set(f"Perp notional: {_money(total_perp_notional)}")
+    if hasattr(self, "cockpit_largest_risk_var"):
+        if largest is None:
+            self.cockpit_largest_risk_var.set("Largest risk: --")
+        else:
+            self.cockpit_largest_risk_var.set(f"Largest risk: {largest.symbol} {_money(abs(largest.market_value))}")
+
+    _update_cockpit_exposure_table(self, exposures)
+
+    lines = [
+        "PORTFOLIO RISK CONSOLE",
+        "======================",
+        "",
+        "Portfolio posture:",
+        f"- Total value: {_money(total_value)}",
+        f"- Cash: {_money(cash)} ({cash / total_value:.1%})",
+        f"- Positions value: {_money(getattr(portfolio, 'positions_value', 0.0))}",
+        f"- Perp notional: {_money(total_perp_notional)} ({total_perp_notional / total_value:.1%} of total value)",
+        "",
+        "Spot / perp pairing:",
+    ]
+    if exposures:
+        for coin, row in sorted(exposures.items()):
+            lines.append(f"- {coin}: {_exposure_sentence(row, total_value)}")
+    else:
+        lines.append("- No Hyperliquid spot/perp exposure found in the current cockpit snapshot.")
+
+    lines.extend(["", "Next checks:"])
+    lines.extend(f"- {line}" for line in _cockpit_next_checks(portfolio, exposures, total_value))
+    lines.extend(
+        [
+            "",
+            "Execution lives in the Schwab Trading and Hyperliquid Trading tabs. This Cockpit view is read-only risk context.",
+        ]
     )
 
-    explainer = ttk.LabelFrame(explainer_shell, text="Order Type Cheat Sheet", style="Card.TLabelframe")
-    explainer.pack(fill=tk.BOTH, expand=True)
-    ttk.Label(
-        explainer,
-        text=(
-            "Schwab: existing stock/ETF ticket. Hyperliquid: coin + side + size + limit price, "
-            "with TIF Alo/Ioc/Gtc and optional reduce-only intent."
-        ),
-        wraplength=560,
-        style="Subtle.TLabel",
-    ).pack(anchor=tk.W)
+    self.cockpit_risk_console_text.configure(state=tk.NORMAL)
+    self.cockpit_risk_console_text.delete("1.0", tk.END)
+    self.cockpit_risk_console_text.insert(tk.END, "\n".join(lines))
+    self.cockpit_risk_console_text.configure(state=tk.DISABLED)
+
+
+def _update_cockpit_exposure_table(self: tk.Tk, exposures: dict[str, dict[str, Any]]) -> None:
+    table = getattr(self, "cockpit_exposure_table", None)
+    if table is None:
+        return
+    for row_id in table.get_children():
+        table.delete(row_id)
+    for coin, row in sorted(exposures.items()):
+        table.insert(
+            "",
+            tk.END,
+            values=(
+                coin,
+                _money(row["spot_value"]),
+                _money(abs(row["perp_notional"])),
+                _signed_money(row["net_delta"]),
+                row["readout"],
+            ),
+        )
+
+
+def _portfolio_coin_exposures(portfolio: Any) -> dict[str, dict[str, Any]]:
+    rows: dict[str, dict[str, Any]] = {}
+    for position in getattr(portfolio, "positions", {}).values():
+        symbol = str(getattr(position, "symbol", "")).upper()
+        asset_type = str(getattr(position, "asset_type", "")).lower()
+        is_perp = "-PERP" in symbol or asset_type.startswith("perp")
+        is_spot = asset_type == "spot" or symbol.endswith("-SPOT")
+        if not is_perp and not is_spot:
+            continue
+
+        coin = _coin_from_exposure_symbol(symbol)
+        row = rows.setdefault(
+            coin,
+            {
+                "coin": coin,
+                "spot_value": 0.0,
+                "spot_quantity": 0.0,
+                "perp_notional": 0.0,
+                "perp_signed": 0.0,
+                "perp_quantity": 0.0,
+            },
+        )
+
+        if is_perp:
+            signed_notional = abs(position.market_value)
+            signed_quantity = abs(float(getattr(position, "quantity", 0.0) or 0.0))
+            if symbol.endswith("-SHORT") or "short" in asset_type:
+                signed_notional *= -1
+                signed_quantity *= -1
+            row["perp_notional"] += signed_notional
+            row["perp_signed"] += signed_notional
+            row["perp_quantity"] += signed_quantity
+        else:
+            row["spot_value"] += abs(position.market_value)
+            row["spot_quantity"] += abs(float(getattr(position, "quantity", 0.0) or 0.0))
+
+    for row in rows.values():
+        row["net_delta"] = row["spot_value"] + row["perp_signed"]
+        row["readout"] = _exposure_readout(row)
+    return rows
+
+
+def _coin_from_exposure_symbol(symbol: str) -> str:
+    clean = symbol.upper().replace("-SPOT", "")
+    if "-PERP" in clean:
+        clean = clean.split("-PERP", 1)[0]
+    if "/" in clean:
+        clean = clean.split("/", 1)[0]
+    return clean
+
+
+def _exposure_readout(row: dict[str, Any]) -> str:
+    spot = float(row["spot_value"])
+    perp = float(row["perp_signed"])
+    abs_perp = abs(perp)
+    if abs_perp <= 0.01 and spot > 0.01:
+        return "Spot only"
+    if spot <= 0.01 and abs_perp > 0.01:
+        return "Directional perp, no spot hedge"
+    if abs_perp <= 0.01:
+        return "No active exposure"
+    if perp < 0:
+        ratio = spot / abs_perp if abs_perp else 0.0
+        if 0.75 <= ratio <= 1.25:
+            return "Spot roughly hedges short perp"
+        if ratio < 0.25:
+            return "Short perp much larger than spot"
+        if ratio < 0.75:
+            return "Partial spot hedge"
+        return "Spot larger than short perp"
+    return "Spot plus long perp stacks direction"
+
+
+def _exposure_sentence(row: dict[str, Any], total_value: float) -> str:
+    spot = float(row["spot_value"])
+    perp = float(row["perp_signed"])
+    net = float(row["net_delta"])
+    direction = "short" if perp < 0 else "long"
+    if abs(perp) <= 0.01:
+        return f"spot {_money(spot)}, no perp notional. {row['readout']}."
+    return (
+        f"spot {_money(spot)} versus {_money(abs(perp))} {direction} perp notional; "
+        f"net read {_signed_money(net)} ({abs(net) / total_value:.1%} of portfolio). {row['readout']}."
+    )
+
+
+def _cockpit_next_checks(portfolio: Any, exposures: dict[str, dict[str, Any]], total_value: float) -> list[str]:
+    checks: list[str] = []
+    for coin, row in sorted(exposures.items()):
+        spot = float(row["spot_value"])
+        perp = abs(float(row["perp_signed"]))
+        if perp > 0 and spot <= max(25.0, perp * 0.05):
+            checks.append(f"{coin}: perp exposure is large relative to spot; decide whether that is intentional directional risk or needs spot hedge/reduction.")
+        elif perp > 0 and spot < perp * 0.75:
+            checks.append(f"{coin}: spot only partially offsets perp notional; review whether the hedge ratio matches the thesis.")
+        elif perp > 0 and spot > perp * 1.25:
+            checks.append(f"{coin}: spot value is larger than perp notional; confirm you still want net spot exposure.")
+
+    largest = _largest_abs_position(portfolio)
+    if largest is not None and abs(largest.market_value) / total_value >= 0.20:
+        checks.append(f"{largest.symbol}: largest position is {abs(largest.market_value) / total_value:.1%} of portfolio value.")
+
+    cash_ratio = float(getattr(portfolio, "cash", 0.0) or 0.0) / total_value
+    if cash_ratio >= 0.75:
+        checks.append("Cash is very high; this is defensive, but new trades should have clear priority versus staying liquid.")
+    elif cash_ratio <= 0.05:
+        checks.append("Cash buffer is thin; avoid adding risk before checking liquidity and open orders.")
+
+    if not checks:
+        checks.append("No major spot/perp mismatch stands out from the current snapshot.")
+    checks.append("Use the dedicated trading tabs for any add, reduce, hedge, cancel, or edit action.")
+    return checks
+
+
+def _largest_abs_position(portfolio: Any) -> Any | None:
+    positions = [position for position in getattr(portfolio, "positions", {}).values() if abs(position.market_value) > 0.01]
+    if not positions:
+        return None
+    return max(positions, key=lambda position: abs(position.market_value))
+
+
+def _money(value: float) -> str:
+    return polished_theme._format_money(float(value or 0.0))
+
+
+def _signed_money(value: float) -> str:
+    value = float(value or 0.0)
+    return f"{'+' if value > 0 else ''}{_money(value)}"
 
 
 def _grid_hyperliquid_quantity_row(parent: ttk.LabelFrame, self: tk.Tk, row: int) -> None:
