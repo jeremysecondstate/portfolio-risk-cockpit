@@ -329,12 +329,7 @@ def _portfolio_coin_exposures(portfolio: Any) -> dict[str, dict[str, Any]]:
 
 
 def _coin_from_exposure_symbol(symbol: str) -> str:
-    clean = symbol.upper().replace("-SPOT", "")
-    if "-PERP" in clean:
-        clean = clean.split("-PERP", 1)[0]
-    if "/" in clean:
-        clean = clean.split("/", 1)[0]
-    return clean
+    return _display_spot_base(symbol)
 
 
 def _exposure_readout(row: dict[str, Any]) -> str:
@@ -1313,12 +1308,7 @@ def _run_hyperliquid_spot_what_if(self: tk.Tk) -> None:
 
 
 def _spot_ticket_base_coin(market: str) -> str:
-    clean = market.strip().upper().replace("-SPOT", "")
-    if "/" in clean:
-        clean = clean.split("/", 1)[0]
-    if clean.startswith("@"):
-        return clean
-    return clean
+    return _display_spot_base(market)
 
 
 def _spot_gap_text(hedge_gap: float, remaining_gap: float, price: float) -> str:
