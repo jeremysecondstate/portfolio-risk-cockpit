@@ -68,6 +68,7 @@ def install_hyperliquid_trading_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls.show_hyperliquid_position_tpsl_dialog = _show_hyperliquid_position_tpsl_dialog  # type: ignore[attr-defined]
     app_cls.place_hyperliquid_position_tpsl_guarded = _place_hyperliquid_position_tpsl_guarded  # type: ignore[attr-defined]
     app_cls.show_hyperliquid_perp_position_size = _show_hyperliquid_perp_position_size  # type: ignore[attr-defined]
+    app_cls.use_hyperliquid_perp_position = _use_hyperliquid_perp_position  # type: ignore[attr-defined]
     app_cls.load_selected_recent_orders = _load_selected_recent_orders  # type: ignore[attr-defined]
     app_cls._build_order_panel = _build_order_panel_with_hyperliquid  # type: ignore[method-assign]
     app_cls.load_selected_open_orders_only = _load_selected_open_orders_only  # type: ignore[attr-defined]
@@ -717,6 +718,29 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
         self.trade_venue_var.set("Hyperliquid")
 
     cached_order = _selected_hyperliquid_order(self)
+    if cached_order is None:
+        active_ticket = getattr(self, "hyperliquid_workspace_active_ticket_var", tk.StringVar(value="spot")).get()
+        coin = self.hyperliquid_coin_var.get().strip() or self.symbol_var.get().strip()
+        context = "perp position" if active_ticket == "perp" and coin else "Hyperliquid order"
+        self.hyperliquid_status_var.set("Hyperliquid: no open order selected")
+        self._set_preview_text(
+            "HYPERLIQUID EDIT ORDER BLOCKED\n"
+            "==============================\n\n"
+            "Edit Order only modifies an existing loaded open order.\n\n"
+            f"Current target: {coin or '--'} {context}\n\n"
+            "No loaded open order is selected for that target. A perp position is not itself an order ID; if the position has no TP/SL orders yet, use TP/SL to create new reduce-only trigger orders.\n\n"
+            "Next steps:\n"
+            "- Select the BTC/HYPE/ZEC perp position row to make it the ticket target.\n"
+            "- Click TP/SL to create new take-profit or stop-loss trigger orders for that position.\n"
+            "- Use Open Only, select an existing order row, then Edit Order only when you need to modify an existing open order."
+        )
+        messagebox.showinfo(
+            "No open order selected",
+            "Edit Order requires an existing loaded open order.\n\n"
+            "To add TP/SL to the selected perp position, use the TP/SL button; it can create new reduce-only trigger orders even when no open orders exist.",
+        )
+        return
+
     normalized_order = normalize_hyperliquid_open_order(cached_order) if cached_order else None
     raw_order_id = self.cancel_order_id_var.get().strip()
     if not raw_order_id and normalized_order is not None:
@@ -1061,6 +1085,8 @@ def _selected_hyperliquid_order(self: tk.Tk) -> dict[str, Any] | None:
     raw_order_id = self.cancel_order_id_var.get().strip()
     if raw_order_id and raw_order_id in orders:
         return orders[raw_order_id]
+    if raw_order_id and raw_order_id not in orders:
+        return None
     if orders:
         first_order_id = sorted(orders)[0]
         self.cancel_order_id_var.set(first_order_id)
@@ -1256,9 +1282,11 @@ def _show_hyperliquid_position_tpsl_dialog(self: tk.Tk) -> None:
         mark_price = _lookup_hyperliquid_perp_mid(coin)
     except Exception:
         pass
+    existing = _matching_tpsl_orders(self, coin)
+    direction = "SHORT" if is_short else "LONG"
 
     dialog = tk.Toplevel(self)
-    dialog.title("Hyperliquid Perp TP/SL")
+    dialog.title(f"Hyperliquid Perp TP/SL - {coin} {direction}")
     dialog.transient(self)
     dialog.resizable(False, False)
 
@@ -1276,19 +1304,18 @@ def _show_hyperliquid_position_tpsl_dialog(self: tk.Tk) -> None:
     limit_trigger_var = tk.BooleanVar(value=False)
     limit_price_var = tk.StringVar(value=_format_hyperliquid_size(mark_price))
 
-    readonly_lines = [
-        ("Coin", coin_var),
-        ("Position", tk.StringVar(value=f"{position.quantity:g} {coin} {'short' if is_short else 'long'}")),
-        ("Entry price", tk.StringVar(value=f"${position.average_cost:,.4f}")),
-        ("Mark price", tk.StringVar(value=f"${mark_price:,.4f}")),
-        ("Closing side", tk.StringVar(value=close_side)),
-    ]
-    for row, (label, var) in enumerate(readonly_lines):
-        ttk.Label(shell, text=label, style="Subtle.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 10), pady=4)
-        ttk.Label(shell, textvariable=var, style="Body.TLabel").grid(row=row, column=1, sticky="ew", pady=4)
+    target = ttk.LabelFrame(shell, text=f"Target Position: {coin} {direction}", style="Card.TLabelframe")
+    target.grid(row=0, column=0, columnspan=2, sticky="ew")
+    for column in range(3):
+        target.columnconfigure(column, weight=1)
+    _summary_cell(target, 0, 0, "Coin", coin)
+    _summary_cell(target, 0, 1, "Position", f"{position.quantity:g} {coin} {direction.lower()}")
+    _summary_cell(target, 0, 2, "Closing Side", close_side)
+    _summary_cell(target, 1, 0, "Entry", f"${position.average_cost:,.4f}")
+    _summary_cell(target, 1, 1, "Mark", f"${mark_price:,.4f}")
+    _summary_cell(target, 1, 2, "Existing TP/SL", str(len(existing)))
 
-    row = len(readonly_lines)
-    existing = _matching_tpsl_orders(self, coin)
+    row = 1
     if existing:
         existing_frame = ttk.LabelFrame(shell, text="Existing TP/SL", style="Card.TLabelframe")
         existing_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 4))
@@ -1302,6 +1329,14 @@ def _show_hyperliquid_position_tpsl_dialog(self: tk.Tk) -> None:
                 command=lambda oid=order.oid: _cancel_tpsl_from_dialog(self, oid),
                 style="CompactDanger.TButton",
             ).grid(row=existing_row, column=1, sticky="ew", padx=(8, 0), pady=3)
+        row += 1
+    else:
+        ttk.Label(
+            shell,
+            text=f"No existing TP/SL orders were found for {coin}. Confirming below creates new reduce-only trigger order(s) for this {direction.lower()} position.",
+            style="Subtle.TLabel",
+            wraplength=500,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(8, 4))
         row += 1
 
     ttk.Label(shell, text="TP price", style="Subtle.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 10), pady=5)
@@ -1499,6 +1534,54 @@ def _show_hyperliquid_perp_position_size(self: tk.Tk) -> None:
         "- This uses the synced Hyperliquid perp position, not Schwab candles.\n"
         "- TP/SL can create new reduce-only trigger orders even when there are no existing open orders to edit.\n"
         "- Open Only shows existing open orders only; it will not show an order ID for a position that has no TP/SL order yet."
+    )
+
+
+def _use_hyperliquid_perp_position(self: tk.Tk, raw_coin: str | None = None) -> None:
+    _ensure_hyperliquid_vars(self)
+    self.trade_venue_var.set("Hyperliquid")
+    coin = normalize_hyperliquid_coin(raw_coin or self.hyperliquid_coin_var.get().strip() or self.symbol_var.get().strip())
+    position, is_short = _current_hyperliquid_perp_position(self, coin)
+    mark = position.last_price or position.average_cost
+    qty = abs(float(getattr(position, "quantity", 0.0) or 0.0))
+    direction = "SHORT" if is_short else "LONG"
+    close_side = "buy" if is_short else "sell"
+
+    self.symbol_var.set(coin)
+    self.hyperliquid_coin_var.set(coin)
+    self.side_var.set(close_side)
+    self.quantity_var.set(_format_hyperliquid_size(qty))
+    self.limit_price_var.set(_format_hyperliquid_size(mark))
+    self.hyperliquid_reduce_only_var.set(True)
+    if hasattr(self, "hyperliquid_workspace_active_ticket_var"):
+        self.hyperliquid_workspace_active_ticket_var.set("perp")
+    if hasattr(self, "hyperliquid_perp_coin_var"):
+        self.hyperliquid_perp_coin_var.set(coin)
+    if hasattr(self, "hyperliquid_perp_symbol_var"):
+        self.hyperliquid_perp_symbol_var.set(coin)
+    if hasattr(self, "hyperliquid_perp_side_var"):
+        self.hyperliquid_perp_side_var.set(close_side)
+    if hasattr(self, "hyperliquid_perp_quantity_var"):
+        self.hyperliquid_perp_quantity_var.set(_format_hyperliquid_size(qty))
+    if hasattr(self, "hyperliquid_perp_limit_price_var"):
+        self.hyperliquid_perp_limit_price_var.set(_format_hyperliquid_size(mark))
+    if hasattr(self, "hyperliquid_perp_reduce_only_var"):
+        self.hyperliquid_perp_reduce_only_var.set(True)
+
+    existing = _matching_tpsl_orders(self, coin)
+    self.hyperliquid_status_var.set(f"Hyperliquid: targeting {coin} {direction.lower()} position")
+    self._set_preview_text(
+        "HYPERLIQUID PERP POSITION TARGET\n"
+        "================================\n\n"
+        f"Target position: {coin} {direction} {qty:g}\n"
+        f"Entry: ${position.average_cost:,.4f}\n"
+        f"Mark: ${mark:,.4f}\n"
+        f"Closing side for TP/SL: {close_side}\n"
+        f"Existing loaded TP/SL orders for this coin: {len(existing)}\n\n"
+        "What this means\n"
+        "- The perp ticket is now scoped to this position.\n"
+        "- TP/SL will create new reduce-only trigger orders for this position if no matching open TP/SL orders exist.\n"
+        "- Edit Order still requires selecting an actual open order row; a position by itself has no order ID."
     )
 
 

@@ -345,6 +345,9 @@ def _load_workspace_ticket_from_holding(self: tk.Tk, table: ttk.Treeview, event:
 
     if venue == "Hyperliquid":
         self.trade_venue_var.set("Hyperliquid")
+        preview = getattr(self, "hyperliquid_trading_preview_text", None)
+        if preview is not None:
+            self.preview_text = preview
         self.symbol_var.set(ticket_symbol)
         self.hyperliquid_coin_var.set(ticket_symbol)
         is_perp = asset_type.lower().startswith("perp") or "-PERP" in symbol.upper()
@@ -355,6 +358,12 @@ def _load_workspace_ticket_from_holding(self: tk.Tk, table: ttk.Treeview, event:
                 self.hyperliquid_perp_coin_var.set(ticket_symbol)
             if hasattr(self, "hyperliquid_perp_symbol_var"):
                 self.hyperliquid_perp_symbol_var.set(ticket_symbol)
+            selector = getattr(self, "use_hyperliquid_perp_position", None)
+            if callable(selector):
+                try:
+                    selector(ticket_symbol)
+                except Exception:
+                    pass
         else:
             if hasattr(self, "hyperliquid_workspace_active_ticket_var"):
                 self.hyperliquid_workspace_active_ticket_var.set("spot")
@@ -370,6 +379,56 @@ def _load_workspace_ticket_from_holding(self: tk.Tk, table: ttk.Treeview, event:
         self.hyperliquid_coin_var.set("")
     if hasattr(self, "options_symbol_var"):
         self.options_symbol_var.set(ticket_symbol)
+
+
+def _selected_hyperliquid_perp_coin_from_workspace(self: tk.Tk) -> str:
+    table = getattr(self, "hyperliquid_workspace_holdings_table", None)
+    if table is not None:
+        selection = table.selection()
+        if selection:
+            raw_values = table.item(selection[0], "values")
+            columns = tuple(table["columns"])
+            values = {str(column): str(raw_values[index]) for index, column in enumerate(columns) if index < len(raw_values)}
+            symbol = values.get("symbol", "").strip()
+            asset_type = values.get("type", "").strip().lower()
+            if asset_type.startswith("perp") or "-PERP" in symbol.upper():
+                return _workspace_ticket_symbol(symbol)
+            raise ValueError("Select a Hyperliquid perp position row first. Spot and cash rows do not have perp TP/SL.")
+    fallback = getattr(self, "hyperliquid_perp_coin_var", tk.StringVar(value="")).get().strip() or getattr(self, "hyperliquid_coin_var", tk.StringVar(value="")).get().strip()
+    if fallback:
+        return normalize_hyperliquid_coin(fallback)
+    raise ValueError("Select a Hyperliquid perp position row first.")
+
+
+def _target_selected_hyperliquid_perp_position(self: tk.Tk) -> bool:
+    try:
+        coin = _selected_hyperliquid_perp_coin_from_workspace(self)
+        preview = getattr(self, "hyperliquid_trading_preview_text", None)
+        if preview is not None:
+            self.preview_text = preview
+        selector = getattr(self, "use_hyperliquid_perp_position", None)
+        if not callable(selector):
+            raise RuntimeError("Perp position targeting is not installed.")
+        selector(coin)
+        return True
+    except Exception as exc:
+        messagebox.showinfo("Select perp position", str(exc))
+        return False
+
+
+def _open_tpsl_for_selected_hyperliquid_perp_position(self: tk.Tk) -> None:
+    try:
+        if not _target_selected_hyperliquid_perp_position(self):
+            return
+        command = _first_available_command(self, "show_hyperliquid_position_tpsl_dialog")
+        _run_hyperliquid_ticket_action(
+            self,
+            ticket_kind="perp",
+            preview_widget=self.hyperliquid_trading_preview_text,
+            command=command,
+        )
+    except Exception as exc:
+        messagebox.showinfo("TP/SL unavailable", str(exc))
 
 
 def _workspace_ticket_symbol(symbol: str) -> str:
@@ -934,6 +993,30 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     hyperliquid_holdings_frame.pack(fill=tk.BOTH, expand=True)
     self.hyperliquid_workspace_holdings_table = _workspace_holdings_table(hyperliquid_holdings_frame)
     _bind_workspace_holdings_click(self, self.hyperliquid_workspace_holdings_table, "Hyperliquid")
+    hyperliquid_position_actions = ttk.Frame(hyperliquid_holdings_frame, style="Panel.TFrame")
+    hyperliquid_position_actions.pack(fill=tk.X, pady=(8, 0))
+    hyperliquid_position_actions.columnconfigure((0, 1, 2), weight=1)
+    ttk.Button(
+        hyperliquid_position_actions,
+        text="Use Selected Position",
+        command=lambda: _target_selected_hyperliquid_perp_position(self),
+    ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+    ttk.Button(
+        hyperliquid_position_actions,
+        text="TP/SL Selected",
+        command=lambda: _open_tpsl_for_selected_hyperliquid_perp_position(self),
+        style="Accent.TButton",
+    ).grid(row=0, column=1, sticky="ew", padx=(0, 6))
+    ttk.Button(
+        hyperliquid_position_actions,
+        text="Open Orders",
+        command=lambda: _run_hyperliquid_ticket_action(
+            self,
+            ticket_kind="perp",
+            preview_widget=self.hyperliquid_trading_preview_text,
+            command=_first_available_command(self, "load_hyperliquid_open_orders"),
+        ),
+    ).grid(row=0, column=2, sticky="ew")
 
     hyperliquid_orders_frame = ttk.LabelFrame(orders_shell, text="Hyperliquid Open Orders", style="Card.TLabelframe")
     hyperliquid_orders_frame.pack(fill=tk.BOTH, expand=True)

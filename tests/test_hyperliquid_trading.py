@@ -10,7 +10,7 @@ from app.brokers.hyperliquid.trading import (
     normalize_hyperliquid_trigger_ticket_for_wire,
 )
 from app.core.portfolio import Portfolio, Position
-from app.ui.hyperliquid_trading_extension import _normalize_edit_market, normalize_hyperliquid_open_order
+from app.ui.hyperliquid_trading_extension import _normalize_edit_market, _selected_hyperliquid_order, normalize_hyperliquid_open_order
 from app.ui.hyperliquid_trading_extension import _current_hyperliquid_perp_position, _perp_position_pnl
 
 
@@ -25,6 +25,17 @@ class _Broker:
 class _App:
     def __init__(self, portfolio: Portfolio) -> None:
         self.broker = _Broker(portfolio)
+
+
+class _Var:
+    def __init__(self, value: str = "") -> None:
+        self.value = value
+
+    def get(self) -> str:
+        return self.value
+
+    def set(self, value: str) -> None:
+        self.value = value
 
 
 class HyperliquidTradingTests(unittest.TestCase):
@@ -141,6 +152,19 @@ class HyperliquidTradingTests(unittest.TestCase):
     def test_perp_position_pnl_handles_short_and_long(self) -> None:
         self.assertAlmostEqual(_perp_position_pnl(500.0, 450.0, 4.0, True), 200.0)
         self.assertAlmostEqual(_perp_position_pnl(500.0, 550.0, 4.0, False), 200.0)
+
+    def test_selected_order_does_not_auto_edit_wrong_order_when_id_is_stale(self) -> None:
+        app = type(
+            "App",
+            (),
+            {
+                "cancel_order_id_var": _Var("stale-oid"),
+                "hyperliquid_open_order_by_oid": {"123": {"oid": 123, "coin": "BTC"}},
+            },
+        )()
+
+        self.assertIsNone(_selected_hyperliquid_order(app))  # type: ignore[arg-type]
+        self.assertEqual(app.cancel_order_id_var.get(), "stale-oid")
 
 
 if __name__ == "__main__":
