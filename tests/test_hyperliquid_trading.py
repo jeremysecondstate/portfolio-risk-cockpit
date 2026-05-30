@@ -9,7 +9,22 @@ from app.brokers.hyperliquid.trading import (
     HyperliquidTriggerTicket,
     normalize_hyperliquid_trigger_ticket_for_wire,
 )
+from app.core.portfolio import Portfolio, Position
 from app.ui.hyperliquid_trading_extension import _normalize_edit_market, normalize_hyperliquid_open_order
+from app.ui.hyperliquid_trading_extension import _current_hyperliquid_perp_position, _perp_position_pnl
+
+
+class _Broker:
+    def __init__(self, portfolio: Portfolio) -> None:
+        self._portfolio = portfolio
+
+    def get_portfolio(self) -> Portfolio:
+        return self._portfolio
+
+
+class _App:
+    def __init__(self, portfolio: Portfolio) -> None:
+        self.broker = _Broker(portfolio)
 
 
 class HyperliquidTradingTests(unittest.TestCase):
@@ -111,6 +126,21 @@ class HyperliquidTradingTests(unittest.TestCase):
 
         self.assertEqual(above.trigger_condition, "Price above 81698")
         self.assertEqual(below.trigger_condition, "Price below 70000")
+
+    def test_current_perp_position_falls_back_to_broker_portfolio(self) -> None:
+        portfolio = Portfolio(
+            cash=0,
+            positions={"ZEC-PERP-SHORT": Position("ZEC-PERP-SHORT", 4, 520.0, 506.0, open_profit_loss=56.0)},
+        )
+
+        position, is_short = _current_hyperliquid_perp_position(_App(portfolio), "ZEC")  # type: ignore[arg-type]
+
+        self.assertTrue(is_short)
+        self.assertEqual(position.symbol, "ZEC-PERP-SHORT")
+
+    def test_perp_position_pnl_handles_short_and_long(self) -> None:
+        self.assertAlmostEqual(_perp_position_pnl(500.0, 450.0, 4.0, True), 200.0)
+        self.assertAlmostEqual(_perp_position_pnl(500.0, 550.0, 4.0, False), 200.0)
 
 
 if __name__ == "__main__":

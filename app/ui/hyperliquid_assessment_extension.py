@@ -64,6 +64,7 @@ def _sync_hyperliquid_account_with_assessment(self: tk.Tk) -> None:
         base_source_message = self.broker.source_message.split(" + Loaded Hyperliquid account ")[0]
         source_message = f"{base_source_message} + {hyperliquid_source_message}"
         self.broker.set_portfolio(merged_portfolio, source_message)
+        self.current_portfolio = merged_portfolio
         self.last_hyperliquid_cash_adjustment = hyperliquid_portfolio.cash
         self.refresh_portfolio()
 

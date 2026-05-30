@@ -67,6 +67,7 @@ def install_hyperliquid_trading_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls.edit_hyperliquid_order_guarded = _edit_hyperliquid_order_guarded  # type: ignore[attr-defined]
     app_cls.show_hyperliquid_position_tpsl_dialog = _show_hyperliquid_position_tpsl_dialog  # type: ignore[attr-defined]
     app_cls.place_hyperliquid_position_tpsl_guarded = _place_hyperliquid_position_tpsl_guarded  # type: ignore[attr-defined]
+    app_cls.show_hyperliquid_perp_position_size = _show_hyperliquid_perp_position_size  # type: ignore[attr-defined]
     app_cls.load_selected_recent_orders = _load_selected_recent_orders  # type: ignore[attr-defined]
     app_cls._build_order_panel = _build_order_panel_with_hyperliquid  # type: ignore[method-assign]
     app_cls.load_selected_open_orders_only = _load_selected_open_orders_only  # type: ignore[attr-defined]
@@ -1267,8 +1268,10 @@ def _show_hyperliquid_position_tpsl_dialog(self: tk.Tk) -> None:
 
     coin_var = tk.StringVar(value=coin)
     size_var = tk.StringVar(value=_format_hyperliquid_size(position.quantity))
-    tp_var = tk.StringVar(value=getattr(self, "hyperliquid_target_price_var", tk.StringVar(value="")).get())
-    sl_var = tk.StringVar(value=getattr(self, "hyperliquid_bad_price_var", tk.StringVar(value="")).get() or getattr(self, "stop_price_var", tk.StringVar(value="")).get())
+    existing_tp = getattr(self, "hyperliquid_target_price_var", tk.StringVar(value="")).get().strip()
+    existing_sl = (getattr(self, "hyperliquid_bad_price_var", tk.StringVar(value="")).get() or getattr(self, "stop_price_var", tk.StringVar(value="")).get()).strip()
+    tp_var = tk.StringVar(value=existing_tp or _format_hyperliquid_size(mark_price * (0.95 if is_short else 1.05)))
+    sl_var = tk.StringVar(value=existing_sl or _format_hyperliquid_size(mark_price * (1.03 if is_short else 0.97)))
     configure_amount_var = tk.BooleanVar(value=False)
     limit_trigger_var = tk.BooleanVar(value=False)
     limit_price_var = tk.StringVar(value=_format_hyperliquid_size(mark_price))
@@ -1331,7 +1334,7 @@ def _show_hyperliquid_position_tpsl_dialog(self: tk.Tk) -> None:
 
     note = ttk.Label(
         shell,
-        text="Creates reduce-only Hyperliquid position TP/SL trigger orders. Leave TP or SL blank to skip that side.",
+        text="Creates new reduce-only Hyperliquid position TP/SL trigger orders. Existing open orders are optional; leave TP or SL blank to skip that side.",
         style="Subtle.TLabel",
         wraplength=430,
     )
@@ -1452,8 +1455,60 @@ def _place_hyperliquid_position_tpsl_guarded(
         messagebox.showerror("Hyperliquid TP/SL failed", str(exc))
 
 
+def _show_hyperliquid_perp_position_size(self: tk.Tk) -> None:
+    _ensure_hyperliquid_vars(self)
+    self.trade_venue_var.set("Hyperliquid")
+    try:
+        coin = normalize_hyperliquid_coin(self.hyperliquid_coin_var.get().strip() or self.symbol_var.get().strip())
+        position, is_short = _current_hyperliquid_perp_position(self, coin)
+    except Exception as exc:
+        messagebox.showerror("Hyperliquid position size failed", str(exc))
+        return
+
+    mark = position.last_price or position.average_cost
+    entry = position.average_cost or mark
+    qty = abs(float(getattr(position, "quantity", 0.0) or 0.0))
+    notional = qty * mark
+    direction = "SHORT" if is_short else "LONG"
+    tp_price = _optional_order_float(getattr(self, "hyperliquid_target_price_var", tk.StringVar(value="")).get())
+    sl_price = _optional_order_float(getattr(self, "hyperliquid_bad_price_var", tk.StringVar(value="")).get()) or _optional_order_float(getattr(self, "stop_price_var", tk.StringVar(value="")).get())
+    if tp_price is None:
+        tp_price = mark * (0.95 if is_short else 1.05)
+    if sl_price is None:
+        sl_price = mark * (1.03 if is_short else 0.97)
+    tp_pnl = _perp_position_pnl(entry, tp_price, qty, is_short)
+    sl_pnl = _perp_position_pnl(entry, sl_price, qty, is_short)
+    mark_pnl = _perp_position_pnl(entry, mark, qty, is_short)
+    rr = _risk_reward(tp_pnl - mark_pnl, sl_pnl - mark_pnl)
+
+    self.hyperliquid_status_var.set("Hyperliquid: position size ready")
+    self._set_preview_text(
+        "HYPERLIQUID PERP POSITION SIZE\n"
+        "==============================\n\n"
+        f"Coin: {coin}\n"
+        f"Current position: {direction} {qty:g} {coin}\n"
+        f"Entry: ${entry:,.4f}\n"
+        f"Mark: ${mark:,.4f}\n"
+        f"Current notional: ${notional:,.2f}\n"
+        f"Open P&L estimate from entry: {_signed_money(mark_pnl)}\n\n"
+        "TP / SL planning\n"
+        f"- Take-profit trigger: ${tp_price:,.4f} -> position P&L {_signed_money(tp_pnl)}\n"
+        f"- Stop-loss trigger: ${sl_price:,.4f} -> position P&L {_signed_money(sl_pnl)}\n"
+        f"- Reward/risk from current mark: {rr}\n\n"
+        "How to use this\n"
+        "- This uses the synced Hyperliquid perp position, not Schwab candles.\n"
+        "- TP/SL can create new reduce-only trigger orders even when there are no existing open orders to edit.\n"
+        "- Open Only shows existing open orders only; it will not show an order ID for a position that has no TP/SL order yet."
+    )
+
+
 def _current_hyperliquid_perp_position(self: tk.Tk, coin: str) -> tuple[Any, bool]:
     portfolio = getattr(self, "current_portfolio", None)
+    if portfolio is None:
+        try:
+            portfolio = self.broker.get_portfolio()
+        except Exception:
+            portfolio = None
     if portfolio is None:
         raise ValueError("Sync Hyperliquid first so the app can see the current perp position.")
     long_position = portfolio.positions.get(f"{coin}-PERP")
@@ -1463,6 +1518,12 @@ def _current_hyperliquid_perp_position(self: tk.Tk, coin: str) -> tuple[Any, boo
     if long_position is not None:
         return long_position, False
     raise ValueError(f"No active Hyperliquid perp position found for {coin}.")
+
+
+def _perp_position_pnl(entry: float, price: float, quantity: float, is_short: bool) -> float:
+    if is_short:
+        return (entry - price) * quantity
+    return (price - entry) * quantity
 
 
 def _matching_tpsl_orders(self: tk.Tk, coin: str) -> list[HyperliquidOpenOrder]:
