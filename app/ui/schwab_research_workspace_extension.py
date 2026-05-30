@@ -933,7 +933,7 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
     if best is not None:
         cards.append(_synthetic_badge("Upside Reward", _money(best.position_pnl), "good" if best.position_pnl > 0 else "info", f"{best.scenario} move, {best.portfolio_pnl_impact:+.2%} portfolio impact."))
     cards.extend([payload.decision.position_impact, payload.decision.risk_level])
-    metric_grid(frame.cards, cards, columns=4)  # type: ignore[attr-defined]
+    metric_grid(frame.cards, cards, columns=4, card_height=112, prominent_height=112)  # type: ignore[attr-defined]
     move_tree = frame.move_planner_tree  # type: ignore[attr-defined]
     for row_id in move_tree.get_children():
         move_tree.delete(row_id)

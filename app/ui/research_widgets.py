@@ -85,7 +85,12 @@ class MetricCard(tk.Frame):
         label_font = ("Segoe UI", 16 if prominent else 13, "bold")
         tk.Label(self, text=readout.title.upper(), bg=colors["bg"], fg=MUTED, font=title_font, anchor="w").grid(row=0, column=1, sticky="ew", padx=12, pady=(9, 0))
         tk.Label(self, text=readout.label, bg=colors["bg"], fg=colors["fg"], font=label_font, anchor="w").grid(row=1, column=1, sticky="ew", padx=12, pady=(2, 0))
-        tk.Label(self, text=readout.why, bg=colors["bg"], fg=TEXT, font=("Segoe UI", 8), wraplength=width - 28, justify=tk.LEFT, anchor="nw").grid(row=2, column=1, sticky="nsew", padx=12, pady=(4, 10))
+        self._why_label = tk.Label(self, text=readout.why, bg=colors["bg"], fg=TEXT, font=("Segoe UI", 8), wraplength=width - 28, justify=tk.LEFT, anchor="nw")
+        self._why_label.grid(row=2, column=1, sticky="nsew", padx=12, pady=(4, 10))
+        self.bind("<Configure>", self._on_resize, add="+")
+
+    def _on_resize(self, event: tk.Event) -> None:
+        self._why_label.configure(wraplength=max(140, int(event.width) - 34))
 
 
 class ScoreBadge(tk.Frame):
@@ -181,13 +186,21 @@ class ScenarioImpactBars(tk.Canvas):
             self.create_text(width - 8, y, text=display, anchor="ne", fill=color, font=("Segoe UI", 8, "bold"))
 
 
-def metric_grid(parent: tk.Widget, readouts: list[BadgeReadout], *, columns: int = 4, prominent_indexes: set[int] | None = None) -> None:
+def metric_grid(
+    parent: tk.Widget,
+    readouts: list[BadgeReadout],
+    *,
+    columns: int = 4,
+    prominent_indexes: set[int] | None = None,
+    card_height: int = 92,
+    prominent_height: int = 102,
+) -> None:
     clear_children(parent)
     prominent_indexes = prominent_indexes or set()
     for column in range(columns):
         parent.columnconfigure(column, weight=1, uniform="metric_cards")
     for index, readout in enumerate(readouts):
-        card = MetricCard(parent, readout, prominent=index in prominent_indexes, height=102 if index in prominent_indexes else 92)
+        card = MetricCard(parent, readout, prominent=index in prominent_indexes, height=prominent_height if index in prominent_indexes else card_height)
         card.grid(row=index // columns, column=index % columns, sticky="nsew", padx=(0 if index % columns == 0 else 8, 0), pady=(0, 8))
 
 
