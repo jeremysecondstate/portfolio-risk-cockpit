@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from app.brokers.hyperliquid.trading import (
+    HyperliquidExecutionAdapter,
     HyperliquidOrderEditTicket,
     HyperliquidTradingConfig,
     HyperliquidTriggerTicket,
@@ -165,6 +166,21 @@ class HyperliquidTradingTests(unittest.TestCase):
 
         self.assertIsNone(_selected_hyperliquid_order(app))  # type: ignore[arg-type]
         self.assertEqual(app.cancel_order_id_var.get(), "stale-oid")
+
+    def test_update_leverage_normalizes_coin_and_calls_exchange_hook(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "HYPE_WALLET_ADDRESS": "0x0000000000000000000000000000000000000000",
+                "HYPE_API_ADDRESS": "0x0000000000000000000000000000000000000001",
+                "HYPE_API_SECRET": "not-a-real-secret",
+                "HYPERLIQUID_ENABLE_LIVE_ORDERS": "true",
+            },
+        ), patch.object(HyperliquidExecutionAdapter, "_local_signed_update_leverage", return_value={"ok": True}) as update:
+            result = HyperliquidExecutionAdapter().update_leverage("zec-perp-short", 10, is_cross=True)
+
+        self.assertEqual(result, {"ok": True})
+        update.assert_called_once_with("ZEC", 10, is_cross=True)
 
 
 if __name__ == "__main__":

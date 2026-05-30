@@ -50,9 +50,6 @@ def _patch_grid_row(app_cls: type[tk.Tk]) -> None:
                 left_widget = ttk.Entry(parent, textvariable=_var(self, "hyperliquid_perp_leverage_var", self.hyperliquid_leverage_var))
                 right_label = "Use Mid"
                 right_widget = _make_hyperliquid_use_mid_button(self, parent)
-            elif left_label == "Leverage x" and right_label == "Fee % / side":
-                left_label = "Attach TP/SL"
-                left_widget = ttk.Checkbutton(parent, variable=_var(self, "hyperliquid_perp_attach_tpsl_var", self.hyperliquid_attach_tpsl_var))
         elif right_label == _DELETE_ME:
             if title == "Schwab Stock / ETF Ticket":
                 right_label = "Use Mid"

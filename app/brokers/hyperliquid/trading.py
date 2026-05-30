@@ -307,6 +307,16 @@ class HyperliquidExecutionAdapter:
             config.validate_trigger_for_live(ticket)
         return self._local_signed_position_tpsl(normalized_tickets)
 
+    def update_leverage(self, coin: str, leverage: int, *, is_cross: bool = True) -> Any:
+        config = HyperliquidTradingConfig()
+        config.validate_for_live_action()
+        normalized_coin = normalize_hyperliquid_coin(coin)
+        if leverage < 1:
+            raise ValueError("Hyperliquid leverage must be at least 1x.")
+        if leverage > 100:
+            raise ValueError("Hyperliquid leverage must be 100x or lower.")
+        return self._local_signed_update_leverage(normalized_coin, leverage, is_cross=is_cross)
+
     def _local_signed_submit(self, ticket: HyperliquidOrderTicket) -> Any:
         from eth_account import Account
         from hyperliquid.exchange import Exchange
@@ -433,6 +443,24 @@ class HyperliquidExecutionAdapter:
             for ticket in normalized_tickets
         ]
         return exchange.bulk_orders(order_requests, grouping="positionTpsl")
+
+    def _local_signed_update_leverage(self, coin: str, leverage: int, *, is_cross: bool = True) -> Any:
+        from eth_account import Account
+        from hyperliquid.exchange import Exchange
+        from hyperliquid.utils import constants
+
+        api_secret = os.getenv("HYPE_API_SECRET", "").strip()
+        wallet_address = os.getenv("HYPE_WALLET_ADDRESS", "").strip()
+
+        api_wallet = Account.from_key(api_secret)
+
+        exchange = Exchange(
+            api_wallet,
+            constants.MAINNET_API_URL,
+            account_address=wallet_address,
+        )
+
+        return exchange.update_leverage(int(leverage), coin, is_cross=is_cross)
 
 
 def normalize_hyperliquid_ticket_limit_price(ticket: HyperliquidOrderTicket) -> HyperliquidOrderTicket:

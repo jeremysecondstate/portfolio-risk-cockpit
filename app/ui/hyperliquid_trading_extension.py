@@ -69,6 +69,7 @@ def install_hyperliquid_trading_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls.place_hyperliquid_position_tpsl_guarded = _place_hyperliquid_position_tpsl_guarded  # type: ignore[attr-defined]
     app_cls.show_hyperliquid_perp_position_size = _show_hyperliquid_perp_position_size  # type: ignore[attr-defined]
     app_cls.use_hyperliquid_perp_position = _use_hyperliquid_perp_position  # type: ignore[attr-defined]
+    app_cls.apply_hyperliquid_leverage_guarded = _apply_hyperliquid_leverage_guarded  # type: ignore[attr-defined]
     app_cls.load_selected_recent_orders = _load_selected_recent_orders  # type: ignore[attr-defined]
     app_cls._build_order_panel = _build_order_panel_with_hyperliquid  # type: ignore[method-assign]
     app_cls.load_selected_open_orders_only = _load_selected_open_orders_only  # type: ignore[attr-defined]
@@ -104,6 +105,8 @@ def _ensure_hyperliquid_vars(self: tk.Tk) -> None:
         self.hyperliquid_size_status_var = tk.StringVar(value="Sync Hyperliquid, then choose a size %")
     if not hasattr(self, "hyperliquid_size_unit_var"):
         self.hyperliquid_size_unit_var = tk.StringVar(value="")
+    if not hasattr(self, "hyperliquid_margin_mode_var"):
+        self.hyperliquid_margin_mode_var = tk.StringVar(value="Cross")
 
 
 def _configure_compact_ticket_styles(self: tk.Tk) -> None:
@@ -1583,6 +1586,67 @@ def _use_hyperliquid_perp_position(self: tk.Tk, raw_coin: str | None = None) -> 
         "- TP/SL will create new reduce-only trigger orders for this position if no matching open TP/SL orders exist.\n"
         "- Edit Order still requires selecting an actual open order row; a position by itself has no order ID."
     )
+
+
+def _apply_hyperliquid_leverage_guarded(self: tk.Tk) -> None:
+    _ensure_hyperliquid_vars(self)
+    self.trade_venue_var.set("Hyperliquid")
+    try:
+        coin = normalize_hyperliquid_coin(self.hyperliquid_coin_var.get().strip() or self.symbol_var.get().strip())
+        raw_leverage = getattr(self, "hyperliquid_leverage_var", tk.StringVar(value="1")).get().strip().lower().replace("x", "")
+        leverage = int(float(raw_leverage))
+        if leverage < 1:
+            raise ValueError("Leverage must be at least 1x.")
+        margin_mode = getattr(self, "hyperliquid_margin_mode_var", tk.StringVar(value="Cross")).get().strip() or "Cross"
+        is_cross = margin_mode.lower() != "isolated"
+    except Exception as exc:
+        messagebox.showerror("Hyperliquid leverage blocked", str(exc))
+        return
+
+    config = HyperliquidTradingConfig()
+    try:
+        config.validate_for_live_action()
+    except Exception as exc:
+        self.hyperliquid_status_var.set("Hyperliquid: leverage blocked")
+        self._set_preview_text(
+            "HYPERLIQUID LEVERAGE UPDATE BLOCKED\n"
+            "===================================\n\n"
+            f"{exc}\n\n"
+            "This action changes the exchange-side perp leverage setting for the selected coin. Required local .env gates:\n"
+            "- HYPE_WALLET_ADDRESS\n"
+            "- HYPE_API_ADDRESS\n"
+            "- HYPE_API_SECRET\n"
+            "- HYPERLIQUID_ENABLE_LIVE_ORDERS=true"
+        )
+        messagebox.showerror("Hyperliquid leverage blocked", str(exc))
+        return
+
+    ok = messagebox.askyesno(
+        "FINAL HYPERLIQUID LEVERAGE CONFIRMATION",
+        "This will update LIVE Hyperliquid perp leverage settings.\n\n"
+        f"Coin: {coin}\n"
+        f"Leverage: {leverage}x\n"
+        f"Margin mode: {'Cross' if is_cross else 'Isolated'}\n\n"
+        "Continue?",
+    )
+    if not ok:
+        return
+
+    try:
+        result = HyperliquidExecutionAdapter().update_leverage(coin, leverage, is_cross=is_cross)
+        self.hyperliquid_status_var.set(f"Hyperliquid: {coin} leverage update attempted")
+        self._set_preview_text(
+            "HYPERLIQUID LEVERAGE UPDATE RESULT\n"
+            "==================================\n\n"
+            f"Coin: {coin}\n"
+            f"Leverage: {leverage}x\n"
+            f"Margin mode: {'Cross' if is_cross else 'Isolated'}\n\n"
+            f"Response:\n{result}\n\n"
+            "No order was submitted. Use Preview Perp Ticket or Perp What-If to review the ticket with this leverage setting."
+        )
+    except Exception as exc:
+        self.hyperliquid_status_var.set("Hyperliquid: leverage update failed")
+        messagebox.showerror("Hyperliquid leverage failed", str(exc))
 
 
 def _current_hyperliquid_perp_position(self: tk.Tk, coin: str) -> tuple[Any, bool]:
