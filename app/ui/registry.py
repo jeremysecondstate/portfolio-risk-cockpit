@@ -37,6 +37,7 @@ from app.ui.schwab_sync_report_extension import install_schwab_sync_report_exten
 from app.ui.schwab_workspace_sync_extension import install_schwab_workspace_sync_extension
 from app.ui.thesis_option_ticket_extension import install_thesis_option_ticket_extension
 from app.ui.trade_setup_extension import install_trade_setup_extension
+from app.ui.uncovered_options_risk_lane_extension import install_uncovered_options_risk_lane_extension
 from app.ui.unified_refresh_extension import install_unified_refresh_extension
 from app.ui.unified_trade_thesis_extension import install_unified_trade_thesis_extension
 from app.ui.unified_trade_thesis_next_checks_extension import install_unified_trade_thesis_next_checks_extension
@@ -88,3 +89,4 @@ def install_ui_extensions(app_cls: Type[tk.Tk]) -> None:
     install_schwab_mechanical_submit_extension(app_cls)
     install_hyperliquid_spot_symbol_display_extension(app_cls)
     install_hyperliquid_quote_asset_extension(app_cls)
+    install_uncovered_options_risk_lane_extension(app_cls)
