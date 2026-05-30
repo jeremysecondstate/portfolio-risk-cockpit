@@ -93,7 +93,7 @@ def _install_schwab_options_feature(self: tk.Tk, schwab_tab: ttk.Frame) -> None:
         "========================\n\n"
         "Use this single tab for stocks, ETFs, Schwab previews, order history, guarded live Schwab actions, and options what-if planning.\n\n"
         "The Stock / ETF ticket and Options Ticket Fields now sit side by side above the Schwab action grid, so the option inputs and guarded Schwab buttons stay visible together.\n\n"
-        "Sync Schwab refreshes account balances and positions. Options What-If writes the scenario analysis here without switching into a separate sub-tab.",
+        "Sync Schwab refreshes account balances and positions. Options Strategy now lives inside the Schwab Research + Risk Workspace next to Risk Scenarios.",
     )
 
 
@@ -202,7 +202,7 @@ def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
     _add_action_button(actions, row=1, column=2, text="Position Size", command=schwab_action("show_position_size"))
     _add_action_button(actions, row=2, column=0, text="Preview Risk", command=schwab_action("preview_order"), style="Accent.TButton")
     _add_action_button(actions, row=2, column=1, text="Open Only", command=schwab_action("load_selected_open_orders_only", "load_schwab_open_orders_only"))
-    _add_action_button(actions, row=2, column=2, text="Options What-If", command=lambda app=self: _run_schwab_integrated_options_what_if(app), style="Accent.TButton")
+    _add_action_button(actions, row=2, column=2, text="Options Strategy", command=schwab_action("show_technical_analysis"))
     _add_action_button(actions, row=3, column=0, text="Recent Orders", command=schwab_action("load_selected_recent_orders", "load_schwab_open_orders"))
     _add_action_button(actions, row=3, column=1, text="Live Safety", command=schwab_action("show_live_submit_safety_review"))
     _add_action_button(actions, row=3, column=2, text="LIVE Submit", command=schwab_action("submit_selected_venue", "submit_live_schwab_order_guarded"), style="Danger.TButton")

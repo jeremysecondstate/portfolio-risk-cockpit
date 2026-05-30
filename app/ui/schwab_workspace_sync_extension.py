@@ -31,7 +31,7 @@ def _polish_schwab_workspace(self: tk.Tk) -> None:
     if output is None:
         return
 
-    _embed_options_lab_under_schwab(self)
+    _hide_top_level_options_tab(self)
 
     for button in _walk_buttons(self):
         label = str(button.cget("text"))
@@ -49,8 +49,8 @@ def _polish_schwab_workspace(self: tk.Tk) -> None:
             button.configure(text="Preview Stock Ticket")
         elif label == "Order Checklist" and _inside_labelframe(button, "Schwab Actions"):
             button.configure(
-                text="Options Lab",
-                command=lambda: _select_options_lab(self),
+                text="Options Strategy",
+                command=lambda: getattr(self, "show_technical_analysis")(),
             )
 
     _set_schwab_workspace_intro(self)
@@ -139,7 +139,7 @@ def _set_schwab_workspace_intro(self: tk.Tk) -> None:
         "========================\n\n"
         "Use this tab for stocks, ETFs, Schwab previews, order history, guarded live Schwab actions, and options what-if planning.\n\n"
         "Sync Schwab refreshes account balances and positions through the Trader API account snapshot flow.\n\n"
-        "The Schwab Options What-If Lab is embedded below the stock/ETF ticket because options are a Schwab-only workflow in this cockpit.",
+        "Options Strategy lives in the Schwab Research + Risk Workspace so option candidates sit beside technicals, macro, earnings, and risk scenarios.",
     )
 
 

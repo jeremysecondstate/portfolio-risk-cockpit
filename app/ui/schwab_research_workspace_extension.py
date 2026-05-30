@@ -17,6 +17,18 @@ from app.analytics.research_scoring import (
     risk_heat_label,
     scenario_impact_bar_value,
 )
+from app.analytics.research_workspace_insights import (
+    TERM_HELPERS,
+    OptionCandidate,
+    build_earnings_workspace_summary,
+    build_macro_metric_cards,
+    build_technical_narrative,
+    combined_option_scenarios,
+    inflation_read_from_metrics,
+    macro_why_it_matters,
+    suggest_option_candidates,
+    ticket_fields_for_option_candidate,
+)
 from app.analytics.stock_research import (
     AdvancedIndicatorSnapshot,
     DataSourceStatus,
@@ -31,7 +43,9 @@ from app.analytics.stock_research import (
 )
 from app.analytics.technical_analysis import candles_from_price_history
 from app.data.sec_edgar import SecEdgarClient, normalize_ticker
-from app.macro.releases import build_macro_report
+from app.macro.analysis import format_macro_report
+from app.macro.models import MacroSnapshot
+from app.macro.releases import fetch_macro_release_snapshot
 from app.ui.research_widgets import Checklist, ScenarioImpactBars, ScoreMeter, ScrollableFrame, clear_children, freshness_badges, labeled_value_grid, metric_grid
 from app.ui.schwab_output_popout_extension import _apply_report_tags
 
@@ -51,6 +65,7 @@ class _ResearchPayload:
     macro_text: str
     statuses: list[DataSourceStatus]
     decision: ResearchDecisionReadout
+    macro_snapshot: MacroSnapshot | None = None
 
 
 def install_schwab_research_workspace_extension(app_cls: Type[tk.Tk]) -> None:
@@ -201,11 +216,12 @@ def _build_research_right_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     self.schwab_research_overview_text = self.schwab_research_overview_frame.detail_text  # type: ignore[attr-defined]
     self.schwab_research_technicals_frame = _technicals_tab(notebook)
     self.schwab_research_scenarios_frame = _scenarios_tab(self, notebook)
-    self.schwab_research_earnings_frame = _section_summary_tab(notebook, "Earnings / News")
+    self.schwab_research_options_frame = _options_strategy_tab(self, notebook)
+    self.schwab_research_earnings_frame = _earnings_tab(notebook)
     self.schwab_research_earnings_text = self.schwab_research_earnings_frame.detail_text  # type: ignore[attr-defined]
     self.schwab_research_fundamentals_frame = _section_summary_tab(notebook, "Fundamentals")
     self.schwab_research_fundamentals_text = self.schwab_research_fundamentals_frame.detail_text  # type: ignore[attr-defined]
-    self.schwab_research_macro_frame = _section_summary_tab(notebook, "Macro Context")
+    self.schwab_research_macro_frame = _macro_tab(notebook)
     self.schwab_research_macro_text = self.schwab_research_macro_frame.detail_text  # type: ignore[attr-defined]
 
 
@@ -248,6 +264,73 @@ def _section_summary_tab(notebook: ttk.Notebook, title: str) -> ttk.Frame:
     frame.checks.grid(row=1, column=0, sticky="ew", pady=(8, 0))
     frame.detail_text = _detail_text(frame)  # type: ignore[attr-defined]
     frame.detail_text.grid(row=2, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
+    return frame
+
+
+def _macro_tab(notebook: ttk.Notebook) -> ttk.Frame:
+    frame = _scrollable_tab(notebook, "Macro Context")
+    frame.columnconfigure(0, weight=1)
+    frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.cards.grid(row=0, column=0, sticky="ew")
+    frame.why = ttk.LabelFrame(frame, text="Why This Matters For This Symbol", style="Card.TLabelframe")  # type: ignore[attr-defined]
+    frame.why.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+    frame.why.columnconfigure(0, weight=1)  # type: ignore[attr-defined]
+    tree_box = ttk.LabelFrame(frame, text="Official Macro Dashboard", style="Card.TLabelframe")
+    tree_box.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+    tree_box.columnconfigure(0, weight=1)
+    tree = ttk.Treeview(tree_box, columns=("group", "metric", "latest", "prior", "change", "period", "source", "fresh", "read"), show="headings", height=7)
+    specs = (
+        ("group", "Card", 130, tk.W),
+        ("metric", "Metric", 150, tk.W),
+        ("latest", "Latest", 85, tk.E),
+        ("prior", "Prior", 85, tk.E),
+        ("change", "Change", 80, tk.E),
+        ("period", "Period", 95, tk.W),
+        ("source", "Source", 100, tk.W),
+        ("fresh", "Freshness", 90, tk.W),
+        ("read", "Read", 95, tk.W),
+    )
+    for column, label, width, anchor in specs:
+        tree.heading(column, text=label)
+        tree.column(column, width=width, anchor=anchor, stretch=column in {"metric", "source"})
+    tree.grid(row=0, column=0, sticky="ew")
+    y_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
+    y_scroll.grid(row=0, column=1, sticky="ns")
+    tree.configure(yscrollcommand=y_scroll.set)
+    frame.metric_tree = tree  # type: ignore[attr-defined]
+    frame.interpretation = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.interpretation.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+    frame.interpretation.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    raw = ttk.LabelFrame(frame, text="Raw Details", style="Card.TLabelframe")
+    raw.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+    raw.columnconfigure(0, weight=1)
+    frame.detail_text = _detail_text(raw)  # type: ignore[attr-defined]
+    frame.detail_text.grid(row=0, column=0, sticky="ew")  # type: ignore[attr-defined]
+    return frame
+
+
+def _earnings_tab(notebook: ttk.Notebook) -> ttk.Frame:
+    frame = _scrollable_tab(notebook, "Earnings / News")
+    frame.columnconfigure(0, weight=1)
+    frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.cards.grid(row=0, column=0, sticky="ew")
+    frame.checks = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.checks.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+    frame.checks.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    source_box = ttk.LabelFrame(frame, text="Source Links", style="Card.TLabelframe")
+    source_box.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+    source_box.columnconfigure(0, weight=1)
+    tree = ttk.Treeview(source_box, columns=("source", "date", "url"), show="headings", height=5)
+    for column, label, width in (("source", "Source", 250), ("date", "Date", 110), ("url", "URL", 520)):
+        tree.heading(column, text=label)
+        tree.column(column, width=width, anchor=tk.W, stretch=column == "url")
+    tree.grid(row=0, column=0, sticky="ew")
+    y_scroll = ttk.Scrollbar(source_box, orient=tk.VERTICAL, command=tree.yview)
+    y_scroll.grid(row=0, column=1, sticky="ns")
+    tree.configure(yscrollcommand=y_scroll.set)
+    frame.source_tree = tree  # type: ignore[attr-defined]
+    frame.detail_text = _detail_text(frame)  # type: ignore[attr-defined]
+    frame.detail_text.grid(row=3, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
     return frame
 
 
@@ -342,6 +425,70 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     note.grid(row=4, column=0, sticky="ew", pady=(10, 0))
     frame.scenario_tree = tree  # type: ignore[attr-defined]
     frame.scenario_note_text = note  # type: ignore[attr-defined]
+    option_box = ttk.LabelFrame(frame, text="Options Scenario Based On Suggested Contract", style="Card.TLabelframe")
+    option_box.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+    option_box.columnconfigure(0, weight=1)
+    option_controls = ttk.Frame(option_box, style="Panel.TFrame")
+    option_controls.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+    ttk.Button(option_controls, text="Run Option Scenario From Top Candidate", command=lambda app=self: _render_option_scenarios_from_top(app)).pack(side=tk.LEFT)
+    option_tree = ttk.Treeview(option_box, columns=("move", "stock", "option", "combined", "impact", "read"), show="headings", height=6)
+    for column, label, width in (
+        ("move", "Underlying Move", 130),
+        ("stock", "Stock P&L", 120),
+        ("option", "Option P&L", 120),
+        ("combined", "Combined P&L", 130),
+        ("impact", "Portfolio Impact", 140),
+        ("read", "Read", 180),
+    ):
+        option_tree.heading(column, text=label)
+        option_tree.column(column, width=width, anchor=tk.E if column not in {"move", "read"} else tk.W, stretch=True)
+    option_tree.tag_configure("positive", foreground="#047857")
+    option_tree.tag_configure("negative", foreground="#b91c1c")
+    option_tree.grid(row=1, column=0, sticky="ew")
+    option_scroll = ttk.Scrollbar(option_box, orient=tk.VERTICAL, command=option_tree.yview)
+    option_scroll.grid(row=1, column=1, sticky="ns")
+    option_tree.configure(yscrollcommand=option_scroll.set)
+    frame.option_scenario_tree = option_tree  # type: ignore[attr-defined]
+    return frame
+
+
+def _options_strategy_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
+    frame = _scrollable_tab(notebook, "Options Strategy")
+    frame.columnconfigure(0, weight=1)
+    controls = ttk.Frame(frame, style="Panel.TFrame")
+    controls.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    ttk.Button(controls, text="Generate Candidates", command=lambda app=self: _render_options_strategy(app)).pack(side=tk.LEFT)
+    ttk.Button(controls, text="Load Chain", command=lambda app=self: _load_chain_from_research_tab(app)).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(controls, text="Use This Option", command=lambda app=self: _use_selected_research_option(app), style="Accent.TButton").pack(side=tk.LEFT, padx=(8, 0))
+    frame.status_var = tk.StringVar(value="Run symbol analysis and load an option chain to generate candidates.")  # type: ignore[attr-defined]
+    ttk.Label(frame, textvariable=frame.status_var, style="Subtle.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 8))  # type: ignore[attr-defined]
+    frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.cards.grid(row=2, column=0, sticky="ew")
+    tree_box = ttk.LabelFrame(frame, text="Candidate Options", style="Card.TLabelframe")
+    tree_box.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+    tree_box.columnconfigure(0, weight=1)
+    tree = ttk.Treeview(tree_box, columns=("group", "strategy", "expiration", "strike", "type", "mid", "max_loss", "breakeven", "confidence"), show="headings", height=7)
+    for column, label, width in (
+        ("group", "Group", 110),
+        ("strategy", "Strategy", 210),
+        ("expiration", "Expiration", 130),
+        ("strike", "Strike", 95),
+        ("type", "Call/Put", 90),
+        ("mid", "Mid/Debit", 95),
+        ("max_loss", "Max Loss", 105),
+        ("breakeven", "Breakeven", 105),
+        ("confidence", "Read", 110),
+    ):
+        tree.heading(column, text=label)
+        tree.column(column, width=width, anchor=tk.E if column in {"strike", "mid", "max_loss", "breakeven"} else tk.W, stretch=column == "strategy")
+    tree.grid(row=0, column=0, sticky="ew")
+    tree.bind("<<TreeviewSelect>>", lambda _event, app=self: _show_selected_option_candidate(app), add="+")
+    y_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
+    y_scroll.grid(row=0, column=1, sticky="ns")
+    tree.configure(yscrollcommand=y_scroll.set)
+    frame.candidate_tree = tree  # type: ignore[attr-defined]
+    frame.detail_text = _detail_text(frame)  # type: ignore[attr-defined]
+    frame.detail_text.grid(row=4, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
     return frame
 
 
@@ -405,8 +552,10 @@ def _build_research_payload(session: Any, portfolio, symbol: str, moves: tuple[f
     earnings_text, fundamentals_text, filings_lines, sec_statuses = _fetch_sec_layers(symbol)
     statuses.extend(sec_statuses)
 
+    macro_snapshot: MacroSnapshot | None = None
     try:
-        macro_text = build_macro_report(timeout_seconds=8)
+        macro_snapshot = fetch_macro_release_snapshot(timeout_seconds=8)
+        macro_text = format_macro_report(macro_snapshot)
         statuses.append(DataSourceStatus("Official macro", "fresh/cache", _now(), "BLS/BEA/Treasury macro context loaded."))
     except Exception as exc:
         macro_text = f"Official Macro Snapshot\nFetched: unavailable\n\nMacro data unavailable/error: {exc}"
@@ -422,7 +571,7 @@ def _build_research_payload(session: Any, portfolio, symbol: str, moves: tuple[f
         statuses=statuses,
     )
 
-    return _ResearchPayload(symbol, quote, indicators, context, scenario_rows, earnings_text, fundamentals_text, filings_lines, macro_text, statuses, decision)
+    return _ResearchPayload(symbol, quote, indicators, context, scenario_rows, earnings_text, fundamentals_text, filings_lines, macro_text, statuses, decision, macro_snapshot)
 
 
 def _fetch_quote(session: Any, symbol: str) -> tuple[dict[str, Any] | None, DataSourceStatus]:
@@ -503,6 +652,7 @@ def _render_research_payload(self: tk.Tk, payload: _ResearchPayload) -> None:
     _render_overview(self, payload)
     _render_technicals(self, payload)
     _render_scenarios(self, payload)
+    _render_options_strategy(self)
     _render_earnings_news(self, payload)
     _render_fundamentals(self, payload)
     _render_macro(self, payload)
@@ -624,6 +774,7 @@ def _render_technicals(self: tk.Tk, payload: _ResearchPayload) -> None:
     frame = self.schwab_research_technicals_frame
     indicators = payload.indicators
     decision = payload.decision
+    narrative = build_technical_narrative(indicators, payload.context, decision.macro_backdrop.label)
     metric_grid(
         frame.cards,  # type: ignore[attr-defined]
         [
@@ -631,8 +782,9 @@ def _render_technicals(self: tk.Tk, payload: _ResearchPayload) -> None:
             decision.momentum,
             decision.volatility,
             _rsi_badge(indicators),
+            _synthetic_badge("Indicator Agreement", narrative.indicator_agreement, narrative.agreement_status, narrative.agreement_explanation),
         ],
-        columns=4,
+        columns=5,
     )
     frame.bull_meter.set_score(decision.technical_score, mode="direction", label=f"Bullishness: {direction_strength_label(decision.technical_score)} ({decision.technical_score:.0f})")  # type: ignore[attr-defined]
     frame.momentum_meter.set_score(decision.momentum_score, mode="direction", label=f"Momentum: {direction_strength_label(decision.momentum_score)} ({decision.momentum_score:.0f})")  # type: ignore[attr-defined]
@@ -647,22 +799,36 @@ def _render_technicals(self: tk.Tk, payload: _ResearchPayload) -> None:
         ("SMA 200", indicators.sma_200, "Long trend reference"),
         ("EMA 12", indicators.ema_12, "Fast momentum average"),
         ("EMA 26", indicators.ema_26, "Slow momentum average"),
-        ("MACD", indicators.macd, "12/26 line"),
-        ("MACD signal", indicators.macd_signal, "9-period MACD signal"),
-        ("RSI 14", indicators.rsi_14, "Momentum oscillator"),
-        ("Bollinger upper", indicators.bollinger_upper, "Upper 2 stdev band"),
-        ("Bollinger middle", indicators.bollinger_middle, "20 SMA band middle"),
-        ("Bollinger lower", indicators.bollinger_lower, "Lower 2 stdev band"),
-        ("ATR 14", indicators.atr_14, "Average true range"),
+        ("MACD", indicators.macd, TERM_HELPERS["MACD"]),
+        ("MACD signal", indicators.macd_signal, "9-period MACD signal; compare it with MACD for momentum turns."),
+        ("RSI 14", indicators.rsi_14, TERM_HELPERS["RSI"]),
+        ("Bollinger upper", indicators.bollinger_upper, TERM_HELPERS["Bollinger Bands"]),
+        ("Bollinger middle", indicators.bollinger_middle, "20 SMA band middle."),
+        ("Bollinger lower", indicators.bollinger_lower, TERM_HELPERS["Bollinger Bands"]),
+        ("ATR 14", indicators.atr_14, TERM_HELPERS["ATR"]),
         ("Volume avg 20", indicators.volume_average_20, "Average daily volume"),
-        ("Swing high", indicators.swing_high, "Recent 60-candle high"),
-        ("Swing low", indicators.swing_low, "Recent 60-candle low"),
+        ("Swing high", indicators.swing_high, TERM_HELPERS["Swing high / swing low"]),
+        ("Swing low", indicators.swing_low, TERM_HELPERS["Swing high / swing low"]),
     ]
     for metric, value, read in rows:
         tree.insert("", tk.END, values=(metric, _number(value), read))
     for label, value in indicators.fibonacci_levels.items():
-        tree.insert("", tk.END, values=(f"Fib {label}", _money(value), "Recent swing retracement"))
-    notes = "\n".join(["Technicals summary:", f"- Trend classification: {indicators.trend}.", f"- Momentum classification: {indicators.momentum}.", f"- Volatility classification: {indicators.volatility}.", *[f"- {note}" for note in indicators.notes]])
+        tree.insert("", tk.END, values=(f"Fib {label}", _money(value), TERM_HELPERS["Fibonacci retracement"]))
+    notes = "\n".join(
+        [
+            "What the chart is saying:",
+            *[f"- {label}: {text}" for label, text in narrative.rows.items()],
+            "",
+            "Current position meaning:",
+            f"- {narrative.position_meaning}",
+            "",
+            "Term helpers:",
+            *[f"- {term}: {explanation}" for term, explanation in TERM_HELPERS.items()],
+            "",
+            "Raw technical notes:",
+            *[f"- {note}" for note in indicators.notes],
+        ]
+    )
     _set_research_text(frame.technical_notes_text, notes)  # type: ignore[attr-defined]
 
 
@@ -700,6 +866,176 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
         "- Options context: check loaded option chain, implied volatility, and earnings timing before using option structures.",
     ]
     _set_research_text(frame.scenario_note_text, "\n".join(lines))  # type: ignore[attr-defined]
+    _render_option_scenarios_from_top(self)
+
+
+def _render_options_strategy(self: tk.Tk) -> None:
+    frame = getattr(self, "schwab_research_options_frame", None)
+    payload = getattr(self, "schwab_research_last_payload", None)
+    if frame is None:
+        return
+    tree = frame.candidate_tree  # type: ignore[attr-defined]
+    for row_id in tree.get_children():
+        tree.delete(row_id)
+    rows_map = getattr(self, "schwab_option_chain_rows", {}) or {}
+    chain_rows = [row for row in rows_map.values() if isinstance(row, dict)]
+    if payload is None:
+        frame.status_var.set("Run technical analysis first; candidates need the symbol read, macro context, and position context.")  # type: ignore[attr-defined]
+        _set_research_text(frame.detail_text, "Run analysis first, then load the option chain to generate candidates.")  # type: ignore[attr-defined]
+        metric_grid(frame.cards, [_synthetic_badge("Options Strategy", "Waiting", "info", "Needs analysis and option chain.")], columns=1)  # type: ignore[attr-defined]
+        return
+    if not chain_rows:
+        frame.status_var.set("Load the option chain to generate option candidates.")  # type: ignore[attr-defined]
+        _set_research_text(frame.detail_text, "Load the option chain to generate option candidates.\n\nUse the Load Chain button inside this tab. No order will be submitted.")  # type: ignore[attr-defined]
+        metric_grid(frame.cards, [_synthetic_badge("Chain", "Not Loaded", "info", "Load the option chain to generate candidates.")], columns=1)  # type: ignore[attr-defined]
+        return
+    candidates = suggest_option_candidates(chain_rows, payload.indicators, payload.context, macro_label=payload.decision.macro_backdrop.label, earnings_text=payload.earnings_text)
+    self.schwab_research_option_candidates = candidates
+    if not candidates:
+        frame.status_var.set("No usable option candidates found in the loaded chain.")  # type: ignore[attr-defined]
+        _set_research_text(frame.detail_text, "The loaded chain did not include usable bid/ask/mark data for calls or puts.")  # type: ignore[attr-defined]
+        return
+    top = candidates[0]
+    metric_grid(
+        frame.cards,  # type: ignore[attr-defined]
+        [
+            _synthetic_badge("Top Suggestion", top.strategy, _candidate_status(top.confidence), top.why),
+            _synthetic_badge("Entry", _money(top.midpoint), "info", "Estimated entry uses bid/ask midpoint when available."),
+            _synthetic_badge("Breakeven", _money(top.breakeven), "info", "Expiration-style breakeven for a simple long option."),
+            _synthetic_badge("Risk Read", top.confidence, _candidate_status(top.confidence), top.goes_wrong_if),
+        ],
+        columns=4,
+        prominent_indexes={0},
+    )
+    for index, candidate in enumerate(candidates):
+        tree.insert(
+            "",
+            tk.END,
+            iid=f"candidate_{index}",
+            values=(
+                candidate.group,
+                candidate.strategy,
+                candidate.expiration,
+                _money(candidate.strike),
+                candidate.option_type.upper(),
+                _money(candidate.midpoint),
+                "Unlimited/stock" if candidate.max_loss is None else _money(candidate.max_loss),
+                _money(candidate.breakeven),
+                candidate.confidence,
+            ),
+        )
+    tree.selection_set("candidate_0")
+    frame.status_var.set(f"{len(candidates)} candidates generated from loaded {payload.symbol} chain. Select one and click Use This Option to fill fields only.")  # type: ignore[attr-defined]
+    _show_selected_option_candidate(self)
+    _render_option_scenarios_from_top(self)
+
+
+def _load_chain_from_research_tab(self: tk.Tk) -> None:
+    payload = getattr(self, "schwab_research_last_payload", None)
+    symbol = getattr(self, "schwab_research_symbol_var", tk.StringVar(value="")).get().strip().upper()
+    if payload is not None:
+        symbol = payload.symbol
+    if symbol and hasattr(self, "symbol_var"):
+        self.symbol_var.set(symbol)
+    command = getattr(self, "load_schwab_option_chain", None)
+    if command is None:
+        messagebox.showerror("Option chain unavailable", "The Schwab option-chain loader is not installed.")
+        return
+    command()
+    _render_options_strategy(self)
+
+
+def _selected_option_candidate(self: tk.Tk) -> OptionCandidate | None:
+    frame = getattr(self, "schwab_research_options_frame", None)
+    if frame is None:
+        return None
+    tree = frame.candidate_tree  # type: ignore[attr-defined]
+    selection = tree.selection()
+    if not selection:
+        return None
+    try:
+        index = int(str(selection[0]).replace("candidate_", ""))
+    except ValueError:
+        return None
+    candidates = getattr(self, "schwab_research_option_candidates", []) or []
+    return candidates[index] if 0 <= index < len(candidates) else None
+
+
+def _show_selected_option_candidate(self: tk.Tk) -> None:
+    frame = getattr(self, "schwab_research_options_frame", None)
+    candidate = _selected_option_candidate(self)
+    if frame is None or candidate is None:
+        return
+    lines = [
+        f"{candidate.group}: {candidate.strategy}",
+        "",
+        f"Contract: {candidate.underlying} {candidate.expiration} {_money(candidate.strike)} {candidate.option_type.upper()}",
+        f"Bid / Ask / Mark / Mid: {_money(candidate.bid)} / {_money(candidate.ask)} / {_money(candidate.mark)} / {_money(candidate.midpoint)}",
+        f"Max loss: {'unlimited/stock assignment style' if candidate.max_loss is None else _money(candidate.max_loss)}",
+        f"Max gain: {'not capped for simple long option' if candidate.max_gain is None else _money(candidate.max_gain)}",
+        f"Breakeven: {_money(candidate.breakeven)}",
+        "",
+        f"Why this candidate: {candidate.why}",
+        f"What must happen: {candidate.works_if}",
+        f"What goes wrong: {candidate.goes_wrong_if}",
+        f"Relation to current stock position: {candidate.relation_to_position}",
+        "",
+        "Use This Option fills the existing options ticket only. It does not submit, preview, or stage an order.",
+    ]
+    _set_research_text(frame.detail_text, "\n".join(lines))  # type: ignore[attr-defined]
+
+
+def _use_selected_research_option(self: tk.Tk) -> None:
+    candidate = _selected_option_candidate(self)
+    if candidate is None:
+        messagebox.showinfo("Choose candidate", "Select an option candidate first.")
+        return
+    if candidate.option_type not in {"call", "put"}:
+        messagebox.showinfo("No option to use", "The selected candidate is a wait/no-trade read, so there is no contract to fill.")
+        return
+    _ensure_option_ticket_vars(self)
+    fields = ticket_fields_for_option_candidate(candidate)
+    self.symbol_var.set(fields["symbol"])
+    self.options_symbol_var.set(fields["symbol"])
+    if candidate.underlying_price is not None:
+        self.options_underlying_price_var.set(_format_number(candidate.underlying_price))
+    self.options_strategy_var.set(fields["strategy"])
+    self.options_action_var.set(fields["action"])
+    self.options_expiration_var.set(fields["expiration"])
+    self.options_type_var.set(fields["option_type"])
+    self.options_order_type_var.set(fields["order_type"])
+    self.options_tif_var.set(fields["time_in_force"])
+    self.options_contracts_var.set(fields["contracts"])
+    self.options_strike_var.set(fields["strike"])
+    self.options_short_strike_var.set(fields["short_strike"])
+    self.options_bid_var.set(fields["bid"])
+    self.options_ask_var.set(fields["ask"])
+    self.options_mark_var.set(fields["mark"])
+    self.options_premium_var.set(fields["premium"])
+    self.options_credit_var.set(fields["credit"])
+    if hasattr(self, "schwab_preview_status_var"):
+        self.schwab_preview_status_var.set("Last Schwab preview: research option filled only")
+    frame = getattr(self, "schwab_research_options_frame", None)
+    if frame is not None:
+        frame.status_var.set("Option candidate filled into ticket only. No order was submitted.")  # type: ignore[attr-defined]
+
+
+def _render_option_scenarios_from_top(self: tk.Tk) -> None:
+    frame = getattr(self, "schwab_research_scenarios_frame", None)
+    if frame is None or not hasattr(frame, "option_scenario_tree"):
+        return
+    tree = frame.option_scenario_tree  # type: ignore[attr-defined]
+    for row_id in tree.get_children():
+        tree.delete(row_id)
+    payload = getattr(self, "schwab_research_last_payload", None)
+    candidates = getattr(self, "schwab_research_option_candidates", []) or []
+    candidate = next((item for item in candidates if item.option_type in {"call", "put"}), None)
+    if payload is None or candidate is None:
+        tree.insert("", tk.END, values=("Load chain", "--", "--", "--", "--", "Load the option chain to generate option candidates."))
+        return
+    for row in combined_option_scenarios(candidate, payload.context):
+        tag = "positive" if row.combined_pnl > 0 else "negative" if row.combined_pnl < 0 else ""
+        tree.insert("", tk.END, values=(row.move_label, _money(row.stock_pnl), _money(row.option_pnl), _money(row.combined_pnl), f"{row.portfolio_impact:+.2%}", f"{row.read}; expiration-style estimate"), tags=(tag,) if tag else ())
 
 
 def _recalculate_research_scenarios(self: tk.Tk) -> None:
@@ -719,6 +1055,7 @@ def _recalculate_research_scenarios(self: tk.Tk) -> None:
         payload.macro_text,
         payload.statuses,
         payload.decision,
+        payload.macro_snapshot,
     )
     self.schwab_research_last_payload = updated
     _render_scenarios(self, updated)
@@ -727,19 +1064,26 @@ def _recalculate_research_scenarios(self: tk.Tk) -> None:
 def _render_earnings_news(self: tk.Tk, payload: _ResearchPayload) -> None:
     frame = self.schwab_research_earnings_frame
     decision = payload.decision
+    summary = build_earnings_workspace_summary(payload.symbol, payload.earnings_text, payload.fundamentals_text, payload.filings_lines)
     metric_grid(
         frame.cards,  # type: ignore[attr-defined]
         [
             decision.earnings_risk,
-            _synthetic_badge("Next Earnings", "Unknown", "info", "No dependable calendar date loaded yet."),
-            _synthetic_badge("Guidance Tone", _tone_from_text(payload.earnings_text), _tone_status(payload.earnings_text), "Read from SEC earnings text when available."),
-            _synthetic_badge("News Tone", "Official/Quiet", "info", "Current layer uses SEC filings and earnings exhibits."),
+            _synthetic_badge("Latest Earnings", "SEC Scan", "info", summary.snapshot["Latest earnings release"]),
+            _synthetic_badge("Guidance Tone", summary.guidance_tone, _tone_status(summary.guidance_tone), "Read from SEC earnings text when available."),
+            _synthetic_badge("Revenue Trend", summary.revenue_trend, _trend_status(summary.revenue_trend), "Interpreted from standardized companyfacts where available."),
+            _synthetic_badge("Profitability", summary.profitability_trend, _trend_status(summary.profitability_trend), "Net income/EPS/margin read from loaded facts and snippets."),
         ],
-        columns=4,
+        columns=5,
     )
     clear_children(frame.checks)  # type: ignore[attr-defined]
-    Checklist(frame.checks, "Top Earnings / News Takeaways", _short_text_bullets(payload.earnings_text, limit=3)).grid(row=0, column=0, sticky="ew", padx=(0, 8))  # type: ignore[attr-defined]
-    Checklist(frame.checks, "Risks To Watch", _risk_text_bullets(payload.earnings_text, payload.filings_lines, limit=3)).grid(row=0, column=1, sticky="ew")  # type: ignore[attr-defined]
+    Checklist(frame.checks, "Plain-English Interpretation", summary.interpretation).grid(row=0, column=0, sticky="ew", padx=(0, 8))  # type: ignore[attr-defined]
+    Checklist(frame.checks, "Risks To Watch", summary.risks).grid(row=0, column=1, sticky="ew")  # type: ignore[attr-defined]
+    tree = frame.source_tree  # type: ignore[attr-defined]
+    for row_id in tree.get_children():
+        tree.delete(row_id)
+    for label, date, url in summary.source_links:
+        tree.insert("", tk.END, values=(label, date, url or "--"))
     _set_research_text(self.schwab_research_earnings_text, _earnings_news_text(payload))
 
 
@@ -765,20 +1109,26 @@ def _render_fundamentals(self: tk.Tk, payload: _ResearchPayload) -> None:
 def _render_macro(self: tk.Tk, payload: _ResearchPayload) -> None:
     frame = self.schwab_research_macro_frame
     decision = payload.decision
+    readouts = build_macro_metric_cards(payload.macro_snapshot)
     metric_grid(
         frame.cards,  # type: ignore[attr-defined]
         [
-            _synthetic_badge("Inflation", _macro_metric_label(payload.macro_text, hot_terms=("hotter", "hawkish"), cool_terms=("cooler",)), _macro_metric_status(payload.macro_text, hot_terms=("hotter", "hawkish"), cool_terms=("cooler",)), "official inflation readout from loaded macro text."),
-            _synthetic_badge("Labor", _macro_metric_label(payload.macro_text, hot_terms=("stronger labor",), cool_terms=("weaker labor",)), "mixed", "labor source read is summarized from official data."),
-            _synthetic_badge("Rates", decision.macro_backdrop.label, decision.macro_backdrop.status, decision.macro_backdrop.why),
-            _synthetic_badge("Energy", _macro_metric_label(payload.macro_text, hot_terms=("energy inflation", "oil up"), cool_terms=("energy cool",)), _macro_metric_status(payload.macro_text, hot_terms=("energy inflation", "oil up"), cool_terms=("energy cool",)), "energy pressure read from macro text."),
-            decision.macro_backdrop,
+            _synthetic_badge(readout.group, readout.simple_read, readout.status, readout.interpretation)
+            for readout in readouts
         ],
-        columns=5,
+        columns=3,
     )
-    clear_children(frame.checks)  # type: ignore[attr-defined]
-    Checklist(frame.checks, "Good For Stocks", decision.macro_good).grid(row=0, column=0, sticky="ew", padx=(0, 8))  # type: ignore[attr-defined]
-    Checklist(frame.checks, "Bad / Watch", [*decision.macro_bad, *decision.macro_watch]).grid(row=0, column=1, sticky="ew")  # type: ignore[attr-defined]
+    clear_children(frame.why)  # type: ignore[attr-defined]
+    why_text = macro_why_it_matters(payload.symbol, None, decision.macro_backdrop.label)
+    ttk.Label(frame.why, text=why_text, style="Subtle.TLabel", wraplength=980, justify=tk.LEFT).grid(row=0, column=0, sticky="ew", padx=10, pady=8)  # type: ignore[attr-defined]
+    tree = frame.metric_tree  # type: ignore[attr-defined]
+    for row_id in tree.get_children():
+        tree.delete(row_id)
+    for readout in readouts:
+        tree.insert("", tk.END, values=(readout.group, readout.metric, readout.latest_value, readout.prior_value, readout.change, readout.period, readout.source, readout.freshness, readout.simple_read))
+    clear_children(frame.interpretation)  # type: ignore[attr-defined]
+    Checklist(frame.interpretation, "Plain-English Interpretations", [readout.interpretation for readout in readouts[:5]]).grid(row=0, column=0, sticky="ew", padx=(0, 8))  # type: ignore[attr-defined]
+    Checklist(frame.interpretation, "Good / Bad / Watch", [*decision.macro_good, *decision.macro_bad, *decision.macro_watch]).grid(row=0, column=1, sticky="ew")  # type: ignore[attr-defined]
     _set_research_text(self.schwab_research_macro_text, payload.macro_text)
 
 
@@ -828,12 +1178,22 @@ def _tone_from_text(text: str) -> str:
 
 
 def _tone_status(text: str) -> str:
-    tone = _tone_from_text(text)
+    tone = text if text in {"Positive", "Negative", "Unknown", "Unavailable", "Mixed"} else _tone_from_text(text)
     if tone == "Positive":
         return "good"
     if tone == "Negative":
         return "bad"
-    if tone == "Unknown":
+    if tone in {"Unknown", "Unavailable"}:
+        return "info"
+    return "mixed"
+
+
+def _trend_status(text: str) -> str:
+    if text == "Improving":
+        return "good"
+    if text == "Weak":
+        return "bad"
+    if text == "Unavailable":
         return "info"
     return "mixed"
 
@@ -1032,7 +1392,10 @@ def _to_float(value: Any) -> float | None:
 
 
 def _money(value: float | None) -> str:
-    return "--" if value is None else f"${value:,.2f}"
+    if value is None:
+        return "--"
+    prefix = "-$" if value < 0 else "$"
+    return f"{prefix}{abs(value):,.2f}"
 
 
 def _number(value: float | None) -> str:
@@ -1045,6 +1408,50 @@ def _percent(value: float | None) -> str:
 
 def _shares(value: float | None) -> str:
     return "--" if value is None else f"{value:,.2f} shares"
+
+
+def _format_number(value: float, *, digits: int = 2) -> str:
+    formatted = f"{value:.{digits}f}"
+    return formatted.rstrip("0").rstrip(".") if "." in formatted else formatted
+
+
+def _format_optional_number(value: float | None) -> str:
+    return "" if value is None else _format_number(value)
+
+
+def _candidate_status(label: str) -> str:
+    if label == "Good":
+        return "good"
+    if label == "Avoid":
+        return "bad"
+    if label == "Speculative":
+        return "mixed"
+    return "info"
+
+
+def _ensure_option_ticket_vars(self: tk.Tk) -> None:
+    defaults = {
+        "options_symbol_var": "",
+        "options_strategy_var": "",
+        "options_action_var": "",
+        "options_expiration_var": "",
+        "options_type_var": "",
+        "options_order_type_var": "LIMIT",
+        "options_tif_var": "Day",
+        "options_underlying_price_var": "",
+        "options_quantity_var": "100",
+        "options_contracts_var": "1",
+        "options_strike_var": "",
+        "options_short_strike_var": "",
+        "options_bid_var": "",
+        "options_ask_var": "",
+        "options_mark_var": "",
+        "options_premium_var": "",
+        "options_credit_var": "0",
+    }
+    for name, value in defaults.items():
+        if not hasattr(self, name):
+            setattr(self, name, tk.StringVar(value=value))
 
 
 def _now() -> str:
