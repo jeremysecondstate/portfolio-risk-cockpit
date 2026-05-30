@@ -188,7 +188,7 @@ def _preview_hyperliquid_ticket_overview(self: tk.Tk) -> None:
                 lines.append(f"- Take profit: {closing_side} reduce-only trigger near ${tp_price:,.4f}")
             if sl_price is not None:
                 lines.append(f"- Stop loss: {closing_side} reduce-only trigger near ${sl_price:,.4f}")
-            lines.append("- TP/SL trigger orders are reviewed here; live child-order wiring is a separate safety step.")
+            lines.append("- LIVE Submit will attempt these reduce-only child trigger order(s) immediately after the parent order is accepted.")
         else:
             lines.append("- Attach TP/SL is off. LIVE Submit is a single main order only.")
 
@@ -263,7 +263,7 @@ def _run_hyperliquid_perp_what_if_clean(self: tk.Tk) -> None:
             "Setup quality\n"
             f"- Reward/risk using net P&L: {rr}\n"
             "- Spot scenario P&L uses the synced spot mark as the starting point, plus avg-cost context when available.\n"
-            "- TP/SL fields are scenario inputs unless Attach TP/SL is on and child-order execution is wired.\n"
+            "- TP/SL fields are scenario inputs; when Attach TP/SL is on, LIVE Submit attempts reduce-only child trigger orders after the parent order is accepted.\n"
             "- Liquidation is an estimate: Hyperliquid can also account for maintenance margin, funding, open orders, and account mode."
         )
     except Exception as exc:

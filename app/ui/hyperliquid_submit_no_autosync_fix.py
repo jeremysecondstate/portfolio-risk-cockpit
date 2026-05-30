@@ -6,7 +6,9 @@ from typing import Type
 
 from app.brokers.hyperliquid.trading import (
     HyperliquidExecutionAdapter,
+    HyperliquidOrderTicket,
     HyperliquidTradingConfig,
+    HyperliquidTriggerTicket,
     format_hyperliquid_limit_price,
     normalize_hyperliquid_ticket_limit_price,
 )
@@ -47,14 +49,28 @@ def _show_hyperliquid_perp_live_submit_no_autosync(self: tk.Tk) -> None:
         normalized_ticket = normalize_hyperliquid_ticket_limit_price(ticket)
         config = HyperliquidTradingConfig()
         self._set_preview_text(config.live_review_text(normalized_ticket))
-        result = HyperliquidExecutionAdapter().submit(normalized_ticket)
+        adapter = HyperliquidExecutionAdapter()
+        result = adapter.submit(normalized_ticket)
         self.hyperliquid_status_var.set("Hyperliquid: submit attempted")
         _update_limit_price_if_needed(self, ticket, normalized_ticket)
+        child_tickets = _attached_tpsl_tickets(self, normalized_ticket)
+        child_result: object | None = None
+        child_error: Exception | None = None
+        if child_tickets:
+            try:
+                child_result = adapter.place_position_tpsl(child_tickets)
+            except Exception as exc:
+                child_error = exc
+                self.hyperliquid_status_var.set("Hyperliquid: parent sent, TP/SL failed")
+        elif _attach_tpsl_enabled(self):
+            self.hyperliquid_status_var.set("Hyperliquid: parent sent, no TP/SL price entered")
         self._set_preview_text(
             "HYPERLIQUID LIVE SUBMIT RESULT\n"
             "==============================\n\n"
             f"{_price_adjustment_lines(ticket, normalized_ticket)}"
+            "Parent order response:\n"
             f"{result}\n\n"
+            f"{_child_tpsl_result_lines(child_tickets, child_result, child_error)}"
             "No automatic portfolio sync was run.\n"
             "Use Open Only to verify active orders, or Connect Hyperliquid to refresh the account snapshot."
         )
@@ -88,3 +104,92 @@ def _price_adjustment_lines(ticket, normalized_ticket) -> str:
         f"- Original limit: {format_hyperliquid_limit_price(ticket.limit_price)}\n"
         f"- Submitted limit: {format_hyperliquid_limit_price(normalized_ticket.limit_price)}\n\n"
     )
+
+
+def _attach_tpsl_enabled(self: tk.Tk) -> bool:
+    var = getattr(self, "hyperliquid_attach_tpsl_var", None)
+    try:
+        return bool(var.get()) if var is not None else False
+    except Exception:
+        return False
+
+
+def _optional_price(raw: str) -> float | None:
+    try:
+        text = str(raw or "").strip().replace(",", "")
+        if not text:
+            return None
+        value = float(text)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _var_text(self: tk.Tk, name: str) -> str:
+    var = getattr(self, name, None)
+    if var is None:
+        return ""
+    try:
+        return str(var.get())
+    except Exception:
+        return ""
+
+
+def _attached_tpsl_tickets(self: tk.Tk, ticket: HyperliquidOrderTicket) -> list[HyperliquidTriggerTicket]:
+    if not _attach_tpsl_enabled(self):
+        return []
+    tp_price = _optional_price(_var_text(self, "hyperliquid_target_price_var"))
+    sl_price = _optional_price(
+        _var_text(self, "hyperliquid_bad_price_var")
+        or _var_text(self, "stop_price_var")
+    )
+    close_is_buy = not ticket.is_buy
+    triggers: list[HyperliquidTriggerTicket] = []
+    if tp_price is not None:
+        triggers.append(
+            HyperliquidTriggerTicket(
+                coin=ticket.coin,
+                is_buy=close_is_buy,
+                size=ticket.size,
+                trigger_price=tp_price,
+                tpsl="tp",
+            )
+        )
+    if sl_price is not None:
+        triggers.append(
+            HyperliquidTriggerTicket(
+                coin=ticket.coin,
+                is_buy=close_is_buy,
+                size=ticket.size,
+                trigger_price=sl_price,
+                tpsl="sl",
+            )
+        )
+    return triggers
+
+
+def _child_tpsl_result_lines(
+    child_tickets: list[HyperliquidTriggerTicket],
+    child_result: object | None,
+    child_error: Exception | None,
+) -> str:
+    if not child_tickets:
+        return "Attached TP/SL: no child trigger order submitted.\n\n"
+    lines = ["Attached TP/SL child orders:"]
+    for trigger in child_tickets:
+        side = "BUY" if trigger.is_buy else "SELL"
+        label = "take-profit" if trigger.tpsl == "tp" else "stop-loss"
+        lines.append(f"- {label}: {side} reduce-only {trigger.size:g} {trigger.coin} at trigger ${trigger.trigger_price:,.4f}")
+    if child_error is not None:
+        lines.extend(
+            [
+                "",
+                "Child TP/SL result: FAILED after parent order was sent.",
+                f"Reason: {child_error}",
+                "Use TP/SL Selected after the parent fill is visible to create the missing protection order.",
+                "",
+            ]
+        )
+        return "\n".join(lines)
+    lines.extend(["", "Child TP/SL result:", str(child_result), ""])
+    return "\n".join(lines)

@@ -6,6 +6,7 @@ from unittest.mock import patch
 from app.brokers.hyperliquid.trading import (
     HyperliquidExecutionAdapter,
     HyperliquidOrderEditTicket,
+    HyperliquidOrderTicket,
     HyperliquidTradingConfig,
     HyperliquidTriggerTicket,
     normalize_hyperliquid_trigger_ticket_for_wire,
@@ -13,6 +14,7 @@ from app.brokers.hyperliquid.trading import (
 from app.core.portfolio import Portfolio, Position
 from app.ui.hyperliquid_trading_extension import _normalize_edit_market, _selected_hyperliquid_order, normalize_hyperliquid_open_order
 from app.ui.hyperliquid_trading_extension import _current_hyperliquid_perp_position, _perp_position_pnl
+from app.ui.hyperliquid_submit_no_autosync_fix import _attached_tpsl_tickets
 
 
 class _Broker:
@@ -181,6 +183,41 @@ class HyperliquidTradingTests(unittest.TestCase):
 
         self.assertEqual(result, {"ok": True})
         update.assert_called_once_with("ZEC", 10, is_cross=True)
+
+    def test_attached_tpsl_creates_short_stop_loss_child_order(self) -> None:
+        app = type(
+            "App",
+            (),
+            {
+                "hyperliquid_attach_tpsl_var": _Var("1"),
+                "hyperliquid_target_price_var": _Var(""),
+                "hyperliquid_bad_price_var": _Var("550"),
+                "stop_price_var": _Var(""),
+            },
+        )()
+        ticket = HyperliquidOrderTicket("ZEC", is_buy=False, size=5, limit_price=512.65, tif="Gtc")
+
+        children = _attached_tpsl_tickets(app, ticket)  # type: ignore[arg-type]
+
+        self.assertEqual(len(children), 1)
+        self.assertTrue(children[0].is_buy)
+        self.assertEqual(children[0].tpsl, "sl")
+        self.assertEqual(children[0].trigger_price, 550)
+
+    def test_attached_tpsl_ignores_blank_prices(self) -> None:
+        app = type(
+            "App",
+            (),
+            {
+                "hyperliquid_attach_tpsl_var": _Var("1"),
+                "hyperliquid_target_price_var": _Var(""),
+                "hyperliquid_bad_price_var": _Var(""),
+                "stop_price_var": _Var(""),
+            },
+        )()
+        ticket = HyperliquidOrderTicket("ZEC", is_buy=False, size=5, limit_price=512.65, tif="Gtc")
+
+        self.assertEqual(_attached_tpsl_tickets(app, ticket), [])  # type: ignore[arg-type]
 
 
 if __name__ == "__main__":
