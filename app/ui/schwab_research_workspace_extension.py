@@ -374,10 +374,13 @@ def _technicals_tab(notebook: ttk.Notebook) -> ttk.Frame:
     frame.momentum_meter.grid(row=0, column=1, sticky="ew", padx=(0, 8))  # type: ignore[attr-defined]
     frame.risk_meter = ScoreMeter(frame.meters)  # type: ignore[attr-defined]
     frame.risk_meter.grid(row=0, column=2, sticky="ew")  # type: ignore[attr-defined]
+    frame.chart_readout = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.chart_readout.grid(row=2, column=0, sticky="ew", pady=(10, 0))  # type: ignore[attr-defined]
+    frame.chart_readout.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
     tree_box = ttk.Frame(frame, style="Panel.TFrame")
-    tree_box.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+    tree_box.grid(row=3, column=0, sticky="ew", pady=(10, 0))
     tree_box.columnconfigure(0, weight=1)
-    tree = ttk.Treeview(tree_box, columns=("metric", "value", "read"), show="headings", height=9)
+    tree = ttk.Treeview(tree_box, columns=("metric", "value", "read"), show="headings", height=7)
     for column, label, width in (("metric", "Metric", 160), ("value", "Value", 140), ("read", "Readout", 360)):
         tree.heading(column, text=label)
         tree.column(column, width=width, anchor=tk.W if column != "value" else tk.E, stretch=True)
@@ -385,8 +388,8 @@ def _technicals_tab(notebook: ttk.Notebook) -> ttk.Frame:
     y_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
     y_scroll.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=y_scroll.set)
-    text = tk.Text(frame, height=8, wrap=tk.WORD, font=("Segoe UI", 10), padx=14, pady=10, relief=tk.FLAT, borderwidth=0, background="#f8fafc")
-    text.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+    text = tk.Text(frame, height=12, wrap=tk.WORD, font=("Segoe UI", 10), padx=14, pady=10, relief=tk.FLAT, borderwidth=0, background="#f8fafc")
+    text.grid(row=4, column=0, sticky="ew", pady=(10, 0))
     frame.indicator_tree = tree  # type: ignore[attr-defined]
     frame.technical_notes_text = text  # type: ignore[attr-defined]
     return frame
@@ -852,6 +855,19 @@ def _render_technicals(self: tk.Tk, payload: _ResearchPayload) -> None:
     frame.bull_meter.set_score(decision.technical_score, mode="direction", label=f"Bullishness: {direction_strength_label(decision.technical_score)} ({decision.technical_score:.0f})")  # type: ignore[attr-defined]
     frame.momentum_meter.set_score(decision.momentum_score, mode="direction", label=f"Momentum: {direction_strength_label(decision.momentum_score)} ({decision.momentum_score:.0f})")  # type: ignore[attr-defined]
     frame.risk_meter.set_score(decision.risk_score, mode="risk", label=f"Risk Heat: {risk_heat_label(decision.risk_score)} ({decision.risk_score:.0f})")  # type: ignore[attr-defined]
+    clear_children(frame.chart_readout)  # type: ignore[attr-defined]
+    chart_rows = [f"{label}: {text}" for label, text in narrative.rows.items()]
+    Checklist(frame.chart_readout, "What The Chart Is Saying", chart_rows).grid(row=0, column=0, sticky="nsew", padx=(0, 8))  # type: ignore[attr-defined]
+    Checklist(
+        frame.chart_readout,
+        "Position + Key Terms",
+        [
+            narrative.position_meaning,
+            TERM_HELPERS["Confirmation"],
+            TERM_HELPERS["Risk line"],
+            TERM_HELPERS["Fibonacci retracement"],
+        ],
+    ).grid(row=0, column=1, sticky="nsew")  # type: ignore[attr-defined]
     tree = frame.indicator_tree  # type: ignore[attr-defined]
     for row_id in tree.get_children():
         tree.delete(row_id)
