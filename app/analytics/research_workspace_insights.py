@@ -54,6 +54,11 @@ class OptionCandidate:
     contract_symbol: str
     underlying: str
     underlying_price: float | None
+    dte: int | None = None
+    score: float = 0.0
+    score_reason: str = ""
+    primary_risk: str = ""
+    primary_payoff_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -61,10 +66,34 @@ class CombinedOptionScenarioRow:
     move_label: str
     underlying_price: float
     stock_pnl: float
+    option_value: float
     option_pnl: float
     combined_pnl: float
     portfolio_impact: float
     read: str
+
+
+@dataclass(frozen=True)
+class FundamentalVerdict:
+    verdict: str
+    action_bias: str
+    confidence: str
+    investment_read: str
+    trade_read: str
+    combined_read: str
+    what_changes: list[str]
+
+
+@dataclass(frozen=True)
+class RiskPlan:
+    recommendation: str
+    status: str
+    reason: str
+    confirmation: str
+    risk_line: str
+    suggested_max_risk: float | None
+    paired_option: str
+    move_planner: list[tuple[str, str, str, str, str]]
 
 
 @dataclass(frozen=True)
@@ -259,19 +288,19 @@ def suggest_option_candidates(
 
     candidates: list[OptionCandidate] = []
     if agreement == "Bullish":
-        conservative = _candidate_from_row(_best_row(rows, underlying, "call", 0.0, 0.06), "call", "Recommended", "Conservative bullish call", context, underlying)
-        speculative = _candidate_from_row(_best_row(rows, underlying, "call", 0.05, 0.14), "call", "Watchlist", "Speculative bullish call", context, underlying)
+        conservative = _candidate_from_row(_best_row(rows, underlying, "call", 0.0, 0.06), "call", "Best Fit", "Conservative bullish call", context, underlying)
+        speculative = _candidate_from_row(_best_row(rows, underlying, "call", 0.05, 0.14), "call", "Speculative", "Speculative bullish call", context, underlying)
         for candidate in (conservative, speculative):
             if candidate:
                 candidates.append(_with_candidate_reason(candidate, indicators, macro_label, earnings_soon, high_vol))
     elif agreement == "Bearish":
-        bearish = _candidate_from_row(_best_row(rows, underlying, "put", -0.08, 0.0), "put", "Recommended", "Bearish put", context, underlying)
+        bearish = _candidate_from_row(_best_row(rows, underlying, "put", -0.08, 0.0), "put", "Best Fit", "Bearish put", context, underlying)
         if bearish:
             candidates.append(_with_candidate_reason(bearish, indicators, macro_label, earnings_soon, high_vol))
     else:
         wait = OptionCandidate(
             key="wait",
-            group="Recommended",
+            group="Wait / No Trade",
             strategy="No-trade / wait",
             expiration="--",
             strike=None,
@@ -291,15 +320,19 @@ def suggest_option_candidates(
             contract_symbol="",
             underlying=context.symbol,
             underlying_price=underlying,
+            score=45.0,
+            score_reason="No-trade is preferred until confirmation improves or premium becomes more attractive.",
+            primary_risk="Missing an unconfirmed move.",
+            primary_payoff_path="Capital is preserved until a cleaner setup appears.",
         )
         candidates.append(wait)
-        small = _candidate_from_row(_best_row(rows, underlying, "call", 0.0, 0.05), "call", "Watchlist", "Small-risk bullish call", context, underlying)
+        small = _candidate_from_row(_best_row(rows, underlying, "call", 0.0, 0.05), "call", "Speculative", "Small-risk bullish call", context, underlying)
         if small:
             candidates.append(_with_candidate_reason(small, indicators, macro_label, earnings_soon, high_vol, confidence="Speculative"))
 
     if context.is_held:
-        hedge = _candidate_from_row(_best_row(rows, underlying, "put", -0.10, -0.01), "put", "Watchlist", "Protective put / hedge", context, underlying)
-        covered = _candidate_from_row(_best_row(rows, underlying, "call", 0.03, 0.12), "call", "Watchlist", "Income / covered-call candidate", context, underlying, credit=True)
+        hedge = _candidate_from_row(_best_row(rows, underlying, "put", -0.10, -0.01), "put", "Hedge", "Protective put / hedge", context, underlying)
+        covered = _candidate_from_row(_best_row(rows, underlying, "call", 0.03, 0.12), "call", "Income", "Income / covered-call candidate", context, underlying, credit=True)
         for candidate in (hedge, covered):
             if candidate:
                 candidates.append(_with_candidate_reason(candidate, indicators, macro_label, earnings_soon, high_vol))
@@ -328,17 +361,33 @@ def option_expiration_payoff(candidate: OptionCandidate, underlying_price: float
     if candidate.strike is None or candidate.midpoint is None or candidate.option_type not in {"call", "put"}:
         return 0.0
     multiplier = max(contracts, 1) * 100
+    is_short_call = "covered" in candidate.strategy.lower() or candidate.group == "Income"
     if candidate.option_type == "call":
         intrinsic = max(underlying_price - candidate.strike, 0.0)
     else:
         intrinsic = max(candidate.strike - underlying_price, 0.0)
+    if is_short_call:
+        return (candidate.midpoint - intrinsic) * multiplier
     return (intrinsic - candidate.midpoint) * multiplier
+
+
+def option_expiration_value(candidate: OptionCandidate, underlying_price: float, *, contracts: int = 1) -> float:
+    if candidate.strike is None or candidate.option_type not in {"call", "put"}:
+        return 0.0
+    multiplier = max(contracts, 1) * 100
+    if candidate.option_type == "call":
+        intrinsic = max(underlying_price - candidate.strike, 0.0)
+    else:
+        intrinsic = max(candidate.strike - underlying_price, 0.0)
+    if "covered" in candidate.strategy.lower() or candidate.group == "Income":
+        return -intrinsic * multiplier
+    return intrinsic * multiplier
 
 
 def combined_option_scenarios(
     candidate: OptionCandidate | None,
     context: PortfolioSymbolContext,
-    moves: tuple[float, ...] = (-0.10, -0.05, -0.03, -0.02, 0.02, 0.03, 0.05, 0.10),
+    moves: tuple[float, ...] = (-0.10, -0.05, -0.03, -0.02, 0.0, 0.02, 0.03, 0.05, 0.10),
 ) -> list[CombinedOptionScenarioRow]:
     if candidate is None or candidate.underlying_price is None:
         return []
@@ -348,16 +397,87 @@ def combined_option_scenarios(
     for move in moves:
         price = base * (1 + move)
         stock_pnl = (price - base) * context.quantity if context.is_held else 0.0
+        option_value = option_expiration_value(candidate, price)
         option_pnl = option_expiration_payoff(candidate, price)
         combined = stock_pnl + option_pnl
-        if combined > 0:
+        if candidate.option_type == "put" and stock_pnl < 0 and combined > stock_pnl:
+            read = f"Hedges; protection benefit {_money(combined - stock_pnl)}"
+        elif candidate.option_type == "call" and combined > stock_pnl:
+            read = "Amplifies upside; premium is at risk if move is too small"
+        elif combined > 0:
             read = "Helps"
         elif combined < 0:
             read = "Hurts"
         else:
             read = "Flat"
-        rows.append(CombinedOptionScenarioRow(f"{move:+.0%}", price, stock_pnl, option_pnl, combined, combined / total, read))
+        rows.append(CombinedOptionScenarioRow(f"{move:+.0%}", price, stock_pnl, option_value, option_pnl, combined, combined / total, read))
     return rows
+
+
+def option_breakeven_explanation(candidate: OptionCandidate) -> str:
+    if candidate.breakeven is None or candidate.option_type not in {"call", "put"}:
+        return "Breakeven is unavailable because the candidate has no usable strike/premium."
+    direction = "above" if candidate.option_type == "call" else "below"
+    return f"The stock must be {direction} {_money(candidate.breakeven)} by expiration for this {candidate.option_type} to profit at expiration."
+
+
+def option_timeline_text(candidate: OptionCandidate, earnings_text: str = "") -> str:
+    dte = candidate.dte
+    if dte is None:
+        term = "term unknown"
+        dte_text = "DTE unavailable"
+    elif dte <= 14:
+        term = "short-term"
+        dte_text = f"{dte} days"
+    elif dte <= 60:
+        term = "medium-term"
+        dte_text = f"{dte} days"
+    else:
+        term = "longer-term"
+        dte_text = f"{dte} days"
+    earnings_risk = " Earnings before expiration: IV/event risk high." if ("soon" in earnings_text.lower() or "8-k" in earnings_text.lower()) else ""
+    return f"Today -> {dte_text} -> Expiration ({term}).{earnings_risk}"
+
+
+def selected_candidate_detail(candidate: OptionCandidate, context: PortfolioSymbolContext, earnings_text: str = "") -> list[str]:
+    cost = (candidate.midpoint or 0.0) * 100
+    rows = combined_option_scenarios(candidate, context)
+    best = max(rows, key=lambda row: row.combined_pnl, default=None)
+    worst = min(rows, key=lambda row: row.combined_pnl, default=None)
+    return [
+        f"{candidate.group}: {candidate.strategy}",
+        "",
+        "Contract basics:",
+        f"- Type: {candidate.option_type.upper()}  Expiration: {candidate.expiration}  DTE: {candidate.dte if candidate.dte is not None else '--'}",
+        f"- Strike: {_money(candidate.strike)}  Bid/Ask/Mid: {_money(candidate.bid)} / {_money(candidate.ask)} / {_money(candidate.midpoint)}",
+        f"- Contract cost/credit estimate for 1 contract: {_money(cost)}.",
+        f"- Max loss: {'unlimited/stock assignment style' if candidate.max_loss is None else _money(candidate.max_loss)}.",
+        f"- Max gain: {'not capped for simple long option' if candidate.max_gain is None else _money(candidate.max_gain)}.",
+        f"- {option_breakeven_explanation(candidate)}",
+        f"- Score: {candidate.score:.0f}/100. {candidate.score_reason}",
+        "",
+        f"Timeline: {option_timeline_text(candidate, earnings_text)}",
+        "",
+        f"Why this candidate: {candidate.why}",
+        f"What must happen: {candidate.works_if}",
+        f"What goes wrong: {candidate.goes_wrong_if}",
+        f"Position interaction: {candidate.relation_to_position}",
+        f"Primary risk: {candidate.primary_risk}",
+        f"Primary payoff path: {candidate.primary_payoff_path}",
+        f"Best-case simple read: {best.move_label if best else '--'} move -> combined {_money(best.combined_pnl) if best else '--'}.",
+        f"Worst-case simple read: {worst.move_label if worst else '--'} move -> combined {_money(worst.combined_pnl) if worst else '--'}.",
+        "",
+        "Expiration-style estimate, not live option pricing.",
+    ]
+
+
+def protective_put_benefit(candidate: OptionCandidate, context: PortfolioSymbolContext, move: float = -0.05) -> float | None:
+    if candidate.option_type != "put" or candidate.underlying_price is None:
+        return None
+    rows = combined_option_scenarios(candidate, context, moves=(move,))
+    if not rows:
+        return None
+    return rows[0].combined_pnl - rows[0].stock_pnl
 
 
 def ticket_fields_for_option_candidate(candidate: OptionCandidate) -> dict[str, str]:
@@ -422,6 +542,122 @@ def build_earnings_workspace_summary(
         risks=risks,
         source_links=source_links,
         interpretation=interpretation,
+    )
+
+
+def build_fundamental_verdict(
+    fundamentals_text: str,
+    indicators: AdvancedIndicatorSnapshot,
+    macro_label: str,
+) -> FundamentalVerdict:
+    lower = fundamentals_text.lower()
+    if not lower.strip() or "unavailable" in lower:
+        return FundamentalVerdict(
+            verdict="Unknown",
+            action_bias="Unknown / insufficient data",
+            confidence="Low",
+            investment_read="Investment read: insufficient standardized data.",
+            trade_read=_trade_read(indicators, macro_label),
+            combined_read="Combined read: wait for better fundamental data before sizing risk from this tab.",
+            what_changes=["SEC companyfacts becomes available.", "Fresh 10-Q/10-K data loads.", "Price confirms above resistance."],
+        )
+
+    positive_terms = ("revenue growth", "revenue is strong", "net income improved", "operating income expanded", "cash flow", "free cash flow", "positive", "strong")
+    negative_terms = ("decline", "decreased", "weak", "loss", "cash used", "negative", "debt", "pressure")
+    positive = sum(1 for term in positive_terms if term in lower)
+    negative = sum(1 for term in negative_terms if term in lower)
+    data_points = sum(1 for term in ("revenue", "net income", "operating income", "cash", "liabilities", "companyfacts", "10-q", "10-k") if term in lower)
+    score = positive * 18 - negative * 16 + min(data_points, 8) * 5
+    if score >= 80:
+        verdict, action = "Strong", "Supports owning"
+        investment = "Investment read: favorable. Fundamentals look strong enough to support owning this."
+    elif score >= 45:
+        verdict, action = "Good", "Supports adding on pullbacks"
+        investment = "Investment read: favorable, but add only when price and risk confirm."
+    elif score >= -15:
+        verdict, action = "Mixed", "Supports watch only"
+        investment = "Investment read: mixed. The data does not justify aggressive new risk by itself."
+    elif score <= -35:
+        verdict, action = "Avoid", "Avoid until fundamentals improve"
+        investment = "Investment read: unfavorable. Fundamentals do not justify new risk right now."
+    else:
+        verdict, action = "Weak", "Supports trimming"
+        investment = "Investment read: weak. Own only with a specific risk plan."
+    confidence = "High" if data_points >= 6 and abs(score) >= 45 else "Medium" if data_points >= 4 else "Low"
+    trade = _trade_read(indicators, macro_label)
+    combined = _combined_fundamental_trade_read(verdict, trade, macro_label)
+    return FundamentalVerdict(
+        verdict=verdict,
+        action_bias=action,
+        confidence=confidence,
+        investment_read=investment,
+        trade_read=trade,
+        combined_read=combined,
+        what_changes=[
+            "Revenue trend deteriorates or improves in the next filing.",
+            "Cash flow weakens or strengthens versus the latest period.",
+            "Debt/liabilities worsen relative to assets.",
+            risk_line_text(indicators),
+            "Earnings/guidance disappoints or confirms the trend.",
+            f"Macro/rates move from {macro_label.lower()} to a clearer tailwind or headwind.",
+        ],
+    )
+
+
+def build_risk_plan(
+    indicators: AdvancedIndicatorSnapshot,
+    context: PortfolioSymbolContext,
+    macro_label: str,
+    fundamental_verdict: str,
+    candidate: OptionCandidate | None,
+    max_risk: float | None,
+) -> RiskPlan:
+    agreement, _status, reason = indicator_agreement_classification(indicators, macro_label)
+    support = indicators.support or indicators.swing_low
+    stop = support
+    suggested_size = None
+    if max_risk is not None and context.last_price is not None and stop is not None and context.last_price > stop:
+        suggested_size = max_risk / max(context.last_price - stop, 0.01)
+    if macro_label == "Headwind" and context.is_held and candidate and candidate.option_type == "put":
+        recommendation, status = "Hedge with put", "mixed"
+        reason_text = "Macro is a headwind and the position is already held; a put can cap some downside, but only if premium is reasonable."
+    elif agreement == "Bullish" and fundamental_verdict in {"Strong", "Good"}:
+        recommendation, status = "Add carefully", "good"
+        reason_text = "Fundamentals and technicals are aligned; wait for confirmation and keep max loss controlled."
+    elif agreement == "Bullish":
+        recommendation, status = "Speculative call only", "mixed"
+        reason_text = "Technicals lean constructive, but fundamentals/macro are not fully aligned."
+    elif context.portfolio_weight >= 0.10:
+        recommendation, status = "Trim", "bad"
+        reason_text = "Position weight is large enough that downside scenarios matter more than adding exposure."
+    elif candidate and "covered" in candidate.strategy.lower() and context.is_held:
+        recommendation, status = "Covered call candidate", "mixed"
+        reason_text = "Existing shares can support income, but upside is capped above the strike."
+    elif macro_label == "Headwind":
+        recommendation, status = "Watch", "mixed"
+        reason_text = "Macro is fighting the setup; wait for confirmation instead of forcing premium risk."
+    else:
+        recommendation, status = "Watch", "info"
+        reason_text = reason
+    paired = candidate.strategy if candidate else "No option candidate loaded"
+    moves = [
+        ("Do nothing / watch", "Mixed setup or macro headwind.", "Avoids premium and bad entries.", "Can miss a fast breakout.", "Best when price is below confirmation."),
+        ("Add shares", "Fundamentals strong and price confirms.", "Keeps payoff simple.", "Adds full downside exposure.", f"Use only above {_money(indicators.resistance)}."),
+        ("Trim shares", "Position is large or support breaks.", "Reduces portfolio drawdown.", "Gives up rebound exposure.", f"Most relevant below {_money(support)}."),
+        ("Buy protective put", "Held shares plus downside/event risk.", "Offsets some share losses.", "Premium can expire worthless.", "Insurance, not free protection."),
+        ("Buy bullish call", "Bullish setup but smaller defined risk desired.", "Caps debit at premium.", "Needs move before expiration.", "Useful only if breakeven is realistic."),
+        ("Covered call / income", "Held shares and upside looks capped.", "Collects premium.", "Caps upside above strike.", "Avoid if you want unlimited upside."),
+        ("Avoid new risk", "Macro/earnings/technicals conflict.", "Preserves capital.", "No participation.", "Correct when premium is unattractive."),
+    ]
+    return RiskPlan(
+        recommendation=recommendation,
+        status=status,
+        reason=reason_text,
+        confirmation=confirmation_text(indicators),
+        risk_line=risk_line_text(indicators),
+        suggested_max_risk=max_risk,
+        paired_option=paired,
+        move_planner=moves,
     )
 
 
@@ -566,10 +802,11 @@ def _candidate_from_row(row: dict[str, Any] | None, option_type: str, group: str
         works_if="The underlying moves through confirmation before time decay overwhelms the premium.",
         goes_wrong_if="Price chops sideways, loses support, or implied volatility falls after the entry.",
         relation_to_position=current_position_meaning(context),
-        confidence="Good" if group == "Recommended" else "Watch",
+        confidence="Good" if group == "Best Fit" else "Watch",
         contract_symbol=str(contract.get("symbol") or ""),
         underlying=str(row.get("underlying") or context.symbol),
         underlying_price=underlying,
+        dte=_to_int(row.get("dte")),
     )
 
 
@@ -590,7 +827,128 @@ def _with_candidate_reason(
     why = f"{candidate.strategy} fits a {indicators.trend}/{indicators.momentum} setup with macro {macro_label.lower()}."
     if warnings:
         why += " Watch: " + "; ".join(warnings) + "."
-    return OptionCandidate(**{**candidate.__dict__, "why": why, "confidence": confidence or candidate.confidence})
+    score, score_reason = option_candidate_score(candidate, indicators, macro_label, earnings_soon=earnings_soon)
+    fit = confidence or _fit_from_score(score)
+    primary_risk = _primary_option_risk(candidate, earnings_soon, high_vol)
+    primary_payoff = _primary_payoff_path(candidate)
+    return OptionCandidate(
+        **{
+            **candidate.__dict__,
+            "why": why,
+            "confidence": fit,
+            "score": score,
+            "score_reason": score_reason,
+            "primary_risk": primary_risk,
+            "primary_payoff_path": primary_payoff,
+        }
+    )
+
+
+def option_candidate_score(
+    candidate: OptionCandidate,
+    indicators: AdvancedIndicatorSnapshot,
+    macro_label: str,
+    *,
+    earnings_soon: bool = False,
+) -> tuple[float, str]:
+    if candidate.option_type not in {"call", "put"}:
+        return 45.0, "Wait/no-trade is appropriate when setup quality is not strong enough."
+    score = 50.0
+    reasons: list[str] = []
+    if candidate.option_type == "call" and indicators.trend == "bullish":
+        score += 14
+        reasons.append("call aligns with bullish trend")
+    if candidate.option_type == "put" and (indicators.trend == "bearish" or "hedge" in candidate.strategy.lower()):
+        score += 14
+        reasons.append("put aligns with downside/hedge need")
+    if candidate.breakeven is not None and candidate.underlying_price:
+        distance = abs(candidate.breakeven - candidate.underlying_price) / candidate.underlying_price
+        if distance <= 0.035:
+            score += 10
+            reasons.append("breakeven is nearby")
+        elif distance >= 0.10:
+            score -= 14
+            reasons.append("breakeven needs a large move")
+    if candidate.midpoint and candidate.underlying_price:
+        premium_pct = candidate.midpoint / candidate.underlying_price
+        if premium_pct <= 0.015:
+            score += 8
+            reasons.append("premium is modest")
+        elif premium_pct >= 0.05:
+            score -= 12
+            reasons.append("premium is expensive")
+    if candidate.bid is not None and candidate.ask is not None and candidate.ask > 0:
+        spread_pct = (candidate.ask - candidate.bid) / max((candidate.ask + candidate.bid) / 2, 0.01)
+        if spread_pct <= 0.15:
+            score += 6
+            reasons.append("spread is usable")
+        elif spread_pct >= 0.35:
+            score -= 10
+            reasons.append("spread is wide")
+    if candidate.dte is not None:
+        if 14 <= candidate.dte <= 60:
+            score += 6
+            reasons.append("expiration window is practical")
+        elif candidate.dte < 7:
+            score -= 12
+            reasons.append("very short time window")
+    if "headwind" in macro_label.lower() and candidate.option_type == "call":
+        score -= 8
+        reasons.append("macro headwind works against calls")
+    if earnings_soon:
+        score -= 8
+        reasons.append("earnings/event risk can distort premium")
+    return max(0.0, min(100.0, score)), "; ".join(reasons) or "Balanced candidate score."
+
+
+def _fit_from_score(score: float) -> str:
+    if score >= 72:
+        return "Good"
+    if score >= 52:
+        return "Watch"
+    if score >= 35:
+        return "Speculative"
+    return "Avoid"
+
+
+def _primary_option_risk(candidate: OptionCandidate, earnings_soon: bool, high_vol: bool) -> str:
+    if candidate.option_type == "call":
+        base = "This call needs the stock to rise above breakeven before expiration; otherwise premium decays."
+    elif candidate.option_type == "put":
+        base = "This put can lose premium if the stock stays above the strike/breakeven."
+    else:
+        base = "No contract risk because no option is selected."
+    if earnings_soon:
+        base += " Earnings/event risk can make IV expensive."
+    if high_vol:
+        base += " Volatility is elevated, so premium may be rich."
+    return base
+
+
+def _primary_payoff_path(candidate: OptionCandidate) -> str:
+    if candidate.option_type == "call":
+        return f"Best path is a move above {_money(candidate.breakeven)} by expiration."
+    if candidate.option_type == "put":
+        return f"Best path is a move below {_money(candidate.breakeven)} by expiration, especially if shares need protection."
+    return "Best path is waiting for confirmation before paying option premium."
+
+
+def _trade_read(indicators: AdvancedIndicatorSnapshot, macro_label: str) -> str:
+    if indicators.trend == "bullish" and indicators.momentum == "improving" and macro_label != "Headwind":
+        return f"Trade read: favorable above confirmation. {confirmation_text(indicators)}"
+    if indicators.trend == "bearish" or macro_label == "Headwind":
+        return f"Trade read: wait or hedge. {risk_line_text(indicators)}"
+    return f"Trade read: mixed. {confirmation_text(indicators)}"
+
+
+def _combined_fundamental_trade_read(verdict: str, trade: str, macro_label: str) -> str:
+    if verdict in {"Strong", "Good"} and "favorable" in trade.lower():
+        return "Combined read: fundamentals and trade setup support risk, with normal position discipline."
+    if verdict in {"Strong", "Good"}:
+        return f"Combined read: fundamentals say yes, but trade timing is not clean because macro is {macro_label.lower()} or price has not confirmed."
+    if verdict == "Mixed":
+        return "Combined read: watch only until either fundamentals or price action improves."
+    return "Combined read: do not add risk until the business trend and chart improve."
 
 
 def _first_underlying(rows: list[dict[str, Any]]) -> float | None:
@@ -607,6 +965,15 @@ def _first_number(source: dict[str, Any], *keys: str) -> float | None:
         if value is not None:
             return value
     return None
+
+
+def _to_int(value: Any) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(float(str(value).replace(",", "")))
+    except (TypeError, ValueError):
+        return None
 
 
 def _to_float(value: Any) -> float | None:

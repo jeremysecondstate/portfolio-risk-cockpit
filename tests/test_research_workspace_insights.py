@@ -4,7 +4,9 @@ import unittest
 
 from app.analytics.research_workspace_insights import (
     build_earnings_workspace_summary,
+    build_fundamental_verdict,
     build_macro_metric_cards,
+    build_risk_plan,
     build_technical_narrative,
     combined_option_scenarios,
     confirmation_text,
@@ -14,6 +16,7 @@ from app.analytics.research_workspace_insights import (
     macro_why_it_matters,
     option_expiration_payoff,
     option_midpoint,
+    protective_put_benefit,
     suggest_option_candidates,
     ticket_fields_for_option_candidate,
 )
@@ -189,6 +192,49 @@ class ResearchWorkspaceInsightTests(unittest.TestCase):
         self.assertGreater(option_expiration_payoff(candidate, 80.0), 0)
         self.assertEqual(len(rows), 2)
         self.assertNotEqual(rows[0].combined_pnl, rows[0].stock_pnl)
+
+    def test_stock_plus_call_combined_scenario(self) -> None:
+        candidate = next(item for item in suggest_option_candidates(_chain(), _indicators(), _context(held=True), macro_label="Tailwind") if item.option_type == "call")
+        row = combined_option_scenarios(candidate, _context(held=True), moves=(0.10,))[0]
+
+        self.assertGreater(row.option_value, 0)
+        self.assertAlmostEqual(row.combined_pnl, row.stock_pnl + row.option_pnl)
+
+    def test_protective_put_hedge_benefit_math(self) -> None:
+        candidate = next(item for item in suggest_option_candidates(_chain(), _indicators("sideways", "neutral"), _context(held=True), macro_label="Headwind") if item.option_type == "put")
+
+        self.assertIsNotNone(protective_put_benefit(candidate, _context(held=True), move=-0.10))
+
+    def test_covered_call_basic_payoff_if_implemented(self) -> None:
+        candidate = next(item for item in suggest_option_candidates(_chain(), _indicators("sideways", "neutral"), _context(held=True), macro_label="Headwind") if "covered-call" in item.strategy)
+
+        self.assertGreater(option_expiration_payoff(candidate, 100.0), 0)
+        self.assertLess(option_expiration_payoff(candidate, 125.0), 0)
+
+    def test_option_candidate_scoring_and_wait_when_premium_not_attractive(self) -> None:
+        candidates = suggest_option_candidates(_chain(), _indicators("sideways", "neutral"), _context(), macro_label="Headwind")
+
+        self.assertEqual(candidates[0].strategy, "No-trade / wait")
+        self.assertGreaterEqual(next(item for item in candidates if item.option_type == "call").score, 0)
+
+    def test_fundamentals_verdict_and_investment_trade_read(self) -> None:
+        strong = build_fundamental_verdict("Revenue growth is strong. Net income improved. Operating cash flow and companyfacts 10-Q data are positive.", _indicators(), "Tailwind")
+        mixed = build_fundamental_verdict("Revenue mixed. Net income pressure.", _indicators("sideways", "neutral"), "Headwind")
+        missing = build_fundamental_verdict("Fundamentals unavailable.", _indicators(), "Mixed")
+
+        self.assertEqual(strong.verdict, "Strong")
+        self.assertEqual(strong.action_bias, "Supports owning")
+        self.assertIn("Investment read", strong.investment_read)
+        self.assertEqual(mixed.verdict, "Mixed")
+        self.assertEqual(missing.verdict, "Unknown")
+
+    def test_risk_plan_recommended_move_and_concrete_levels(self) -> None:
+        candidate = next(item for item in suggest_option_candidates(_chain(), _indicators(), _context(held=True), macro_label="Headwind") if item.option_type == "put")
+        plan = build_risk_plan(_indicators(), _context(held=True), "Headwind", "Strong", candidate, 500.0)
+
+        self.assertIn(plan.recommendation, {"Hedge with put", "Watch", "Add carefully", "Speculative call only"})
+        self.assertIn("$104.00", plan.confirmation)
+        self.assertIn("$96.00", plan.risk_line)
 
     def test_earnings_summary_source_links_and_fallback(self) -> None:
         summary = build_earnings_workspace_summary(

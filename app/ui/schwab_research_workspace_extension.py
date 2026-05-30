@@ -21,11 +21,15 @@ from app.analytics.research_workspace_insights import (
     TERM_HELPERS,
     OptionCandidate,
     build_earnings_workspace_summary,
+    build_fundamental_verdict,
     build_macro_metric_cards,
+    build_risk_plan,
     build_technical_narrative,
     combined_option_scenarios,
     inflation_read_from_metrics,
     macro_why_it_matters,
+    option_timeline_text,
+    selected_candidate_detail,
     suggest_option_candidates,
     ticket_fields_for_option_candidate,
 )
@@ -400,10 +404,28 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     ttk.Button(controls, text="Recalculate", command=lambda app=self: _recalculate_research_scenarios(app)).grid(row=0, column=4, sticky="w")
     frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.cards.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+    planner_box = ttk.LabelFrame(frame, text="Move Planner", style="Card.TLabelframe")
+    planner_box.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+    planner_box.columnconfigure(0, weight=1)
+    move_tree = ttk.Treeview(planner_box, columns=("move", "makes_sense", "protects", "gives_up", "effect"), show="headings", height=7)
+    for column, label, width in (
+        ("move", "Move", 150),
+        ("makes_sense", "When It Makes Sense", 260),
+        ("protects", "Protects Against", 210),
+        ("gives_up", "Gives Up", 210),
+        ("effect", "Estimated Effect", 260),
+    ):
+        move_tree.heading(column, text=label)
+        move_tree.column(column, width=width, anchor=tk.W, stretch=column in {"makes_sense", "effect"})
+    move_tree.grid(row=0, column=0, sticky="ew")
+    move_scroll = ttk.Scrollbar(planner_box, orient=tk.VERTICAL, command=move_tree.yview)
+    move_scroll.grid(row=0, column=1, sticky="ns")
+    move_tree.configure(yscrollcommand=move_scroll.set)
+    frame.move_planner_tree = move_tree  # type: ignore[attr-defined]
     frame.impact_bars = ScenarioImpactBars(frame, height=128)  # type: ignore[attr-defined]
-    frame.impact_bars.grid(row=2, column=0, sticky="ew", pady=(0, 8))  # type: ignore[attr-defined]
+    frame.impact_bars.grid(row=3, column=0, sticky="ew", pady=(0, 8))  # type: ignore[attr-defined]
     tree_box = ttk.Frame(frame, style="Panel.TFrame")
-    tree_box.grid(row=3, column=0, sticky="ew")
+    tree_box.grid(row=4, column=0, sticky="ew")
     tree_box.columnconfigure(0, weight=1)
     tree = ttk.Treeview(tree_box, columns=("scenario", "price", "pnl", "impact", "portfolio"), show="headings", height=7)
     for column, label, width in (
@@ -422,11 +444,11 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     y_scroll.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=y_scroll.set)
     note = tk.Text(frame, height=7, wrap=tk.WORD, font=("Segoe UI", 10), padx=14, pady=10, relief=tk.FLAT, borderwidth=0, background="#f8fafc")
-    note.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+    note.grid(row=5, column=0, sticky="ew", pady=(10, 0))
     frame.scenario_tree = tree  # type: ignore[attr-defined]
     frame.scenario_note_text = note  # type: ignore[attr-defined]
     option_box = ttk.LabelFrame(frame, text="Options Scenario Based On Suggested Contract", style="Card.TLabelframe")
-    option_box.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+    option_box.grid(row=6, column=0, sticky="ew", pady=(10, 0))
     option_box.columnconfigure(0, weight=1)
     option_controls = ttk.Frame(option_box, style="Panel.TFrame")
     option_controls.grid(row=0, column=0, sticky="ew", pady=(0, 6))
@@ -467,7 +489,7 @@ def _options_strategy_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     tree_box = ttk.LabelFrame(frame, text="Candidate Options", style="Card.TLabelframe")
     tree_box.grid(row=3, column=0, sticky="ew", pady=(8, 0))
     tree_box.columnconfigure(0, weight=1)
-    tree = ttk.Treeview(tree_box, columns=("group", "strategy", "expiration", "strike", "type", "mid", "max_loss", "breakeven", "confidence"), show="headings", height=7)
+    tree = ttk.Treeview(tree_box, columns=("group", "strategy", "expiration", "strike", "type", "mid", "max_loss", "breakeven", "score", "confidence"), show="headings", height=6)
     for column, label, width in (
         ("group", "Group", 110),
         ("strategy", "Strategy", 210),
@@ -477,18 +499,59 @@ def _options_strategy_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
         ("mid", "Mid/Debit", 95),
         ("max_loss", "Max Loss", 105),
         ("breakeven", "Breakeven", 105),
+        ("score", "Score", 70),
         ("confidence", "Read", 110),
     ):
         tree.heading(column, text=label)
-        tree.column(column, width=width, anchor=tk.E if column in {"strike", "mid", "max_loss", "breakeven"} else tk.W, stretch=column == "strategy")
+        tree.column(column, width=width, anchor=tk.E if column in {"strike", "mid", "max_loss", "breakeven", "score"} else tk.W, stretch=column == "strategy")
     tree.grid(row=0, column=0, sticky="ew")
     tree.bind("<<TreeviewSelect>>", lambda _event, app=self: _show_selected_option_candidate(app), add="+")
     y_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
     y_scroll.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=y_scroll.set)
     frame.candidate_tree = tree  # type: ignore[attr-defined]
+    frame.timeline = ttk.LabelFrame(frame, text="Selected Candidate Timeline", style="Card.TLabelframe")  # type: ignore[attr-defined]
+    frame.timeline.grid(row=4, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
+    frame.timeline.columnconfigure(0, weight=1)  # type: ignore[attr-defined]
+    frame.timeline_var = tk.StringVar(value="Select a candidate.")  # type: ignore[attr-defined]
+    ttk.Label(frame.timeline, textvariable=frame.timeline_var, style="Chip.TLabel").grid(row=0, column=0, sticky="ew", padx=10, pady=8)  # type: ignore[attr-defined]
+    scenario_box = ttk.LabelFrame(frame, text="Selected Candidate Combined Scenario", style="Card.TLabelframe")
+    scenario_box.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+    scenario_box.columnconfigure(0, weight=1)
+    frame.candidate_bars = ScenarioImpactBars(scenario_box, height=104)  # type: ignore[attr-defined]
+    frame.candidate_bars.grid(row=0, column=0, sticky="ew", pady=(0, 6))  # type: ignore[attr-defined]
+    scenario_tree = ttk.Treeview(scenario_box, columns=("move", "price", "stock", "value", "option", "combined", "impact", "read"), show="headings", height=7)
+    for column, label, width in (
+        ("move", "Move", 75),
+        ("price", "Stock Price", 105),
+        ("stock", "Stock P&L", 105),
+        ("value", "Option Value", 110),
+        ("option", "Option P&L", 105),
+        ("combined", "Combined", 110),
+        ("impact", "Portfolio", 95),
+        ("read", "Plain-English Read", 280),
+    ):
+        scenario_tree.heading(column, text=label)
+        scenario_tree.column(column, width=width, anchor=tk.E if column not in {"move", "read"} else tk.W, stretch=column == "read")
+    scenario_tree.tag_configure("positive", foreground="#047857")
+    scenario_tree.tag_configure("negative", foreground="#b91c1c")
+    scenario_tree.grid(row=1, column=0, sticky="ew")
+    scenario_scroll = ttk.Scrollbar(scenario_box, orient=tk.VERTICAL, command=scenario_tree.yview)
+    scenario_scroll.grid(row=1, column=1, sticky="ns")
+    scenario_tree.configure(yscrollcommand=scenario_scroll.set)
+    frame.candidate_scenario_tree = scenario_tree  # type: ignore[attr-defined]
+    help_box = ttk.LabelFrame(frame, text="How To Read This", style="Card.TLabelframe")
+    help_box.grid(row=6, column=0, sticky="ew", pady=(8, 0))
+    ttk.Label(
+        help_box,
+        text="Call: right to benefit from upside. Put: downside insurance/speculation. Premium: upfront option price. Strike: exercise reference price. Intrinsic value: value at expiration from stock versus strike. Expiration-style estimate: simple payoff math, not live option pricing.",
+        style="Subtle.TLabel",
+        wraplength=1120,
+        justify=tk.LEFT,
+    ).grid(row=0, column=0, sticky="ew", padx=10, pady=8)
     frame.detail_text = _detail_text(frame)  # type: ignore[attr-defined]
-    frame.detail_text.grid(row=4, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
+    frame.detail_text.configure(height=12)  # type: ignore[attr-defined]
+    frame.detail_text.grid(row=7, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
     return frame
 
 
@@ -834,17 +897,32 @@ def _render_technicals(self: tk.Tk, payload: _ResearchPayload) -> None:
 
 def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
     frame = self.schwab_research_scenarios_frame
+    max_risk = _to_float(self.schwab_research_max_risk_var.get())
+    candidates = getattr(self, "schwab_research_option_candidates", []) or []
+    top_candidate = next((item for item in candidates if item.option_type in {"call", "put"}), None)
+    fundamental_verdict = build_fundamental_verdict(payload.fundamentals_text, payload.indicators, payload.decision.macro_backdrop.label)
+    risk_plan = build_risk_plan(payload.indicators, payload.context, payload.decision.macro_backdrop.label, fundamental_verdict.verdict, top_candidate, max_risk)
     negative_rows = [row for row in payload.scenario_rows if row.position_pnl < 0]
     positive_rows = [row for row in payload.scenario_rows if row.position_pnl > 0]
     worst = min(negative_rows or payload.scenario_rows, key=lambda row: row.position_pnl, default=None)
     best = max(positive_rows or payload.scenario_rows, key=lambda row: row.position_pnl, default=None)
-    cards = []
+    cards = [
+        _synthetic_badge("Recommended Move", risk_plan.recommendation, risk_plan.status, risk_plan.reason),
+        _synthetic_badge("Current Exposure", _money(payload.context.market_value), "mixed" if payload.context.is_held else "info", f"{payload.context.quantity:g} shares; {payload.context.portfolio_weight:.2%} of portfolio."),
+        _synthetic_badge("Max Acceptable Loss", _money(max_risk), "info", "User input used for stop/size planning."),
+        _synthetic_badge("Paired Option", risk_plan.paired_option, "info", "Best loaded option candidate for this risk plan."),
+    ]
     if worst is not None:
-        cards.append(_synthetic_badge("Worst Normal Case", _money(worst.position_pnl), "bad" if worst.position_pnl < 0 else "info", f"{worst.scenario} move, {worst.portfolio_pnl_impact:+.2%} portfolio impact."))
+        cards.append(_synthetic_badge("Downside Pain", _money(worst.position_pnl), "bad" if worst.position_pnl < 0 else "info", f"{worst.scenario} move, {worst.portfolio_pnl_impact:+.2%} portfolio impact."))
     if best is not None:
-        cards.append(_synthetic_badge("Best Normal Case", _money(best.position_pnl), "good" if best.position_pnl > 0 else "info", f"{best.scenario} move, {best.portfolio_pnl_impact:+.2%} portfolio impact."))
+        cards.append(_synthetic_badge("Upside Reward", _money(best.position_pnl), "good" if best.position_pnl > 0 else "info", f"{best.scenario} move, {best.portfolio_pnl_impact:+.2%} portfolio impact."))
     cards.extend([payload.decision.position_impact, payload.decision.risk_level])
     metric_grid(frame.cards, cards, columns=4)  # type: ignore[attr-defined]
+    move_tree = frame.move_planner_tree  # type: ignore[attr-defined]
+    for row_id in move_tree.get_children():
+        move_tree.delete(row_id)
+    for move, makes_sense, protects, gives_up, effect in risk_plan.move_planner:
+        move_tree.insert("", tk.END, values=(move, makes_sense, protects, gives_up, effect))
     max_abs = max((abs(row.portfolio_pnl_impact) for row in payload.scenario_rows), default=0.0001)
     frame.impact_bars.set_rows([(row.scenario, scenario_impact_bar_value(row, max_abs), _money(row.position_pnl)) for row in payload.scenario_rows])  # type: ignore[attr-defined]
     tree = frame.scenario_tree  # type: ignore[attr-defined]
@@ -855,15 +933,26 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
         tree.insert("", tk.END, values=(row.scenario, _money(row.symbol_price), _money(row.position_pnl), f"{row.portfolio_pnl_impact:+.2%}", _money(row.new_portfolio_value)), tags=(tag,) if tag else ())
     stop = _float_from_var(getattr(self, "stop_price_var", None))
     target = _float_from_var(getattr(self, "options_target_price_var", None)) or _float_from_var(getattr(self, "limit_price_var", None))
-    max_risk = _to_float(self.schwab_research_max_risk_var.get())
     size = suggested_position_size(entry_price=payload.context.last_price, stop_price=stop, max_risk_dollars=max_risk)
+    decision_difference = _decision_difference_text(top_candidate, payload.context)
     lines = [
-        "Scenario notes:",
-        "- Scenarios model direct share P&L impact for the currently held quantity.",
+        "Recommended move:",
+        f"- {risk_plan.recommendation}: {risk_plan.reason}",
+        f"- {risk_plan.confirmation}",
+        f"- {risk_plan.risk_line}",
+        "",
+        "Decision difference:",
+        f"- {decision_difference}",
+        "",
+        "How to read this:",
+        "- Stock-only rows show direct share P&L. Combined rows below use expiration-style option payoff, not live option pricing.",
+        "- Protective put: insurance that can gain value if your shares fall, but the premium is paid upfront.",
+        "- Covered call: income against held shares, but upside can be capped above the strike.",
+        "",
+        "Stock-only scenario notes:",
         f"- Stop distance: {_percent(distance_to_price(payload.context.last_price, stop))}.",
         f"- Target distance: {_percent(distance_to_price(payload.context.last_price, target))}.",
         f"- Suggested size at {_money(max_risk)} max risk and stop {_money(stop)}: {_shares(size)}.",
-        "- Options context: check loaded option chain, implied volatility, and earnings timing before using option structures.",
     ]
     _set_research_text(frame.scenario_note_text, "\n".join(lines))  # type: ignore[attr-defined]
     _render_option_scenarios_from_top(self)
@@ -921,13 +1010,14 @@ def _render_options_strategy(self: tk.Tk) -> None:
                 _money(candidate.midpoint),
                 "Unlimited/stock" if candidate.max_loss is None else _money(candidate.max_loss),
                 _money(candidate.breakeven),
+                f"{candidate.score:.0f}",
                 candidate.confidence,
             ),
         )
     tree.selection_set("candidate_0")
     frame.status_var.set(f"{len(candidates)} candidates generated from loaded {payload.symbol} chain. Select one and click Use This Option to fill fields only.")  # type: ignore[attr-defined]
     _show_selected_option_candidate(self)
-    _render_option_scenarios_from_top(self)
+    _render_scenarios(self, payload)
 
 
 def _load_chain_from_research_tab(self: tk.Tk) -> None:
@@ -966,22 +1056,30 @@ def _show_selected_option_candidate(self: tk.Tk) -> None:
     candidate = _selected_option_candidate(self)
     if frame is None or candidate is None:
         return
-    lines = [
-        f"{candidate.group}: {candidate.strategy}",
-        "",
-        f"Contract: {candidate.underlying} {candidate.expiration} {_money(candidate.strike)} {candidate.option_type.upper()}",
-        f"Bid / Ask / Mark / Mid: {_money(candidate.bid)} / {_money(candidate.ask)} / {_money(candidate.mark)} / {_money(candidate.midpoint)}",
-        f"Max loss: {'unlimited/stock assignment style' if candidate.max_loss is None else _money(candidate.max_loss)}",
-        f"Max gain: {'not capped for simple long option' if candidate.max_gain is None else _money(candidate.max_gain)}",
-        f"Breakeven: {_money(candidate.breakeven)}",
-        "",
-        f"Why this candidate: {candidate.why}",
-        f"What must happen: {candidate.works_if}",
-        f"What goes wrong: {candidate.goes_wrong_if}",
-        f"Relation to current stock position: {candidate.relation_to_position}",
-        "",
-        "Use This Option fills the existing options ticket only. It does not submit, preview, or stage an order.",
-    ]
+    payload = getattr(self, "schwab_research_last_payload", None)
+    earnings_text = payload.earnings_text if payload is not None else ""
+    context = payload.context if payload is not None else None
+    frame.timeline_var.set(option_timeline_text(candidate, earnings_text))  # type: ignore[attr-defined]
+    scenario_tree = frame.candidate_scenario_tree  # type: ignore[attr-defined]
+    for row_id in scenario_tree.get_children():
+        scenario_tree.delete(row_id)
+    if context is not None:
+        scenario_rows = combined_option_scenarios(candidate, context, moves=(-0.10, -0.05, -0.03, -0.02, 0.0, 0.02, 0.03, 0.05, 0.10))
+        max_abs = max((abs(row.combined_pnl) for row in scenario_rows), default=1.0)
+        frame.candidate_bars.set_rows([(row.move_label, (row.combined_pnl / max_abs) * 100, _money(row.combined_pnl)) for row in scenario_rows])  # type: ignore[attr-defined]
+        for row in scenario_rows:
+            tag = "positive" if row.combined_pnl > 0 else "negative" if row.combined_pnl < 0 else ""
+            scenario_tree.insert(
+                "",
+                tk.END,
+                values=(row.move_label, _money(row.underlying_price), _money(row.stock_pnl), _money(row.option_value), _money(row.option_pnl), _money(row.combined_pnl), f"{row.portfolio_impact:+.2%}", row.read),
+                tags=(tag,) if tag else (),
+            )
+        lines = selected_candidate_detail(candidate, context, earnings_text)
+    else:
+        frame.candidate_bars.set_rows([])  # type: ignore[attr-defined]
+        lines = [f"{candidate.group}: {candidate.strategy}", "Run analysis to see combined stock + option scenarios."]
+    lines.extend(["", "Use This Option fills the existing options ticket only. It does not submit, preview, or stage an order."])
     _set_research_text(frame.detail_text, "\n".join(lines))  # type: ignore[attr-defined]
 
 
@@ -1038,6 +1136,22 @@ def _render_option_scenarios_from_top(self: tk.Tk) -> None:
         tree.insert("", tk.END, values=(row.move_label, _money(row.stock_pnl), _money(row.option_pnl), _money(row.combined_pnl), f"{row.portfolio_impact:+.2%}", f"{row.read}; expiration-style estimate"), tags=(tag,) if tag else ())
 
 
+def _decision_difference_text(candidate: OptionCandidate | None, context: PortfolioSymbolContext) -> str:
+    if candidate is None or candidate.option_type not in {"call", "put"}:
+        return "No loaded option candidate yet. Load the chain and generate candidates to compare stock-only versus combined outcomes."
+    rows = combined_option_scenarios(candidate, context, moves=(-0.05,))
+    if not rows:
+        return "Combined option math is unavailable for the selected candidate."
+    row = rows[0]
+    difference = row.combined_pnl - row.stock_pnl
+    premium = (candidate.midpoint or 0.0) * 100
+    if candidate.option_type == "put":
+        worth = "This hedge may not be worth the premium." if difference < premium * 0.5 else "This hedge provides visible downside offset in the -5% case."
+        return f"If {context.symbol} falls -5%, stock-only is {_money(row.stock_pnl)}; with {candidate.strategy}, combined is {_money(row.combined_pnl)}. Net protection benefit: {_money(difference)}. Trade-off: upfront debit about {_money(premium)}. {worth}"
+    worth = "This call needs too much move before expiration." if row.option_pnl < 0 else "This call adds upside leverage in the + path, but premium is still the defined risk."
+    return f"If {context.symbol} falls -5%, stock-only is {_money(row.stock_pnl)}; with {candidate.strategy}, combined is {_money(row.combined_pnl)}. Option difference: {_money(difference)}. Trade-off: upfront debit about {_money(premium)}. {worth}"
+
+
 def _recalculate_research_scenarios(self: tk.Tk) -> None:
     payload = getattr(self, "schwab_research_last_payload", None)
     if payload is None:
@@ -1090,20 +1204,41 @@ def _render_earnings_news(self: tk.Tk, payload: _ResearchPayload) -> None:
 def _render_fundamentals(self: tk.Tk, payload: _ResearchPayload) -> None:
     frame = self.schwab_research_fundamentals_frame
     decision = payload.decision
+    verdict = build_fundamental_verdict(payload.fundamentals_text, payload.indicators, decision.macro_backdrop.label)
     metric_grid(
         frame.cards,  # type: ignore[attr-defined]
         [
+            _synthetic_badge("Fundamental Verdict", verdict.verdict, _fundamental_status(verdict.verdict), verdict.investment_read),
+            _synthetic_badge("Action Bias", verdict.action_bias, _fundamental_status(verdict.verdict), "Fundamentals translated into portfolio action bias."),
+            _synthetic_badge("Confidence", verdict.confidence, "good" if verdict.confidence == "High" else "mixed" if verdict.confidence == "Medium" else "info", "Based on data quantity, consistency, and recency language."),
             decision.valuation,
             decision.growth,
             decision.profitability,
             decision.balance_sheet,
             decision.cash_flow,
         ],
-        columns=5,
+        columns=4,
+        prominent_indexes={0, 1},
     )
     clear_children(frame.checks)  # type: ignore[attr-defined]
-    Checklist(frame.checks, "Fundamental Takeaways", _short_text_bullets(payload.fundamentals_text, limit=4)).grid(row=0, column=0, sticky="ew")  # type: ignore[attr-defined]
-    _set_research_text(self.schwab_research_fundamentals_text, payload.fundamentals_text)
+    frame.checks.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    Checklist(frame.checks, "Investment vs Trade", [verdict.investment_read, verdict.trade_read, verdict.combined_read]).grid(row=0, column=0, sticky="ew", padx=(0, 8))  # type: ignore[attr-defined]
+    Checklist(frame.checks, "What Would Change This View", verdict.what_changes).grid(row=0, column=1, sticky="ew")  # type: ignore[attr-defined]
+    details = "\n".join(
+        [
+            "Fundamental recommendation:",
+            f"- Verdict: {verdict.verdict}.",
+            f"- Action bias: {verdict.action_bias}.",
+            f"- Confidence: {verdict.confidence}.",
+            f"- {verdict.investment_read}",
+            f"- {verdict.trade_read}",
+            f"- {verdict.combined_read}",
+            "",
+            "Key standardized data below:",
+            payload.fundamentals_text,
+        ]
+    )
+    _set_research_text(self.schwab_research_fundamentals_text, details)
 
 
 def _render_macro(self: tk.Tk, payload: _ResearchPayload) -> None:
@@ -1194,6 +1329,16 @@ def _trend_status(text: str) -> str:
     if text == "Weak":
         return "bad"
     if text == "Unavailable":
+        return "info"
+    return "mixed"
+
+
+def _fundamental_status(verdict: str) -> str:
+    if verdict in {"Strong", "Good"}:
+        return "good"
+    if verdict in {"Weak", "Avoid"}:
+        return "bad"
+    if verdict == "Unknown":
         return "info"
     return "mixed"
 
