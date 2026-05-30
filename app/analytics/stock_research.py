@@ -223,6 +223,92 @@ def build_scenario_rows(context: PortfolioSymbolContext, moves: tuple[float, ...
     return rows
 
 
+def technical_scenario_moves(context: PortfolioSymbolContext, indicators: AdvancedIndicatorSnapshot) -> tuple[float, ...]:
+    """Build scenario moves from current technical levels instead of arbitrary user input."""
+    last_price = context.last_price or indicators.latest_close
+    if last_price is None or last_price <= 0:
+        return (-0.10, -0.05, -0.02, 0.02, 0.05, 0.10)
+
+    moves: set[float] = set()
+
+    atr_move = _move_from_distance(indicators.atr_14, last_price)
+    if atr_move is not None:
+        moves.update({-atr_move, atr_move, -min(atr_move * 2, 0.25), min(atr_move * 2, 0.25)})
+
+    for level in (
+        indicators.support,
+        indicators.resistance,
+        indicators.bollinger_lower,
+        indicators.bollinger_upper,
+        indicators.swing_low,
+        indicators.swing_high,
+    ):
+        move = distance_to_price(last_price, level)
+        if move is not None and 0.005 <= abs(move) <= 0.35:
+            moves.add(_round_move(move))
+
+    negative = sorted(move for move in moves if move < 0)
+    positive = sorted(move for move in moves if move > 0)
+    if not negative:
+        negative = [-0.05, -0.10]
+    if not positive:
+        positive = [0.05, 0.10]
+
+    selected = negative[:3] + positive[:3]
+    selected.extend([-0.10, 0.10])
+    return tuple(sorted(set(_round_move(move) for move in selected if 0.005 <= abs(move) <= 0.35)))
+
+
+def technical_scenario_basis(context: PortfolioSymbolContext, indicators: AdvancedIndicatorSnapshot) -> str:
+    last_price = context.last_price or indicators.latest_close
+    if last_price is None or last_price <= 0:
+        return "Fallback moves: price history is unavailable."
+    parts: list[str] = []
+    if indicators.atr_14:
+        parts.append(f"ATR ${indicators.atr_14:,.2f} ({abs(indicators.atr_14 / last_price):.1%})")
+    if indicators.support:
+        parts.append(f"support ${indicators.support:,.2f} ({distance_to_price(last_price, indicators.support):+.1%})")
+    if indicators.resistance:
+        parts.append(f"resistance ${indicators.resistance:,.2f} ({distance_to_price(last_price, indicators.resistance):+.1%})")
+    if not parts:
+        return "Technical fallback moves: no clear ATR/support/resistance levels were available."
+    return "Scenario moves are generated from " + ", ".join(parts[:3]) + "."
+
+
+def recommended_risk_budget(
+    context: PortfolioSymbolContext,
+    indicators: AdvancedIndicatorSnapshot,
+    requested_cap: float | None = None,
+) -> float | None:
+    last_price = context.last_price or indicators.latest_close
+    portfolio_cap = max(context.portfolio_value, 0.0) * 0.005
+    if context.is_held and context.quantity and last_price:
+        risk_level = indicators.support or (last_price - indicators.atr_14 if indicators.atr_14 else None)
+        if risk_level is not None and risk_level > 0:
+            technical_budget = abs(last_price - risk_level) * abs(context.quantity)
+        elif indicators.atr_14:
+            technical_budget = abs(indicators.atr_14) * abs(context.quantity)
+        else:
+            technical_budget = abs(context.market_value) * 0.03
+    else:
+        technical_budget = portfolio_cap
+    candidates = [value for value in (technical_budget, portfolio_cap, requested_cap) if value is not None and value > 0]
+    return min(candidates) if candidates else None
+
+
+def _move_from_distance(distance: float | None, price: float) -> float | None:
+    if distance is None or price <= 0:
+        return None
+    move = abs(distance / price)
+    if move < 0.005:
+        return None
+    return _round_move(min(move, 0.35))
+
+
+def _round_move(move: float) -> float:
+    return round(float(move), 4)
+
+
 def suggested_position_size(*, entry_price: float | None, stop_price: float | None, max_risk_dollars: float | None) -> float | None:
     if entry_price is None or stop_price is None or max_risk_dollars is None:
         return None

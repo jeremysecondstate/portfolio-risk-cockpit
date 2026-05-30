@@ -14,8 +14,11 @@ from app.analytics.stock_research import (
     distance_to_price,
     fibonacci_retracements,
     load_cached_price_history,
+    recommended_risk_budget,
     save_cached_price_history,
     suggested_position_size,
+    technical_scenario_basis,
+    technical_scenario_moves,
 )
 from app.analytics.research_scoring import (
     build_decision_readout,
@@ -168,6 +171,31 @@ class StockResearchAnalyticsTests(unittest.TestCase):
 
         self.assertAlmostEqual(scenario_impact_bar_value(down, 0.01), -100.0)
         self.assertAlmostEqual(scenario_impact_bar_value(up, 0.01), 100.0)
+
+    def test_technical_scenario_moves_use_levels_not_user_input(self) -> None:
+        indicators = calculate_advanced_indicators("NOC", _sample_candles())
+        portfolio = Portfolio(cash=9_000.0, positions={"NOC": Position("NOC", 2, 100.0, indicators.latest_close or 100.0)})
+        context = build_portfolio_symbol_context(portfolio, "NOC", fallback_price=indicators.latest_close)
+
+        moves = technical_scenario_moves(context, indicators)
+        basis = technical_scenario_basis(context, indicators)
+
+        self.assertTrue(any(move < 0 for move in moves))
+        self.assertTrue(any(move > 0 for move in moves))
+        self.assertIn("ATR", basis)
+        self.assertLess(max(abs(move) for move in moves), 0.36)
+
+    def test_recommended_risk_budget_clamps_absurd_user_cap(self) -> None:
+        indicators = calculate_advanced_indicators("NOC", _sample_candles())
+        last = indicators.latest_close or 100.0
+        portfolio = Portfolio(cash=9_000.0, positions={"NOC": Position("NOC", 1, 100.0, last)})
+        context = build_portfolio_symbol_context(portfolio, "NOC", fallback_price=last)
+
+        budget = recommended_risk_budget(context, indicators, requested_cap=500_000_000.0)
+
+        self.assertIsNotNone(budget)
+        self.assertLess(budget or 0, 500_000_000.0)
+        self.assertLessEqual(budget or 0, context.portfolio_value * 0.005)
 
     def test_friendly_meter_labels_are_readable(self) -> None:
         self.assertEqual(direction_strength_label(87), "Very Strong")

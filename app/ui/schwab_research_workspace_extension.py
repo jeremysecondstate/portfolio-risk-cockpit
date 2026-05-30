@@ -42,8 +42,11 @@ from app.analytics.stock_research import (
     calculate_advanced_indicators,
     distance_to_price,
     load_cached_price_history,
+    recommended_risk_budget,
     save_cached_price_history,
     suggested_position_size,
+    technical_scenario_basis,
+    technical_scenario_moves,
 )
 from app.analytics.technical_analysis import candles_from_price_history
 from app.data.sec_edgar import SecEdgarClient, normalize_ticker
@@ -98,8 +101,8 @@ def _open_schwab_research_workspace(self: tk.Tk) -> None:
 
     selected_symbol = _initial_research_symbol(self)
     self.schwab_research_symbol_var = tk.StringVar(value=selected_symbol)
-    self.schwab_research_custom_move_var = tk.StringVar(value="3")
     self.schwab_research_max_risk_var = tk.StringVar(value="500")
+    self.schwab_research_scenario_basis_var = tk.StringVar(value="Scenario moves will be generated from technical levels.")
     self.schwab_research_status_var = tk.StringVar(value="Choose a holding or enter a symbol, then run analysis.")
 
     header = ttk.Frame(window, padding=(12, 10), style="Panel.TFrame")
@@ -400,11 +403,12 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     frame.columnconfigure(0, weight=1)
     controls = ttk.Frame(frame, style="Panel.TFrame")
     controls.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-    ttk.Label(controls, text="Custom move %", style="Subtle.TLabel").grid(row=0, column=0, sticky="w")
-    ttk.Entry(controls, textvariable=self.schwab_research_custom_move_var, width=8).grid(row=0, column=1, sticky="w", padx=(6, 18))
-    ttk.Label(controls, text="Max risk $", style="Subtle.TLabel").grid(row=0, column=2, sticky="w")
+    controls.columnconfigure(1, weight=1)
+    ttk.Label(controls, text="Scenario basis", style="Subtle.TLabel").grid(row=0, column=0, sticky="w")
+    ttk.Label(controls, textvariable=self.schwab_research_scenario_basis_var, style="Chip.TLabel").grid(row=0, column=1, sticky="ew", padx=(8, 18))
+    ttk.Label(controls, text="Risk cap $", style="Subtle.TLabel").grid(row=0, column=2, sticky="w")
     ttk.Entry(controls, textvariable=self.schwab_research_max_risk_var, width=10).grid(row=0, column=3, sticky="w", padx=(6, 18))
-    ttk.Button(controls, text="Recalculate", command=lambda app=self: _recalculate_research_scenarios(app)).grid(row=0, column=4, sticky="w")
+    ttk.Button(controls, text="Refresh Risk", command=lambda app=self: _recalculate_research_scenarios(app)).grid(row=0, column=4, sticky="w")
     frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.cards.grid(row=1, column=0, sticky="ew", pady=(0, 8))
     planner_box = ttk.LabelFrame(frame, text="Move Planner", style="Card.TLabelframe")
@@ -583,13 +587,12 @@ def _run_research_analysis(self: tk.Tk) -> None:
         return
 
     portfolio = self.broker.get_portfolio()
-    moves = _scenario_moves(self)
     _set_research_text(self.schwab_research_overview_text, f"Running Schwab research for {symbol}...\n\nFetching quote/history, SEC filings, fundamentals, earnings layer, and macro context.")
     self.schwab_research_status_var.set(f"Running analysis for {symbol}...")
 
     def worker() -> None:
         try:
-            payload = _build_research_payload(session, portfolio, symbol, moves)
+            payload = _build_research_payload(session, portfolio, symbol)
         except Exception as exc:
             self.after(0, lambda error=exc: _show_research_error(self, symbol, error))
             return
@@ -598,7 +601,7 @@ def _run_research_analysis(self: tk.Tk) -> None:
     threading.Thread(target=worker, daemon=True).start()
 
 
-def _build_research_payload(session: Any, portfolio, symbol: str, moves: tuple[float, ...]) -> _ResearchPayload:
+def _build_research_payload(session: Any, portfolio, symbol: str) -> _ResearchPayload:
     statuses: list[DataSourceStatus] = []
     quote: dict[str, Any] | None = None
     daily_payload: dict[str, Any] | None = None
@@ -613,6 +616,7 @@ def _build_research_payload(session: Any, portfolio, symbol: str, moves: tuple[f
 
     fallback_price = _last_price_from_quote(quote) or indicators.latest_close
     context = build_portfolio_symbol_context(portfolio, symbol, fallback_price)
+    moves = technical_scenario_moves(context, indicators)
     scenario_rows = build_scenario_rows(context, moves)
 
     earnings_text, fundamentals_text, filings_lines, sec_statuses = _fetch_sec_layers(symbol)
@@ -913,7 +917,10 @@ def _render_technicals(self: tk.Tk, payload: _ResearchPayload) -> None:
 
 def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
     frame = self.schwab_research_scenarios_frame
-    max_risk = _to_float(self.schwab_research_max_risk_var.get())
+    requested_risk_cap = _to_float(self.schwab_research_max_risk_var.get())
+    max_risk = recommended_risk_budget(payload.context, payload.indicators, requested_risk_cap)
+    scenario_basis = technical_scenario_basis(payload.context, payload.indicators)
+    self.schwab_research_scenario_basis_var.set(scenario_basis)
     candidates = getattr(self, "schwab_research_option_candidates", []) or []
     top_candidate = next((item for item in candidates if item.option_type in {"call", "put"}), None)
     fundamental_verdict = build_fundamental_verdict(payload.fundamentals_text, payload.indicators, payload.decision.macro_backdrop.label)
@@ -925,7 +932,7 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
     cards = [
         _synthetic_badge("Recommended Move", risk_plan.recommendation, risk_plan.status, risk_plan.reason),
         _synthetic_badge("Current Exposure", _money(payload.context.market_value), "mixed" if payload.context.is_held else "info", f"{payload.context.quantity:g} shares; {payload.context.portfolio_weight:.2%} of portfolio."),
-        _synthetic_badge("Max Acceptable Loss", _money(max_risk), "info", "User input used for stop/size planning."),
+        _synthetic_badge("Technical Risk Budget", _money(max_risk), "info", "Generated from support/ATR and clipped by the optional risk cap."),
         _synthetic_badge("Paired Option", risk_plan.paired_option, "info", "Best loaded option candidate for this risk plan."),
     ]
     if worst is not None:
@@ -969,6 +976,7 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
         f"- Stop distance: {_percent(distance_to_price(payload.context.last_price, stop))}.",
         f"- Target distance: {_percent(distance_to_price(payload.context.last_price, target))}.",
         f"- Suggested size at {_money(max_risk)} max risk and stop {_money(stop)}: {_shares(size)}.",
+        f"- Scenario basis: {scenario_basis}",
     ]
     _set_research_text(frame.scenario_note_text, "\n".join(lines))  # type: ignore[attr-defined]
     _render_option_scenarios_from_top(self)
@@ -1172,7 +1180,7 @@ def _recalculate_research_scenarios(self: tk.Tk) -> None:
     payload = getattr(self, "schwab_research_last_payload", None)
     if payload is None:
         return
-    moves = _scenario_moves(self)
+    moves = technical_scenario_moves(payload.context, payload.indicators)
     updated = _ResearchPayload(
         payload.symbol,
         payload.quote,
@@ -1519,15 +1527,6 @@ def _set_research_text(widget: tk.Text, content: str) -> None:
     widget.insert(tk.END, content)
     _apply_report_tags(widget, content)
     widget.configure(state=tk.DISABLED)
-
-
-def _scenario_moves(self: tk.Tk) -> tuple[float, ...]:
-    moves = [-0.10, -0.05, -0.02, 0.02, 0.05, 0.10]
-    custom = _to_float(self.schwab_research_custom_move_var.get())
-    if custom is not None and custom != 0:
-        move = abs(custom) / 100
-        moves.extend([-move, move])
-    return tuple(sorted(set(moves)))
 
 
 def _is_hyperliquid(asset_type: str, symbol: str) -> bool:
