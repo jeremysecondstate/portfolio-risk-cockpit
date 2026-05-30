@@ -13,6 +13,7 @@ from app.ui.hyperliquid_cockpit_spot_mid_extension import install_hyperliquid_co
 from app.ui.hyperliquid_existing_perp_what_if_extension import install_hyperliquid_existing_perp_what_if_extension
 from app.ui.hyperliquid_notifications_fix import install_hyperliquid_notifications_fix
 from app.ui.hyperliquid_perp_ticket_use_mid_fix import install_hyperliquid_perp_ticket_use_mid_fix
+from app.ui.hyperliquid_quote_asset_extension import install_hyperliquid_quote_asset_extension
 from app.ui.hyperliquid_research_workspace_extension import install_hyperliquid_research_workspace_extension
 from app.ui.hyperliquid_spot_symbol_display_extension import install_hyperliquid_spot_symbol_display_extension
 from app.ui.hyperliquid_submit_no_autosync_fix import install_hyperliquid_submit_no_autosync_fix
@@ -86,3 +87,4 @@ def install_ui_extensions(app_cls: Type[tk.Tk]) -> None:
     install_schwab_option_order_payload_extension(app_cls)
     install_schwab_mechanical_submit_extension(app_cls)
     install_hyperliquid_spot_symbol_display_extension(app_cls)
+    install_hyperliquid_quote_asset_extension(app_cls)
