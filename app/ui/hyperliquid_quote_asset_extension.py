@@ -8,6 +8,10 @@ from app.brokers.hyperliquid.trading import HyperliquidOrderTicket
 from app.ui import options_lab_extension as workspace_ui
 
 QUOTE_ASSETS = ("USDC", "USDH")
+BASE_ALIASES = {
+    "SDH": "USDH",  # defensive repair for the previous UI bug that stripped USDH's leading U
+    "USDH": "USDH",
+}
 _installed = False
 _original_build_layout = None
 
@@ -63,7 +67,7 @@ def _install_quote_selector_widgets(self: tk.Tk) -> None:
 
 def _add_quote_selector_to_spot_ticket(self: tk.Tk, spot_ticket: ttk.LabelFrame) -> None:
     row = _next_grid_row(spot_ticket)
-    ttk.Label(spot_ticket, text="Quote", style="Subtle.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=6)
+    ttk.Label(spot_ticket, text="Pay / Quote", style="Subtle.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=6)
     combo = ttk.Combobox(
         spot_ticket,
         textvariable=self.hyperliquid_spot_quote_asset_var,
@@ -74,7 +78,7 @@ def _add_quote_selector_to_spot_ticket(self: tk.Tk, spot_ticket: ttk.LabelFrame)
     combo.grid(row=row, column=1, sticky="ew", pady=6)
     ttk.Label(
         spot_ticket,
-        text="Used for spot markets and quantity units",
+        text="Example: buy USDH with USDC = Market USDH, Pay/Quote USDC",
         style="Subtle.TLabel",
     ).grid(row=row, column=2, columnspan=2, sticky="w", padx=(16, 0), pady=6)
     self.hyperliquid_spot_quote_asset_var.trace_add("write", lambda *_args: _on_quote_changed(self))
@@ -85,7 +89,7 @@ def _add_quote_note_to_perp_ticket(self: tk.Tk, perp_ticket: ttk.LabelFrame) -> 
     ttk.Label(perp_ticket, text="Settlement", style="Subtle.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=6)
     ttk.Label(
         perp_ticket,
-        text="Perps remain exchange-native; quote selector applies to spot tickets.",
+        text="Perps remain exchange-native; Pay/Quote selector applies to spot tickets.",
         style="Subtle.TLabel",
     ).grid(row=row, column=1, columnspan=3, sticky="w", pady=6)
 
@@ -177,6 +181,7 @@ def _normalize_spot_market_for_quote(symbol: str, quote: str) -> str:
         return market
     if "/" in market:
         base, raw_quote = market.split("/", 1)
+        raw_quote = BASE_ALIASES.get(raw_quote, raw_quote)
         if raw_quote not in QUOTE_ASSETS:
             raise ValueError("Hyperliquid spot quote must be USDC or USDH.")
         quote = raw_quote
@@ -184,14 +189,22 @@ def _normalize_spot_market_for_quote(symbol: str, quote: str) -> str:
         base = market
     base = _normalize_spot_base_for_quote(base, quote)
     if not base:
-        raise ValueError("Enter a Hyperliquid spot market, for example HYPE, BTC, or BTC/USDH.")
+        raise ValueError("Enter a Hyperliquid spot market, for example HYPE, USDH, or BTC/USDH.")
     return f"{base}/{quote}"
 
 
 def _normalize_spot_base_for_quote(base: str, quote: str) -> str:
-    clean = base.strip().upper()
+    clean = BASE_ALIASES.get(base.strip().upper(), base.strip().upper())
     if quote == "USDC":
-        aliases = {"BTC": "UBTC", "UBTC": "UBTC", "ETH": "UETH", "UETH": "UETH", "ZEC": "UZEC", "UZEC": "UZEC"}
+        aliases = {
+            "BTC": "UBTC",
+            "UBTC": "UBTC",
+            "ETH": "UETH",
+            "UETH": "UETH",
+            "ZEC": "UZEC",
+            "UZEC": "UZEC",
+            "USDH": "USDH",
+        }
         return aliases.get(clean, clean)
     # Hyperliquid USDH markets display familiar base names such as BTC/USDH.
     if clean.startswith("U") and clean in {"UBTC", "UETH", "UZEC"}:
@@ -206,6 +219,7 @@ def _hyperliquid_workspace_spot_size_unit_values_with_quote(self: tk.Tk) -> list
         base = workspace_ui._hyperliquid_workspace_spot_base(self)
     except Exception:
         base = ""
+    base = BASE_ALIASES.get(str(base).strip().upper(), str(base).strip().upper())
     return [quote, base] if base and base != quote else [quote]
 
 
@@ -216,6 +230,7 @@ def _selected_quote_asset(self: tk.Tk) -> str:
             value = str(var.get()).strip().upper()
         except Exception:
             value = ""
+        value = BASE_ALIASES.get(value, value)
         if value in QUOTE_ASSETS:
             return value
     return "USDC"
