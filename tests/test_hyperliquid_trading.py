@@ -12,7 +12,7 @@ from app.brokers.hyperliquid.trading import (
     normalize_hyperliquid_trigger_ticket_for_wire,
 )
 from app.core.portfolio import Portfolio, Position
-from app.ui.hyperliquid_trading_extension import _market_close_limit_price, _normalize_edit_market, _risk_reward, _selected_hyperliquid_order, normalize_hyperliquid_open_order
+from app.ui.hyperliquid_trading_extension import _market_close_limit_price, _normalize_edit_market, _reverse_order_size_for_same_opposite_position, _risk_reward, _selected_hyperliquid_order, normalize_hyperliquid_open_order
 from app.ui.hyperliquid_trading_extension import _current_hyperliquid_perp_position, _perp_position_pnl
 from app.ui.hyperliquid_submit_no_autosync_fix import _apply_ticket_leverage_if_needed, _attached_tpsl_tickets
 
@@ -166,6 +166,9 @@ class HyperliquidTradingTests(unittest.TestCase):
     def test_market_close_limit_price_crosses_the_book(self) -> None:
         self.assertAlmostEqual(_market_close_limit_price(100.0, is_short=True), 101.0)
         self.assertAlmostEqual(_market_close_limit_price(100.0, is_short=False), 99.0)
+
+    def test_reverse_order_size_flips_to_same_size_opposite_position(self) -> None:
+        self.assertEqual(_reverse_order_size_for_same_opposite_position(25.0), 50.0)
 
     def test_selected_order_does_not_auto_edit_wrong_order_when_id_is_stale(self) -> None:
         app = type(

@@ -1606,31 +1606,28 @@ def _show_hyperliquid_perp_position_editor(self: tk.Tk) -> None:
 
     actions = ttk.LabelFrame(shell, text="Position Actions", style="Card.TLabelframe")
     actions.grid(row=2, column=0, sticky="ew", pady=(10, 0))
-    actions.columnconfigure((0, 1, 2), weight=1)
+    actions.columnconfigure((0, 1, 2, 3), weight=1)
 
-    def _prepare_close(*, tif: str, price_multiplier: float = 1.0) -> None:
-        try:
-            close_size = _positive_dialog_float(amount_var.get(), "Amount")
-            close_price = _positive_dialog_float(limit_var.get(), "Limit / IOC price") * price_multiplier
-            _prepare_hyperliquid_perp_ticket(
-                self,
-                coin=coin,
-                side=close_side,
-                size=close_size,
-                limit_price=close_price,
-                tif=tif,
-                reduce_only=True,
-                tp_price=tp_var.get(),
-                sl_price=sl_var.get(),
-                note=f"Prepared reduce-only {coin} {direction.lower()} close ticket. Review it, then use LIVE Submit.",
-            )
-            dialog.destroy()
-        except Exception as exc:
-            messagebox.showerror("Hyperliquid position edit blocked", str(exc))
+    def _open_limit_close() -> None:
+        _show_hyperliquid_limit_close_dialog(
+            self,
+            parent=dialog,
+            coin=coin,
+            direction=direction,
+            close_side=close_side,
+            qty=qty,
+            entry=entry,
+            mark=mark,
+            pnl=_perp_position_pnl(entry, mark, qty, is_short),
+            amount_var=amount_var,
+            limit_var=limit_var,
+            tp_var=tp_var,
+            sl_var=sl_var,
+        )
 
     def _prepare_reverse() -> None:
         try:
-            reverse_size = _positive_dialog_float(amount_var.get(), "Amount") * 2.0
+            reverse_size = _reverse_order_size_for_same_opposite_position(_positive_dialog_float(amount_var.get(), "Amount"))
             reverse_price = _positive_dialog_float(limit_var.get(), "Limit / IOC price")
             _prepare_hyperliquid_perp_ticket(
                 self,
@@ -1643,7 +1640,7 @@ def _show_hyperliquid_perp_position_editor(self: tk.Tk) -> None:
                 tp_price=tp_var.get(),
                 sl_price=sl_var.get(),
                 note=(
-                    f"Prepared {coin} reverse ticket sized at 2x the selected amount. "
+                    f"Prepared {coin} reverse ticket to close the current position and open the same size in the opposite direction. "
                     "This is not reduce-only; review carefully before LIVE Submit."
                 ),
             )
@@ -1691,23 +1688,122 @@ def _show_hyperliquid_perp_position_editor(self: tk.Tk) -> None:
         dialog.destroy()
         self.show_hyperliquid_position_tpsl_dialog()
 
-    ttk.Button(actions, text="Prepare Limit Close", command=lambda: _prepare_close(tif="Gtc")).grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=(0, 6))
-    ttk.Button(actions, text="Prepare IOC Close", command=lambda: _prepare_close(tif="Ioc", price_multiplier=(1.01 if is_short else 0.99))).grid(row=0, column=1, sticky="ew", padx=(0, 6), pady=(0, 6))
-    ttk.Button(actions, text="TP/SL", command=_open_tpsl, style="Accent.TButton").grid(row=0, column=2, sticky="ew", pady=(0, 6))
-    ttk.Button(actions, text="Prepare Reverse", command=_prepare_reverse).grid(row=1, column=0, sticky="ew", padx=(0, 6))
-    ttk.Button(actions, text="Position Size", command=lambda: (dialog.destroy(), self.show_hyperliquid_perp_position_size())).grid(row=1, column=1, sticky="ew", padx=(0, 6))
-    ttk.Button(actions, text="Market Close", command=_market_close, style="CompactDanger.TButton").grid(row=1, column=2, sticky="ew")
+    ttk.Button(actions, text="Limit", command=_open_limit_close, style="CompactDanger.TButton").grid(row=0, column=0, sticky="ew", padx=(0, 6))
+    ttk.Button(actions, text="Market", command=_market_close, style="CompactDanger.TButton").grid(row=0, column=1, sticky="ew", padx=(0, 6))
+    ttk.Button(actions, text="Reverse", command=_prepare_reverse, style="CompactDanger.TButton").grid(row=0, column=2, sticky="ew", padx=(0, 6))
+    ttk.Button(actions, text="TP/SL", command=_open_tpsl, style="CompactAccent.TButton").grid(row=0, column=3, sticky="ew")
 
     note = ttk.Label(
         shell,
         text=(
-            "Position actions do not need an open-order OID. Market Close sends a reduce-only IOC close immediately. "
-            "Limit close and reverse only prepare the ticket for review; TP/SL opens the reduce-only position TP/SL flow."
+            "Position actions use the selected Hyperliquid perp position.\n"
+            "Market sends a reduce-only immediate close using the existing market-close logic. "
+            "Limit opens a limit-close ticket where you can confirm price and size before preparing the reduce-only close for review. "
+            "Reverse prepares the opposite-side ticket for review before LIVE Submit. "
+            "TP/SL opens the reduce-only take-profit / stop-loss flow."
         ),
         style="Subtle.TLabel",
         wraplength=620,
     )
     note.grid(row=3, column=0, sticky="w", pady=(10, 0))
+
+
+def _show_hyperliquid_limit_close_dialog(
+    self: tk.Tk,
+    *,
+    parent: tk.Toplevel,
+    coin: str,
+    direction: str,
+    close_side: str,
+    qty: float,
+    entry: float,
+    mark: float,
+    pnl: float,
+    amount_var: tk.StringVar,
+    limit_var: tk.StringVar,
+    tp_var: tk.StringVar,
+    sl_var: tk.StringVar,
+) -> tk.Toplevel:
+    dialog = tk.Toplevel(parent)
+    dialog.title("Limit Close")
+    dialog.transient(parent)
+    dialog.resizable(False, False)
+
+    shell = ttk.Frame(dialog, style="Panel.TFrame", padding=14)
+    shell.pack(fill=tk.BOTH, expand=True)
+    shell.columnconfigure(0, weight=1)
+
+    summary = ttk.LabelFrame(shell, text="Position", style="Card.TLabelframe")
+    summary.grid(row=0, column=0, sticky="ew")
+    for column in range(4):
+        summary.columnconfigure(column, weight=1)
+    _summary_cell(summary, 0, 0, "Coin", coin)
+    _summary_cell(summary, 0, 1, "Side", direction)
+    _summary_cell(summary, 0, 2, "Size", f"{qty:g}")
+    _summary_cell(summary, 0, 3, "Close Side", close_side.upper())
+    _summary_cell(summary, 1, 0, "Entry", f"${entry:,.4f}")
+    _summary_cell(summary, 1, 1, "Mark", f"${mark:,.4f}")
+    _summary_cell(summary, 1, 2, "Notional", f"${qty * mark:,.2f}")
+    _summary_cell(summary, 1, 3, "Open P&L", _signed_money(pnl))
+
+    fields = ttk.LabelFrame(shell, text="Limit Close Ticket", style="Card.TLabelframe")
+    fields.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+    fields.columnconfigure(1, weight=1)
+    price_var = tk.StringVar(value=(limit_var.get().strip() or _format_hyperliquid_size(mark)))
+    size_var = tk.StringVar(value=(amount_var.get().strip() or _format_hyperliquid_size(qty)))
+
+    ttk.Label(fields, text="Limit price", style="Subtle.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=5)
+    ttk.Entry(fields, textvariable=price_var).grid(row=0, column=1, sticky="ew", pady=5)
+    ttk.Label(fields, text="Amount", style="Subtle.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=5)
+    ttk.Entry(fields, textvariable=size_var).grid(row=1, column=1, sticky="ew", pady=5)
+
+    note = ttk.Label(
+        shell,
+        text=(
+            "Confirming prepares a reduce-only GTC limit close ticket for review. "
+            "No live order is sent until you use the existing LIVE Submit flow."
+        ),
+        style="Subtle.TLabel",
+        wraplength=520,
+    )
+    note.grid(row=2, column=0, sticky="w", pady=(10, 0))
+
+    buttons = ttk.Frame(shell, style="Panel.TFrame")
+    buttons.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+    buttons.columnconfigure((0, 1), weight=1)
+
+    def confirm_limit_close() -> None:
+        try:
+            close_size = _positive_dialog_float(size_var.get(), "Amount")
+            close_price = _positive_dialog_float(price_var.get(), "Limit price")
+            amount_var.set(_format_hyperliquid_size(close_size))
+            limit_var.set(_format_hyperliquid_size(close_price))
+            _prepare_hyperliquid_perp_ticket(
+                self,
+                coin=coin,
+                side=close_side,
+                size=close_size,
+                limit_price=close_price,
+                tif="Gtc",
+                reduce_only=True,
+                tp_price=tp_var.get(),
+                sl_price=sl_var.get(),
+                note=f"Prepared reduce-only {coin} {direction.lower()} limit close ticket. Review it, then use LIVE Submit.",
+            )
+            dialog.destroy()
+            parent.destroy()
+        except Exception as exc:
+            messagebox.showerror("Hyperliquid limit close blocked", str(exc))
+
+    ttk.Button(buttons, text="Cancel", command=dialog.destroy).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+    ttk.Button(buttons, text="Confirm Limit Close", command=confirm_limit_close, style="CompactDanger.TButton").grid(row=0, column=1, sticky="ew")
+    return dialog
+
+
+def _reverse_order_size_for_same_opposite_position(size: float) -> float:
+    if size <= 0:
+        raise ValueError("Amount must be positive.")
+    return size * 2.0
 
 
 def _positive_dialog_float(raw: object, label: str) -> float:
