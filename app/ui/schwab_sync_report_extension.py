@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import tkinter as tk
 from tkinter import messagebox
-from typing import Type
+from typing import Callable, Type
 
 from app.brokers.schwab.account_adapter import (
     format_schwab_account_snapshot,
@@ -16,6 +16,10 @@ _REAUTH_STATUS_CODES = {401, 403, 500}
 
 def install_schwab_sync_report_extension(app_cls: Type[tk.Tk]) -> None:
     """Give Schwab sync the same rich report treatment as Hyperliquid sync."""
+
+    previous_sync_snapshot = getattr(app_cls, "_sync_schwab_account_snapshot", None)
+    if callable(previous_sync_snapshot):
+        app_cls._sync_schwab_account_snapshot = _wrap_schwab_snapshot_sync(previous_sync_snapshot)  # type: ignore[method-assign]
 
     app_cls.connect_schwab = _connect_schwab_with_report  # type: ignore[method-assign]
     app_cls.refresh_schwab_account = _refresh_schwab_account_with_report  # type: ignore[method-assign]
@@ -60,6 +64,22 @@ def _refresh_schwab_account_with_report(self: tk.Tk) -> None:
         messagebox.showerror("Schwab account refresh failed", str(exc))
 
 
+def _wrap_schwab_snapshot_sync(previous_sync_snapshot: Callable[[tk.Tk, object], str]) -> Callable[[tk.Tk, object], str]:
+    def sync_snapshot_with_reauth_fallback(self: tk.Tk, session: object) -> str:
+        try:
+            return previous_sync_snapshot(self, session)
+        except Exception as exc:
+            if not _should_force_schwab_reauthorization(exc):
+                raise
+
+            retry_session = _force_schwab_reauthorization(self, session, exc)
+            if retry_session is None:
+                raise RuntimeError("Schwab reauthorization canceled; no authorization was provided.") from exc
+            return previous_sync_snapshot(self, retry_session)
+
+    return sync_snapshot_with_reauth_fallback
+
+
 def _sync_schwab_account_report_with_reauth_fallback(self: tk.Tk, session) -> str | None:
     """Sync once, but force a fresh browser authorization if Schwab rejects cached auth."""
 
@@ -69,23 +89,31 @@ def _sync_schwab_account_report_with_reauth_fallback(self: tk.Tk, session) -> st
         if not _should_force_schwab_reauthorization(exc):
             raise
 
-        # The old happy path was: Sync Schwab silently uses cached auth until Schwab
-        # requires a fresh grant, then the same click opens Schwab's authorization URL.
-        # Clear both the in-memory session and saved token cache before retrying so we
-        # do not loop on a stale refresh/access token.
-        clear_cached_authorization = getattr(session, "clear_cached_authorization", None)
-        if callable(clear_cached_authorization):
-            clear_cached_authorization()
-        self.schwab_session = None
-        self.schwab_status_var.set("Schwab session: saved authorization rejected; login required")
-        self._set_preview_text(_schwab_reauthorization_required_report(exc))
-
-        retry_session = self._authorize_schwab_session()
+        retry_session = _force_schwab_reauthorization(self, session, exc)
         if retry_session is None:
             return None
 
-        self.schwab_session = retry_session
         return _sync_schwab_account_report(self, retry_session)
+
+
+def _force_schwab_reauthorization(self: tk.Tk, session, exc: Exception):
+    # The old happy path was: Sync Schwab silently uses cached auth until Schwab
+    # requires a fresh grant, then the same click opens Schwab's authorization URL.
+    # Clear both the in-memory session and saved token cache before retrying so we
+    # do not loop on a stale refresh/access token.
+    clear_cached_authorization = getattr(session, "clear_cached_authorization", None)
+    if callable(clear_cached_authorization):
+        clear_cached_authorization()
+    self.schwab_session = None
+    self.schwab_status_var.set("Schwab session: saved authorization rejected; login required")
+    self._set_preview_text(_schwab_reauthorization_required_report(exc))
+
+    retry_session = self._authorize_schwab_session()
+    if retry_session is None:
+        return None
+
+    self.schwab_session = retry_session
+    return retry_session
 
 
 def _sync_schwab_account_report(self: tk.Tk, session) -> str:
