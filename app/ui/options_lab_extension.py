@@ -27,6 +27,7 @@ def install_options_lab_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls.use_hyperliquid_mid_market = _use_hyperliquid_mid_market  # type: ignore[attr-defined]
     app_cls.run_hyperliquid_perp_what_if = _run_hyperliquid_perp_what_if  # type: ignore[attr-defined]
     app_cls.update_workspace_holdings_tables = _update_workspace_holdings_tables  # type: ignore[attr-defined]
+    app_cls.set_hyperliquid_sync_status = _set_hyperliquid_sync_status  # type: ignore[attr-defined]
 
 
 def _build_layout_with_options_lab(self: tk.Tk) -> None:
@@ -98,6 +99,10 @@ def _ensure_execution_workspace_vars(self: tk.Tk) -> None:
         self.hyperliquid_fee_rate_var = tk.StringVar(value="0.045")
     if not hasattr(self, "hyperliquid_workspace_active_ticket_var"):
         self.hyperliquid_workspace_active_ticket_var = tk.StringVar(value="spot")
+    if not hasattr(self, "hyperliquid_sync_status_var"):
+        self.hyperliquid_sync_status_var = tk.StringVar(value="\u2715 Not synced")
+    if not hasattr(self, "hyperliquid_sync_status_state"):
+        self.hyperliquid_sync_status_state = "failure"
 
     _ensure_string_var(self, "hyperliquid_spot_symbol_var", getattr(self, "symbol_var", tk.StringVar(value="")).get())
     _ensure_string_var(self, "hyperliquid_spot_coin_var", getattr(self, "hyperliquid_coin_var", tk.StringVar(value="")).get())
@@ -643,6 +648,97 @@ def _run_workspace_action(
     command()
 
 
+def _run_hyperliquid_sync_action(self: tk.Tk) -> None:
+    previous_source = getattr(getattr(self, "broker", None), "source_message", "")
+    _set_hyperliquid_sync_status(self, "working")
+    try:
+        _run_workspace_action(
+            self,
+            venue="Hyperliquid",
+            preview_widget=self.hyperliquid_trading_preview_text,
+            command=_first_available_command(self, "sync_hyperliquid_account"),
+        )
+    except Exception:
+        _set_hyperliquid_sync_status(self, "failure")
+        raise
+
+    _sync_hyperliquid_badge_from_status_text(self)
+    if getattr(self, "hyperliquid_sync_status_state", "failure") != "working":
+        return
+
+    current_source = getattr(getattr(self, "broker", None), "source_message", "")
+    if current_source != previous_source and "Hyperliquid" in current_source:
+        _set_hyperliquid_sync_status(self, "success")
+    else:
+        _set_hyperliquid_sync_status(self, "failure")
+
+
+def _install_hyperliquid_sync_status_badge(parent: ttk.Frame, self: tk.Tk, *, row: int, column: int) -> None:
+    _ensure_execution_workspace_vars(self)
+    _install_hyperliquid_sync_status_trace(self)
+
+    badge = getattr(self, "hyperliquid_sync_status_badge", None)
+    if badge is None:
+        badge = tk.Label(
+            parent,
+            textvariable=self.hyperliquid_sync_status_var,
+            bg="#fee2e2",
+            fg="#b91c1c",
+            font=("Segoe UI", 9, "bold"),
+            padx=8,
+            pady=4,
+            bd=0,
+        )
+        self.hyperliquid_sync_status_badge = badge
+    _apply_hyperliquid_sync_status_colors(self)
+    badge.grid(row=row, column=column, sticky="e", padx=(0, 8))
+
+
+def _install_hyperliquid_sync_status_trace(self: tk.Tk) -> None:
+    if getattr(self, "_hyperliquid_sync_status_trace_installed", False):
+        return
+    self.hyperliquid_status_var.trace_add("write", lambda *_args, app=self: _sync_hyperliquid_badge_from_status_text(app))
+    self._hyperliquid_sync_status_trace_installed = True
+    _sync_hyperliquid_badge_from_status_text(self)
+
+
+def _sync_hyperliquid_badge_from_status_text(self: tk.Tk) -> None:
+    status = str(self.hyperliquid_status_var.get()).strip().lower()
+    if status == "hyperliquid: synced":
+        _set_hyperliquid_sync_status(self, "success")
+    elif "sync failed" in status or "not synced" in status:
+        _set_hyperliquid_sync_status(self, "failure")
+
+
+def _set_hyperliquid_sync_status(self: tk.Tk, status: str, message: str | None = None) -> None:
+    _ensure_execution_workspace_vars(self)
+    clean = status if status in {"success", "failure", "working"} else "failure"
+    self.hyperliquid_sync_status_state = clean
+    label = {
+        "success": "\u2713 Synced",
+        "failure": "\u2715 Not synced",
+        "working": "\u21bb Syncing",
+    }[clean]
+    self.hyperliquid_sync_status_var.set(message or label)
+    _apply_hyperliquid_sync_status_colors(self)
+
+
+def _apply_hyperliquid_sync_status_colors(self: tk.Tk) -> None:
+    badge = getattr(self, "hyperliquid_sync_status_badge", None)
+    if badge is None:
+        return
+    state = getattr(self, "hyperliquid_sync_status_state", "failure")
+    colors = {
+        "success": ("#dcfce7", "#047857"),
+        "failure": ("#fee2e2", "#b91c1c"),
+        "working": ("#dbeafe", "#1d4ed8"),
+    }.get(state, ("#fee2e2", "#b91c1c"))
+    try:
+        badge.configure(bg=colors[0], fg=colors[1])
+    except tk.TclError:
+        return
+
+
 def _run_hyperliquid_ticket_action(
     self: tk.Tk,
     *,
@@ -986,17 +1082,13 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
         style="Subtle.TLabel",
         wraplength=1120,
     ).grid(row=0, column=0, sticky="w", padx=(0, 12))
+    _install_hyperliquid_sync_status_badge(header, self, row=0, column=1)
     ttk.Button(
         header,
         text="Sync Hyperliquid",
-        command=lambda: _run_workspace_action(
-            self,
-            venue="Hyperliquid",
-            preview_widget=self.hyperliquid_trading_preview_text,
-            command=_first_available_command(self, "sync_hyperliquid_account"),
-        ),
+        command=lambda: _run_hyperliquid_sync_action(self),
         style="Accent.TButton",
-    ).grid(row=0, column=1, sticky="e")
+    ).grid(row=0, column=2, sticky="e")
 
     workspace = _make_paned(parent, tk.HORIZONTAL)
     workspace.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
@@ -1201,13 +1293,6 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     _add_workspace_button(actions, row=2, column=1, text="Edit Order", command=hyperliquid_action("perp", "show_hyperliquid_order_edit_dialog"))
     _add_workspace_button(actions, row=2, column=2, text="Cancel Order", command=hyperliquid_action("perp", "cancel_selected_order", "cancel_hyperliquid_order_guarded"), style="Danger.TButton")
     _add_workspace_button(actions, row=3, column=0, text="LIVE Submit", command=hyperliquid_action("perp", "submit_selected_venue"), style="Danger.TButton", columnspan=3)
-
-    status = ttk.Frame(ticket, style="Panel.TFrame")
-    status.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(8, 0))
-    status.columnconfigure((0, 1, 2), weight=1)
-    ttk.Label(status, textvariable=self.hyperliquid_status_var, style="Chip.TLabel").grid(row=0, column=0, sticky="ew", padx=(0, 6))
-    ttk.Label(status, textvariable=self.schwab_verification_status_var, style="Chip.TLabel").grid(row=0, column=1, sticky="ew", padx=(0, 6))
-    ttk.Label(status, text="Venue locked: Hyperliquid", style="Chip.TLabel").grid(row=0, column=2, sticky="ew")
 
     _set_workspace_text(
         self.hyperliquid_trading_preview_text,
