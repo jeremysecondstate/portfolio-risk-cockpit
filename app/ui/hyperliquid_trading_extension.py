@@ -1598,7 +1598,20 @@ def _show_hyperliquid_perp_position_editor(self: tk.Tk) -> None:
     ttk.Label(fields, text="Amount", style="Subtle.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=5)
     ttk.Entry(fields, textvariable=amount_var).grid(row=0, column=1, sticky="ew", padx=(0, 14), pady=5)
     ttk.Label(fields, text="Limit / IOC price", style="Subtle.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 8), pady=5)
-    ttk.Entry(fields, textvariable=limit_var).grid(row=0, column=3, sticky="ew", pady=5)
+    limit_controls = ttk.Frame(fields, style="Panel.TFrame")
+    limit_controls.grid(row=0, column=3, sticky="ew", pady=5)
+    limit_controls.columnconfigure(0, weight=1)
+    ttk.Entry(limit_controls, textvariable=limit_var).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+
+    def _use_perp_mid() -> None:
+        try:
+            mid = _set_hyperliquid_perp_mid_price(coin, limit_var)
+            self.hyperliquid_status_var.set(f"Hyperliquid: {coin} perp mid ${mid:,.4f}")
+        except Exception as exc:
+            self.hyperliquid_status_var.set("Hyperliquid: perp mid failed")
+            messagebox.showerror("Hyperliquid perp mid failed", str(exc))
+
+    ttk.Button(limit_controls, text="Mid", command=_use_perp_mid, style="CompactAccent.TButton").grid(row=0, column=1, sticky="ew")
     ttk.Label(fields, text="TP price", style="Subtle.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=5)
     ttk.Entry(fields, textvariable=tp_var).grid(row=1, column=1, sticky="ew", padx=(0, 14), pady=5)
     ttk.Label(fields, text="SL price", style="Subtle.TLabel").grid(row=1, column=2, sticky="w", padx=(0, 8), pady=5)
@@ -2049,6 +2062,12 @@ def _lookup_hyperliquid_perp_mid(coin: str) -> float:
     if value is None:
         raise ValueError(f"No Hyperliquid perp mid-market price found for {normalized_coin}.")
     return float(value)
+
+
+def _set_hyperliquid_perp_mid_price(coin: str, target_var: tk.StringVar) -> float:
+    mid = _lookup_hyperliquid_perp_mid(coin)
+    target_var.set(_format_hyperliquid_size(mid))
+    return mid
 
 
 def _hyperliquid_cancel_coin_for_order(self: tk.Tk, order_id: str) -> str:

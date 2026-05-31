@@ -12,7 +12,7 @@ from app.brokers.hyperliquid.trading import (
     normalize_hyperliquid_trigger_ticket_for_wire,
 )
 from app.core.portfolio import Portfolio, Position
-from app.ui.hyperliquid_trading_extension import _market_close_limit_price, _normalize_edit_market, _reverse_order_size_for_same_opposite_position, _risk_reward, _selected_hyperliquid_order, normalize_hyperliquid_open_order
+from app.ui.hyperliquid_trading_extension import _market_close_limit_price, _normalize_edit_market, _reverse_order_size_for_same_opposite_position, _risk_reward, _selected_hyperliquid_order, _set_hyperliquid_perp_mid_price, normalize_hyperliquid_open_order
 from app.ui.hyperliquid_trading_extension import _current_hyperliquid_perp_position, _perp_position_pnl
 from app.ui.hyperliquid_submit_no_autosync_fix import _apply_ticket_leverage_if_needed, _attached_tpsl_tickets
 
@@ -169,6 +169,16 @@ class HyperliquidTradingTests(unittest.TestCase):
 
     def test_reverse_order_size_flips_to_same_size_opposite_position(self) -> None:
         self.assertEqual(_reverse_order_size_for_same_opposite_position(25.0), 50.0)
+
+    def test_position_editor_mid_button_uses_perp_mid_lookup(self) -> None:
+        target = _Var("")
+
+        with patch("app.ui.hyperliquid_trading_extension._lookup_hyperliquid_perp_mid", return_value=71.7105) as lookup:
+            mid = _set_hyperliquid_perp_mid_price("HYPE", target)  # type: ignore[arg-type]
+
+        self.assertEqual(mid, 71.7105)
+        self.assertEqual(target.get(), "71.7105")
+        lookup.assert_called_once_with("HYPE")
 
     def test_selected_order_does_not_auto_edit_wrong_order_when_id_is_stale(self) -> None:
         app = type(
