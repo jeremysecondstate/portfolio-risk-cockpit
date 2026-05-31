@@ -37,6 +37,7 @@ from app.ui.schwab_research_workspace_extension import (
     _source_status_text,
     selected_holding_symbol_from_values,
 )
+from app.ui.schwab_sync_report_extension import _is_temporary_schwab_provider_error, _schwab_account_refresh_failure_report
 
 
 def _sample_candles(count: int = 260) -> list[Candle]:
@@ -241,6 +242,14 @@ class SchwabResearchWorkspaceHelperTests(unittest.TestCase):
 
         self.assertIn("Schwab quote", output)
         self.assertIn("2026-05-29T12:00:00+00:00", output)
+
+    def test_schwab_http_500_is_treated_as_temporary_provider_failure(self) -> None:
+        exc = RuntimeError("Schwab account fetch returned HTTP 500: unexpected error")
+
+        self.assertTrue(_is_temporary_schwab_provider_error(exc))
+        report = _schwab_account_refresh_failure_report(exc)
+        self.assertIn("Kept the current local/cached portfolio visible", report)
+        self.assertIn("Did not submit", report)
 
 
 if __name__ == "__main__":

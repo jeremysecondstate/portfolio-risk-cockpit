@@ -10,6 +10,7 @@ from app.brokers.hyperliquid.client import (
     format_hyperliquid_snapshot,
     portfolio_from_hyperliquid_snapshot,
 )
+from app.ui.schwab_sync_report_extension import _is_temporary_schwab_provider_error
 
 
 HYPERLIQUID_ADDRESS_ENV_KEYS = ("HYPE_WALLET_ADDRESS", "HYPERLIQUID_USER_ADDRESS")
@@ -289,7 +290,7 @@ def _refresh_connected_portfolio(self: tk.Tk, automated: bool = False) -> None:
         if hyperliquid_error:
             failed.append("Hyperliquid")
         _set_refresh_status(self, "● auto-refresh failed" if automated else "● refresh failed", "RefreshDue.TLabel")
-        if not automated:
+        if not automated and not (schwab_error and _is_temporary_schwab_provider_error(schwab_error) and not hyperliquid_error):
             messagebox.showerror("Portfolio refresh incomplete", f"Could not refresh: {', '.join(failed)}")
         return
 
