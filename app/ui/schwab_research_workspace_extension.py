@@ -430,7 +430,7 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     move_scroll.grid(row=0, column=1, sticky="ns")
     move_tree.configure(yscrollcommand=move_scroll.set)
     frame.move_planner_tree = move_tree  # type: ignore[attr-defined]
-    frame.impact_bars = ScenarioImpactBars(frame, height=128)  # type: ignore[attr-defined]
+    frame.impact_bars = ScenarioImpactBars(frame, height=170)  # type: ignore[attr-defined]
     frame.impact_bars.grid(row=3, column=0, sticky="ew", pady=(0, 8))  # type: ignore[attr-defined]
     tree_box = ttk.Frame(frame, style="Panel.TFrame")
     tree_box.grid(row=4, column=0, sticky="ew")
@@ -461,6 +461,7 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     option_controls = ttk.Frame(option_box, style="Panel.TFrame")
     option_controls.grid(row=0, column=0, sticky="ew", pady=(0, 6))
     ttk.Button(option_controls, text="Run Option Scenario From Top Candidate", command=lambda app=self: _render_option_scenarios_from_top(app)).pack(side=tk.LEFT)
+    ttk.Button(option_controls, text="Load Chain", command=lambda app=self: _load_chain_from_research_tab(app)).pack(side=tk.LEFT, padx=(8, 0))
     option_tree = ttk.Treeview(option_box, columns=("move", "stock", "option", "combined", "impact", "read"), show="headings", height=6)
     for column, label, width in (
         ("move", "Underlying Move", 130),
@@ -478,6 +479,8 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     option_scroll = ttk.Scrollbar(option_box, orient=tk.VERTICAL, command=option_tree.yview)
     option_scroll.grid(row=1, column=1, sticky="ns")
     option_tree.configure(yscrollcommand=option_scroll.set)
+    option_tree.bind("<Double-1>", lambda _event, app=self: _load_chain_from_option_scenario_row(app), add="+")
+    option_tree.bind("<Return>", lambda _event, app=self: _load_chain_from_option_scenario_row(app), add="+")
     frame.option_scenario_tree = option_tree  # type: ignore[attr-defined]
     return frame
 
@@ -936,6 +939,12 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
     self.schwab_research_scenario_basis_var.set(scenario_basis)
     scenario_rows = build_scenario_rows(scenario_context, technical_scenario_moves(payload.context, payload.indicators))
     candidates = getattr(self, "schwab_research_option_candidates", []) or []
+    if not candidates:
+        rows_map = getattr(self, "schwab_option_chain_rows", {}) or {}
+        chain_rows = [row for row in rows_map.values() if isinstance(row, dict)]
+        if chain_rows:
+            candidates = suggest_option_candidates(chain_rows, payload.indicators, payload.context, macro_label=payload.decision.macro_backdrop.label, earnings_text=payload.earnings_text)
+            setattr(self, "schwab_research_option_candidates", candidates)
     top_candidate = next((item for item in candidates if item.option_type in {"call", "put"}), None)
     fundamental_verdict = build_fundamental_verdict(payload.fundamentals_text, payload.indicators, payload.decision.macro_backdrop.label)
     risk_plan = build_risk_plan(payload.indicators, payload.context, payload.decision.macro_backdrop.label, fundamental_verdict.verdict, top_candidate, max_risk)
@@ -1084,6 +1093,17 @@ def _load_chain_from_research_tab(self: tk.Tk) -> None:
     _render_options_strategy(self)
 
 
+def _load_chain_from_option_scenario_row(self: tk.Tk) -> None:
+    frame = getattr(self, "schwab_research_scenarios_frame", None)
+    if frame is None or not hasattr(frame, "option_scenario_tree"):
+        return
+    tree = frame.option_scenario_tree  # type: ignore[attr-defined]
+    row_id = tree.focus() or (tree.selection()[0] if tree.selection() else "")
+    values = tree.item(row_id, "values") if row_id else ()
+    if values and str(values[0]).lower().startswith("load chain"):
+        _load_chain_from_research_tab(self)
+
+
 def _selected_option_candidate(self: tk.Tk) -> OptionCandidate | None:
     frame = getattr(self, "schwab_research_options_frame", None)
     if frame is None:
@@ -1178,7 +1198,7 @@ def _render_option_scenarios_from_top(self: tk.Tk) -> None:
     candidates = getattr(self, "schwab_research_option_candidates", []) or []
     candidate = next((item for item in candidates if item.option_type in {"call", "put"}), None)
     if payload is None or candidate is None:
-        tree.insert("", tk.END, values=("Load chain", "--", "--", "--", "--", "Load the option chain to generate option candidates."))
+        tree.insert("", tk.END, iid="load_chain_row", values=("Load chain", "--", "--", "--", "--", "Double-click this row or use Load Chain above to generate option scenarios."))
         return
     for row in combined_option_scenarios(candidate, payload.context):
         tag = "positive" if row.combined_pnl > 0 else "negative" if row.combined_pnl < 0 else ""

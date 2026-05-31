@@ -264,7 +264,7 @@ def current_position_meaning(context: PortfolioSymbolContext) -> str:
     if context.is_held:
         down_5 = (context.last_price or 0.0) * -0.05 * context.quantity
         return f"You already own {context.quantity:g} shares, so a -5% move would cost about {_money(down_5)} before any options hedge."
-    return f"{context.symbol} is not currently held, so the signals describe a possible new trade rather than risk in an existing position."
+    return f"{context.symbol} is not currently held, so the priority is evaluating a small generated starter position unless the setup turns clearly bearish or event risk is flashing red."
 
 
 def suggest_option_candidates(
@@ -633,6 +633,9 @@ def build_risk_plan(
     elif candidate and "covered" in candidate.strategy.lower() and context.is_held:
         recommendation, status = "Covered call candidate", "mixed"
         reason_text = "Existing shares can support income, but upside is capped above the strike."
+    elif not context.is_held and agreement != "Bearish":
+        recommendation, status = "Consider starter", "mixed"
+        reason_text = "There is no current exposure; use the generated stock scenario size as a small starter candidate, but require confirmation because the setup is not fully green."
     elif macro_label == "Headwind":
         recommendation, status = "Watch", "mixed"
         reason_text = "Macro is fighting the setup; wait for confirmation instead of forcing premium risk."
@@ -642,6 +645,7 @@ def build_risk_plan(
     paired = candidate.strategy if candidate else "No option candidate loaded"
     moves = [
         ("Do nothing / watch", "Mixed setup or macro headwind.", "Avoids premium and bad entries.", "Can miss a fast breakout.", "Best when price is below confirmation."),
+        ("Starter stock position", "No current shares and risk is not flashing red.", "Gets exposure without using full size.", "Still has downside risk.", "Size from generated risk budget and technical stop."),
         ("Add shares", "Fundamentals strong and price confirms.", "Keeps payoff simple.", "Adds full downside exposure.", f"Use only above {_money(indicators.resistance)}."),
         ("Trim shares", "Position is large or support breaks.", "Reduces portfolio drawdown.", "Gives up rebound exposure.", f"Most relevant below {_money(support)}."),
         ("Buy protective put", "Held shares plus downside/event risk.", "Offsets some share losses.", "Premium can expire worthless.", "Insurance, not free protection."),

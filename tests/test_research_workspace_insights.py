@@ -153,7 +153,7 @@ class ResearchWorkspaceInsightTests(unittest.TestCase):
         watch = build_technical_narrative(_indicators(), _context(held=False), "Mixed")
 
         self.assertIn("-5% move", held.position_meaning)
-        self.assertIn("possible new trade", watch.position_meaning)
+        self.assertIn("small generated starter position", watch.position_meaning)
 
     def test_option_candidate_selection_by_setup(self) -> None:
         bullish = suggest_option_candidates(_chain(), _indicators(), _context(), macro_label="Tailwind")
@@ -163,6 +163,12 @@ class ResearchWorkspaceInsightTests(unittest.TestCase):
         self.assertTrue(any(candidate.option_type == "call" for candidate in bullish))
         self.assertTrue(any(candidate.option_type == "put" for candidate in bearish))
         self.assertEqual(mixed[0].strategy, "No-trade / wait")
+
+    def test_no_position_mixed_setup_considers_starter_stock_risk(self) -> None:
+        plan = build_risk_plan(_indicators("sideways", "neutral"), _context(held=False), "Headwind", "Mixed", None, 150.0)
+
+        self.assertEqual(plan.recommendation, "Consider starter")
+        self.assertTrue(any(row[0] == "Starter stock position" for row in plan.move_planner))
 
     def test_held_stock_suggests_hedge_or_covered_call(self) -> None:
         candidates = suggest_option_candidates(_chain(), _indicators("sideways", "neutral"), _context(held=True), macro_label="Headwind")
