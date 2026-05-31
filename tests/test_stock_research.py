@@ -37,7 +37,12 @@ from app.ui.schwab_research_workspace_extension import (
     _source_status_text,
     selected_holding_symbol_from_values,
 )
-from app.ui.schwab_sync_report_extension import _is_temporary_schwab_provider_error, _schwab_account_refresh_failure_report
+from app.ui.schwab_sync_report_extension import (
+    _is_temporary_schwab_provider_error,
+    _schwab_account_refresh_failure_report,
+    _schwab_reauthorization_required_report,
+    _should_force_schwab_reauthorization,
+)
 
 
 def _sample_candles(count: int = 260) -> list[Candle]:
@@ -243,14 +248,22 @@ class SchwabResearchWorkspaceHelperTests(unittest.TestCase):
         self.assertIn("Schwab quote", output)
         self.assertIn("2026-05-29T12:00:00+00:00", output)
 
-    def test_schwab_http_500_is_treated_as_temporary_provider_failure(self) -> None:
+    def test_schwab_http_500_forces_reauthorization_instead_of_token_loop(self) -> None:
         exc = RuntimeError("Schwab account fetch returned HTTP 500: unexpected error")
+
+        self.assertTrue(_should_force_schwab_reauthorization(exc))
+        self.assertFalse(_is_temporary_schwab_provider_error(exc))
+        report = _schwab_reauthorization_required_report(exc)
+        self.assertIn("Cleared the in-memory Schwab session", report)
+        self.assertIn("Opened the Schwab authorization page", report)
+
+    def test_schwab_temporary_outage_report_keeps_portfolio_safe(self) -> None:
+        exc = RuntimeError("Schwab account endpoint temporarily unavailable")
 
         self.assertTrue(_is_temporary_schwab_provider_error(exc))
         report = _schwab_account_refresh_failure_report(exc)
         self.assertIn("Kept the current local/cached portfolio visible", report)
         self.assertIn("Did not submit", report)
-        self.assertIn("authorization is still connected", report.lower())
 
 
 if __name__ == "__main__":
