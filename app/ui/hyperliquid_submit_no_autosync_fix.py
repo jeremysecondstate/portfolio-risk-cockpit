@@ -50,6 +50,7 @@ def _show_hyperliquid_perp_live_submit_no_autosync(self: tk.Tk) -> None:
         config = HyperliquidTradingConfig()
         self._set_preview_text(config.live_review_text(normalized_ticket))
         adapter = HyperliquidExecutionAdapter()
+        leverage_result = _apply_ticket_leverage_if_needed(self, adapter, normalized_ticket)
         result = adapter.submit(normalized_ticket)
         self.hyperliquid_status_var.set("Hyperliquid: submit attempted")
         _update_limit_price_if_needed(self, ticket, normalized_ticket)
@@ -68,6 +69,7 @@ def _show_hyperliquid_perp_live_submit_no_autosync(self: tk.Tk) -> None:
             "HYPERLIQUID LIVE SUBMIT RESULT\n"
             "==============================\n\n"
             f"{_price_adjustment_lines(ticket, normalized_ticket)}"
+            f"{_leverage_result_lines(leverage_result)}"
             "Parent order response:\n"
             f"{result}\n\n"
             f"{_child_tpsl_result_lines(child_tickets, child_result, child_error)}"
@@ -104,6 +106,33 @@ def _price_adjustment_lines(ticket, normalized_ticket) -> str:
         f"- Original limit: {format_hyperliquid_limit_price(ticket.limit_price)}\n"
         f"- Submitted limit: {format_hyperliquid_limit_price(normalized_ticket.limit_price)}\n\n"
     )
+
+
+def _apply_ticket_leverage_if_needed(self: tk.Tk, adapter: HyperliquidExecutionAdapter, ticket: HyperliquidOrderTicket) -> object | None:
+    if ticket.reduce_only:
+        return None
+    leverage = _optional_int(_var_text(self, "hyperliquid_leverage_var"))
+    if leverage is None:
+        return None
+    margin_mode = (_var_text(self, "hyperliquid_margin_mode_var") or "Cross").strip().lower()
+    return adapter.update_leverage(ticket.coin, leverage, is_cross=margin_mode != "isolated")
+
+
+def _optional_int(raw: str) -> int | None:
+    text = str(raw or "").strip().lower().replace("x", "")
+    if not text:
+        return None
+    try:
+        value = int(float(text))
+    except ValueError:
+        return None
+    return value if value >= 1 else None
+
+
+def _leverage_result_lines(result: object | None) -> str:
+    if result is None:
+        return ""
+    return f"Leverage update before parent order:\n{result}\n\n"
 
 
 def _attach_tpsl_enabled(self: tk.Tk) -> bool:

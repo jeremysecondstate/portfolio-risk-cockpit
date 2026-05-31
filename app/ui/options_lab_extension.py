@@ -291,6 +291,8 @@ def _set_workspace_text(widget: tk.Text, content: str) -> None:
 
 def _bind_workspace_holdings_click(self: tk.Tk, table: ttk.Treeview, venue: str) -> None:
     table.bind("<ButtonRelease-1>", lambda event, app=self, source=table, selected_venue=venue: _load_workspace_ticket_from_holding(app, source, event, selected_venue), add="+")
+    if venue == "Hyperliquid":
+        table.bind("<Double-1>", lambda event, app=self, source=table: _open_editor_for_clicked_hyperliquid_perp_position(app, source, event), add="+")
     table.bind("<Motion>", lambda event, source=table: source.configure(cursor="hand2" if source.identify_row(event.y) else ""), add="+")
     table.bind("<Leave>", lambda _event, source=table: source.configure(cursor=""), add="+")
 
@@ -432,6 +434,30 @@ def _open_tpsl_for_selected_hyperliquid_perp_position(self: tk.Tk) -> None:
         )
     except Exception as exc:
         messagebox.showinfo("TP/SL unavailable", str(exc))
+
+
+def _open_editor_for_selected_hyperliquid_perp_position(self: tk.Tk) -> None:
+    try:
+        if not _target_selected_hyperliquid_perp_position(self):
+            return
+        command = _first_available_command(self, "show_hyperliquid_perp_position_editor")
+        _run_hyperliquid_ticket_action(
+            self,
+            ticket_kind="perp",
+            preview_widget=self.hyperliquid_trading_preview_text,
+            command=command,
+        )
+    except Exception as exc:
+        messagebox.showinfo("Position editor unavailable", str(exc))
+
+
+def _open_editor_for_clicked_hyperliquid_perp_position(self: tk.Tk, table: ttk.Treeview, event: tk.Event) -> None:
+    row_id = table.identify_row(event.y)
+    if not row_id:
+        return
+    table.selection_set(row_id)
+    _load_workspace_ticket_from_holding(self, table, event, "Hyperliquid")
+    _open_editor_for_selected_hyperliquid_perp_position(self)
 
 
 def _workspace_ticket_symbol(symbol: str) -> str:
@@ -1003,8 +1029,8 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     hyperliquid_position_actions.columnconfigure((0, 1, 2), weight=1)
     ttk.Button(
         hyperliquid_position_actions,
-        text="Use Selected Position",
-        command=lambda: _target_selected_hyperliquid_perp_position(self),
+        text="Edit Selected Position",
+        command=lambda: _open_editor_for_selected_hyperliquid_perp_position(self),
     ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
     ttk.Button(
         hyperliquid_position_actions,
@@ -1169,7 +1195,7 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     _add_workspace_button(actions, row=0, column=1, text="Perp What-If", command=hyperliquid_workspace_action("perp", "hyperliquid_crypto_scenarios_frame", "run_hyperliquid_perp_what_if"), style="Accent.TButton")
     _add_workspace_button(actions, row=0, column=2, text="Preview Perp Ticket", command=hyperliquid_action("perp", "preview_hyperliquid_ticket", "preview_order"))
     _add_workspace_button(actions, row=1, column=0, text="TP/SL", command=hyperliquid_action("perp", "show_hyperliquid_position_tpsl_dialog"))
-    _add_workspace_button(actions, row=1, column=1, text="Apply Leverage", command=hyperliquid_action("perp", "apply_hyperliquid_leverage_guarded"))
+    _add_workspace_button(actions, row=1, column=1, text="Edit Position", command=hyperliquid_action("perp", "show_hyperliquid_perp_position_editor"))
     _add_workspace_button(actions, row=1, column=2, text="Position Size", command=hyperliquid_action("perp", "show_hyperliquid_perp_position_size", "show_position_size"))
     _add_workspace_button(actions, row=2, column=0, text="Open Orders", command=hyperliquid_action("perp", "load_selected_open_orders_only", "load_hyperliquid_open_orders"))
     _add_workspace_button(actions, row=2, column=1, text="Edit Order", command=hyperliquid_action("perp", "show_hyperliquid_order_edit_dialog"))

@@ -68,6 +68,7 @@ def install_hyperliquid_trading_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls.show_hyperliquid_position_tpsl_dialog = _show_hyperliquid_position_tpsl_dialog  # type: ignore[attr-defined]
     app_cls.place_hyperliquid_position_tpsl_guarded = _place_hyperliquid_position_tpsl_guarded  # type: ignore[attr-defined]
     app_cls.show_hyperliquid_perp_position_size = _show_hyperliquid_perp_position_size  # type: ignore[attr-defined]
+    app_cls.show_hyperliquid_perp_position_editor = _show_hyperliquid_perp_position_editor  # type: ignore[attr-defined]
     app_cls.use_hyperliquid_perp_position = _use_hyperliquid_perp_position  # type: ignore[attr-defined]
     app_cls.apply_hyperliquid_leverage_guarded = _apply_hyperliquid_leverage_guarded  # type: ignore[attr-defined]
     app_cls.load_selected_recent_orders = _load_selected_recent_orders  # type: ignore[attr-defined]
@@ -1540,6 +1541,217 @@ def _show_hyperliquid_perp_position_size(self: tk.Tk) -> None:
     )
 
 
+def _show_hyperliquid_perp_position_editor(self: tk.Tk) -> None:
+    _ensure_hyperliquid_vars(self)
+    self.trade_venue_var.set("Hyperliquid")
+    try:
+        coin = normalize_hyperliquid_coin(self.hyperliquid_coin_var.get().strip() or self.symbol_var.get().strip())
+        position, is_short = _current_hyperliquid_perp_position(self, coin)
+    except Exception as exc:
+        messagebox.showerror("Hyperliquid position edit blocked", str(exc))
+        return
+
+    mark = position.last_price or position.average_cost
+    try:
+        mark = _lookup_hyperliquid_perp_mid(coin)
+    except Exception:
+        pass
+
+    entry = position.average_cost or mark
+    qty = abs(float(getattr(position, "quantity", 0.0) or 0.0))
+    direction = "SHORT" if is_short else "LONG"
+    close_side = "buy" if is_short else "sell"
+    reverse_side = close_side
+
+    dialog = tk.Toplevel(self)
+    dialog.title(f"Edit Hyperliquid Perp Position - {coin} {direction}")
+    dialog.transient(self)
+    dialog.resizable(False, False)
+
+    shell = ttk.Frame(dialog, style="Panel.TFrame", padding=14)
+    shell.pack(fill=tk.BOTH, expand=True)
+    shell.columnconfigure(0, weight=1)
+
+    summary = ttk.LabelFrame(shell, text="Position", style="Card.TLabelframe")
+    summary.grid(row=0, column=0, sticky="ew")
+    for column in range(4):
+        summary.columnconfigure(column, weight=1)
+    _summary_cell(summary, 0, 0, "Coin", coin)
+    _summary_cell(summary, 0, 1, "Side", direction)
+    _summary_cell(summary, 0, 2, "Size", f"{qty:g}")
+    _summary_cell(summary, 0, 3, "Close Side", close_side.upper())
+    _summary_cell(summary, 1, 0, "Entry", f"${entry:,.4f}")
+    _summary_cell(summary, 1, 1, "Mark", f"${mark:,.4f}")
+    _summary_cell(summary, 1, 2, "Notional", f"${qty * mark:,.2f}")
+    _summary_cell(summary, 1, 3, "Open P&L", _signed_money(_perp_position_pnl(entry, mark, qty, is_short)))
+
+    fields = ttk.LabelFrame(shell, text="Ticket Values", style="Card.TLabelframe")
+    fields.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+    fields.columnconfigure(1, weight=1)
+    fields.columnconfigure(3, weight=1)
+
+    amount_var = tk.StringVar(value=_format_hyperliquid_size(qty))
+    limit_var = tk.StringVar(value=_format_hyperliquid_size(mark))
+    tp_var = tk.StringVar(value=getattr(self, "hyperliquid_target_price_var", tk.StringVar(value="")).get())
+    sl_var = tk.StringVar(value=(getattr(self, "hyperliquid_bad_price_var", tk.StringVar(value="")).get() or getattr(self, "stop_price_var", tk.StringVar(value="")).get()))
+
+    ttk.Label(fields, text="Amount", style="Subtle.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=5)
+    ttk.Entry(fields, textvariable=amount_var).grid(row=0, column=1, sticky="ew", padx=(0, 14), pady=5)
+    ttk.Label(fields, text="Limit / IOC price", style="Subtle.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 8), pady=5)
+    ttk.Entry(fields, textvariable=limit_var).grid(row=0, column=3, sticky="ew", pady=5)
+    ttk.Label(fields, text="TP price", style="Subtle.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=5)
+    ttk.Entry(fields, textvariable=tp_var).grid(row=1, column=1, sticky="ew", padx=(0, 14), pady=5)
+    ttk.Label(fields, text="SL price", style="Subtle.TLabel").grid(row=1, column=2, sticky="w", padx=(0, 8), pady=5)
+    ttk.Entry(fields, textvariable=sl_var).grid(row=1, column=3, sticky="ew", pady=5)
+
+    actions = ttk.LabelFrame(shell, text="Position Actions", style="Card.TLabelframe")
+    actions.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+    actions.columnconfigure((0, 1, 2), weight=1)
+
+    def _prepare_close(*, tif: str, price_multiplier: float = 1.0) -> None:
+        try:
+            close_size = _positive_dialog_float(amount_var.get(), "Amount")
+            close_price = _positive_dialog_float(limit_var.get(), "Limit / IOC price") * price_multiplier
+            _prepare_hyperliquid_perp_ticket(
+                self,
+                coin=coin,
+                side=close_side,
+                size=close_size,
+                limit_price=close_price,
+                tif=tif,
+                reduce_only=True,
+                tp_price=tp_var.get(),
+                sl_price=sl_var.get(),
+                note=f"Prepared reduce-only {coin} {direction.lower()} close ticket. Review it, then use LIVE Submit.",
+            )
+            dialog.destroy()
+        except Exception as exc:
+            messagebox.showerror("Hyperliquid position edit blocked", str(exc))
+
+    def _prepare_reverse() -> None:
+        try:
+            reverse_size = _positive_dialog_float(amount_var.get(), "Amount") * 2.0
+            reverse_price = _positive_dialog_float(limit_var.get(), "Limit / IOC price")
+            _prepare_hyperliquid_perp_ticket(
+                self,
+                coin=coin,
+                side=reverse_side,
+                size=reverse_size,
+                limit_price=reverse_price,
+                tif="Gtc",
+                reduce_only=False,
+                tp_price=tp_var.get(),
+                sl_price=sl_var.get(),
+                note=(
+                    f"Prepared {coin} reverse ticket sized at 2x the selected amount. "
+                    "This is not reduce-only; review carefully before LIVE Submit."
+                ),
+            )
+            dialog.destroy()
+        except Exception as exc:
+            messagebox.showerror("Hyperliquid position edit blocked", str(exc))
+
+    def _open_tpsl() -> None:
+        self.hyperliquid_coin_var.set(coin)
+        self.symbol_var.set(coin)
+        self.hyperliquid_target_price_var.set(tp_var.get())
+        self.hyperliquid_bad_price_var.set(sl_var.get())
+        self.stop_price_var.set(sl_var.get())
+        dialog.destroy()
+        self.show_hyperliquid_position_tpsl_dialog()
+
+    ttk.Button(actions, text="Prepare Limit Close", command=lambda: _prepare_close(tif="Gtc")).grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=(0, 6))
+    ttk.Button(actions, text="Prepare IOC Close", command=lambda: _prepare_close(tif="Ioc", price_multiplier=(1.01 if is_short else 0.99))).grid(row=0, column=1, sticky="ew", padx=(0, 6), pady=(0, 6))
+    ttk.Button(actions, text="TP/SL", command=_open_tpsl, style="Accent.TButton").grid(row=0, column=2, sticky="ew", pady=(0, 6))
+    ttk.Button(actions, text="Prepare Reverse", command=_prepare_reverse).grid(row=1, column=0, sticky="ew", padx=(0, 6))
+    ttk.Button(actions, text="Position Size", command=lambda: (dialog.destroy(), self.show_hyperliquid_perp_position_size())).grid(row=1, column=1, sticky="ew", padx=(0, 6))
+    ttk.Button(actions, text="Close", command=dialog.destroy).grid(row=1, column=2, sticky="ew")
+
+    note = ttk.Label(
+        shell,
+        text=(
+            "Position actions do not need an open-order OID. Close and reverse prepare the perp ticket; "
+            "TP/SL opens the reduce-only position TP/SL flow. Use LIVE Submit only after reviewing the prepared ticket."
+        ),
+        style="Subtle.TLabel",
+        wraplength=620,
+    )
+    note.grid(row=3, column=0, sticky="w", pady=(10, 0))
+
+
+def _positive_dialog_float(raw: object, label: str) -> float:
+    try:
+        value = float(str(raw).strip().replace(",", ""))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a number.") from exc
+    if value <= 0:
+        raise ValueError(f"{label} must be positive.")
+    return value
+
+
+def _prepare_hyperliquid_perp_ticket(
+    self: tk.Tk,
+    *,
+    coin: str,
+    side: str,
+    size: float,
+    limit_price: float,
+    tif: str,
+    reduce_only: bool,
+    tp_price: str,
+    sl_price: str,
+    note: str,
+) -> None:
+    _ensure_hyperliquid_vars(self)
+    self.trade_venue_var.set("Hyperliquid")
+    self.hyperliquid_coin_var.set(coin)
+    self.symbol_var.set(coin)
+    self.side_var.set(side)
+    self.quantity_var.set(_format_hyperliquid_size(size))
+    self.limit_price_var.set(_format_hyperliquid_size(limit_price))
+    self.hyperliquid_tif_var.set(tif)
+    self.hyperliquid_reduce_only_var.set(reduce_only)
+    self.hyperliquid_target_price_var.set(str(tp_price).strip())
+    self.hyperliquid_bad_price_var.set(str(sl_price).strip())
+    self.stop_price_var.set(str(sl_price).strip())
+    if hasattr(self, "hyperliquid_workspace_active_ticket_var"):
+        self.hyperliquid_workspace_active_ticket_var.set("perp")
+    if hasattr(self, "hyperliquid_perp_coin_var"):
+        self.hyperliquid_perp_coin_var.set(coin)
+    if hasattr(self, "hyperliquid_perp_symbol_var"):
+        self.hyperliquid_perp_symbol_var.set(coin)
+    if hasattr(self, "hyperliquid_perp_side_var"):
+        self.hyperliquid_perp_side_var.set(side)
+    if hasattr(self, "hyperliquid_perp_quantity_var"):
+        self.hyperliquid_perp_quantity_var.set(_format_hyperliquid_size(size))
+    if hasattr(self, "hyperliquid_perp_limit_price_var"):
+        self.hyperliquid_perp_limit_price_var.set(_format_hyperliquid_size(limit_price))
+    if hasattr(self, "hyperliquid_perp_tif_var"):
+        self.hyperliquid_perp_tif_var.set(tif)
+    if hasattr(self, "hyperliquid_perp_reduce_only_var"):
+        self.hyperliquid_perp_reduce_only_var.set(reduce_only)
+    if hasattr(self, "hyperliquid_perp_target_price_var"):
+        self.hyperliquid_perp_target_price_var.set(str(tp_price).strip())
+    if hasattr(self, "hyperliquid_perp_stop_price_var"):
+        self.hyperliquid_perp_stop_price_var.set(str(sl_price).strip())
+
+    self.hyperliquid_status_var.set(f"Hyperliquid: prepared {coin} position action")
+    self._set_preview_text(
+        "HYPERLIQUID PERP POSITION ACTION PREPARED\n"
+        "=========================================\n\n"
+        f"{note}\n\n"
+        f"Coin: {coin}\n"
+        f"Side: {side.upper()}\n"
+        f"Size: {size:g}\n"
+        f"Limit price: ${limit_price:,.4f}\n"
+        f"TIF: {tif}\n"
+        f"Reduce-only: {'yes' if reduce_only else 'no'}\n"
+        f"TP price field: {str(tp_price).strip() or '--'}\n"
+        f"SL price field: {str(sl_price).strip() or '--'}\n\n"
+        "No order was submitted. Use Preview Perp Ticket or LIVE Submit after checking the ticket."
+    )
+
+
 def _use_hyperliquid_perp_position(self: tk.Tk, raw_coin: str | None = None) -> None:
     _ensure_hyperliquid_vars(self)
     self.trade_venue_var.set("Hyperliquid")
@@ -1584,7 +1796,7 @@ def _use_hyperliquid_perp_position(self: tk.Tk, raw_coin: str | None = None) -> 
         "What this means\n"
         "- The perp ticket is now scoped to this position.\n"
         "- TP/SL will create new reduce-only trigger orders for this position if no matching open TP/SL orders exist.\n"
-        "- Edit Order still requires selecting an actual open order row; a position by itself has no order ID."
+        "- Edit Position works from the synced position row and does not need an open-order ID."
     )
 
 

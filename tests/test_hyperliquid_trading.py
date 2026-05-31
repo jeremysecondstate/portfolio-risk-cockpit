@@ -14,7 +14,7 @@ from app.brokers.hyperliquid.trading import (
 from app.core.portfolio import Portfolio, Position
 from app.ui.hyperliquid_trading_extension import _normalize_edit_market, _risk_reward, _selected_hyperliquid_order, normalize_hyperliquid_open_order
 from app.ui.hyperliquid_trading_extension import _current_hyperliquid_perp_position, _perp_position_pnl
-from app.ui.hyperliquid_submit_no_autosync_fix import _attached_tpsl_tickets
+from app.ui.hyperliquid_submit_no_autosync_fix import _apply_ticket_leverage_if_needed, _attached_tpsl_tickets
 
 
 class _Broker:
@@ -190,6 +190,36 @@ class HyperliquidTradingTests(unittest.TestCase):
 
         self.assertEqual(result, {"ok": True})
         update.assert_called_once_with("ZEC", 10, is_cross=True)
+
+    def test_live_submit_applies_ticket_leverage_for_non_reduce_only_perp(self) -> None:
+        app = type(
+            "App",
+            (),
+            {
+                "hyperliquid_leverage_var": _Var("10"),
+                "hyperliquid_margin_mode_var": _Var("Isolated"),
+            },
+        )()
+        adapter = type("Adapter", (), {"update_leverage": lambda self, coin, leverage, *, is_cross: (coin, leverage, is_cross)})()
+        ticket = HyperliquidOrderTicket("ZEC", is_buy=False, size=5, limit_price=512.65, tif="Gtc")
+
+        result = _apply_ticket_leverage_if_needed(app, adapter, ticket)  # type: ignore[arg-type]
+
+        self.assertEqual(result, ("ZEC", 10, False))
+
+    def test_live_submit_skips_ticket_leverage_for_reduce_only_close(self) -> None:
+        app = type(
+            "App",
+            (),
+            {
+                "hyperliquid_leverage_var": _Var("10"),
+                "hyperliquid_margin_mode_var": _Var("Cross"),
+            },
+        )()
+        adapter = type("Adapter", (), {"update_leverage": lambda self, coin, leverage, *, is_cross: self.fail("should not update leverage")})()
+        ticket = HyperliquidOrderTicket("ZEC", is_buy=True, size=5, limit_price=512.65, tif="Gtc", reduce_only=True)
+
+        self.assertIsNone(_apply_ticket_leverage_if_needed(app, adapter, ticket))  # type: ignore[arg-type]
 
     def test_attached_tpsl_creates_short_stop_loss_child_order(self) -> None:
         app = type(
