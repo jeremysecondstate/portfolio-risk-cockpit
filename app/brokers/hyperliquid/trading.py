@@ -147,7 +147,7 @@ class HyperliquidTradingConfig:
             raise ValueError("Hyperliquid size must be positive.")
         if ticket.limit_price <= 0:
             raise ValueError("Hyperliquid limit price must be positive.")
-        if ticket.notional > self.max_live_notional:
+        if not ticket.reduce_only and ticket.notional > self.max_live_notional:
             raise PermissionError(
                 f"Estimated notional ${ticket.notional:,.2f} exceeds "
                 f"HYPERLIQUID_MAX_LIVE_ORDER_DOLLARS=${self.max_live_notional:,.2f}."

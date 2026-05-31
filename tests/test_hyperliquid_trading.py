@@ -12,7 +12,7 @@ from app.brokers.hyperliquid.trading import (
     normalize_hyperliquid_trigger_ticket_for_wire,
 )
 from app.core.portfolio import Portfolio, Position
-from app.ui.hyperliquid_trading_extension import _normalize_edit_market, _risk_reward, _selected_hyperliquid_order, normalize_hyperliquid_open_order
+from app.ui.hyperliquid_trading_extension import _market_close_limit_price, _normalize_edit_market, _risk_reward, _selected_hyperliquid_order, normalize_hyperliquid_open_order
 from app.ui.hyperliquid_trading_extension import _current_hyperliquid_perp_position, _perp_position_pnl
 from app.ui.hyperliquid_submit_no_autosync_fix import _apply_ticket_leverage_if_needed, _attached_tpsl_tickets
 
@@ -163,6 +163,10 @@ class HyperliquidTradingTests(unittest.TestCase):
         self.assertEqual(_risk_reward(0.0, -50.0), "n/a - TP must be profitable and SL must be a loss")
         self.assertEqual(_risk_reward(50.0, 10.0), "n/a - TP must be profitable and SL must be a loss")
 
+    def test_market_close_limit_price_crosses_the_book(self) -> None:
+        self.assertAlmostEqual(_market_close_limit_price(100.0, is_short=True), 101.0)
+        self.assertAlmostEqual(_market_close_limit_price(100.0, is_short=False), 99.0)
+
     def test_selected_order_does_not_auto_edit_wrong_order_when_id_is_stale(self) -> None:
         app = type(
             "App",
@@ -220,6 +224,21 @@ class HyperliquidTradingTests(unittest.TestCase):
         ticket = HyperliquidOrderTicket("ZEC", is_buy=True, size=5, limit_price=512.65, tif="Gtc", reduce_only=True)
 
         self.assertIsNone(_apply_ticket_leverage_if_needed(app, adapter, ticket))  # type: ignore[arg-type]
+
+    def test_reduce_only_close_is_not_blocked_by_new_trade_notional_cap(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "HYPE_WALLET_ADDRESS": "0x0000000000000000000000000000000000000000",
+                "HYPE_API_ADDRESS": "0x0000000000000000000000000000000000000001",
+                "HYPE_API_SECRET": "not-a-real-secret",
+                "HYPERLIQUID_ENABLE_LIVE_ORDERS": "true",
+                "HYPERLIQUID_MAX_LIVE_ORDER_DOLLARS": "500",
+            },
+        ):
+            HyperliquidTradingConfig().validate_for_live(
+                HyperliquidOrderTicket("ZEC", is_buy=True, size=5, limit_price=512.65, tif="Ioc", reduce_only=True)
+            )
 
     def test_attached_tpsl_creates_short_stop_loss_child_order(self) -> None:
         app = type(

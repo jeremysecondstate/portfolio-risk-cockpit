@@ -1651,6 +1651,37 @@ def _show_hyperliquid_perp_position_editor(self: tk.Tk) -> None:
         except Exception as exc:
             messagebox.showerror("Hyperliquid position edit blocked", str(exc))
 
+    def _market_close() -> None:
+        try:
+            close_size = _positive_dialog_float(amount_var.get(), "Amount")
+            base_price = _positive_dialog_float(limit_var.get(), "Limit / IOC price")
+            close_price = _market_close_limit_price(base_price, is_short)
+            ticket = HyperliquidOrderTicket(
+                coin=coin,
+                is_buy=close_side == "buy",
+                size=close_size,
+                limit_price=close_price,
+                tif="Ioc",
+                reduce_only=True,
+            )
+            result = HyperliquidExecutionAdapter().submit(ticket)
+            self.hyperliquid_status_var.set(f"Hyperliquid: {coin} market close sent")
+            self._set_preview_text(
+                "HYPERLIQUID MARKET CLOSE RESULT\n"
+                "===============================\n\n"
+                f"Coin: {coin}\n"
+                f"Position: {direction} {qty:g}\n"
+                f"Submitted: {ticket.side_label} reduce-only {ticket.size:g} {coin}\n"
+                f"TIF: IOC\n"
+                f"Aggressive limit used for market-style close: ${ticket.limit_price:,.4f}\n\n"
+                f"Response:\n{result}\n\n"
+                "No automatic portfolio sync was run. Use Sync Hyperliquid to refresh balances and positions."
+            )
+            dialog.destroy()
+        except Exception as exc:
+            self.hyperliquid_status_var.set("Hyperliquid: market close blocked")
+            messagebox.showerror("Hyperliquid market close blocked", str(exc))
+
     def _open_tpsl() -> None:
         self.hyperliquid_coin_var.set(coin)
         self.symbol_var.set(coin)
@@ -1665,13 +1696,13 @@ def _show_hyperliquid_perp_position_editor(self: tk.Tk) -> None:
     ttk.Button(actions, text="TP/SL", command=_open_tpsl, style="Accent.TButton").grid(row=0, column=2, sticky="ew", pady=(0, 6))
     ttk.Button(actions, text="Prepare Reverse", command=_prepare_reverse).grid(row=1, column=0, sticky="ew", padx=(0, 6))
     ttk.Button(actions, text="Position Size", command=lambda: (dialog.destroy(), self.show_hyperliquid_perp_position_size())).grid(row=1, column=1, sticky="ew", padx=(0, 6))
-    ttk.Button(actions, text="Close", command=dialog.destroy).grid(row=1, column=2, sticky="ew")
+    ttk.Button(actions, text="Market Close", command=_market_close, style="CompactDanger.TButton").grid(row=1, column=2, sticky="ew")
 
     note = ttk.Label(
         shell,
         text=(
-            "Position actions do not need an open-order OID. Close and reverse prepare the perp ticket; "
-            "TP/SL opens the reduce-only position TP/SL flow. Use LIVE Submit only after reviewing the prepared ticket."
+            "Position actions do not need an open-order OID. Market Close sends a reduce-only IOC close immediately. "
+            "Limit close and reverse only prepare the ticket for review; TP/SL opens the reduce-only position TP/SL flow."
         ),
         style="Subtle.TLabel",
         wraplength=620,
@@ -1687,6 +1718,12 @@ def _positive_dialog_float(raw: object, label: str) -> float:
     if value <= 0:
         raise ValueError(f"{label} must be positive.")
     return value
+
+
+def _market_close_limit_price(base_price: float, is_short: bool) -> float:
+    if base_price <= 0:
+        raise ValueError("Market close price basis must be positive.")
+    return base_price * (1.01 if is_short else 0.99)
 
 
 def _prepare_hyperliquid_perp_ticket(
