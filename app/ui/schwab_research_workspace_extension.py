@@ -856,6 +856,8 @@ def _render_technicals(self: tk.Tk, payload: _ResearchPayload) -> None:
             _synthetic_badge("Indicator Agreement", narrative.indicator_agreement, narrative.agreement_status, narrative.agreement_explanation),
         ],
         columns=5,
+        card_height=112,
+        prominent_height=112,
     )
     frame.bull_meter.set_score(decision.technical_score, mode="direction", label=f"Bullishness: {direction_strength_label(decision.technical_score)} ({decision.technical_score:.0f})")  # type: ignore[attr-defined]
     frame.momentum_meter.set_score(decision.momentum_score, mode="direction", label=f"Momentum: {direction_strength_label(decision.momentum_score)} ({decision.momentum_score:.0f})")  # type: ignore[attr-defined]
