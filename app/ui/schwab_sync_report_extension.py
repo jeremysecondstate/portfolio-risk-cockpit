@@ -28,7 +28,7 @@ def _connect_schwab_with_report(self: tk.Tk) -> None:
         self._set_preview_text(report)
     except Exception as exc:
         if _is_temporary_schwab_provider_error(exc):
-            self.schwab_status_var.set("Schwab session: connected; account refresh unavailable")
+            self.schwab_status_var.set("Schwab session: connected; retry account sync")
             self._set_preview_text(_schwab_account_refresh_failure_report(exc))
             return
         self.schwab_session = None
@@ -46,7 +46,7 @@ def _refresh_schwab_account_with_report(self: tk.Tk) -> None:
         self._set_preview_text(report)
     except Exception as exc:
         if _is_temporary_schwab_provider_error(exc):
-            self.schwab_status_var.set("Schwab session: connected; account refresh unavailable")
+            self.schwab_status_var.set("Schwab session: connected; retry account sync")
             self._set_preview_text(_schwab_account_refresh_failure_report(exc))
             return
         messagebox.showerror("Schwab account refresh failed", str(exc))
@@ -73,13 +73,13 @@ def _is_temporary_schwab_provider_error(exc: Exception) -> bool:
 
 def _schwab_account_refresh_failure_report(exc: Exception) -> str:
     return (
-        "SCHWAB ACCOUNT REFRESH UNAVAILABLE\n"
-        "==================================\n\n"
-        "Schwab returned a temporary server-side error while the app tried to fetch balances and positions.\n\n"
+        "SCHWAB AUTH CONNECTED; ACCOUNT SYNC NEEDS RETRY\n"
+        "===============================================\n\n"
+        "Schwab authorization is still connected. The failure is from Schwab's balances/positions endpoint, not the login step.\n\n"
         f"Provider response: {exc}\n\n"
         "What the app did:\n"
         "- Kept the current local/cached portfolio visible.\n"
         "- Did not submit, preview, replace, or cancel any order.\n"
-        "- Left the Schwab session connected so you can retry without resetting login.\n\n"
-        "Next step: wait a moment and use Sync Schwab / Refresh Portfolio again. If Schwab keeps returning HTTP 500, this is usually a provider-side account endpoint outage rather than a ticket problem."
+        "- Left the Schwab session connected so the next Sync Schwab click retries the account fetch directly.\n\n"
+        "Next step: click Sync Schwab again. If Schwab keeps returning HTTP 500, this is usually a Schwab account endpoint outage rather than a ticket or authorization problem."
     )

@@ -250,6 +250,7 @@ class SchwabResearchWorkspaceHelperTests(unittest.TestCase):
         report = _schwab_account_refresh_failure_report(exc)
         self.assertIn("Kept the current local/cached portfolio visible", report)
         self.assertIn("Did not submit", report)
+        self.assertIn("authorization is still connected", report.lower())
 
 
 if __name__ == "__main__":
