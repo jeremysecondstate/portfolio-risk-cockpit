@@ -1134,8 +1134,7 @@ def _show_selected_option_candidate(self: tk.Tk) -> None:
         scenario_tree.delete(row_id)
     if context is not None:
         scenario_rows = combined_option_scenarios(candidate, context, moves=(-0.10, -0.05, -0.03, -0.02, 0.0, 0.02, 0.03, 0.05, 0.10))
-        max_abs = max((abs(row.combined_pnl) for row in scenario_rows), default=1.0)
-        frame.candidate_bars.set_rows([(row.move_label, (row.combined_pnl / max_abs) * 100, _money(row.combined_pnl)) for row in scenario_rows])  # type: ignore[attr-defined]
+        frame.candidate_bars.set_rows(_normalized_candidate_bar_rows(scenario_rows))  # type: ignore[attr-defined]
         for row in scenario_rows:
             tag = "positive" if row.combined_pnl > 0 else "negative" if row.combined_pnl < 0 else ""
             scenario_tree.insert(
@@ -1150,6 +1149,18 @@ def _show_selected_option_candidate(self: tk.Tk) -> None:
         lines = [f"{candidate.group}: {candidate.strategy}", "Run analysis to see combined stock + option scenarios."]
     lines.extend(["", "Use This Option fills the existing options ticket only. It does not submit, preview, or stage an order."])
     _set_research_text(frame.detail_text, "\n".join(lines))  # type: ignore[attr-defined]
+
+
+def _normalized_candidate_bar_rows(scenario_rows: list[Any]) -> list[tuple[str, float, str]]:
+    max_abs = max(max((abs(float(getattr(row, "combined_pnl", 0.0) or 0.0)) for row in scenario_rows), default=0.0), 0.0001)
+    return [
+        (
+            str(getattr(row, "move_label", "")),
+            (float(getattr(row, "combined_pnl", 0.0) or 0.0) / max_abs) * 100,
+            _money(float(getattr(row, "combined_pnl", 0.0) or 0.0)),
+        )
+        for row in scenario_rows
+    ]
 
 
 def _use_selected_research_option(self: tk.Tk) -> None:

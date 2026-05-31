@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -36,6 +37,7 @@ from app.analytics.technical_analysis import Candle
 from app.core.portfolio import Portfolio, Position
 from app.ui.schwab_research_workspace_extension import (
     _fetch_sec_layers,
+    _normalized_candidate_bar_rows,
     _source_status_text,
     selected_holding_symbol_from_values,
 )
@@ -328,6 +330,17 @@ class SchwabResearchWorkspaceHelperTests(unittest.TestCase):
 
         self.assertIn("Schwab quote", output)
         self.assertIn("2026-05-29T12:00:00+00:00", output)
+
+    def test_zero_option_scenario_bars_do_not_divide_by_zero(self) -> None:
+        rows = [
+            SimpleNamespace(move_label="-5%", combined_pnl=0.0),
+            SimpleNamespace(move_label="+5%", combined_pnl=0.0),
+        ]
+
+        bars = _normalized_candidate_bar_rows(rows)
+
+        self.assertEqual([row[1] for row in bars], [0.0, 0.0])
+        self.assertEqual([row[2] for row in bars], ["$0.00", "$0.00"])
 
     def test_schwab_http_500_forces_reauthorization_instead_of_token_loop(self) -> None:
         exc = RuntimeError("Schwab account fetch returned HTTP 500: unexpected error")
