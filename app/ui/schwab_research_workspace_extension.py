@@ -56,7 +56,7 @@ from app.macro.analysis import format_macro_report
 from app.macro.models import MacroSnapshot
 from app.macro.releases import fetch_macro_release_snapshot
 from app.ui.research_widgets import Checklist, ScenarioImpactBars, ScoreMeter, ScrollableFrame, clear_children, freshness_badges, labeled_value_grid, metric_grid
-from app.ui.schwab_output_popout_extension import _apply_report_tags
+from app.ui.schwab_output_popout_extension import _apply_report_tags, _open_external_url
 
 REPORT_FORMS = ("10-K", "10-Q", "8-K")
 
@@ -334,9 +334,26 @@ def _earnings_tab(notebook: ttk.Notebook) -> ttk.Frame:
     y_scroll = ttk.Scrollbar(source_box, orient=tk.VERTICAL, command=tree.yview)
     y_scroll.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=y_scroll.set)
+    tree.bind("<Double-1>", lambda event, source=tree: _open_source_tree_url(source, event), add="+")
     frame.source_tree = tree  # type: ignore[attr-defined]
     frame.detail_text = _readout_launcher(frame, title="Earnings Release Explanation", button_text="Open Earnings Release Explanation", row=3)  # type: ignore[attr-defined]
     return frame
+
+
+def _open_source_tree_url(tree: ttk.Treeview, event: tk.Event | None = None) -> None:
+    row_id = tree.identify_row(event.y) if event is not None else tree.focus()
+    if row_id:
+        tree.selection_set(row_id)
+        tree.focus(row_id)
+    selected = tree.focus() or (tree.selection()[0] if tree.selection() else "")
+    if not selected:
+        return
+    values = tree.item(selected, "values")
+    if len(values) < 3:
+        return
+    url = str(values[2]).strip()
+    if url.startswith(("http://", "https://")):
+        _open_external_url(url)
 
 
 def _detail_text(parent: ttk.Frame) -> tk.Text:

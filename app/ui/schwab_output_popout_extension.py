@@ -3,6 +3,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 import re
+import webbrowser
 from typing import Type
 
 REPORT_BG = "#f8fafc"
@@ -10,6 +11,7 @@ REPORT_FG = "#111827"
 REPORT_SELECT_BG = "#bfdbfe"
 REPORT_FONT = ("Segoe UI", 10)
 REPORT_MONO_FONT = ("Cascadia Mono", 10)
+URL_PATTERN = re.compile(r"https?://[^\s<>'\"{}|\\^`]+")
 
 
 def install_schwab_output_popout_extension(app_cls: Type[tk.Tk]) -> None:
@@ -211,17 +213,23 @@ def _configure_report_tags(text: tk.Text) -> None:
     text.tag_configure("report_title", font=("Segoe UI", 13, "bold"), foreground="#0f172a", spacing1=2, spacing3=8)
     text.tag_configure("section_title", font=("Segoe UI", 10, "bold"), foreground="#1d4ed8", spacing1=6, spacing3=3)
     text.tag_configure("bullet", lmargin1=18, lmargin2=34, foreground="#1f2937")
+    text.tag_configure("snippet_label", font=("Segoe UI", 9, "bold"), foreground="#334155", lmargin1=18, lmargin2=18, spacing1=8, spacing3=2)
+    text.tag_configure("snippet_body", foreground="#111827", lmargin1=18, lmargin2=18, spacing1=1, spacing3=8)
     text.tag_configure("muted", foreground="#64748b")
     text.tag_configure("separator", foreground="#cbd5e1", font=("Segoe UI", 7))
     text.tag_configure("mono", font=REPORT_MONO_FONT, foreground="#1f2937")
+    text.tag_configure("link", foreground="#1d4ed8", underline=True)
+    text.tag_raise("link")
 
 
 def _apply_report_tags(text: tk.Text, content: str) -> None:
     try:
         _configure_report_tags(text)
-        for tag in ("report_title", "section_title", "bullet", "muted", "separator", "mono"):
+        _clear_url_tags(text)
+        for tag in ("report_title", "section_title", "bullet", "snippet_label", "snippet_body", "muted", "separator", "mono", "link"):
             text.tag_remove(tag, "1.0", tk.END)
         table_mode = False
+        snippet_body_mode = False
         for index, line in enumerate(content.splitlines(), start=1):
             start = f"{index}.0"
             end = f"{index}.end"
@@ -231,9 +239,15 @@ def _apply_report_tags(text: tk.Text, content: str) -> None:
             if re.fullmatch(r"[=\-]{5,}", stripped):
                 text.tag_add("separator", start, end)
                 table_mode = False
+                snippet_body_mode = False
                 continue
             if index == 1:
                 text.tag_add("report_title", start, end)
+                continue
+            if _looks_like_snippet_label(stripped):
+                text.tag_add("snippet_label", start, end)
+                table_mode = False
+                snippet_body_mode = True
                 continue
             if stripped.startswith(("- ", "* ")):
                 text.tag_add("bullet", start, end)
@@ -241,15 +255,61 @@ def _apply_report_tags(text: tk.Text, content: str) -> None:
             if stripped.endswith(":") or _looks_like_section_heading(stripped):
                 text.tag_add("section_title", start, end)
                 table_mode = False
+                snippet_body_mode = False
                 continue
             if _looks_like_table_line(stripped) or (table_mode and re.search(r"\s{2,}", line)):
                 text.tag_add("mono", start, end)
                 table_mode = True
                 continue
+            if snippet_body_mode:
+                text.tag_add("snippet_body", start, end)
+                continue
             if ":" in stripped and len(stripped.split(":", 1)[0]) <= 22:
                 text.tag_add("muted", start, f"{index}.{len(line.split(':', 1)[0]) + 1}")
+        _apply_url_tags(text, content)
     except tk.TclError:
         return
+
+
+def _iter_url_spans(content: str) -> list[tuple[int, int, str]]:
+    spans: list[tuple[int, int, str]] = []
+    for match in URL_PATTERN.finditer(content):
+        start = match.start()
+        end = match.end()
+        url = match.group(0)
+        while url and url[-1] in ".,;!?)]":
+            url = url[:-1]
+            end -= 1
+        if url:
+            spans.append((start, end, url))
+    return spans
+
+
+def _clear_url_tags(text: tk.Text) -> None:
+    for tag in text.tag_names():
+        if str(tag).startswith("url_link_"):
+            text.tag_delete(tag)
+
+
+def _apply_url_tags(text: tk.Text, content: str) -> None:
+    for index, (start_offset, end_offset, url) in enumerate(_iter_url_spans(content), start=1):
+        tag = f"url_link_{index}"
+        start = f"1.0+{start_offset}c"
+        end = f"1.0+{end_offset}c"
+        text.tag_add("link", start, end)
+        text.tag_add(tag, start, end)
+        text.tag_bind(tag, "<Button-1>", lambda _event, target_url=url: _open_external_url(target_url))
+        text.tag_bind(tag, "<Enter>", lambda event: event.widget.configure(cursor="hand2"))
+        text.tag_bind(tag, "<Leave>", lambda event: event.widget.configure(cursor=""))
+
+
+def _open_external_url(url: str) -> str:
+    webbrowser.open_new_tab(url)
+    return "break"
+
+
+def _looks_like_snippet_label(value: str) -> bool:
+    return bool(re.fullmatch(r"Snippet\s+\d+:?", value, re.IGNORECASE))
 
 
 def _looks_like_section_heading(value: str) -> bool:

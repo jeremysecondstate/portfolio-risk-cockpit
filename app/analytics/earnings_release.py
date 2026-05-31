@@ -95,20 +95,20 @@ def format_earnings_release_digest(digest: EarningsReleaseDigest | None) -> str:
     lines.extend(
         [
             digest.title,
-            f"Filed: {digest.filing_date} · 8-K items: {digest.filing_items} · Exhibit: {digest.exhibit_type}",
+            f"Filed: {digest.filing_date} | 8-K items: {digest.filing_items} | Exhibit: {digest.exhibit_type}",
             f"Source: {digest.source_url}",
             "",
-            "Headline/result snippets:",
+            "Headline / Result Snippets:",
         ]
     )
     _append_snippet_bucket(lines, digest.headline_snippets)
 
     lines.append("")
-    lines.append("Guidance / outlook snippets:")
+    lines.append("Guidance / Outlook Snippets:")
     _append_snippet_bucket(lines, digest.guidance_snippets)
 
     lines.append("")
-    lines.append("Margin / cash-flow snippets:")
+    lines.append("Margin / Cash Flow Snippets:")
     _append_snippet_bucket(lines, digest.margin_cashflow_snippets)
 
     lines.extend(
@@ -128,9 +128,22 @@ def normalize_release_text(text: str) -> str:
 
 def _append_snippet_bucket(lines: list[str], snippets: list[str]) -> None:
     if not snippets:
-        lines.append("- No clean snippet found; open the exhibit source for full detail.")
+        lines.extend(
+            [
+                "Snippet availability:",
+                "No clean snippet found; open the exhibit source for full detail.",
+            ]
+        )
         return
-    lines.extend(f"- {snippet}" for snippet in snippets)
+    for index, snippet in enumerate(snippets, start=1):
+        if index > 1:
+            lines.append("")
+        lines.extend(
+            [
+                f"Snippet {index}:",
+                snippet,
+            ]
+        )
 
 
 def _find_snippets(text: str, keywords: tuple[str, ...], *, limit: int) -> list[str]:
@@ -153,7 +166,7 @@ def _find_snippets(text: str, keywords: tuple[str, ...], *, limit: int) -> list[
 def _clean_snippet(value: str) -> str:
     value = re.sub(r"\s+", " ", value).strip(" -–—|•\t\n")
     if len(value) > MAX_SNIPPET_CHARS:
-        value = value[: MAX_SNIPPET_CHARS - 1].rstrip() + "…"
+        value = value[: MAX_SNIPPET_CHARS - 1].rstrip() + "..."
     return value
 
 
