@@ -37,6 +37,7 @@ from app.analytics.technical_analysis import Candle
 from app.core.portfolio import Portfolio, Position
 from app.ui.schwab_research_workspace_extension import (
     _fetch_sec_layers,
+    _stock_plan_look_lines,
     _normalized_candidate_bar_rows,
     _source_status_text,
     selected_holding_symbol_from_values,
@@ -341,6 +342,18 @@ class SchwabResearchWorkspaceHelperTests(unittest.TestCase):
 
         self.assertEqual([row[1] for row in bars], [0.0, 0.0])
         self.assertEqual([row[2] for row in bars], ["$0.00", "$0.00"])
+
+    def test_decision_difference_stock_looks_use_generated_watchlist_size(self) -> None:
+        indicators = calculate_advanced_indicators("LHX", _sample_candles())
+        context = build_portfolio_symbol_context(Portfolio(cash=120_000.0), "LHX", fallback_price=indicators.latest_close)
+        risk_budget = generated_risk_budget(context, indicators, macro_label="Headwind", risk_level_label="Medium", action_bias_label="Watch")
+        planned_context, stock_plan = build_planned_stock_context(context, indicators, risk_budget)
+
+        lines = _stock_plan_look_lines(planned_context, stock_plan)
+
+        self.assertTrue(lines)
+        self.assertTrue(any("shares" in line for line in lines))
+        self.assertFalse(any("$0.00 notional" in line for line in lines))
 
     def test_schwab_http_500_forces_reauthorization_instead_of_token_loop(self) -> None:
         exc = RuntimeError("Schwab account fetch returned HTTP 500: unexpected error")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import threading
 import tkinter as tk
 from dataclasses import dataclass
@@ -935,6 +936,8 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
     max_risk = risk_budget.amount
     self.schwab_research_max_risk_var.set(_money(max_risk))
     scenario_context, stock_plan = build_planned_stock_context(payload.context, payload.indicators, risk_budget)
+    self.schwab_research_scenario_context = scenario_context
+    self.schwab_research_stock_plan = stock_plan
     scenario_basis = technical_scenario_basis(payload.context, payload.indicators)
     self.schwab_research_scenario_basis_var.set(scenario_basis)
     scenario_rows = build_scenario_rows(scenario_context, technical_scenario_moves(payload.context, payload.indicators))
@@ -981,7 +984,7 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
     stop = _float_from_var(getattr(self, "stop_price_var", None))
     target = _float_from_var(getattr(self, "options_target_price_var", None)) or _float_from_var(getattr(self, "limit_price_var", None))
     size = suggested_position_size(entry_price=payload.context.last_price, stop_price=stop, max_risk_dollars=max_risk)
-    decision_difference = _decision_difference_text(top_candidate, payload.context)
+    decision_difference_lines = _decision_difference_lines(top_candidate, scenario_context, stock_plan)
     lines = [
         "Recommended move:",
         f"- {risk_plan.recommendation}: {risk_plan.reason}",
@@ -989,7 +992,7 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
         f"- {risk_plan.risk_line}",
         "",
         "Decision difference:",
-        f"- {decision_difference}",
+        *[f"- {line}" for line in decision_difference_lines],
         "",
         "How to read this:",
         "- Stock-only rows show direct share P&L. Combined rows below use expiration-style option payoff, not live option pricing.",
@@ -1127,7 +1130,7 @@ def _show_selected_option_candidate(self: tk.Tk) -> None:
         return
     payload = getattr(self, "schwab_research_last_payload", None)
     earnings_text = payload.earnings_text if payload is not None else ""
-    context = payload.context if payload is not None else None
+    context = _active_stock_scenario_context(self, payload) if payload is not None else None
     frame.timeline_var.set(option_timeline_text(candidate, earnings_text))  # type: ignore[attr-defined]
     scenario_tree = frame.candidate_scenario_tree  # type: ignore[attr-defined]
     for row_id in scenario_tree.get_children():
@@ -1211,25 +1214,55 @@ def _render_option_scenarios_from_top(self: tk.Tk) -> None:
     if payload is None or candidate is None:
         tree.insert("", tk.END, iid="load_chain_row", values=("Load chain", "--", "--", "--", "--", "Double-click this row or use Load Chain above to generate option scenarios."))
         return
-    for row in combined_option_scenarios(candidate, payload.context):
+    context = _active_stock_scenario_context(self, payload)
+    for row in combined_option_scenarios(candidate, context):
         tag = "positive" if row.combined_pnl > 0 else "negative" if row.combined_pnl < 0 else ""
         tree.insert("", tk.END, values=(row.move_label, _money(row.stock_pnl), _money(row.option_pnl), _money(row.combined_pnl), f"{row.portfolio_impact:+.2%}", f"{row.read}; expiration-style estimate"), tags=(tag,) if tag else ())
 
 
-def _decision_difference_text(candidate: OptionCandidate | None, context: PortfolioSymbolContext) -> str:
+def _active_stock_scenario_context(self: tk.Tk, payload: _ResearchPayload) -> PortfolioSymbolContext:
+    context = getattr(self, "schwab_research_scenario_context", None)
+    if isinstance(context, PortfolioSymbolContext) and context.symbol == payload.context.symbol:
+        return context
+    return payload.context
+
+
+def _decision_difference_lines(candidate: OptionCandidate | None, context: PortfolioSymbolContext, stock_plan: Any | None = None) -> list[str]:
+    lines = _stock_plan_look_lines(context, stock_plan)
     if candidate is None or candidate.option_type not in {"call", "put"}:
-        return "No loaded option candidate yet. Load the chain and generate candidates to compare stock-only versus combined outcomes."
+        lines.append("No loaded option candidate yet. Load the chain to compare those stock looks against option structures.")
+        return lines
     rows = combined_option_scenarios(candidate, context, moves=(-0.05,))
     if not rows:
-        return "Combined option math is unavailable for the selected candidate."
+        lines.append("Combined option math is unavailable for the selected candidate.")
+        return lines
     row = rows[0]
     difference = row.combined_pnl - row.stock_pnl
     premium = (candidate.midpoint or 0.0) * 100
     if candidate.option_type == "put":
         worth = "This hedge may not be worth the premium." if difference < premium * 0.5 else "This hedge provides visible downside offset in the -5% case."
-        return f"If {context.symbol} falls -5%, stock-only is {_money(row.stock_pnl)}; with {candidate.strategy}, combined is {_money(row.combined_pnl)}. Net protection benefit: {_money(difference)}. Trade-off: upfront debit about {_money(premium)}. {worth}"
+        lines.append(f"At the model stock look, if {context.symbol} falls -5%, stock-only is {_money(row.stock_pnl)}; with {candidate.strategy}, combined is {_money(row.combined_pnl)}. Net protection benefit: {_money(difference)}. Trade-off: upfront debit about {_money(premium)}. {worth}")
+        return lines
     worth = "This call needs too much move before expiration." if row.option_pnl < 0 else "This call adds upside leverage in the + path, but premium is still the defined risk."
-    return f"If {context.symbol} falls -5%, stock-only is {_money(row.stock_pnl)}; with {candidate.strategy}, combined is {_money(row.combined_pnl)}. Option difference: {_money(difference)}. Trade-off: upfront debit about {_money(premium)}. {worth}"
+    lines.append(f"At the model stock look, if {context.symbol} falls -5%, stock-only is {_money(row.stock_pnl)}; with {candidate.strategy}, combined is {_money(row.combined_pnl)}. Option difference: {_money(difference)}. Trade-off: upfront debit about {_money(premium)}. {worth}")
+    return lines
+
+
+def _stock_plan_look_lines(context: PortfolioSymbolContext, stock_plan: Any | None = None) -> list[str]:
+    quantity = float(getattr(stock_plan, "quantity", context.quantity) or context.quantity or 0.0)
+    entry = float(getattr(stock_plan, "entry_price", context.last_price) or context.last_price or 0.0)
+    if quantity <= 0 or entry <= 0:
+        return ["No stock scenario size is available yet, so stock-only comparison remains at zero exposure."]
+    whole_quantity = max(1, int(quantity))
+    look_quantities = sorted({max(1, int(math.floor(whole_quantity * fraction))) for fraction in (0.33, 0.66, 1.0)})
+    lines: list[str] = []
+    for qty in look_quantities:
+        notional = qty * entry
+        down_5 = notional * -0.05
+        up_5 = notional * 0.05
+        label = "Model" if qty == whole_quantity else "Starter"
+        lines.append(f"{label} stock look: {qty:g} shares, {_money(notional)} notional; -5% is {_money(down_5)}, +5% is {_money(up_5)}.")
+    return lines
 
 
 def _recalculate_research_scenarios(self: tk.Tk) -> None:
