@@ -102,7 +102,7 @@ class ScoreBadge(tk.Frame):
 
 
 class ScoreMeter(tk.Canvas):
-    def __init__(self, parent: tk.Widget, *, height: int = 36, background: str = PANEL_BG) -> None:
+    def __init__(self, parent: tk.Widget, *, height: int = 48, background: str = PANEL_BG) -> None:
         super().__init__(parent, height=height, bg=background, highlightthickness=0)
         self._score = 0.0
         self._mode = "direction"
@@ -118,9 +118,9 @@ class ScoreMeter(tk.Canvas):
     def redraw(self) -> None:
         self.delete("all")
         width = max(self.winfo_width(), 160)
-        height = max(self.winfo_height(), 30)
+        height = max(self.winfo_height(), 44)
         x0, x1 = 10, width - 10
-        y = height // 2
+        y = 16
         self.create_rectangle(x0, y - 5, x1, y + 5, fill="#e5e7eb", outline="")
         if self._mode == "risk":
             fill_width = (self._score / 100.0) * (x1 - x0)
@@ -135,7 +135,7 @@ class ScoreMeter(tk.Canvas):
             self.create_line(center, y - 9, center, y + 9, fill="#94a3b8")
         self.create_oval(pointer - 5, y - 9, pointer + 5, y + 9, fill=color, outline="#ffffff")
         if self._label:
-            self.create_text(x0, height - 6, text=self._label, anchor="sw", fill=MUTED, font=("Segoe UI", 8))
+            self.create_text(x0, height - 7, text=self._label, anchor="sw", fill=MUTED, font=("Segoe UI", 8))
 
 
 class Checklist(tk.Frame):
@@ -159,11 +159,18 @@ class Checklist(tk.Frame):
 class ScenarioImpactBars(tk.Canvas):
     def __init__(self, parent: tk.Widget, *, height: int = 150, background: str = PANEL_BG) -> None:
         super().__init__(parent, height=height, bg=background, highlightthickness=0)
+        self._base_height = height
         self._rows: list[tuple[str, float, str]] = []
         self.bind("<Configure>", lambda _event: self.redraw())
 
     def set_rows(self, rows: list[tuple[str, float, str]]) -> None:
-        self._rows = rows[:8]
+        self._rows = rows
+        desired_height = max(self._base_height, 34 + len(self._rows) * 18)
+        try:
+            if int(float(str(self.cget("height")))) != desired_height:
+                self.configure(height=desired_height)
+        except (tk.TclError, ValueError):
+            pass
         self.redraw()
 
     def redraw(self) -> None:

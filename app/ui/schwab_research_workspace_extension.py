@@ -259,8 +259,7 @@ def _overview_tab(notebook: ttk.Notebook) -> ttk.Frame:
     frame.checks.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
     frame.freshness = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.freshness.grid(row=4, column=0, sticky="ew", pady=(8, 0))
-    frame.detail_text = _detail_text(frame)  # type: ignore[attr-defined]
-    frame.detail_text.grid(row=5, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
+    frame.detail_text = _readout_launcher(frame, title="Overview Explanation", button_text="Open Overview Explanation", row=5)  # type: ignore[attr-defined]
     return frame
 
 
@@ -271,8 +270,7 @@ def _section_summary_tab(notebook: ttk.Notebook, title: str) -> ttk.Frame:
     frame.cards.grid(row=0, column=0, sticky="ew")
     frame.checks = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.checks.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-    frame.detail_text = _detail_text(frame)  # type: ignore[attr-defined]
-    frame.detail_text.grid(row=2, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
+    frame.detail_text = _readout_launcher(frame, title=f"{title} Explanation", button_text=f"Open {title} Explanation", row=2)  # type: ignore[attr-defined]
     return frame
 
 
@@ -313,8 +311,7 @@ def _macro_tab(notebook: ttk.Notebook) -> ttk.Frame:
     raw = ttk.LabelFrame(frame, text="Raw Details", style="Card.TLabelframe")
     raw.grid(row=4, column=0, sticky="ew", pady=(8, 0))
     raw.columnconfigure(0, weight=1)
-    frame.detail_text = _detail_text(raw)  # type: ignore[attr-defined]
-    frame.detail_text.grid(row=0, column=0, sticky="ew")  # type: ignore[attr-defined]
+    frame.detail_text = _readout_launcher(raw, title="Macro Snapshot Explanation", button_text="Open Macro Snapshot Explanation", row=0, pady=(0, 0))  # type: ignore[attr-defined]
     return frame
 
 
@@ -338,8 +335,7 @@ def _earnings_tab(notebook: ttk.Notebook) -> ttk.Frame:
     y_scroll.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=y_scroll.set)
     frame.source_tree = tree  # type: ignore[attr-defined]
-    frame.detail_text = _detail_text(frame)  # type: ignore[attr-defined]
-    frame.detail_text.grid(row=3, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
+    frame.detail_text = _readout_launcher(frame, title="Earnings Release Explanation", button_text="Open Earnings Release Explanation", row=3)  # type: ignore[attr-defined]
     return frame
 
 
@@ -350,6 +346,115 @@ def _detail_text(parent: ttk.Frame) -> tk.Text:
     text._paired_scrollbar = scroll  # type: ignore[attr-defined]
     text.bind("<Map>", lambda _event, widget=text: widget._paired_scrollbar.grid(row=widget.grid_info().get("row", 0), column=1, sticky="ns"), add="+")  # type: ignore[attr-defined]
     return text
+
+
+def _readout_launcher(parent: ttk.Frame, *, title: str, button_text: str, row: int, column: int = 0, sticky: str = "ew", pady: tuple[int, int] = (8, 0)) -> tk.Text:
+    text = _readout_storage_text(parent)
+    text._readout_title = title  # type: ignore[attr-defined]
+    launcher = ttk.Frame(parent, style="Panel.TFrame")
+    launcher.grid(row=row, column=column, sticky=sticky, pady=pady)
+    launcher.columnconfigure(1, weight=1)
+    ttk.Button(launcher, text=button_text, command=lambda widget=text: _open_readout_popout(widget), style="Accent.TButton").grid(row=0, column=0, sticky="w")
+    text._readout_launcher = launcher  # type: ignore[attr-defined]
+    return text
+
+
+def _readout_storage_text(parent: ttk.Frame) -> tk.Text:
+    text = tk.Text(
+        parent,
+        wrap=tk.WORD,
+        font=("Segoe UI", 10),
+        padx=16,
+        pady=14,
+        relief=tk.FLAT,
+        borderwidth=0,
+        background="#f8fafc",
+        foreground="#111827",
+    )
+    return text
+
+
+def _open_readout_popout(source: tk.Text) -> None:
+    existing = getattr(source, "_readout_window", None)
+    if existing is not None:
+        try:
+            if existing.winfo_exists():
+                _refresh_readout_popout(source)
+                existing.deiconify()
+                existing.lift()
+                existing.focus_force()
+                return
+        except tk.TclError:
+            pass
+
+    window = tk.Toplevel(source.winfo_toplevel())
+    title = str(getattr(source, "_readout_title", "Detailed Readout"))
+    window.title(title)
+    window.geometry("960x720")
+    window.minsize(640, 420)
+    window.columnconfigure(0, weight=1)
+    window.rowconfigure(1, weight=1)
+
+    toolbar = ttk.Frame(window, padding=(10, 8), style="Panel.TFrame")
+    toolbar.grid(row=0, column=0, sticky="ew")
+    toolbar.columnconfigure(0, weight=1)
+    ttk.Label(toolbar, text=title, font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
+    close_button = ttk.Button(toolbar, text="Close", command=window.destroy)
+    close_button.grid(row=0, column=1, sticky="e", padx=(8, 0))
+
+    body = ttk.Frame(window, padding=(10, 0, 10, 10), style="Panel.TFrame")
+    body.grid(row=1, column=0, sticky="nsew")
+    body.columnconfigure(0, weight=1)
+    body.rowconfigure(0, weight=1)
+    target = tk.Text(
+        body,
+        wrap=tk.WORD,
+        font=("Segoe UI", 10),
+        padx=18,
+        pady=16,
+        relief=tk.FLAT,
+        borderwidth=0,
+        background="#f8fafc",
+        foreground="#111827",
+        insertbackground="#111827",
+        selectbackground="#bfdbfe",
+        spacing1=3,
+        spacing2=1,
+        spacing3=6,
+    )
+    target.grid(row=0, column=0, sticky="nsew")
+    scrollbar = ttk.Scrollbar(body, orient=tk.VERTICAL, command=target.yview)
+    scrollbar.grid(row=0, column=1, sticky="ns")
+    target.configure(yscrollcommand=scrollbar.set)
+
+    source._readout_window = window  # type: ignore[attr-defined]
+    source._readout_popout_text = target  # type: ignore[attr-defined]
+
+    def _on_close() -> None:
+        source._readout_window = None  # type: ignore[attr-defined]
+        source._readout_popout_text = None  # type: ignore[attr-defined]
+        window.destroy()
+
+    window.protocol("WM_DELETE_WINDOW", _on_close)
+    close_button.configure(command=_on_close)
+    _refresh_readout_popout(source)
+
+
+def _refresh_readout_popout(source: tk.Text) -> None:
+    target = getattr(source, "_readout_popout_text", None)
+    if target is None:
+        return
+    try:
+        content = source.get("1.0", tk.END).strip()
+        if not content:
+            content = "Run analysis first. The detailed readout will appear here."
+        target.configure(state=tk.NORMAL)
+        target.delete("1.0", tk.END)
+        target.insert(tk.END, content)
+        _apply_report_tags(target, content)
+        target.configure(state=tk.DISABLED)
+    except tk.TclError:
+        return
 
 
 def _report_tab(notebook: ttk.Notebook, title: str) -> tk.Text:
@@ -393,8 +498,7 @@ def _technicals_tab(notebook: ttk.Notebook) -> ttk.Frame:
     y_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
     y_scroll.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=y_scroll.set)
-    text = tk.Text(frame, height=12, wrap=tk.WORD, font=("Segoe UI", 10), padx=14, pady=10, relief=tk.FLAT, borderwidth=0, background="#f8fafc")
-    text.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+    text = _readout_launcher(frame, title="Technical Readout", button_text="Open Technical Readout", row=4, pady=(10, 0))
     frame.indicator_tree = tree  # type: ignore[attr-defined]
     frame.technical_notes_text = text  # type: ignore[attr-defined]
     return frame
@@ -452,8 +556,7 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     y_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
     y_scroll.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=y_scroll.set)
-    note = tk.Text(frame, height=7, wrap=tk.WORD, font=("Segoe UI", 10), padx=14, pady=10, relief=tk.FLAT, borderwidth=0, background="#f8fafc")
-    note.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+    note = _readout_launcher(frame, title="Risk Scenario Explanation", button_text="Open Risk Scenario Explanation", row=5, pady=(10, 0))
     frame.scenario_tree = tree  # type: ignore[attr-defined]
     frame.scenario_note_text = note  # type: ignore[attr-defined]
     option_box = ttk.LabelFrame(frame, text="Options Scenario Based On Suggested Contract", style="Card.TLabelframe")
@@ -561,9 +664,7 @@ def _options_strategy_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
         wraplength=1120,
         justify=tk.LEFT,
     ).grid(row=0, column=0, sticky="ew", padx=10, pady=8)
-    frame.detail_text = _detail_text(frame)  # type: ignore[attr-defined]
-    frame.detail_text.configure(height=12)  # type: ignore[attr-defined]
-    frame.detail_text.grid(row=7, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
+    frame.detail_text = _readout_launcher(frame, title="Options Strategy Explanation", button_text="Open Options Strategy Explanation", row=7)  # type: ignore[attr-defined]
     return frame
 
 
@@ -772,6 +873,64 @@ def _overview_text(payload: _ResearchPayload) -> str:
     return "\n".join(lines)
 
 
+def _overview_popout_text(payload: _ResearchPayload) -> str:
+    decision = payload.decision
+    return _format_beginner_readout(
+        title=f"Overview Explanation - {payload.symbol}",
+        what_this_means=(
+            "This is the complete symbol readout. It combines the Schwab quote and portfolio position with "
+            "the technical setup, current risk level, action bias, and data freshness."
+        ),
+        key_points=[
+            f"Overall read: {decision.overall.label} ({decision.overall.why})",
+            f"Risk level: {decision.risk_level.label} ({decision.risk_level.why})",
+            f"Action bias: {decision.action_bias.label} ({decision.action_bias.why})",
+            *decision.summary,
+        ],
+        why_it_matters="Use this view to decide whether the symbol belongs on watch, needs a smaller position, needs a hedge, or has enough confirmation for a planned trade.",
+        original_text=_overview_text(payload),
+    )
+
+
+def _format_beginner_readout(
+    *,
+    title: str,
+    what_this_means: str,
+    key_points: list[str] | tuple[str, ...],
+    why_it_matters: str,
+    original_text: str,
+    original_title: str = "Original / detailed readout",
+) -> str:
+    lines = [
+        title,
+        "=" * min(len(title), 80),
+        "",
+        "What this means:",
+        what_this_means.strip(),
+        "",
+        "Key points:",
+    ]
+    lines.extend(_bullet_line(point) for point in key_points if str(point).strip())
+    lines.extend(
+        [
+            "",
+            "Why it matters:",
+            why_it_matters.strip(),
+            "",
+            f"{original_title}:",
+            original_text.strip(),
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _bullet_line(text: str) -> str:
+    clean = str(text).strip()
+    if clean.startswith(("- ", "* ")):
+        return f"- {clean[2:].strip()}"
+    return f"- {clean}"
+
+
 def _render_at_glance(self: tk.Tk, payload: _ResearchPayload) -> None:
     decision = payload.decision
     metric_grid(
@@ -824,7 +983,7 @@ def _render_overview(self: tk.Tk, payload: _ResearchPayload) -> None:
     Checklist(frame.checks, "What Matters Most", decision.matters).grid(row=0, column=0, sticky="nsew", padx=(0, 8))  # type: ignore[attr-defined]
     Checklist(frame.checks, "What Would Change The View", decision.changes_view).grid(row=0, column=1, sticky="nsew")  # type: ignore[attr-defined]
     freshness_badges(frame.freshness, payload.statuses)  # type: ignore[attr-defined]
-    _set_research_text(self.schwab_research_overview_text, _overview_text(payload))
+    _set_research_text(self.schwab_research_overview_text, _overview_popout_text(payload))
 
 
 def _risk_lines(payload: _ResearchPayload) -> list[str]:
@@ -919,7 +1078,28 @@ def _render_technicals(self: tk.Tk, payload: _ResearchPayload) -> None:
             *[f"- {note}" for note in indicators.notes],
         ]
     )
-    _set_research_text(frame.technical_notes_text, notes)  # type: ignore[attr-defined]
+    _set_research_text(frame.technical_notes_text, _technical_popout_text(payload, narrative, notes))  # type: ignore[attr-defined]
+
+
+def _technical_popout_text(payload: _ResearchPayload, narrative: Any, original_text: str) -> str:
+    indicators = payload.indicators
+    return _format_beginner_readout(
+        title=f"Technical Readout - {payload.symbol}",
+        what_this_means=(
+            "This readout explains the chart signals behind the setup. It separates trend, momentum, volatility, "
+            "support/resistance, and the terms used in the table."
+        ),
+        key_points=[
+            f"Trend: {indicators.trend}.",
+            f"Momentum: {indicators.momentum}.",
+            f"Volatility: {indicators.volatility}.",
+            f"Support / resistance: {_money(indicators.support)} / {_money(indicators.resistance)}.",
+            f"Indicator agreement: {narrative.indicator_agreement}. {narrative.agreement_explanation}",
+            narrative.position_meaning,
+        ],
+        why_it_matters="The technical read helps separate a setup that is improving from one that is only cheap, stretched, or risky. It also gives nearby levels for confirmation and invalidation.",
+        original_text=original_text,
+    )
 
 
 def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
@@ -1015,8 +1195,26 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
         f"- Suggested size at {_money(max_risk)} max risk and ticket stop {_money(stop)}: {_shares(size)}.",
         f"- Scenario basis: {scenario_basis}",
     ]
-    _set_research_text(frame.scenario_note_text, "\n".join(lines))  # type: ignore[attr-defined]
+    _set_research_text(frame.scenario_note_text, _risk_scenario_popout_text(payload, risk_plan, decision_difference_lines, "\n".join(lines)))  # type: ignore[attr-defined]
     _render_option_scenarios_from_top(self)
+
+
+def _risk_scenario_popout_text(payload: _ResearchPayload, risk_plan: Any, decision_difference_lines: list[str], original_text: str) -> str:
+    return _format_beginner_readout(
+        title=f"Risk Scenario Explanation - {payload.symbol}",
+        what_this_means=(
+            "This section explains the suggested risk move, what would confirm it, what would invalidate it, "
+            "and how the generated stock scenario size was calculated."
+        ),
+        key_points=[
+            f"Recommended move: {risk_plan.recommendation}. {risk_plan.reason}",
+            risk_plan.confirmation,
+            risk_plan.risk_line,
+            *decision_difference_lines,
+        ],
+        why_it_matters="The scenario table shows possible P&L paths, but this readout explains how to use those paths for sizing, hedging, waiting, or rejecting the setup.",
+        original_text=original_text,
+    )
 
 
 def _render_options_strategy(self: tk.Tk) -> None:
@@ -1031,19 +1229,19 @@ def _render_options_strategy(self: tk.Tk) -> None:
     chain_rows = [row for row in rows_map.values() if isinstance(row, dict)]
     if payload is None:
         frame.status_var.set("Run technical analysis first; candidates need the symbol read, macro context, and position context.")  # type: ignore[attr-defined]
-        _set_research_text(frame.detail_text, "Run analysis first, then load the option chain to generate candidates.")  # type: ignore[attr-defined]
+        _set_research_text(frame.detail_text, _basic_popout_text("Options Strategy Explanation", "Run analysis first, then load the option chain to generate candidates."))  # type: ignore[attr-defined]
         metric_grid(frame.cards, [_synthetic_badge("Options Strategy", "Waiting", "info", "Needs analysis and option chain.")], columns=1)  # type: ignore[attr-defined]
         return
     if not chain_rows:
         frame.status_var.set("Load the option chain to generate option candidates.")  # type: ignore[attr-defined]
-        _set_research_text(frame.detail_text, "Load the option chain to generate option candidates.\n\nUse the Load Chain button inside this tab. No order will be submitted.")  # type: ignore[attr-defined]
+        _set_research_text(frame.detail_text, _basic_popout_text("Options Strategy Explanation", "Load the option chain to generate option candidates.\n\nUse the Load Chain button inside this tab. No order will be submitted."))  # type: ignore[attr-defined]
         metric_grid(frame.cards, [_synthetic_badge("Chain", "Not Loaded", "info", "Load the option chain to generate candidates.")], columns=1)  # type: ignore[attr-defined]
         return
     candidates = suggest_option_candidates(chain_rows, payload.indicators, payload.context, macro_label=payload.decision.macro_backdrop.label, earnings_text=payload.earnings_text)
     self.schwab_research_option_candidates = candidates
     if not candidates:
         frame.status_var.set("No usable option candidates found in the loaded chain.")  # type: ignore[attr-defined]
-        _set_research_text(frame.detail_text, "The loaded chain did not include usable bid/ask/mark data for calls or puts.")  # type: ignore[attr-defined]
+        _set_research_text(frame.detail_text, _basic_popout_text("Options Strategy Explanation", "The loaded chain did not include usable bid/ask/mark data for calls or puts."))  # type: ignore[attr-defined]
         return
     top = candidates[0]
     metric_grid(
@@ -1151,7 +1349,43 @@ def _show_selected_option_candidate(self: tk.Tk) -> None:
         frame.candidate_bars.set_rows([])  # type: ignore[attr-defined]
         lines = [f"{candidate.group}: {candidate.strategy}", "Run analysis to see combined stock + option scenarios."]
     lines.extend(["", "Use This Option fills the existing options ticket only. It does not submit, preview, or stage an order."])
-    _set_research_text(frame.detail_text, "\n".join(lines))  # type: ignore[attr-defined]
+    _set_research_text(frame.detail_text, _options_strategy_popout_text(payload, candidate, context, "\n".join(lines)))  # type: ignore[attr-defined]
+
+
+def _basic_popout_text(title: str, original_text: str) -> str:
+    return _format_beginner_readout(
+        title=title,
+        what_this_means="This readout will update after the required data is available.",
+        key_points=[line for line in original_text.splitlines() if line.strip()],
+        why_it_matters="The main tab stays compact while keeping the full generated explanation available when there is enough data to show it.",
+        original_text=original_text,
+    )
+
+
+def _options_strategy_popout_text(payload: _ResearchPayload | None, candidate: OptionCandidate, context: PortfolioSymbolContext | None, original_text: str) -> str:
+    symbol = payload.symbol if payload is not None else candidate.underlying
+    cost = (candidate.midpoint or 0.0) * 100
+    key_points = [
+        f"Candidate: {candidate.group}: {candidate.strategy}",
+        f"Contract: {candidate.option_type.upper()} expiring {candidate.expiration}; strike {_money(candidate.strike)}; DTE {candidate.dte if candidate.dte is not None else '--'}.",
+        f"Bid/ask/mid: {_money(candidate.bid)} / {_money(candidate.ask)} / {_money(candidate.midpoint)}; one-contract estimate {_money(cost)}.",
+        f"Works if: {candidate.works_if}",
+        f"Goes wrong if: {candidate.goes_wrong_if}",
+        f"Position interaction: {candidate.relation_to_position}",
+        f"Score: {candidate.score:.0f}/100. {candidate.score_reason}",
+    ]
+    if context is not None:
+        key_points.append(f"Stock context: {context.quantity:g} shares, weight {context.portfolio_weight:.2%}, quote {_money(context.last_price)}.")
+    return _format_beginner_readout(
+        title=f"Options Strategy Explanation - {symbol}",
+        what_this_means=(
+            "This explains the selected option candidate and how it interacts with the stock scenario. "
+            "The estimates are expiration-style payoff math, not live option pricing."
+        ),
+        key_points=key_points,
+        why_it_matters="Options can define risk, add leverage, or hedge a stock position, but the premium, expiration, strike, and required move decide whether the trade is worth considering.",
+        original_text=original_text,
+    )
 
 
 def _normalized_candidate_bar_rows(scenario_rows: list[Any]) -> list[tuple[str, float, str]]:
@@ -1311,7 +1545,7 @@ def _render_earnings_news(self: tk.Tk, payload: _ResearchPayload) -> None:
         tree.delete(row_id)
     for label, date, url in summary.source_links:
         tree.insert("", tk.END, values=(label, date, url or "--"))
-    _set_research_text(self.schwab_research_earnings_text, _earnings_news_text(payload))
+    _set_research_text(self.schwab_research_earnings_text, _earnings_popout_text(payload, summary, _earnings_news_text(payload)))
 
 
 def _render_fundamentals(self: tk.Tk, payload: _ResearchPayload) -> None:
@@ -1351,7 +1585,7 @@ def _render_fundamentals(self: tk.Tk, payload: _ResearchPayload) -> None:
             payload.fundamentals_text,
         ]
     )
-    _set_research_text(self.schwab_research_fundamentals_text, details)
+    _set_research_text(self.schwab_research_fundamentals_text, _fundamentals_popout_text(payload, verdict, details))
 
 
 def _render_macro(self: tk.Tk, payload: _ResearchPayload) -> None:
@@ -1377,7 +1611,7 @@ def _render_macro(self: tk.Tk, payload: _ResearchPayload) -> None:
     clear_children(frame.interpretation)  # type: ignore[attr-defined]
     Checklist(frame.interpretation, "Plain-English Interpretations", [readout.interpretation for readout in readouts[:5]]).grid(row=0, column=0, sticky="ew", padx=(0, 8))  # type: ignore[attr-defined]
     Checklist(frame.interpretation, "Good / Bad / Watch", [*decision.macro_good, *decision.macro_bad, *decision.macro_watch]).grid(row=0, column=1, sticky="ew")  # type: ignore[attr-defined]
-    _set_research_text(self.schwab_research_macro_text, payload.macro_text)
+    _set_research_text(self.schwab_research_macro_text, _macro_popout_text(payload, readouts))
 
 
 def _earnings_news_text(payload: _ResearchPayload) -> str:
@@ -1392,6 +1626,72 @@ def _earnings_news_text(payload: _ResearchPayload) -> str:
         lines.append("- No SEC filing headlines were available.")
     lines.extend(["", "News provider note:", "- First version uses official SEC filings and earnings exhibits as the source-labeled company news layer. Investor-relations and broader news feeds can plug into this tab later."])
     return "\n".join(lines)
+
+
+def _earnings_popout_text(payload: _ResearchPayload, summary: Any, original_text: str) -> str:
+    return _format_beginner_readout(
+        title=f"Fast Earnings Release Layer - {payload.symbol}",
+        what_this_means=(
+            "This is a quick official-filings layer for the latest earnings/news context. It uses SEC filings, "
+            "earnings exhibits, and standardized companyfacts when available."
+        ),
+        key_points=[
+            f"Latest earnings release: {summary.snapshot['Latest earnings release']}",
+            f"Latest 10-Q / 10-K: {summary.snapshot['Latest 10-Q / 10-K']}",
+            f"Guidance tone: {summary.guidance_tone}.",
+            f"Revenue trend: {summary.revenue_trend}.",
+            f"Profitability: {summary.profitability_trend}.",
+            *summary.interpretation,
+            *summary.risks,
+        ],
+        why_it_matters="Earnings and filing language can change risk quickly, especially around guidance, backlog, margins, or event risk before option expiration.",
+        original_text=original_text,
+        original_title="Original / detailed earnings and source readout",
+    )
+
+
+def _fundamentals_popout_text(payload: _ResearchPayload, verdict: Any, original_text: str) -> str:
+    return _format_beginner_readout(
+        title=f"Fundamentals Explanation - {payload.symbol}",
+        what_this_means=(
+            "This translates standardized SEC fundamental data into an investment read, a trading read, "
+            "and a combined view that also considers the current technical and macro setup."
+        ),
+        key_points=[
+            f"Verdict: {verdict.verdict}.",
+            f"Action bias: {verdict.action_bias}.",
+            f"Confidence: {verdict.confidence}.",
+            verdict.investment_read,
+            verdict.trade_read,
+            verdict.combined_read,
+            *verdict.what_changes,
+        ],
+        why_it_matters="Fundamentals can support owning a name, but the trade timing still depends on price confirmation, risk lines, and the macro backdrop.",
+        original_text=original_text,
+        original_title="Original / detailed fundamentals readout",
+    )
+
+
+def _macro_popout_text(payload: _ResearchPayload, readouts: list[Any]) -> str:
+    decision = payload.decision
+    key_points = [
+        f"Macro backdrop: {decision.macro_backdrop.label} ({decision.macro_backdrop.why})",
+        *[readout.interpretation for readout in readouts],
+        *decision.macro_good,
+        *decision.macro_bad,
+        *decision.macro_watch,
+    ]
+    return _format_beginner_readout(
+        title=f"Macro Snapshot Explanation - {payload.symbol}",
+        what_this_means=(
+            "This is the official macro context layer. It keeps CPI, jobs, rates, energy, and other macro feed items "
+            "separate from company-specific data while showing how the backdrop affects this symbol's risk read."
+        ),
+        key_points=key_points,
+        why_it_matters="Macro data can turn an otherwise good company setup into a wait, hedge, or smaller-size trade when rates, inflation, or growth data are working against the position.",
+        original_text=payload.macro_text,
+        original_title="Original / detailed macro snapshot",
+    )
 
 
 def _synthetic_badge(title: str, label: str, status: str, why: str, score: float = 0.0) -> BadgeReadout:
@@ -1616,6 +1916,8 @@ def _set_research_text(widget: tk.Text, content: str) -> None:
     widget.insert(tk.END, content)
     _apply_report_tags(widget, content)
     widget.configure(state=tk.DISABLED)
+    if getattr(widget, "_readout_popout_text", None) is not None:
+        _refresh_readout_popout(widget)
 
 
 def _risk_budget_card_text(risk_budget: Any) -> str:

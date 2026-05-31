@@ -29,6 +29,7 @@ def install_account_sources_fix(app_cls: Type[tk.Tk]) -> None:
     app_cls._build_layout = _build_layout_without_account_strip  # type: ignore[method-assign]
     app_cls.capture_current_portfolio_source = _capture_current_source_portfolio  # type: ignore[attr-defined]
     app_cls.sync_options_from_active_portfolio = _sync_options_values_from_active_portfolio  # type: ignore[attr-defined]
+    app_cls.set_schwab_sync_status = _set_schwab_sync_status  # type: ignore[attr-defined]
 
 
 def _build_layout_without_account_strip(self: tk.Tk) -> None:
@@ -86,6 +87,7 @@ def _install_schwab_options_feature(self: tk.Tk, schwab_tab: ttk.Frame) -> None:
                 command=lambda app=self: _run_schwab_workspace_action(app, "refresh_schwab_account", "connect_schwab"),
                 style="Accent.TButton",
             )
+            _install_schwab_sync_status_badge(self, button)
 
     _set_schwab_mode_text(
         self,
@@ -207,6 +209,76 @@ def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
     _add_action_button(actions, row=3, column=1, text="Live Safety", command=schwab_action("show_live_submit_safety_review"))
     _add_action_button(actions, row=3, column=2, text="LIVE Submit", command=schwab_action("submit_selected_venue", "submit_live_schwab_order_guarded"), style="Danger.TButton")
     _add_action_button(actions, row=4, column=0, text="Cancel Order", command=schwab_action("cancel_selected_order", "show_cancel_order_placeholder"), style="Danger.TButton")
+
+
+def _install_schwab_sync_status_badge(self: tk.Tk, sync_button: ttk.Button) -> None:
+    parent = sync_button.master
+    if parent is None:
+        return
+
+    _ensure_schwab_sync_status_vars(self)
+    badge = getattr(self, "schwab_sync_status_badge", None)
+    if badge is None:
+        badge = tk.Label(
+            parent,
+            textvariable=self.schwab_sync_status_var,
+            bg="#f1f5f9",
+            fg="#475569",
+            font=("Segoe UI", 9, "bold"),
+            padx=8,
+            pady=4,
+            bd=0,
+        )
+        self.schwab_sync_status_badge = badge
+
+    _apply_schwab_sync_status_colors(self)
+    try:
+        info = sync_button.grid_info()
+        row = int(info.get("row", 0))
+        column = int(info.get("column", 1))
+        sticky = info.get("sticky", "e") or "e"
+        parent.columnconfigure(column, weight=0)
+        parent.columnconfigure(column + 1, weight=0)
+        badge.grid(row=row, column=column, sticky="e", padx=(0, 8))
+        sync_button.grid(row=row, column=column + 1, sticky=sticky)
+    except (tk.TclError, ValueError):
+        return
+
+
+def _ensure_schwab_sync_status_vars(self: tk.Tk) -> None:
+    if not hasattr(self, "schwab_sync_status_var"):
+        self.schwab_sync_status_var = tk.StringVar(value="Sync status --")
+    if not hasattr(self, "schwab_sync_status_state"):
+        self.schwab_sync_status_state = "neutral"
+
+
+def _set_schwab_sync_status(self: tk.Tk, status: str, message: str | None = None) -> None:
+    _ensure_schwab_sync_status_vars(self)
+    clean = status if status in {"success", "failure", "neutral"} else "neutral"
+    self.schwab_sync_status_state = clean
+    label = {
+        "success": "\u2713 Synced",
+        "failure": "\u2715 Sync failed",
+        "neutral": "Sync status --",
+    }[clean]
+    self.schwab_sync_status_var.set(message or label)
+    _apply_schwab_sync_status_colors(self)
+
+
+def _apply_schwab_sync_status_colors(self: tk.Tk) -> None:
+    badge = getattr(self, "schwab_sync_status_badge", None)
+    if badge is None:
+        return
+    state = getattr(self, "schwab_sync_status_state", "neutral")
+    colors = {
+        "success": ("#dcfce7", "#047857"),
+        "failure": ("#fee2e2", "#b91c1c"),
+        "neutral": ("#f1f5f9", "#475569"),
+    }.get(state, ("#f1f5f9", "#475569"))
+    try:
+        badge.configure(bg=colors[0], fg=colors[1])
+    except tk.TclError:
+        return
 
 
 def _add_action_button(parent: ttk.Frame, *, row: int, column: int, text: str, command: Callable[[], None], style: str = "TButton") -> None:

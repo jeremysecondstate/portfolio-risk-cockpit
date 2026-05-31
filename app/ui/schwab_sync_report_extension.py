@@ -34,13 +34,16 @@ def _connect_schwab_with_report(self: tk.Tk) -> None:
         report = _sync_schwab_account_report_with_reauth_fallback(self, session)
         if report is None:
             return
+        _mark_schwab_sync_status(self, "success")
         self.schwab_status_var.set("Schwab session: connected")
         self._set_preview_text(report)
     except Exception as exc:
         if _is_temporary_schwab_provider_error(exc):
+            _mark_schwab_sync_status(self, "failure")
             self.schwab_status_var.set("Schwab session: connected; retry account sync")
             self._set_preview_text(_schwab_account_refresh_failure_report(exc))
             return
+        _mark_schwab_sync_status(self, "failure")
         self.schwab_session = None
         self.schwab_status_var.set("Schwab session: not connected")
         messagebox.showerror("Schwab connect failed", str(exc))
@@ -54,28 +57,41 @@ def _refresh_schwab_account_with_report(self: tk.Tk) -> None:
         report = _sync_schwab_account_report_with_reauth_fallback(self, session)
         if report is None:
             return
+        _mark_schwab_sync_status(self, "success")
         self.schwab_status_var.set("Schwab session: connected")
         self._set_preview_text(report)
     except Exception as exc:
         if _is_temporary_schwab_provider_error(exc):
+            _mark_schwab_sync_status(self, "failure")
             self.schwab_status_var.set("Schwab session: connected; retry account sync")
             self._set_preview_text(_schwab_account_refresh_failure_report(exc))
             return
+        _mark_schwab_sync_status(self, "failure")
         messagebox.showerror("Schwab account refresh failed", str(exc))
 
 
 def _wrap_schwab_snapshot_sync(previous_sync_snapshot: Callable[[tk.Tk, object], str]) -> Callable[[tk.Tk, object], str]:
     def sync_snapshot_with_reauth_fallback(self: tk.Tk, session: object) -> str:
         try:
-            return previous_sync_snapshot(self, session)
+            result = previous_sync_snapshot(self, session)
+            _mark_schwab_sync_status(self, "success")
+            return result
         except Exception as exc:
             if not _should_force_schwab_reauthorization(exc):
+                _mark_schwab_sync_status(self, "failure")
                 raise
 
             retry_session = _force_schwab_reauthorization(self, session, exc)
             if retry_session is None:
+                _mark_schwab_sync_status(self, "failure")
                 raise RuntimeError("Schwab reauthorization canceled; no authorization was provided.") from exc
-            return previous_sync_snapshot(self, retry_session)
+            try:
+                result = previous_sync_snapshot(self, retry_session)
+                _mark_schwab_sync_status(self, "success")
+                return result
+            except Exception:
+                _mark_schwab_sync_status(self, "failure")
+                raise
 
     return sync_snapshot_with_reauth_fallback
 
@@ -127,7 +143,24 @@ def _sync_schwab_account_report(self: tk.Tk, session) -> str:
     self.broker.set_portfolio(portfolio, source_message)
     self.last_hyperliquid_cash_adjustment = 0.0
     self.refresh_portfolio()
+    _mark_schwab_sync_status(self, "success")
     return format_schwab_account_snapshot(account_payload, portfolio)
+
+
+def _mark_schwab_sync_status(self: tk.Tk, status: str) -> None:
+    setter = getattr(self, "set_schwab_sync_status", None)
+    if callable(setter):
+        try:
+            setter(status)
+            return
+        except Exception:
+            pass
+    var = getattr(self, "schwab_sync_status_var", None)
+    if var is not None:
+        try:
+            var.set("\u2713 Synced" if status == "success" else "\u2715 Sync failed")
+        except Exception:
+            pass
 
 
 def _should_force_schwab_reauthorization(exc: Exception) -> bool:
