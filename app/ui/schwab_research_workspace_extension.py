@@ -41,8 +41,8 @@ from app.analytics.stock_research import (
     build_scenario_rows,
     calculate_advanced_indicators,
     distance_to_price,
+    generated_risk_budget,
     load_cached_price_history,
-    recommended_risk_budget,
     save_cached_price_history,
     suggested_position_size,
     technical_scenario_basis,
@@ -101,7 +101,7 @@ def _open_schwab_research_workspace(self: tk.Tk) -> None:
 
     selected_symbol = _initial_research_symbol(self)
     self.schwab_research_symbol_var = tk.StringVar(value=selected_symbol)
-    self.schwab_research_max_risk_var = tk.StringVar(value="500")
+    self.schwab_research_max_risk_var = tk.StringVar(value="Run analysis")
     self.schwab_research_scenario_basis_var = tk.StringVar(value="Scenario moves will be generated from technical levels.")
     self.schwab_research_status_var = tk.StringVar(value="Choose a holding or enter a symbol, then run analysis.")
 
@@ -406,8 +406,8 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     controls.columnconfigure(1, weight=1)
     ttk.Label(controls, text="Scenario basis", style="Subtle.TLabel").grid(row=0, column=0, sticky="w")
     ttk.Label(controls, textvariable=self.schwab_research_scenario_basis_var, style="Chip.TLabel").grid(row=0, column=1, sticky="ew", padx=(8, 18))
-    ttk.Label(controls, text="Risk cap $", style="Subtle.TLabel").grid(row=0, column=2, sticky="w")
-    ttk.Entry(controls, textvariable=self.schwab_research_max_risk_var, width=10).grid(row=0, column=3, sticky="w", padx=(6, 18))
+    ttk.Label(controls, text="Generated risk $", style="Subtle.TLabel").grid(row=0, column=2, sticky="w")
+    ttk.Entry(controls, textvariable=self.schwab_research_max_risk_var, width=13, state="readonly").grid(row=0, column=3, sticky="w", padx=(6, 18))
     ttk.Button(controls, text="Refresh Risk", command=lambda app=self: _recalculate_research_scenarios(app)).grid(row=0, column=4, sticky="w")
     frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.cards.grid(row=1, column=0, sticky="ew", pady=(0, 8))
@@ -917,8 +917,17 @@ def _render_technicals(self: tk.Tk, payload: _ResearchPayload) -> None:
 
 def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
     frame = self.schwab_research_scenarios_frame
-    requested_risk_cap = _to_float(self.schwab_research_max_risk_var.get())
-    max_risk = recommended_risk_budget(payload.context, payload.indicators, requested_risk_cap)
+    risk_budget = generated_risk_budget(
+        payload.context,
+        payload.indicators,
+        macro_label=payload.decision.macro_backdrop.label,
+        risk_level_label=payload.decision.risk_level.label,
+        action_bias_label=payload.decision.action_bias.label,
+        earnings_text=payload.earnings_text,
+        fundamentals_text=payload.fundamentals_text,
+    )
+    max_risk = risk_budget.amount
+    self.schwab_research_max_risk_var.set(_money(max_risk))
     scenario_basis = technical_scenario_basis(payload.context, payload.indicators)
     self.schwab_research_scenario_basis_var.set(scenario_basis)
     candidates = getattr(self, "schwab_research_option_candidates", []) or []
@@ -932,7 +941,7 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
     cards = [
         _synthetic_badge("Recommended Move", risk_plan.recommendation, risk_plan.status, risk_plan.reason),
         _synthetic_badge("Current Exposure", _money(payload.context.market_value), "mixed" if payload.context.is_held else "info", f"{payload.context.quantity:g} shares; {payload.context.portfolio_weight:.2%} of portfolio."),
-        _synthetic_badge("Technical Risk Budget", _money(max_risk), "info", "Generated from support/ATR and clipped by the optional risk cap."),
+        _synthetic_badge("Generated Risk Budget", _money(max_risk), "info", _risk_budget_card_text(risk_budget)),
         _synthetic_badge("Paired Option", risk_plan.paired_option, "info", "Best loaded option candidate for this risk plan."),
     ]
     if worst is not None:
@@ -971,6 +980,11 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
         "- Stock-only rows show direct share P&L. Combined rows below use expiration-style option payoff, not live option pricing.",
         "- Protective put: insurance that can gain value if your shares fall, but the premium is paid upfront.",
         "- Covered call: income against held shares, but upside can be capped above the strike.",
+        "",
+        "Generated risk budget:",
+        f"- Amount: {_money(max_risk)}.",
+        f"- Base: {_money(risk_budget.base_amount)}; technical line: {_money(risk_budget.technical_amount)}; portfolio cap: {_money(risk_budget.portfolio_cap)}; cash cap: {_money(risk_budget.cash_cap)}.",
+        *[f"- {factor}." for factor in risk_budget.factors[:6]],
         "",
         "Stock-only scenario notes:",
         f"- Stop distance: {_percent(distance_to_price(payload.context.last_price, stop))}.",
@@ -1527,6 +1541,13 @@ def _set_research_text(widget: tk.Text, content: str) -> None:
     widget.insert(tk.END, content)
     _apply_report_tags(widget, content)
     widget.configure(state=tk.DISABLED)
+
+
+def _risk_budget_card_text(risk_budget: Any) -> str:
+    factors = list(getattr(risk_budget, "factors", ()) or ())
+    if not factors:
+        return "Generated from portfolio value, cash, exposure, technicals, macro, and event risk."
+    return "Portfolio/cash/technical base adjusted by " + "; ".join(factors[:3]) + "."
 
 
 def _is_hyperliquid(asset_type: str, symbol: str) -> bool:

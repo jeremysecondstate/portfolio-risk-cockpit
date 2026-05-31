@@ -58,6 +58,7 @@ class PortfolioSymbolContext:
     portfolio_weight: float
     unrealized_pnl: float | None
     day_pnl: float | None
+    cash_available: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,16 @@ class ScenarioRow:
     position_pnl: float
     portfolio_pnl_impact: float
     new_portfolio_value: float
+
+
+@dataclass(frozen=True)
+class GeneratedRiskBudget:
+    amount: float | None
+    base_amount: float | None
+    technical_amount: float | None
+    portfolio_cap: float | None
+    cash_cap: float | None
+    factors: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -186,6 +197,7 @@ def build_portfolio_symbol_context(portfolio: Portfolio, symbol: str, fallback_p
             portfolio_weight=0.0,
             unrealized_pnl=None,
             day_pnl=None,
+            cash_available=portfolio.cash,
         )
     last_price = fallback_price if fallback_price is not None else position.last_price
     market_value = position.quantity * last_price
@@ -200,6 +212,7 @@ def build_portfolio_symbol_context(portfolio: Portfolio, symbol: str, fallback_p
         portfolio_weight=market_value / portfolio_value,
         unrealized_pnl=position.unrealized_profit_loss,
         day_pnl=position.day_profit_loss,
+        cash_available=portfolio.cash,
     )
 
 
@@ -280,20 +293,244 @@ def recommended_risk_budget(
     indicators: AdvancedIndicatorSnapshot,
     requested_cap: float | None = None,
 ) -> float | None:
+    """Compatibility wrapper for older call sites.
+
+    The generated risk budget is portfolio-derived. ``requested_cap`` is
+    retained so older UI/tests can pass it, but it is only a final safety clamp
+    and is not treated as the source of truth.
+    """
+    budget = generated_risk_budget(context, indicators)
+    if budget.amount is None:
+        return None
+    if requested_cap is not None and requested_cap > 0:
+        return min(budget.amount, requested_cap)
+    return budget.amount
+
+
+def generated_risk_budget(
+    context: PortfolioSymbolContext,
+    indicators: AdvancedIndicatorSnapshot,
+    *,
+    macro_label: str = "Mixed",
+    risk_level_label: str = "Medium",
+    action_bias_label: str = "",
+    earnings_text: str = "",
+    fundamentals_text: str = "",
+) -> GeneratedRiskBudget:
+    total_value = max(context.portfolio_value, 0.0)
+    if total_value <= 0:
+        return GeneratedRiskBudget(None, None, None, None, None, ("Portfolio value unavailable.",))
+
     last_price = context.last_price or indicators.latest_close
-    portfolio_cap = max(context.portfolio_value, 0.0) * 0.005
+    portfolio_cap = total_value * (0.006 if context.is_held else 0.004)
+    cash = max(context.cash_available, 0.0)
+    cash_cap = cash * (0.025 if context.is_held else 0.035) if cash > 0 else None
+    technical_budget = _technical_budget_from_position(context, indicators, last_price)
+
+    candidates = [portfolio_cap]
+    if cash_cap is not None:
+        candidates.append(cash_cap)
+    if technical_budget is not None:
+        candidates.append(technical_budget)
+    base_amount = min(value for value in candidates if value > 0)
+
+    factor_rows = _risk_budget_factors(
+        context,
+        indicators,
+        macro_label=macro_label,
+        risk_level_label=risk_level_label,
+        action_bias_label=action_bias_label,
+        earnings_text=earnings_text,
+        fundamentals_text=fundamentals_text,
+    )
+    multiplier = 1.0
+    factor_notes: list[str] = []
+    for factor, note in factor_rows:
+        multiplier *= factor
+        factor_notes.append(note)
+
+    raw_amount = base_amount * multiplier
+    hard_cap = total_value * 0.01
+    if cash_cap is not None:
+        hard_cap = min(hard_cap, cash * 0.05)
+    if context.is_held and technical_budget is not None:
+        hard_cap = min(hard_cap, max(technical_budget, 25.0))
+    amount = min(raw_amount, hard_cap)
+    if amount > 0:
+        amount = max(min(_round_budget(amount), hard_cap), 0.0)
+    return GeneratedRiskBudget(
+        amount=amount,
+        base_amount=base_amount,
+        technical_amount=technical_budget,
+        portfolio_cap=portfolio_cap,
+        cash_cap=cash_cap,
+        factors=tuple(factor_notes),
+    )
+
+
+def _technical_budget_from_position(
+    context: PortfolioSymbolContext,
+    indicators: AdvancedIndicatorSnapshot,
+    last_price: float | None,
+) -> float | None:
     if context.is_held and context.quantity and last_price:
-        risk_level = indicators.support or (last_price - indicators.atr_14 if indicators.atr_14 else None)
+        risk_level = indicators.support if indicators.support and indicators.support < last_price else None
+        if risk_level is None and indicators.atr_14:
+            risk_level = last_price - abs(indicators.atr_14)
         if risk_level is not None and risk_level > 0:
-            technical_budget = abs(last_price - risk_level) * abs(context.quantity)
-        elif indicators.atr_14:
-            technical_budget = abs(indicators.atr_14) * abs(context.quantity)
-        else:
-            technical_budget = abs(context.market_value) * 0.03
-    else:
-        technical_budget = portfolio_cap
-    candidates = [value for value in (technical_budget, portfolio_cap, requested_cap) if value is not None and value > 0]
-    return min(candidates) if candidates else None
+            return abs(last_price - risk_level) * abs(context.quantity)
+        if indicators.atr_14:
+            return abs(indicators.atr_14) * abs(context.quantity)
+        return abs(context.market_value) * 0.03 if context.market_value else None
+    return None
+
+
+def _risk_budget_factors(
+    context: PortfolioSymbolContext,
+    indicators: AdvancedIndicatorSnapshot,
+    *,
+    macro_label: str,
+    risk_level_label: str,
+    action_bias_label: str,
+    earnings_text: str,
+    fundamentals_text: str,
+) -> list[tuple[float, str]]:
+    factors = [
+        _cash_factor(context),
+        _exposure_factor(context),
+        _trend_factor(indicators.trend),
+        _momentum_factor(indicators.momentum),
+        _volatility_factor(indicators.volatility),
+        _macro_factor(macro_label),
+        _risk_level_factor(risk_level_label),
+        _action_bias_factor(action_bias_label),
+        _event_risk_factor(earnings_text, fundamentals_text),
+        _pnl_factor(context),
+    ]
+    return [item for item in factors if item is not None]
+
+
+def _cash_factor(context: PortfolioSymbolContext) -> tuple[float, str]:
+    total = max(context.portfolio_value, 0.01)
+    cash_ratio = max(context.cash_available, 0.0) / total
+    if cash_ratio >= 0.40:
+        return 1.10, f"cash/liquidity strong ({cash_ratio:.1%}) x1.10"
+    if cash_ratio < 0.05:
+        return 0.55, f"cash/liquidity tight ({cash_ratio:.1%}) x0.55"
+    if cash_ratio < 0.15:
+        return 0.80, f"cash/liquidity modest ({cash_ratio:.1%}) x0.80"
+    return 1.00, f"cash/liquidity normal ({cash_ratio:.1%}) x1.00"
+
+
+def _exposure_factor(context: PortfolioSymbolContext) -> tuple[float, str]:
+    weight = abs(context.portfolio_weight)
+    if weight >= 0.15:
+        return 0.25, f"position concentration high ({weight:.1%}) x0.25"
+    if weight >= 0.10:
+        return 0.45, f"position concentration elevated ({weight:.1%}) x0.45"
+    if weight >= 0.05:
+        return 0.70, f"position concentration watched ({weight:.1%}) x0.70"
+    if context.is_held:
+        return 0.90, f"existing position modest ({weight:.1%}) x0.90"
+    return 1.00, "not currently held x1.00"
+
+
+def _trend_factor(trend: str) -> tuple[float, str]:
+    lower = trend.lower()
+    if lower == "bullish":
+        return 1.10, "technical trend bullish x1.10"
+    if lower == "bearish":
+        return 0.55, "technical trend bearish x0.55"
+    if lower == "sideways":
+        return 0.85, "technical trend sideways x0.85"
+    return 0.75, "technical trend unknown x0.75"
+
+
+def _momentum_factor(momentum: str) -> tuple[float, str]:
+    lower = momentum.lower()
+    if lower == "improving":
+        return 1.05, "momentum improving x1.05"
+    if lower == "weakening":
+        return 0.75, "momentum weakening x0.75"
+    if lower == "neutral":
+        return 0.95, "momentum neutral x0.95"
+    return 0.85, "momentum unknown x0.85"
+
+
+def _volatility_factor(volatility: str) -> tuple[float, str]:
+    lower = volatility.lower()
+    if lower == "elevated":
+        return 0.65, "volatility elevated x0.65"
+    if lower == "low":
+        return 1.05, "volatility low x1.05"
+    if lower == "normal":
+        return 1.00, "volatility normal x1.00"
+    return 0.85, "volatility unknown x0.85"
+
+
+def _macro_factor(label: str) -> tuple[float, str]:
+    lower = label.lower()
+    if "headwind" in lower or "hot" in lower:
+        return 0.60, f"macro {label.lower()} x0.60"
+    if "tailwind" in lower or "cool" in lower:
+        return 1.08, f"macro {label.lower()} x1.08"
+    if "neutral" in lower:
+        return 0.95, f"macro {label.lower()} x0.95"
+    return 0.80, f"macro {label.lower() or 'mixed'} x0.80"
+
+
+def _risk_level_factor(label: str) -> tuple[float, str]:
+    lower = label.lower()
+    if "hot" in lower or "high" in lower:
+        return 0.60, f"risk level {label.lower()} x0.60"
+    if "medium" in lower:
+        return 0.85, f"risk level {label.lower()} x0.85"
+    if "low" in lower:
+        return 1.05, f"risk level {label.lower()} x1.05"
+    return 0.90, f"risk level {label.lower() or 'unknown'} x0.90"
+
+
+def _action_bias_factor(label: str) -> tuple[float, str]:
+    lower = label.lower()
+    if "avoid" in lower:
+        return 0.25, f"action bias {label.lower()} x0.25"
+    if "trim" in lower or "reduce" in lower:
+        return 0.45, f"action bias {label.lower()} x0.45"
+    if "watch" in lower or "wait" in lower:
+        return 0.65, f"action bias {label.lower()} x0.65"
+    if "add" in lower or "bullish" in lower or "buy" in lower:
+        return 1.05, f"action bias {label.lower()} x1.05"
+    return 0.90, f"action bias {label.lower() or 'mixed'} x0.90"
+
+
+def _event_risk_factor(earnings_text: str, fundamentals_text: str) -> tuple[float, str]:
+    lower = f"{earnings_text}\n{fundamentals_text}".lower()
+    if any(term in lower for term in ("upcoming earnings", "earnings soon", "event risk", "guidance withdrawn", "going concern")):
+        return 0.60, "earnings/news event risk flagged x0.60"
+    if "unavailable" in lower:
+        return 0.85, "earnings/news incomplete x0.85"
+    return 1.00, "earnings/news no major event flag x1.00"
+
+
+def _pnl_factor(context: PortfolioSymbolContext) -> tuple[float, str]:
+    if not context.is_held:
+        return 1.00, "no existing unrealized P&L drag x1.00"
+    market_value = max(abs(context.market_value), 0.01)
+    unrealized_ratio = (context.unrealized_pnl or 0.0) / market_value
+    day_ratio = (context.day_pnl or 0.0) / market_value
+    if unrealized_ratio <= -0.08 or day_ratio <= -0.03:
+        return 0.65, "position P&L under pressure x0.65"
+    if unrealized_ratio >= 0.15:
+        return 0.90, "large unrealized gain favors discipline x0.90"
+    return 1.00, "position P&L normal x1.00"
+
+
+def _round_budget(amount: float) -> float:
+    if amount >= 250:
+        return round(amount / 25.0) * 25.0
+    if amount >= 50:
+        return round(amount / 10.0) * 10.0
+    return round(amount, 2)
 
 
 def _move_from_distance(distance: float | None, price: float) -> float | None:

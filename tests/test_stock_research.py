@@ -13,6 +13,7 @@ from app.analytics.stock_research import (
     calculate_advanced_indicators,
     distance_to_price,
     fibonacci_retracements,
+    generated_risk_budget,
     load_cached_price_history,
     recommended_risk_budget,
     save_cached_price_history,
@@ -202,6 +203,51 @@ class StockResearchAnalyticsTests(unittest.TestCase):
         self.assertIsNotNone(budget)
         self.assertLess(budget or 0, 500_000_000.0)
         self.assertLessEqual(budget or 0, context.portfolio_value * 0.005)
+
+    def test_generated_risk_budget_uses_portfolio_cash_and_macro(self) -> None:
+        indicators = calculate_advanced_indicators("LHX", _sample_candles())
+        context = build_portfolio_symbol_context(Portfolio(cash=120_000.0), "LHX", fallback_price=indicators.latest_close)
+
+        headwind = generated_risk_budget(
+            context,
+            indicators,
+            macro_label="Headwind",
+            risk_level_label="Medium",
+            action_bias_label="Watch",
+            earnings_text="No obvious earnings risk bullet was found.",
+        )
+        tailwind = generated_risk_budget(
+            context,
+            indicators,
+            macro_label="Tailwind",
+            risk_level_label="Low",
+            action_bias_label="Add carefully",
+            earnings_text="No obvious earnings risk bullet was found.",
+        )
+
+        self.assertIsNotNone(headwind.amount)
+        self.assertIsNotNone(tailwind.amount)
+        self.assertLess(headwind.amount or 0, tailwind.amount or 0)
+        self.assertLessEqual(headwind.amount or 0, context.portfolio_value * 0.01)
+        self.assertTrue(any("cash/liquidity" in factor for factor in headwind.factors))
+        self.assertTrue(any("macro headwind" in factor for factor in headwind.factors))
+
+    def test_generated_risk_budget_tight_cash_reduces_new_symbol_budget(self) -> None:
+        indicators = calculate_advanced_indicators("LHX", _sample_candles())
+        flush_context = build_portfolio_symbol_context(Portfolio(cash=80_000.0), "LHX", fallback_price=indicators.latest_close)
+        tight_context = build_portfolio_symbol_context(
+            Portfolio(cash=500.0, positions={"CASH_PROXY": Position("CASH_PROXY", 995, 100.0, 100.0)}),
+            "LHX",
+            fallback_price=indicators.latest_close,
+        )
+
+        flush_budget = generated_risk_budget(flush_context, indicators, macro_label="Neutral", risk_level_label="Medium", action_bias_label="Watch")
+        tight_budget = generated_risk_budget(tight_context, indicators, macro_label="Neutral", risk_level_label="Medium", action_bias_label="Watch")
+
+        self.assertIsNotNone(flush_budget.amount)
+        self.assertIsNotNone(tight_budget.amount)
+        self.assertLess(tight_budget.amount or 0, flush_budget.amount or 0)
+        self.assertLessEqual(tight_budget.amount or 0, tight_context.cash_available * 0.05)
 
     def test_friendly_meter_labels_are_readable(self) -> None:
         self.assertEqual(direction_strength_label(87), "Very Strong")
