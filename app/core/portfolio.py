@@ -13,6 +13,8 @@ class Position:
     day_profit_loss: float | None = None
     day_profit_loss_percent: float | None = None
     open_profit_loss: float | None = None
+    unrealized_profit_loss_known: bool = True
+    cost_basis_estimated: bool = False
 
     @property
     def cost_basis(self) -> float:
@@ -24,12 +26,16 @@ class Position:
 
     @property
     def unrealized_profit_loss(self) -> float:
+        if not self.unrealized_profit_loss_known:
+            return 0.0
         if self.open_profit_loss is not None:
             return round(self.open_profit_loss, 2)
         return round(self.market_value - self.cost_basis, 2)
 
     @property
     def unrealized_profit_loss_percent(self) -> float | None:
+        if not self.unrealized_profit_loss_known:
+            return None
         cost_basis = self.cost_basis
         if cost_basis <= 0:
             return None
@@ -90,11 +96,25 @@ class Portfolio:
 
     @property
     def unrealized_profit_loss(self) -> float:
-        return round(sum(position.unrealized_profit_loss for position in self.positions.values()), 2)
+        return round(
+            sum(
+                position.unrealized_profit_loss
+                for position in self.positions.values()
+                if position.unrealized_profit_loss_known
+            ),
+            2,
+        )
 
     @property
     def unrealized_profit_loss_percent(self) -> float | None:
-        cost_basis = self.cost_basis
+        cost_basis = round(
+            sum(
+                position.cost_basis
+                for position in self.positions.values()
+                if position.unrealized_profit_loss_known
+            ),
+            2,
+        )
         if cost_basis <= 0:
             return None
         return round((self.unrealized_profit_loss / cost_basis) * 100, 2)

@@ -194,8 +194,8 @@ def _build_portfolio_panel(self: tk.Tk, parent: ttk.Frame) -> None:
         ("cost_basis", "Cost Basis", 118),
         ("value", "Value", 122),
         ("weight", "Weight", 88),
-        ("pnl", "P&L $", 112),
-        ("pnl_pct", "P&L %", 86),
+        ("pnl", "Unrlzd $", 112),
+        ("pnl_pct", "Unrlzd %", 86),
         ("day_pnl", "Day P&L", 112),
     ]:
         self.positions_table.heading(column, text=label)
@@ -257,6 +257,8 @@ def _refresh_portfolio(self: tk.Tk) -> None:
         p = portfolio.positions[symbol]
         weight = (p.market_value / total_value) * 100
         row_tag = "pnl_positive" if p.unrealized_profit_loss >= 0 else "pnl_negative"
+        pnl_text = _format_money(p.unrealized_profit_loss) if p.unrealized_profit_loss_known else "--"
+        pnl_percent_text = _format_percent(p.unrealized_profit_loss_percent) if p.unrealized_profit_loss_known else "--"
         self.positions_table.insert(
             "",
             tk.END,
@@ -268,8 +270,8 @@ def _refresh_portfolio(self: tk.Tk) -> None:
                 _format_money(p.cost_basis),
                 _format_money(p.market_value),
                 f"{weight:.1f}%",
-                _format_money(p.unrealized_profit_loss),
-                _format_percent(p.unrealized_profit_loss_percent),
+                pnl_text,
+                pnl_percent_text,
                 _format_optional_money(p.day_profit_loss),
             ),
             tags=(row_tag,),

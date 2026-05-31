@@ -123,6 +123,8 @@ def _merge_hyperliquid_portfolio(self: tk.Tk, hyperliquid_portfolio: Portfolio) 
             day_profit_loss=position.day_profit_loss,
             day_profit_loss_percent=position.day_profit_loss_percent,
             open_profit_loss=position.open_profit_loss,
+            unrealized_profit_loss_known=position.unrealized_profit_loss_known,
+            cost_basis_estimated=position.cost_basis_estimated,
         )
 
     self.last_hyperliquid_display_symbols = display_symbols

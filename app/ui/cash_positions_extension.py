@@ -25,8 +25,8 @@ _POSITION_TABLE_COLUMNS = [
     ("cost_basis", "Cost Basis", 118, tk.E),
     ("value", "Value", 122, tk.E),
     ("weight", "Weight", 88, tk.E),
-    ("pnl", "P&L $", 112, tk.E),
-    ("pnl_pct", "P&L %", 86, tk.E),
+    ("pnl", "Unrlzd $", 112, tk.E),
+    ("pnl_pct", "Unrlzd %", 86, tk.E),
     ("day_pnl", "Day P&L", 112, tk.E),
 ]
 _LEFT_POSITION_COLUMNS = tuple(column for column, *_rest in _POSITION_TABLE_COLUMNS if column not in {"pnl", "pnl_pct", "day_pnl"})
@@ -140,6 +140,8 @@ def _merge_hyperliquid_portfolio_with_cash_rows(self: tk.Tk, hyperliquid_portfol
             day_profit_loss=position.day_profit_loss,
             day_profit_loss_percent=position.day_profit_loss_percent,
             open_profit_loss=position.open_profit_loss,
+            unrealized_profit_loss_known=position.unrealized_profit_loss_known,
+            cost_basis_estimated=position.cost_basis_estimated,
         )
         setattr(display_position, "asset_type", _hyperliquid_position_type(symbol))
         positions[display_symbol] = display_position
@@ -222,13 +224,13 @@ def _refresh_portfolio_with_cash_rows(self: tk.Tk) -> None:
                 "cost_basis": polished_theme._format_money(p.cost_basis),
                 "value": polished_theme._format_money(p.market_value),
                 "weight": f"{weight:.1f}%",
-                "pnl": polished_theme._format_money(p.unrealized_profit_loss),
-                "pnl_pct": polished_theme._format_percent(p.unrealized_profit_loss_percent),
+                "pnl": _format_unrealized_money(p),
+                "pnl_pct": _format_unrealized_percent(p),
                 "day_pnl": polished_theme._format_optional_money(p.day_profit_loss),
             },
             pnl_values={
-                "pnl": p.unrealized_profit_loss,
-                "pnl_pct": p.unrealized_profit_loss_percent,
+                "pnl": p.unrealized_profit_loss if p.unrealized_profit_loss_known else None,
+                "pnl_pct": p.unrealized_profit_loss_percent if p.unrealized_profit_loss_known else None,
                 "day_pnl": p.day_profit_loss,
             },
             main_tag="data_neutral",
@@ -493,3 +495,15 @@ def _pnl_value_tag(value: float | None) -> str:
     if value > 0:
         return "pnl_positive"
     return "pnl_negative"
+
+
+def _format_unrealized_money(position: Position) -> str:
+    if not position.unrealized_profit_loss_known:
+        return "--"
+    return polished_theme._format_money(position.unrealized_profit_loss)
+
+
+def _format_unrealized_percent(position: Position) -> str:
+    if not position.unrealized_profit_loss_known:
+        return "--"
+    return polished_theme._format_percent(position.unrealized_profit_loss_percent)

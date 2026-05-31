@@ -42,6 +42,12 @@ SPOT_AVERAGE_COST_KEYS = ("avgEntryPx", "averageEntryPrice", "avgCost", "average
 
 
 @dataclass(frozen=True)
+class SpotEntryNotional:
+    value: float | None
+    known: bool
+
+
+@dataclass(frozen=True)
 class HyperliquidSnapshot:
     """Read-only Hyperliquid account data pulled from the public info API."""
 
@@ -286,7 +292,7 @@ def format_hyperliquid_snapshot(snapshot: HyperliquidSnapshot, portfolio: Portfo
             )
             if current_value is None and spot_price is not None and total and total > ZERO_EPSILON:
                 current_value = total * spot_price
-            entry_ntl = _spot_entry_notional(
+            entry = _spot_entry_notional_status(
                 coin,
                 total,
                 raw_balance,
@@ -294,8 +300,8 @@ def format_hyperliquid_snapshot(snapshot: HyperliquidSnapshot, portfolio: Portfo
                 current_value,
                 reconstructed_spot_basis=reconstructed_spot_basis,
             )
-            pnl = (current_value - entry_ntl) if current_value is not None and entry_ntl is not None else None
-            pnl_percent = (pnl / entry_ntl * 100) if pnl is not None and entry_ntl and entry_ntl > 0 else None
+            pnl = (current_value - entry.value) if current_value is not None and entry.value is not None and entry.known else None
+            pnl_percent = (pnl / entry.value * 100) if pnl is not None and entry.value and entry.value > 0 else None
             lines.append(
                 f"- {coin}: total {_format_optional_number(total)}, "
                 f"held {_format_optional_number(hold)}, "
@@ -322,7 +328,7 @@ def format_hyperliquid_snapshot(snapshot: HyperliquidSnapshot, portfolio: Portfo
     lines.extend(
         [
             "",
-            "Spot P&L is read-only: current value minus entry notional.",
+            "Spot P&L is read-only and shown only when Hyperliquid provides cost basis or matching fills let the cockpit reconstruct it.",
             "Spot prices resolve through Hyperliquid spot metadata when allMids only exposes @-indexed spot markets.",
             "API/agent wallets are only needed for future signed actions.",
         ]
@@ -403,7 +409,7 @@ def _spot_position_from_hyperliquid(
     if coin in CASH_LIKE_COINS:
         return None, CashPosition(coin, round(current_value or quantity, 2), "Hyperliquid")
 
-    entry_notional = _spot_entry_notional(
+    entry = _spot_entry_notional_status(
         coin,
         quantity,
         raw_balance,
@@ -411,6 +417,7 @@ def _spot_position_from_hyperliquid(
         current_value,
         reconstructed_spot_basis=reconstructed_spot_basis,
     )
+    entry_notional = entry.value
     average_cost = (entry_notional / quantity) if entry_notional is not None and quantity > ZERO_EPSILON else None
     last_price = (
         (current_value / quantity) if current_value is not None and quantity > ZERO_EPSILON else None
@@ -418,7 +425,7 @@ def _spot_position_from_hyperliquid(
 
     open_profit_loss = (
         current_value - entry_notional
-        if current_value is not None and entry_notional is not None
+        if current_value is not None and entry_notional is not None and entry.known
         else None
     )
 
@@ -429,6 +436,8 @@ def _spot_position_from_hyperliquid(
             average_cost=round(average_cost or last_price, 4),
             last_price=round(last_price, 4),
             open_profit_loss=round(open_profit_loss, 2) if open_profit_loss is not None else None,
+            unrealized_profit_loss_known=entry.known,
+            cost_basis_estimated=not entry.known,
         ),
         None,
     )
@@ -469,6 +478,25 @@ def _spot_entry_notional(
     *,
     reconstructed_spot_basis: dict[str, SpotCostBasis] | None = None,
 ) -> float | None:
+    return _spot_entry_notional_status(
+        coin,
+        quantity,
+        raw_balance,
+        snapshot,
+        current_value,
+        reconstructed_spot_basis=reconstructed_spot_basis,
+    ).value
+
+
+def _spot_entry_notional_status(
+    coin: str,
+    quantity: float | None,
+    raw_balance: dict[str, Any],
+    snapshot: HyperliquidSnapshot,
+    current_value: float | None,
+    *,
+    reconstructed_spot_basis: dict[str, SpotCostBasis] | None = None,
+) -> SpotEntryNotional:
     history_basis = _spot_history_entry_notional(
         coin,
         quantity,
@@ -476,16 +504,16 @@ def _spot_entry_notional(
         reconstructed_spot_basis=reconstructed_spot_basis,
     )
     if history_basis is not None:
-        return history_basis
+        return SpotEntryNotional(history_basis, True)
 
     api_entry_notional = _spot_api_entry_notional(raw_balance, quantity)
     if api_entry_notional is not None:
-        return api_entry_notional
+        return SpotEntryNotional(api_entry_notional, True)
 
     if coin not in CASH_LIKE_COINS and current_value is not None:
-        return current_value
+        return SpotEntryNotional(current_value, False)
 
-    return None
+    return SpotEntryNotional(None, False)
 
 
 def _spot_api_entry_notional(raw_balance: dict[str, Any], quantity: float | None) -> float | None:

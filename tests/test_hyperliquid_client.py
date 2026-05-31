@@ -74,9 +74,11 @@ class HyperliquidPortfolioTests(unittest.TestCase):
         self.assertAlmostEqual(position.average_cost, 73489.5, delta=0.25)
         self.assertAlmostEqual(position.last_price, 73489.5, delta=0.25)
         self.assertEqual(position.unrealized_profit_loss, 0.0)
-        self.assertEqual(position.unrealized_profit_loss_percent, 0.0)
-        self.assertIn("entry $3,679.04", report)
-        self.assertIn("P&L $0.00 (+0.00%)", report)
+        self.assertIsNone(position.unrealized_profit_loss_percent)
+        self.assertFalse(position.unrealized_profit_loss_known)
+        self.assertTrue(position.cost_basis_estimated)
+        self.assertIn("entry --", report)
+        self.assertIn("P&L -- (--)", report)
 
     def test_spot_real_cost_basis_still_calculates_pnl(self) -> None:
         snapshot = _snapshot(
@@ -176,7 +178,8 @@ class HyperliquidPortfolioTests(unittest.TestCase):
         self.assertEqual(position.cost_basis, 500.00)
         self.assertEqual(position.market_value, 500.00)
         self.assertEqual(position.unrealized_profit_loss, 0.0)
-        self.assertEqual(position.unrealized_profit_loss_percent, 0.0)
+        self.assertIsNone(position.unrealized_profit_loss_percent)
+        self.assertFalse(position.unrealized_profit_loss_known)
 
     def test_perp_pnl_uses_hyperliquid_unrealized_pnl(self) -> None:
         snapshot = _snapshot(
