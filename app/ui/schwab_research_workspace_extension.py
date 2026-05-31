@@ -37,6 +37,7 @@ from app.analytics.stock_research import (
     AdvancedIndicatorSnapshot,
     DataSourceStatus,
     PortfolioSymbolContext,
+    build_planned_stock_context,
     build_portfolio_symbol_context,
     build_scenario_rows,
     calculate_advanced_indicators,
@@ -928,19 +929,22 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
     )
     max_risk = risk_budget.amount
     self.schwab_research_max_risk_var.set(_money(max_risk))
+    scenario_context, stock_plan = build_planned_stock_context(payload.context, payload.indicators, risk_budget)
     scenario_basis = technical_scenario_basis(payload.context, payload.indicators)
     self.schwab_research_scenario_basis_var.set(scenario_basis)
+    scenario_rows = build_scenario_rows(scenario_context, technical_scenario_moves(payload.context, payload.indicators))
     candidates = getattr(self, "schwab_research_option_candidates", []) or []
     top_candidate = next((item for item in candidates if item.option_type in {"call", "put"}), None)
     fundamental_verdict = build_fundamental_verdict(payload.fundamentals_text, payload.indicators, payload.decision.macro_backdrop.label)
     risk_plan = build_risk_plan(payload.indicators, payload.context, payload.decision.macro_backdrop.label, fundamental_verdict.verdict, top_candidate, max_risk)
-    negative_rows = [row for row in payload.scenario_rows if row.position_pnl < 0]
-    positive_rows = [row for row in payload.scenario_rows if row.position_pnl > 0]
-    worst = min(negative_rows or payload.scenario_rows, key=lambda row: row.position_pnl, default=None)
-    best = max(positive_rows or payload.scenario_rows, key=lambda row: row.position_pnl, default=None)
+    negative_rows = [row for row in scenario_rows if row.position_pnl < 0]
+    positive_rows = [row for row in scenario_rows if row.position_pnl > 0]
+    worst = min(negative_rows or scenario_rows, key=lambda row: row.position_pnl, default=None)
+    best = max(positive_rows or scenario_rows, key=lambda row: row.position_pnl, default=None)
     cards = [
         _synthetic_badge("Recommended Move", risk_plan.recommendation, risk_plan.status, risk_plan.reason),
         _synthetic_badge("Current Exposure", _money(payload.context.market_value), "mixed" if payload.context.is_held else "info", f"{payload.context.quantity:g} shares; {payload.context.portfolio_weight:.2%} of portfolio."),
+        _synthetic_badge("Stock Scenario Position", _shares(stock_plan.quantity), "info", _stock_plan_card_text(stock_plan)),
         _synthetic_badge("Generated Risk Budget", _money(max_risk), "info", _risk_budget_card_text(risk_budget)),
         _synthetic_badge("Paired Option", risk_plan.paired_option, "info", "Best loaded option candidate for this risk plan."),
     ]
@@ -955,12 +959,12 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
         move_tree.delete(row_id)
     for move, makes_sense, protects, gives_up, effect in risk_plan.move_planner:
         move_tree.insert("", tk.END, values=(move, makes_sense, protects, gives_up, effect))
-    max_abs = max((abs(row.portfolio_pnl_impact) for row in payload.scenario_rows), default=0.0001)
-    frame.impact_bars.set_rows([(row.scenario, scenario_impact_bar_value(row, max_abs), _money(row.position_pnl)) for row in payload.scenario_rows])  # type: ignore[attr-defined]
+    max_abs = max((abs(row.portfolio_pnl_impact) for row in scenario_rows), default=0.0001)
+    frame.impact_bars.set_rows([(row.scenario, scenario_impact_bar_value(row, max_abs), _money(row.position_pnl)) for row in scenario_rows])  # type: ignore[attr-defined]
     tree = frame.scenario_tree  # type: ignore[attr-defined]
     for row_id in tree.get_children():
         tree.delete(row_id)
-    for row in payload.scenario_rows:
+    for row in scenario_rows:
         tag = "positive" if row.position_pnl > 0 else "negative" if row.position_pnl < 0 else ""
         tree.insert("", tk.END, values=(row.scenario, _money(row.symbol_price), _money(row.position_pnl), f"{row.portfolio_pnl_impact:+.2%}", _money(row.new_portfolio_value)), tags=(tag,) if tag else ())
     stop = _float_from_var(getattr(self, "stop_price_var", None))
@@ -986,10 +990,15 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
         f"- Base: {_money(risk_budget.base_amount)}; technical line: {_money(risk_budget.technical_amount)}; portfolio cap: {_money(risk_budget.portfolio_cap)}; cash cap: {_money(risk_budget.cash_cap)}.",
         *[f"- {factor}." for factor in risk_budget.factors[:6]],
         "",
+        "Generated stock scenario position:",
+        f"- Shares: {_shares(stock_plan.quantity)}; notional: {_money(stock_plan.notional)}; portfolio weight: {stock_plan.portfolio_weight:.2%}.",
+        f"- Entry: {_money(stock_plan.entry_price)}; stop: {_money(stock_plan.stop_price)}; per-share risk: {_money(stock_plan.per_share_risk)}.",
+        f"- {stock_plan.basis}",
+        "",
         "Stock-only scenario notes:",
         f"- Stop distance: {_percent(distance_to_price(payload.context.last_price, stop))}.",
         f"- Target distance: {_percent(distance_to_price(payload.context.last_price, target))}.",
-        f"- Suggested size at {_money(max_risk)} max risk and stop {_money(stop)}: {_shares(size)}.",
+        f"- Suggested size at {_money(max_risk)} max risk and ticket stop {_money(stop)}: {_shares(size)}.",
         f"- Scenario basis: {scenario_basis}",
     ]
     _set_research_text(frame.scenario_note_text, "\n".join(lines))  # type: ignore[attr-defined]
@@ -1548,6 +1557,17 @@ def _risk_budget_card_text(risk_budget: Any) -> str:
     if not factors:
         return "Generated from portfolio value, cash, exposure, technicals, macro, and event risk."
     return "Portfolio/cash/technical base adjusted by " + "; ".join(factors[:3]) + "."
+
+
+def _stock_plan_card_text(stock_plan: Any) -> str:
+    quantity = float(getattr(stock_plan, "quantity", 0.0) or 0.0)
+    if quantity <= 0:
+        return getattr(stock_plan, "basis", "No stock scenario position could be generated.")
+    return (
+        f"{_money(getattr(stock_plan, 'notional', None))} notional; "
+        f"entry {_money(getattr(stock_plan, 'entry_price', None))}; "
+        f"stop {_money(getattr(stock_plan, 'stop_price', None))}."
+    )
 
 
 def _is_hyperliquid(asset_type: str, symbol: str) -> bool:

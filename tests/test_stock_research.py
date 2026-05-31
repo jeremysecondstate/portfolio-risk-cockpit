@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from app.analytics.stock_research import (
     DataSourceStatus,
+    build_planned_stock_context,
     build_portfolio_symbol_context,
     build_scenario_rows,
     calculate_advanced_indicators,
@@ -248,6 +249,40 @@ class StockResearchAnalyticsTests(unittest.TestCase):
         self.assertIsNotNone(tight_budget.amount)
         self.assertLess(tight_budget.amount or 0, flush_budget.amount or 0)
         self.assertLessEqual(tight_budget.amount or 0, tight_context.cash_available * 0.05)
+
+    def test_planned_stock_context_generates_watchlist_scenario_position(self) -> None:
+        indicators = calculate_advanced_indicators("LHX", _sample_candles())
+        context = build_portfolio_symbol_context(Portfolio(cash=120_000.0), "LHX", fallback_price=indicators.latest_close)
+        risk_budget = generated_risk_budget(
+            context,
+            indicators,
+            macro_label="Headwind",
+            risk_level_label="Medium",
+            action_bias_label="Watch",
+            earnings_text="No obvious earnings risk bullet was found.",
+        )
+
+        planned_context, stock_plan = build_planned_stock_context(context, indicators, risk_budget)
+        rows = build_scenario_rows(planned_context, moves=(-0.10, 0.10))
+
+        self.assertFalse(planned_context.is_held)
+        self.assertGreater(stock_plan.quantity, 0)
+        self.assertGreater(stock_plan.notional, 0)
+        self.assertLess(stock_plan.notional, context.cash_available)
+        self.assertTrue(any(abs(row.position_pnl) > 0 for row in rows))
+        self.assertIn("Generated watchlist stock plan", stock_plan.basis)
+
+    def test_planned_stock_context_keeps_actual_held_quantity(self) -> None:
+        indicators = calculate_advanced_indicators("NVDA", _sample_candles())
+        last = indicators.latest_close or 100.0
+        context = build_portfolio_symbol_context(Portfolio(cash=20_000.0, positions={"NVDA": Position("NVDA", 15, 90.0, last)}), "NVDA", fallback_price=last)
+        risk_budget = generated_risk_budget(context, indicators, macro_label="Neutral", risk_level_label="Medium", action_bias_label="Watch")
+
+        planned_context, stock_plan = build_planned_stock_context(context, indicators, risk_budget)
+
+        self.assertIs(planned_context, context)
+        self.assertEqual(stock_plan.quantity, 15)
+        self.assertIn("Current held shares", stock_plan.basis)
 
     def test_friendly_meter_labels_are_readable(self) -> None:
         self.assertEqual(direction_strength_label(87), "Very Strong")

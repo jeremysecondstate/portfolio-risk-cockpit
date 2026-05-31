@@ -81,6 +81,18 @@ class GeneratedRiskBudget:
 
 
 @dataclass(frozen=True)
+class GeneratedStockPosition:
+    quantity: float
+    entry_price: float | None
+    stop_price: float | None
+    risk_dollars: float | None
+    notional: float
+    portfolio_weight: float
+    per_share_risk: float | None
+    basis: str
+
+
+@dataclass(frozen=True)
 class DataSourceStatus:
     source: str
     status: str
@@ -236,6 +248,75 @@ def build_scenario_rows(context: PortfolioSymbolContext, moves: tuple[float, ...
     return rows
 
 
+def build_planned_stock_context(
+    context: PortfolioSymbolContext,
+    indicators: AdvancedIndicatorSnapshot,
+    risk_budget: GeneratedRiskBudget,
+) -> tuple[PortfolioSymbolContext, GeneratedStockPosition]:
+    """Return actual held exposure, or a generated stock plan for watchlist scenarios."""
+    if context.is_held and context.quantity:
+        stop = _scenario_stop_price(context, indicators)
+        per_share_risk = abs((context.last_price or 0.0) - stop) if stop is not None and context.last_price is not None else None
+        return context, GeneratedStockPosition(
+            quantity=context.quantity,
+            entry_price=context.last_price,
+            stop_price=stop,
+            risk_dollars=risk_budget.amount,
+            notional=abs(context.market_value),
+            portfolio_weight=abs(context.portfolio_weight),
+            per_share_risk=per_share_risk,
+            basis="Current held shares.",
+        )
+
+    entry = context.last_price or indicators.latest_close
+    if entry is None or entry <= 0 or risk_budget.amount is None or risk_budget.amount <= 0:
+        return context, GeneratedStockPosition(0.0, entry, None, risk_budget.amount, 0.0, 0.0, None, "Insufficient price or risk budget.")
+
+    stop = _scenario_stop_price(context, indicators)
+    if stop is None or stop <= 0 or stop >= entry:
+        stop = entry * 0.97
+    per_share_risk = max(entry - stop, 0.01)
+    max_notional = min(
+        max(context.cash_available, 0.0) * 0.06 if context.cash_available > 0 else entry,
+        max(context.portfolio_value, 0.0) * 0.06,
+        risk_budget.amount * 45.0,
+    )
+    risk_sized = risk_budget.amount / per_share_risk
+    notional_sized = max_notional / entry if entry else 0.0
+    cash_sized = max(context.cash_available, 0.0) / entry if entry else 0.0
+    quantity = math.floor(max(0.0, min(risk_sized, notional_sized, cash_sized)))
+    notional = quantity * entry
+    planned = PortfolioSymbolContext(
+        symbol=context.symbol,
+        is_held=False,
+        quantity=quantity,
+        average_cost=entry if quantity else None,
+        last_price=entry,
+        market_value=notional,
+        portfolio_value=context.portfolio_value,
+        portfolio_weight=notional / max(context.portfolio_value, 0.01),
+        unrealized_pnl=None,
+        day_pnl=None,
+        cash_available=context.cash_available,
+    )
+    basis = (
+        f"Generated watchlist stock plan from {_plain_money(risk_budget.amount)} risk, "
+        f"{_plain_money(per_share_risk)} per-share risk to {_plain_money(stop)}, "
+        f"and {_plain_money(max_notional)} max starter notional."
+    )
+    position = GeneratedStockPosition(
+        quantity=quantity,
+        entry_price=entry,
+        stop_price=stop,
+        risk_dollars=risk_budget.amount,
+        notional=notional,
+        portfolio_weight=notional / max(context.portfolio_value, 0.01),
+        per_share_risk=per_share_risk,
+        basis=basis,
+    )
+    return planned, position
+
+
 def technical_scenario_moves(context: PortfolioSymbolContext, indicators: AdvancedIndicatorSnapshot) -> tuple[float, ...]:
     """Build scenario moves from current technical levels instead of arbitrary user input."""
     last_price = context.last_price or indicators.latest_close
@@ -270,6 +351,32 @@ def technical_scenario_moves(context: PortfolioSymbolContext, indicators: Advanc
     selected = negative[:3] + positive[:3]
     selected.extend([-0.10, 0.10])
     return tuple(sorted(set(_round_move(move) for move in selected if 0.005 <= abs(move) <= 0.35)))
+
+
+def _scenario_stop_price(context: PortfolioSymbolContext, indicators: AdvancedIndicatorSnapshot) -> float | None:
+    entry = context.last_price or indicators.latest_close
+    if entry is None or entry <= 0:
+        return None
+    candidates: list[float] = []
+    for level in (indicators.support, indicators.swing_low, indicators.bollinger_lower):
+        if level is not None and 0 < level < entry:
+            candidates.append(level)
+    if indicators.atr_14 and indicators.atr_14 > 0:
+        candidates.append(entry - abs(indicators.atr_14))
+    if not candidates:
+        candidates.append(entry * 0.97)
+    stop = max(value for value in candidates if value > 0)
+    minimum_distance = max(entry * 0.01, abs(indicators.atr_14 or 0.0) * 0.75, 0.01)
+    if entry - stop < minimum_distance:
+        stop = max(entry - minimum_distance, entry * 0.90)
+    return stop
+
+
+def _plain_money(value: float | None) -> str:
+    if value is None:
+        return "--"
+    prefix = "-$" if value < 0 else "$"
+    return f"{prefix}{abs(value):,.2f}"
 
 
 def technical_scenario_basis(context: PortfolioSymbolContext, indicators: AdvancedIndicatorSnapshot) -> str:
