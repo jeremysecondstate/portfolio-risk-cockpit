@@ -1207,7 +1207,7 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     status.columnconfigure((0, 1, 2), weight=1)
     ttk.Label(status, textvariable=self.hyperliquid_status_var, style="Chip.TLabel").grid(row=0, column=0, sticky="ew", padx=(0, 6))
     ttk.Label(status, textvariable=self.schwab_verification_status_var, style="Chip.TLabel").grid(row=0, column=1, sticky="ew", padx=(0, 6))
-    ttk.Label(status, text="Venue locked: Hyperliquid", style="Chip.TLabel").grid(row=0, column=2, sticky="ew")
+    ttk.Label(status, text="THIS IS VERY USELESS", style="Chip.TLabel").grid(row=0, column=2, sticky="ew")
 
     _set_workspace_text(
         self.hyperliquid_trading_preview_text,

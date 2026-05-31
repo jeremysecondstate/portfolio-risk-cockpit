@@ -59,7 +59,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         self.schwab_status_var = tk.StringVar(value="Schwab session: not connected")
         self.schwab_preview_status_var = tk.StringVar(value="Last Schwab preview: none")
         self.schwab_verification_status_var = tk.StringVar(
-            value="Open Only verified: no · Cancel verified: no"
+            value="THIS IS USELESS: yes · THIS IS ALSO USELESS: yes"
         )
 
         self._build_layout()
@@ -248,7 +248,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         open_value = "yes" if self.open_only_verified_this_session else "no"
         cancel_value = "yes" if self.cancel_verified_this_session else "no"
         self.schwab_verification_status_var.set(
-            f"Open Only verified: {open_value} · Cancel verified: {cancel_value}"
+            f"THIS IS USELESS: {open_value} · THIS IS USELESS: {cancel_value}"
         )
 
     def reset_schwab_session(self) -> None:
