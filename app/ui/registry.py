@@ -27,6 +27,7 @@ from app.ui.options_what_if_enhancement_extension import install_options_what_if
 from app.ui.polished_theme import install_polished_cockpit_theme
 from app.ui.schwab_live_status_extension import install_schwab_live_status_extension
 from app.ui.schwab_mechanical_submit_extension import install_schwab_mechanical_submit_extension
+from app.ui.schwab_oauth_hardening_extension import install_schwab_oauth_hardening_extension
 from app.ui.schwab_option_chain_extension import install_schwab_option_chain_extension
 from app.ui.schwab_option_chain_visible_fix import install_schwab_option_chain_visible_fix
 from app.ui.schwab_option_order_payload_extension import install_schwab_option_order_payload_extension
@@ -52,6 +53,7 @@ def install_ui_extensions(app_cls: Type[tk.Tk]) -> None:
     should be the single place to audit extension bootstrapping.
     """
 
+    install_schwab_oauth_hardening_extension()
     install_polished_cockpit_theme(app_cls)
     install_trade_setup_extension(app_cls)
     install_advanced_actions_extension(app_cls)
