@@ -1673,6 +1673,14 @@ def _perp_position_pnl(entry: float, price: float, quantity: float, is_short: bo
     return (price - entry) * quantity
 
 
+def _risk_reward(reward_net: float, stop_net: float) -> str:
+    risk = abs(min(stop_net, 0.0))
+    reward = max(reward_net, 0.0)
+    if risk <= 0 or reward <= 0:
+        return "n/a - TP must be profitable and SL must be a loss"
+    return f"{reward / risk:.2f} : 1"
+
+
 def _matching_tpsl_orders(self: tk.Tk, coin: str) -> list[HyperliquidOpenOrder]:
     normalized_coin = normalize_hyperliquid_coin(coin)
     orders = getattr(self, "hyperliquid_open_order_by_oid", {})

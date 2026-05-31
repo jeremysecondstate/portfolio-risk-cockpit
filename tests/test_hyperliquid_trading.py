@@ -12,7 +12,7 @@ from app.brokers.hyperliquid.trading import (
     normalize_hyperliquid_trigger_ticket_for_wire,
 )
 from app.core.portfolio import Portfolio, Position
-from app.ui.hyperliquid_trading_extension import _normalize_edit_market, _selected_hyperliquid_order, normalize_hyperliquid_open_order
+from app.ui.hyperliquid_trading_extension import _normalize_edit_market, _risk_reward, _selected_hyperliquid_order, normalize_hyperliquid_open_order
 from app.ui.hyperliquid_trading_extension import _current_hyperliquid_perp_position, _perp_position_pnl
 from app.ui.hyperliquid_submit_no_autosync_fix import _attached_tpsl_tickets
 
@@ -155,6 +155,13 @@ class HyperliquidTradingTests(unittest.TestCase):
     def test_perp_position_pnl_handles_short_and_long(self) -> None:
         self.assertAlmostEqual(_perp_position_pnl(500.0, 450.0, 4.0, True), 200.0)
         self.assertAlmostEqual(_perp_position_pnl(500.0, 550.0, 4.0, False), 200.0)
+
+    def test_risk_reward_formats_valid_position_size_ratio(self) -> None:
+        self.assertEqual(_risk_reward(150.0, -50.0), "3.00 : 1")
+
+    def test_risk_reward_requires_positive_reward_and_stop_loss(self) -> None:
+        self.assertEqual(_risk_reward(0.0, -50.0), "n/a - TP must be profitable and SL must be a loss")
+        self.assertEqual(_risk_reward(50.0, 10.0), "n/a - TP must be profitable and SL must be a loss")
 
     def test_selected_order_does_not_auto_edit_wrong_order_when_id_is_stale(self) -> None:
         app = type(
