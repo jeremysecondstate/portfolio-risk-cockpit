@@ -16,6 +16,14 @@ from app.ui.cash_positions_extension import _portfolio_display_pnl_summary, _pos
 from app.ui.options_lab_extension import _populate_workspace_open_orders_table, _workspace_holding_rows
 from app.ui.hyperliquid_trading_extension import _market_close_limit_price, _normalize_edit_market, _reverse_order_size_for_same_opposite_position, _risk_reward, _selected_hyperliquid_order, _set_hyperliquid_perp_mid_price, normalize_hyperliquid_open_order
 from app.ui.hyperliquid_trading_extension import _current_hyperliquid_perp_position, _perp_position_pnl
+from app.ui.hyperliquid_perp_ticket_use_mid_fix import (
+    LEVERAGE_PNL_EXPLANATION,
+    _estimated_margin_required,
+    _isolated_liquidation_price,
+    _liquidation_readout_lines,
+    _perp_case,
+    _tpsl_scenario_readout,
+)
 from app.ui.hyperliquid_submit_no_autosync_fix import _apply_ticket_leverage_if_needed, _attached_tpsl_tickets
 
 
@@ -416,6 +424,73 @@ class HyperliquidTradingTests(unittest.TestCase):
         ticket = HyperliquidOrderTicket("ZEC", is_buy=False, size=5, limit_price=512.65, tif="Gtc")
 
         self.assertEqual(_attached_tpsl_tickets(app, ticket), [])  # type: ignore[arg-type]
+
+    def test_long_tp_below_entry_flags_invalid_take_profit(self) -> None:
+        readout = _tpsl_scenario_readout("TP", 72_675.50, 35_000.0, True)
+
+        self.assertFalse(readout.valid)
+        self.assertEqual(readout.label, "TP field scenario - INVALID for LONG take-profit")
+        self.assertEqual(readout.warning, "TP is below entry for a LONG. This is a loss scenario, not take profit.")
+
+    def test_long_sl_above_entry_flags_invalid_stop_loss(self) -> None:
+        readout = _tpsl_scenario_readout("SL", 72_675.50, 81_000.0, True)
+
+        self.assertFalse(readout.valid)
+        self.assertEqual(readout.label, "SL field scenario - INVALID for LONG stop-loss")
+        self.assertEqual(readout.warning, "SL is above entry for a LONG. This is a profit scenario, not stop loss.")
+
+    def test_short_tp_above_entry_flags_invalid_take_profit(self) -> None:
+        readout = _tpsl_scenario_readout("TP", 72_675.50, 81_000.0, False)
+
+        self.assertFalse(readout.valid)
+        self.assertEqual(readout.label, "TP field scenario - INVALID for SHORT take-profit")
+        self.assertEqual(readout.warning, "TP is above entry for a SHORT. This is a loss scenario, not take profit.")
+
+    def test_short_sl_below_entry_flags_invalid_stop_loss(self) -> None:
+        readout = _tpsl_scenario_readout("SL", 72_675.50, 35_000.0, False)
+
+        self.assertFalse(readout.valid)
+        self.assertEqual(readout.label, "SL field scenario - INVALID for SHORT stop-loss")
+        self.assertEqual(readout.warning, "SL is below entry for a SHORT. This is a profit scenario, not stop loss.")
+
+    def test_perp_gross_pnl_is_independent_of_leverage(self) -> None:
+        case_5x = _perp_case(72_675.50, 81_000.0, 0.10, True, 5.0, 0.0)
+        case_30x = _perp_case(72_675.50, 81_000.0, 0.10, True, 30.0, 0.0)
+
+        self.assertAlmostEqual(case_5x["gross_pnl"], case_30x["gross_pnl"])
+        self.assertAlmostEqual(case_5x["net_pnl"], case_30x["net_pnl"])
+        self.assertEqual(LEVERAGE_PNL_EXPLANATION, "Leverage does not change dollar P&L for a fixed contract size. It changes margin required, ROI on margin, and liquidation distance.")
+
+    def test_higher_leverage_lowers_margin_and_raises_roi_magnitude(self) -> None:
+        entry = 72_675.50
+        exit_price = 81_000.0
+        size = 0.10
+        case_5x = _perp_case(entry, exit_price, size, True, 5.0, 0.0)
+        case_30x = _perp_case(entry, exit_price, size, True, 30.0, 0.0)
+
+        self.assertLess(_estimated_margin_required(entry, size, 30.0), _estimated_margin_required(entry, size, 5.0))
+        self.assertGreater(abs(case_30x["margin_roi_percent"]), abs(case_5x["margin_roi_percent"]))
+
+    def test_liquidation_readout_labels_cross_and_isolated_estimates(self) -> None:
+        lines = _liquidation_readout_lines(72_675.50, 0.10, True, 30.0, 500_000.0)
+        text = "\n".join(lines)
+
+        self.assertIn("Isolated-style liquidation estimate using ticket margin/leverage", text)
+        self.assertIn("Cross-margin rough liquidation estimate using account collateral", text)
+        self.assertIn("not an isolated liquidation estimate", text)
+        self.assertNotIn("Rough liquidation estimate: $0.0000", text)
+
+    def test_isolated_liquidation_moves_toward_entry_as_leverage_increases(self) -> None:
+        long_5x = _isolated_liquidation_price(100.0, 1.0, True, 5.0)
+        long_30x = _isolated_liquidation_price(100.0, 1.0, True, 30.0)
+        short_5x = _isolated_liquidation_price(100.0, 1.0, False, 5.0)
+        short_30x = _isolated_liquidation_price(100.0, 1.0, False, 30.0)
+
+        assert long_5x is not None and long_30x is not None and short_5x is not None and short_30x is not None
+        self.assertGreater(long_30x, long_5x)
+        self.assertLess(short_30x, short_5x)
+        self.assertLess(100.0 - long_30x, 100.0 - long_5x)
+        self.assertLess(short_30x - 100.0, short_5x - 100.0)
 
 
 if __name__ == "__main__":

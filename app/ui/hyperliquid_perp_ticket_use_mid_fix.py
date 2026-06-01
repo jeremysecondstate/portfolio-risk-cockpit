@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+from dataclasses import dataclass
 from tkinter import messagebox, ttk
 from typing import Any
 
@@ -8,6 +9,16 @@ from app.brokers.hyperliquid.trading import HyperliquidTradingConfig
 from app.ui import options_lab_extension
 
 _DELETE_ME = "DELETE ME"
+LEVERAGE_PNL_EXPLANATION = "Leverage does not change dollar P&L for a fixed contract size. It changes margin required, ROI on margin, and liquidation distance."
+
+
+@dataclass(frozen=True)
+class TpslScenarioReadout:
+    field: str
+    price: float
+    label: str
+    warning: str | None
+    valid: bool
 
 
 def install_hyperliquid_perp_ticket_use_mid_fix(app_cls: type[tk.Tk] | None = None) -> None:
@@ -156,11 +167,13 @@ def _preview_hyperliquid_ticket_overview(self: tk.Tk) -> None:
         notional = ticket.size * ticket.limit_price
         margin = notional / leverage if leverage > 0 else notional
         collateral = _planning_collateral_usdc(self, margin)
-        rough_liq = _rough_liquidation_price(ticket.limit_price, ticket.size, ticket.is_buy, margin, collateral)
+        liquidation_lines = _liquidation_readout_lines(ticket.limit_price, ticket.size, ticket.is_buy, leverage, collateral)
         closing_side = "SELL" if ticket.is_buy else "BUY"
         main_direction = "BUY / LONG" if ticket.is_buy else "SELL / SHORT"
         reduce_text = "reduce-only" if ticket.reduce_only else "not reduce-only"
         hedge_lines = _spot_hedge_lines(self, ticket.coin, ticket.size, ticket.is_buy, ticket.limit_price)
+        tp_readout = _tpsl_scenario_readout("TP", ticket.limit_price, tp_price, ticket.is_buy) if tp_price is not None else None
+        sl_readout = _tpsl_scenario_readout("SL", ticket.limit_price, sl_price, ticket.is_buy) if sl_price is not None else None
 
         lines = [
             "HYPERLIQUID ORDER OVERVIEW",
@@ -175,7 +188,7 @@ def _preview_hyperliquid_ticket_overview(self: tk.Tk) -> None:
             f"- Order value: ${notional:,.2f}",
             f"- Estimated margin: ${margin:,.2f}",
             f"- Collateral used for liq estimate: ${collateral:,.2f}",
-            f"- Rough liquidation estimate: {_format_liq(rough_liq)}",
+            *liquidation_lines,
             f"- Fee estimate: {fee_rate:g}% per side",
             "",
             "Protection",
@@ -185,9 +198,13 @@ def _preview_hyperliquid_ticket_overview(self: tk.Tk) -> None:
             if tp_price is None and sl_price is None:
                 lines.append("- Attach TP/SL is on, but no TP Price or SL Price is entered yet.")
             if tp_price is not None:
-                lines.append(f"- Take profit: {closing_side} reduce-only trigger near ${tp_price:,.4f}")
+                lines.append(f"- {tp_readout.label if tp_readout else 'TP field scenario'}: {closing_side} reduce-only trigger near ${tp_price:,.4f}")
+                if tp_readout and tp_readout.warning:
+                    lines.append(f"- {tp_readout.warning}")
             if sl_price is not None:
-                lines.append(f"- Stop loss: {closing_side} reduce-only trigger near ${sl_price:,.4f}")
+                lines.append(f"- {sl_readout.label if sl_readout else 'SL field scenario'}: {closing_side} reduce-only trigger near ${sl_price:,.4f}")
+                if sl_readout and sl_readout.warning:
+                    lines.append(f"- {sl_readout.warning}")
             lines.append("- LIVE Submit will attempt these reduce-only child trigger order(s) immediately after the parent order is accepted.")
         else:
             lines.append("- Attach TP/SL is off. LIVE Submit is a single main order only.")
@@ -218,17 +235,20 @@ def _run_hyperliquid_perp_what_if_clean(self: tk.Tk) -> None:
 
         tp_case = _perp_case(ticket.limit_price, tp_price, ticket.size, is_long, leverage, fee_rate)
         sl_case = _perp_case(ticket.limit_price, sl_price, ticket.size, is_long, leverage, fee_rate)
+        tp_readout = _tpsl_scenario_readout("TP", ticket.limit_price, tp_price, is_long)
+        sl_readout = _tpsl_scenario_readout("SL", ticket.limit_price, sl_price, is_long)
         spot_position = _spot_position_for_coin(self, ticket.coin)
-        tp_spot_lines = _spot_scenario_lines("TP", ticket.coin, tp_price, spot_position, tp_case["net_pnl"])
-        sl_spot_lines = _spot_scenario_lines("SL", ticket.coin, sl_price, spot_position, sl_case["net_pnl"])
+        tp_spot_lines = _spot_scenario_lines("TP field", ticket.coin, tp_price, spot_position, tp_case["net_pnl"])
+        sl_spot_lines = _spot_scenario_lines("SL field", ticket.coin, sl_price, spot_position, sl_case["net_pnl"])
         notional = ticket.limit_price * ticket.size
         margin = notional / leverage if leverage > 0 else notional
         collateral = _planning_collateral_usdc(self, margin)
-        rough_liq = _rough_liquidation_price(ticket.limit_price, ticket.size, is_long, margin, collateral)
+        liquidation_lines = _liquidation_readout_lines(ticket.limit_price, ticket.size, is_long, leverage, collateral)
         rr = _risk_reward(tp_case["net_pnl"], sl_case["net_pnl"])
         direction = "LONG" if is_long else "SHORT"
         attach = "on" if self.hyperliquid_attach_tpsl_var.get() else "off"
         hedge_lines = _spot_hedge_lines(self, ticket.coin, ticket.size, is_long, ticket.limit_price)
+        tpsl_warning_lines = _tpsl_warning_lines(tp_readout, sl_readout)
 
         self.hyperliquid_status_var.set("Hyperliquid: what-if ready")
         self._set_preview_text(
@@ -244,16 +264,18 @@ def _run_hyperliquid_perp_what_if_clean(self: tk.Tk) -> None:
             f"Estimated margin required: ${margin:,.2f}\n"
             f"Collateral used for liq estimate: ${collateral:,.2f}\n"
             f"Fee estimate: {fee_rate:g}% per side\n"
-            f"Rough liquidation estimate: {_format_liq(rough_liq)}\n\n"
+            + "\n".join(liquidation_lines) + "\n"
+            f"{LEVERAGE_PNL_EXPLANATION}\n\n"
             + "\n".join(hedge_lines) + "\n\n"
-            "Take Profit scenario\n"
+            + "\n".join(tpsl_warning_lines) + ("\n\n" if tpsl_warning_lines else "")
+            + f"{tp_readout.label}\n"
             f"- TP Price: ${tp_price:,.4f}\n"
             f"- Gross P&L: ${tp_case['gross_pnl']:+,.2f}\n"
             f"- Estimated fees: ${tp_case['fees']:,.2f}\n"
             f"- Net gain/loss: ${tp_case['net_pnl']:+,.2f}\n"
             f"- ROI on estimated margin: {tp_case['margin_roi_percent']:+.2f}%\n"
             + "\n".join(tp_spot_lines) + "\n\n"
-            "Stop Loss scenario\n"
+            f"{sl_readout.label}\n"
             f"- SL Price: ${sl_price:,.4f}\n"
             f"- Gross P&L: ${sl_case['gross_pnl']:+,.2f}\n"
             f"- Estimated fees: ${sl_case['fees']:,.2f}\n"
@@ -284,6 +306,68 @@ def _planning_collateral_usdc(self: tk.Tk, fallback_margin: float) -> float:
     if hyperliquid_usdc > 0:
         return hyperliquid_usdc
     return max(portfolio.cash, fallback_margin, 0.0)
+
+
+def _tpsl_scenario_readout(field: str, entry: float, price: float, is_long: bool) -> TpslScenarioReadout:
+    clean_field = field.upper()
+    direction = "LONG" if is_long else "SHORT"
+    relation = "above" if price > entry else "below" if price < entry else "at"
+    if clean_field == "TP":
+        valid = price > entry if is_long else price < entry
+        label = "Take Profit scenario" if valid else f"TP field scenario - INVALID for {direction} take-profit"
+        if valid:
+            warning = None
+        elif relation == "at":
+            warning = f"TP is at entry for a {direction}. This is flat before fees, not take profit."
+        else:
+            warning = f"TP is {relation} entry for a {direction}. This is a loss scenario, not take profit."
+    elif clean_field == "SL":
+        valid = price < entry if is_long else price > entry
+        label = "Stop Loss scenario" if valid else f"SL field scenario - INVALID for {direction} stop-loss"
+        if valid:
+            warning = None
+        elif relation == "at":
+            warning = f"SL is at entry for a {direction}. This is flat before fees, not stop loss."
+        else:
+            warning = f"SL is {relation} entry for a {direction}. This is a profit scenario, not stop loss."
+    else:
+        valid = True
+        label = f"{clean_field} field scenario"
+        warning = None
+    return TpslScenarioReadout(clean_field, price, label, warning, valid)
+
+
+def _tpsl_warning_lines(*readouts: TpslScenarioReadout) -> list[str]:
+    warnings = [readout.warning for readout in readouts if readout.warning]
+    if not warnings:
+        return []
+    return ["TP/SL direction checks", *[f"- {warning}" for warning in warnings]]
+
+
+def _estimated_margin_required(entry: float, size: float, leverage: float) -> float:
+    notional = entry * size
+    return notional / leverage if leverage > 0 else notional
+
+
+def _isolated_liquidation_price(entry: float, size: float, is_long: bool, leverage: float) -> float | None:
+    if entry <= 0 or size <= 0 or leverage <= 0:
+        return None
+    margin_required = _estimated_margin_required(entry, size, leverage)
+    move_to_zero_margin = margin_required / size
+    if is_long:
+        return max(entry - move_to_zero_margin, 0.0)
+    return entry + move_to_zero_margin
+
+
+def _liquidation_readout_lines(entry: float, size: float, is_long: bool, leverage: float, collateral: float) -> list[str]:
+    margin_required = _estimated_margin_required(entry, size, leverage)
+    isolated_liq = _isolated_liquidation_price(entry, size, is_long, leverage)
+    cross_liq = _rough_liquidation_price(entry, size, is_long, margin_required, collateral)
+    return [
+        f"- Isolated-style liquidation estimate using ticket margin/leverage: {_format_liq(isolated_liq)}",
+        f"- Cross-margin rough liquidation estimate using account collateral: {_format_liq(cross_liq)}",
+        "- Cross-margin estimate is not an isolated liquidation estimate.",
+    ]
 
 
 def _rough_liquidation_price(entry: float, size: float, is_long: bool, margin_required: float, collateral: float) -> float | None:
@@ -452,7 +536,7 @@ def _format_price(value: float) -> str:
 def _format_liq(value: float | None) -> str:
     if value is None:
         return "n/a"
-    return f"${value:,.4f}"
+    return f"${value:,.2f}"
 
 
 def _walk_widgets(root: tk.Widget):

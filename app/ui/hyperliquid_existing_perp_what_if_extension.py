@@ -36,9 +36,11 @@ def _run_hyperliquid_perp_what_if_with_open_position(self: tk.Tk) -> None:
 
         tp_case = base_what_if._perp_case(ticket.limit_price, tp_price, ticket.size, is_long, leverage, fee_rate)
         sl_case = base_what_if._perp_case(ticket.limit_price, sl_price, ticket.size, is_long, leverage, fee_rate)
+        tp_readout = base_what_if._tpsl_scenario_readout("TP", ticket.limit_price, tp_price, is_long)
+        sl_readout = base_what_if._tpsl_scenario_readout("SL", ticket.limit_price, sl_price, is_long)
         spot_position = base_what_if._spot_position_for_coin(self, ticket.coin)
         tp_spot_lines = _spot_and_existing_perp_scenario_lines(
-            "TP",
+            "TP field",
             ticket.coin,
             tp_price,
             spot_position,
@@ -46,7 +48,7 @@ def _run_hyperliquid_perp_what_if_with_open_position(self: tk.Tk) -> None:
             tp_case["net_pnl"],
         )
         sl_spot_lines = _spot_and_existing_perp_scenario_lines(
-            "SL",
+            "SL field",
             ticket.coin,
             sl_price,
             spot_position,
@@ -57,10 +59,11 @@ def _run_hyperliquid_perp_what_if_with_open_position(self: tk.Tk) -> None:
         notional = ticket.limit_price * ticket.size
         margin = notional / leverage if leverage > 0 else notional
         collateral = base_what_if._planning_collateral_usdc(self, margin)
-        rough_liq = base_what_if._rough_liquidation_price(ticket.limit_price, ticket.size, is_long, margin, collateral)
+        liquidation_lines = base_what_if._liquidation_readout_lines(ticket.limit_price, ticket.size, is_long, leverage, collateral)
         rr = base_what_if._risk_reward(tp_case["net_pnl"], sl_case["net_pnl"])
         direction = "LONG" if is_long else "SHORT"
         attach = "on" if self.hyperliquid_attach_tpsl_var.get() else "off"
+        tpsl_warning_lines = base_what_if._tpsl_warning_lines(tp_readout, sl_readout)
         hedge_lines = _spot_hedge_lines_with_open_perp(
             self,
             ticket.coin,
@@ -83,16 +86,18 @@ def _run_hyperliquid_perp_what_if_with_open_position(self: tk.Tk) -> None:
             f"Estimated margin required: ${margin:,.2f}\n"
             f"Collateral used for liq estimate: ${collateral:,.2f}\n"
             f"Fee estimate: {fee_rate:g}% per side\n"
-            f"Rough liquidation estimate: {base_what_if._format_liq(rough_liq)}\n\n"
+            + "\n".join(liquidation_lines) + "\n"
+            f"{base_what_if.LEVERAGE_PNL_EXPLANATION}\n\n"
             + "\n".join(hedge_lines) + "\n\n"
-            "Take Profit scenario\n"
+            + "\n".join(tpsl_warning_lines) + ("\n\n" if tpsl_warning_lines else "")
+            + f"{tp_readout.label}\n"
             f"- TP Price: ${tp_price:,.4f}\n"
             f"- Proposed perp gross P&L: ${tp_case['gross_pnl']:+,.2f}\n"
             f"- Proposed perp estimated fees: ${tp_case['fees']:,.2f}\n"
             f"- Proposed perp net gain/loss: ${tp_case['net_pnl']:+,.2f}\n"
             f"- Proposed perp ROI on estimated margin: {tp_case['margin_roi_percent']:+.2f}%\n"
             + "\n".join(tp_spot_lines) + "\n\n"
-            "Stop Loss scenario\n"
+            f"{sl_readout.label}\n"
             f"- SL Price: ${sl_price:,.4f}\n"
             f"- Proposed perp gross P&L: ${sl_case['gross_pnl']:+,.2f}\n"
             f"- Proposed perp estimated fees: ${sl_case['fees']:,.2f}\n"
