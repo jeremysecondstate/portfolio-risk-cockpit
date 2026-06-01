@@ -1156,7 +1156,7 @@ def _format_optional_trigger_price(value: float | None) -> str:
 
 
 def _selected_hyperliquid_order(self: tk.Tk) -> dict[str, Any] | None:
-    orders = getattr(self, "hyperliquid_open_order_by_oid", {})
+    orders = getattr(self, "hyperliquid_open_order_by_oid", {}) or {}
     selected_order_id = _selected_workspace_hyperliquid_order_id(self)
     if selected_order_id == "":
         return None
@@ -1164,6 +1164,12 @@ def _selected_hyperliquid_order(self: tk.Tk) -> dict[str, Any] | None:
     if raw_order_id and raw_order_id in orders:
         self.cancel_order_id_var.set(raw_order_id)
         return orders[raw_order_id]
+    table_orders = _workspace_hyperliquid_order_cache(self)
+    if raw_order_id and raw_order_id in table_orders:
+        self.cancel_order_id_var.set(raw_order_id)
+        self.hyperliquid_open_order_by_oid = table_orders
+        self.hyperliquid_open_order_coin_by_oid = _workspace_hyperliquid_order_coin_cache(self)
+        return table_orders[raw_order_id]
     return None
 
 
@@ -1177,9 +1183,16 @@ def _selected_workspace_hyperliquid_order_id(self: tk.Tk) -> str | None:
         return None
     if not row_ids:
         try:
-            return "" if table.get_children() else None
+            focused_row = str(table.focus() or "")
         except Exception:
-            return ""
+            focused_row = ""
+        if focused_row:
+            row_ids = (focused_row,)
+        else:
+            try:
+                return "" if table.get_children() else None
+            except Exception:
+                return ""
     row_id = row_ids[0]
     try:
         raw_values = table.item(row_id, "values")
@@ -1188,6 +1201,22 @@ def _selected_workspace_hyperliquid_order_id(self: tk.Tk) -> str | None:
         return ""
     values = {str(column): str(raw_values[index]) for index, column in enumerate(columns) if index < len(raw_values)}
     return values.get("oid", "").strip()
+
+
+def _workspace_hyperliquid_order_cache(self: tk.Tk) -> dict[str, Any]:
+    table = getattr(self, "hyperliquid_workspace_open_orders_table", None)
+    if table is None:
+        return {}
+    cache = getattr(table, "_hyperliquid_open_order_by_oid", {}) or {}
+    return cache if isinstance(cache, dict) else {}
+
+
+def _workspace_hyperliquid_order_coin_cache(self: tk.Tk) -> dict[str, str]:
+    table = getattr(self, "hyperliquid_workspace_open_orders_table", None)
+    if table is None:
+        return {}
+    cache = getattr(table, "_hyperliquid_open_order_coin_by_oid", {}) or {}
+    return cache if isinstance(cache, dict) else {}
 
 
 def _order_market_for_edit(self: tk.Tk, order: dict[str, Any] | None) -> str:

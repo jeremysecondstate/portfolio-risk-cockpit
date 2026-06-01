@@ -465,6 +465,12 @@ def _load_workspace_ticket_from_open_order(self: tk.Tk, table: ttk.Treeview, eve
     order_id = values.get("oid", "").strip()
     coin = _workspace_ticket_symbol(values.get("coin", ""))
     direction = values.get("direction", "").strip().lower()
+    order_cache = getattr(table, "_hyperliquid_open_order_by_oid", {}) or {}
+    if isinstance(order_cache, dict) and order_cache:
+        self.hyperliquid_open_order_by_oid = order_cache
+    coin_cache = getattr(table, "_hyperliquid_open_order_coin_by_oid", {}) or {}
+    if isinstance(coin_cache, dict) and coin_cache:
+        self.hyperliquid_open_order_coin_by_oid = coin_cache
     if order_id:
         if hasattr(self, "cancel_order_id_var"):
             self.cancel_order_id_var.set(order_id)
@@ -664,6 +670,16 @@ def _populate_workspace_holdings_table(table: ttk.Treeview, rows: list[dict[str,
 def _populate_workspace_open_orders_table(table: ttk.Treeview, open_orders: list[dict[str, Any]]) -> None:
     from app.ui import hyperliquid_trading_extension as hyperliquid_ui
 
+    table._hyperliquid_open_order_by_oid = {  # type: ignore[attr-defined]
+        str(order.get("oid")): order
+        for order in open_orders
+        if isinstance(order, dict) and order.get("oid") is not None
+    }
+    table._hyperliquid_open_order_coin_by_oid = {  # type: ignore[attr-defined]
+        str(order.get("oid")): str(order.get("coin"))
+        for order in open_orders
+        if isinstance(order, dict) and order.get("oid") is not None and order.get("coin")
+    }
     for row_id in table.get_children():
         table.delete(row_id)
     for index, raw_order in enumerate(open_orders):

@@ -59,15 +59,19 @@ class _Var:
 
 
 class _OpenOrdersTable:
-    def __init__(self, selection: tuple[str, ...] = (), children: tuple[str, ...] = ()) -> None:
+    def __init__(self, selection: tuple[str, ...] = (), children: tuple[str, ...] = (), focus: str = "") -> None:
         self._selection = selection
         self._children = children
+        self._focus = focus
         self._items: dict[str, tuple[str, ...]] = {}
         self.inserted: list[tuple[str, tuple[object, ...], tuple[str, ...]]] = []
         self.columns = ("time", "type", "coin", "direction", "size", "price", "edit", "ro", "trigger", "tpsl", "oid")
 
     def selection(self) -> tuple[str, ...]:
         return self._selection
+
+    def focus(self) -> str:
+        return self._focus
 
     def get_children(self) -> tuple[str, ...]:
         return self._children
@@ -271,6 +275,42 @@ class HyperliquidTradingTests(unittest.TestCase):
         self.assertEqual(_selected_hyperliquid_order(app), {"oid": 456, "coin": "HYPE"})  # type: ignore[arg-type]
         self.assertEqual(app.cancel_order_id_var.get(), "456")
 
+    def test_selected_order_uses_table_cache_when_sync_populated_table_only(self) -> None:
+        table = _OpenOrdersTable(selection=("row-1",), children=("row-1",))
+        table._items["row-1"] = ("04:55", "Limit", "HYPE", "Buy", "11.31", "73.022", "Edit", "--", "N/A", "TP", "451306819812")
+        table._hyperliquid_open_order_by_oid = {"451306819812": {"oid": 451306819812, "coin": "HYPE", "side": "B"}}  # type: ignore[attr-defined]
+        table._hyperliquid_open_order_coin_by_oid = {"451306819812": "HYPE"}  # type: ignore[attr-defined]
+        app = type(
+            "App",
+            (),
+            {
+                "cancel_order_id_var": _Var("451306819812"),
+                "hyperliquid_open_order_by_oid": {},
+                "hyperliquid_open_order_coin_by_oid": {},
+                "hyperliquid_workspace_open_orders_table": table,
+            },
+        )()
+
+        self.assertEqual(_selected_hyperliquid_order(app), {"oid": 451306819812, "coin": "HYPE", "side": "B"})  # type: ignore[arg-type]
+        self.assertIn("451306819812", app.hyperliquid_open_order_by_oid)
+        self.assertEqual(app.hyperliquid_open_order_coin_by_oid["451306819812"], "HYPE")
+
+    def test_selected_order_can_use_focused_row_after_button_click(self) -> None:
+        table = _OpenOrdersTable(selection=(), children=("row-1",), focus="row-1")
+        table._items["row-1"] = ("04:55", "Limit", "HYPE", "Buy", "11.31", "73.022", "Edit", "--", "N/A", "TP", "451306819812")
+        app = type(
+            "App",
+            (),
+            {
+                "cancel_order_id_var": _Var(""),
+                "hyperliquid_open_order_by_oid": {"451306819812": {"oid": 451306819812, "coin": "HYPE"}},
+                "hyperliquid_workspace_open_orders_table": table,
+            },
+        )()
+
+        self.assertEqual(_selected_hyperliquid_order(app), {"oid": 451306819812, "coin": "HYPE"})  # type: ignore[arg-type]
+        self.assertEqual(app.cancel_order_id_var.get(), "451306819812")
+
     def test_workspace_open_orders_rows_include_visible_edit_action(self) -> None:
         table = _OpenOrdersTable()
 
@@ -291,6 +331,7 @@ class HyperliquidTradingTests(unittest.TestCase):
 
         self.assertEqual(table.inserted[0][1][6], "Edit")
         self.assertEqual(table.inserted[0][1][-1], "123")
+        self.assertEqual(table._hyperliquid_open_order_by_oid["123"]["coin"], "HYPE")  # type: ignore[attr-defined]
 
     def test_hyperliquid_workspace_holdings_use_one_best_pnl_column(self) -> None:
         spot = Position(
