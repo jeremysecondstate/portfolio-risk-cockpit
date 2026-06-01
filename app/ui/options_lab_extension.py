@@ -260,23 +260,24 @@ def _workspace_holdings_table(parent: ttk.Frame) -> ttk.Treeview:
 
 
 def _workspace_open_orders_table(parent: ttk.Frame) -> ttk.Treeview:
-    columns = ("time", "type", "coin", "direction", "size", "price", "ro", "trigger", "tpsl", "oid")
+    columns = ("time", "type", "coin", "direction", "size", "price", "edit", "ro", "trigger", "tpsl", "oid")
     table = ttk.Treeview(parent, columns=columns, show="headings", height=7, selectmode="browse")
     headings = {
-        "time": ("Time", 110, tk.W),
-        "type": ("Type", 92, tk.W),
-        "coin": ("Coin", 72, tk.W),
-        "direction": ("Dir", 96, tk.W),
-        "size": ("Size", 112, tk.E),
-        "price": ("Price", 90, tk.E),
-        "ro": ("RO", 44, tk.CENTER),
-        "trigger": ("Trigger", 150, tk.W),
-        "tpsl": ("TP/SL", 54, tk.CENTER),
-        "oid": ("OID", 96, tk.E),
+        "time": ("Time", 100, tk.W),
+        "type": ("Type", 72, tk.W),
+        "coin": ("Coin", 64, tk.W),
+        "direction": ("Dir", 92, tk.W),
+        "size": ("Size", 78, tk.E),
+        "price": ("Price", 78, tk.E),
+        "edit": ("Edit", 56, tk.CENTER),
+        "ro": ("RO", 38, tk.CENTER),
+        "trigger": ("Trigger", 110, tk.W),
+        "tpsl": ("TP/SL", 48, tk.CENTER),
+        "oid": ("OID", 78, tk.E),
     }
     for column, (label, width, anchor) in headings.items():
         table.heading(column, text=label)
-        table.column(column, width=width, anchor=anchor, stretch=column in {"trigger", "direction", "size"})
+        table.column(column, width=width, anchor=anchor, stretch=column in {"trigger", "direction"})
     table.pack(fill=tk.BOTH, expand=True)
     table.tag_configure("buy", foreground="#047857")
     table.tag_configure("sell", foreground="#b91c1c")
@@ -303,15 +304,46 @@ def _bind_workspace_holdings_click(self: tk.Tk, table: ttk.Treeview, venue: str)
 
 
 def _bind_workspace_open_orders_click(self: tk.Tk, table: ttk.Treeview) -> None:
-    table.bind("<ButtonRelease-1>", lambda event, app=self, source=table: _load_workspace_ticket_from_open_order(app, source, event), add="+")
-    table.bind("<Motion>", lambda event, source=table: source.configure(cursor="hand2" if source.identify_row(event.y) else ""), add="+")
+    table.bind("<ButtonRelease-1>", lambda event, app=self, source=table: _handle_workspace_open_order_click(app, source, event), add="+")
+    table.bind(
+        "<Motion>",
+        lambda event, source=table: source.configure(
+            cursor="hand2" if source.identify_row(event.y) and _workspace_open_order_column_name(source, event) == "edit" else ""
+        ),
+        add="+",
+    )
     table.bind("<Leave>", lambda _event, source=table: source.configure(cursor=""), add="+")
 
 
-def _load_workspace_ticket_from_open_order(self: tk.Tk, table: ttk.Treeview, event: tk.Event) -> None:
+def _workspace_open_order_column_name(table: ttk.Treeview, event: tk.Event) -> str:
+    raw_column = table.identify_column(event.x)
+    if not raw_column.startswith("#"):
+        return ""
+    try:
+        column_index = int(raw_column[1:]) - 1
+    except ValueError:
+        return ""
+    columns = tuple(table["columns"])
+    if column_index < 0 or column_index >= len(columns):
+        return ""
+    return str(columns[column_index])
+
+
+def _handle_workspace_open_order_click(self: tk.Tk, table: ttk.Treeview, event: tk.Event) -> None:
+    order_id = _load_workspace_ticket_from_open_order(self, table, event)
+    if not order_id or _workspace_open_order_column_name(table, event) != "edit":
+        return
+    opener = getattr(self, "show_hyperliquid_order_edit_dialog", None)
+    if callable(opener):
+        opener()
+
+
+def _load_workspace_ticket_from_open_order(self: tk.Tk, table: ttk.Treeview, event: tk.Event) -> str | None:
     row_id = table.identify_row(event.y)
     if not row_id:
-        return
+        return None
+    table.selection_set(row_id)
+    table.focus(row_id)
     raw_values = table.item(row_id, "values")
     columns = tuple(table["columns"])
     values = {str(column): str(raw_values[index]) for index, column in enumerate(columns) if index < len(raw_values)}
@@ -334,6 +366,7 @@ def _load_workspace_ticket_from_open_order(self: tk.Tk, table: ttk.Treeview, eve
         var = getattr(self, var_name, None)
         if var is not None:
             var.set(coin)
+    return order_id or None
 
 
 def _load_workspace_ticket_from_holding(self: tk.Tk, table: ttk.Treeview, event: tk.Event, venue: str) -> None:
@@ -529,6 +562,7 @@ def _populate_workspace_open_orders_table(table: ttk.Treeview, open_orders: list
                 direction,
                 order.size_label,
                 order.price_label,
+                "Edit",
                 "Yes" if order.reduce_only else "--",
                 order.trigger_condition or "N/A",
                 order.tpsl_label or "--",

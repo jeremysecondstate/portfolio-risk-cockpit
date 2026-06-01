@@ -723,25 +723,20 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
 
     cached_order = _selected_hyperliquid_order(self)
     if cached_order is None:
-        active_ticket = getattr(self, "hyperliquid_workspace_active_ticket_var", tk.StringVar(value="spot")).get()
-        coin = self.hyperliquid_coin_var.get().strip() or self.symbol_var.get().strip()
-        context = "perp position" if active_ticket == "perp" and coin else "Hyperliquid order"
         self.hyperliquid_status_var.set("Hyperliquid: no open order selected")
         self._set_preview_text(
             "HYPERLIQUID EDIT ORDER BLOCKED\n"
             "==============================\n\n"
-            "Edit Order only modifies an existing loaded open order.\n\n"
-            f"Current target: {coin or '--'} {context}\n\n"
-            "No loaded open order is selected for that target. A perp position is not itself an order ID; if the position has no TP/SL orders yet, use TP/SL to create new reduce-only trigger orders.\n\n"
+            "Select an open order first.\n\n"
+            "Edit Order modifies the selected loaded Hyperliquid open order. It does not guess from the first cached order when multiple orders are present.\n\n"
             "Next steps:\n"
-            "- Select the BTC/HYPE/ZEC perp position row to make it the ticket target.\n"
-            "- Click TP/SL to create new take-profit or stop-loss trigger orders for that position.\n"
-            "- Use Open Only, select an existing order row, then Edit Order only when you need to modify an existing open order."
+            "- Open the Hyperliquid Open Orders tab.\n"
+            "- Select the specific order row you want to change.\n"
+            "- Click that row's Edit action or click Edit Order."
         )
         messagebox.showinfo(
-            "No open order selected",
-            "Edit Order requires an existing loaded open order.\n\n"
-            "To add TP/SL to the selected perp position, use the TP/SL button; it can create new reduce-only trigger orders even when no open orders exist.",
+            "Select an open order first",
+            "Select an open order row first, then click Edit.",
         )
         return
 
@@ -768,7 +763,7 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
     is_market_trigger = normalized_order.is_market_trigger if normalized_order else False
 
     dialog = tk.Toplevel(self)
-    dialog.title("Edit Hyperliquid Order")
+    dialog.title("Edit Hyperliquid Open Order")
     dialog.transient(self)
     dialog.resizable(False, False)
 
@@ -796,33 +791,33 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
     summary.grid(row=0, column=0, sticky="ew")
     for column in range(4):
         summary.columnconfigure(column, weight=1)
-    _summary_cell(summary, 0, 0, "Order ID", raw_order_id or "--")
-    _summary_cell(summary, 0, 1, "Kind", order_kind_var.get())
+    _summary_cell(summary, 0, 0, "Coin", market or "--")
+    _summary_cell(summary, 0, 1, "Type", order_kind_var.get())
     _summary_cell(summary, 0, 2, "Direction", normalized_order.direction if normalized_order else side)
-    _summary_cell(summary, 0, 3, "Size", normalized_order.size_label if normalized_order else size)
-    _summary_cell(summary, 1, 0, "Price", normalized_order.price_label if normalized_order else price)
-    _summary_cell(summary, 1, 1, "Trigger", normalized_order.trigger_condition if normalized_order else "--")
-    _summary_cell(summary, 1, 2, "Reduce-only", "Yes" if reduce_only else "No")
-    _summary_cell(summary, 1, 3, "TP/SL", normalized_order.tpsl_label if normalized_order else "--")
+    _summary_cell(summary, 0, 3, "OID", raw_order_id or "--")
+    _summary_cell(summary, 1, 0, "Size", normalized_order.size_label if normalized_order else size)
+    _summary_cell(summary, 1, 1, "Original size", normalized_order.original_size_label if normalized_order else "--")
+    _summary_cell(summary, 1, 2, "Price", normalized_order.price_label if normalized_order else price)
+    _summary_cell(summary, 1, 3, "Time", _order_time_label(cached_order or {}))
+    _summary_cell(summary, 2, 0, "Reduce-only", "Yes" if reduce_only else "No")
+    _summary_cell(summary, 2, 1, "Trigger", normalized_order.trigger_condition if normalized_order else "--")
+    _summary_cell(summary, 2, 2, "TP/SL", normalized_order.tpsl_label if normalized_order else "--")
+    _summary_cell(summary, 2, 3, "Venue", context)
 
     editable = ttk.LabelFrame(shell, text="Editable Fields", style="Card.TLabelframe")
     editable.grid(row=1, column=0, sticky="ew", pady=(10, 0))
     editable.columnconfigure(1, weight=1)
 
     editable_fields = [
-        ("Venue", ttk.Combobox(editable, textvariable=context_var, values=["Spot", "Perp"], state="readonly")),
-        ("Order ID", ttk.Entry(editable, textvariable=order_id_var)),
-        ("Coin / Market", ttk.Entry(editable, textvariable=market_var)),
-        ("Side", ttk.Combobox(editable, textvariable=side_var, values=["buy", "sell"], state="readonly")),
         ("Size mode", ttk.Combobox(editable, textvariable=size_mode_var, values=["Numeric size", "Close Position"], state="readonly")),
-        ("Numeric size", ttk.Entry(editable, textvariable=size_var)),
+        ("Size", ttk.Entry(editable, textvariable=size_var)),
     ]
     for row, (label, widget) in enumerate(editable_fields):
         ttk.Label(editable, text=label, style="Subtle.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 10), pady=4)
         widget.grid(row=row, column=1, sticky="ew", pady=4)
 
     price_row = len(editable_fields)
-    ttk.Label(editable, text="Limit price", style="Subtle.TLabel").grid(row=price_row, column=0, sticky="w", padx=(0, 10), pady=4)
+    ttk.Label(editable, text="Price", style="Subtle.TLabel").grid(row=price_row, column=0, sticky="w", padx=(0, 10), pady=4)
     price_controls = ttk.Frame(editable, style="Panel.TFrame")
     price_controls.grid(row=price_row, column=1, sticky="ew", pady=4)
     price_controls.columnconfigure(0, weight=1)
@@ -876,7 +871,7 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
 
     note = ttk.Label(
         shell,
-        text="Normal limit orders use modify. Trigger / close-position orders preserve reduce-only and trigger fields; if Hyperliquid rejects a direct modify, use Cancel plus TP/SL to replace it.",
+        text="This uses Hyperliquid's modify order flow for the selected OID. Price and size are the primary edits; reduce-only and trigger fields are carried forward from the selected order unless changed below.",
         style="Subtle.TLabel",
         wraplength=520,
     )
@@ -905,7 +900,7 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
         )
 
     ttk.Button(buttons, text="Close", command=dialog.destroy).grid(row=0, column=0, sticky="ew", padx=(0, 8))
-    ttk.Button(buttons, text="Confirm Edit", command=submit_edit, style="CompactDanger.TButton").grid(row=0, column=1, sticky="ew")
+    ttk.Button(buttons, text="Submit Edit", command=submit_edit, style="CompactDanger.TButton").grid(row=0, column=1, sticky="ew")
 
 
 def _summary_cell(parent: ttk.Frame, row: int, column: int, label: str, value: str) -> None:
@@ -1086,16 +1081,37 @@ def _format_optional_trigger_price(value: float | None) -> str:
 
 def _selected_hyperliquid_order(self: tk.Tk) -> dict[str, Any] | None:
     orders = getattr(self, "hyperliquid_open_order_by_oid", {})
-    raw_order_id = self.cancel_order_id_var.get().strip()
-    if raw_order_id and raw_order_id in orders:
-        return orders[raw_order_id]
-    if raw_order_id and raw_order_id not in orders:
+    selected_order_id = _selected_workspace_hyperliquid_order_id(self)
+    if selected_order_id == "":
         return None
-    if orders:
-        first_order_id = sorted(orders)[0]
-        self.cancel_order_id_var.set(first_order_id)
-        return orders[first_order_id]
+    raw_order_id = selected_order_id or self.cancel_order_id_var.get().strip()
+    if raw_order_id and raw_order_id in orders:
+        self.cancel_order_id_var.set(raw_order_id)
+        return orders[raw_order_id]
     return None
+
+
+def _selected_workspace_hyperliquid_order_id(self: tk.Tk) -> str | None:
+    table = getattr(self, "hyperliquid_workspace_open_orders_table", None)
+    if table is None:
+        return None
+    try:
+        row_ids = tuple(table.selection())
+    except Exception:
+        return None
+    if not row_ids:
+        try:
+            return "" if table.get_children() else None
+        except Exception:
+            return ""
+    row_id = row_ids[0]
+    try:
+        raw_values = table.item(row_id, "values")
+        columns = tuple(table["columns"])
+    except Exception:
+        return ""
+    values = {str(column): str(raw_values[index]) for index, column in enumerate(columns) if index < len(raw_values)}
+    return values.get("oid", "").strip()
 
 
 def _order_market_for_edit(self: tk.Tk, order: dict[str, Any] | None) -> str:

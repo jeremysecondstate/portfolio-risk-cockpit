@@ -12,6 +12,7 @@ from app.brokers.hyperliquid.trading import (
     normalize_hyperliquid_trigger_ticket_for_wire,
 )
 from app.core.portfolio import Portfolio, Position
+from app.ui.options_lab_extension import _populate_workspace_open_orders_table
 from app.ui.hyperliquid_trading_extension import _market_close_limit_price, _normalize_edit_market, _reverse_order_size_for_same_opposite_position, _risk_reward, _selected_hyperliquid_order, _set_hyperliquid_perp_mid_price, normalize_hyperliquid_open_order
 from app.ui.hyperliquid_trading_extension import _current_hyperliquid_perp_position, _perp_position_pnl
 from app.ui.hyperliquid_submit_no_autosync_fix import _apply_ticket_leverage_if_needed, _attached_tpsl_tickets
@@ -39,6 +40,37 @@ class _Var:
 
     def set(self, value: str) -> None:
         self.value = value
+
+
+class _OpenOrdersTable:
+    def __init__(self, selection: tuple[str, ...] = (), children: tuple[str, ...] = ()) -> None:
+        self._selection = selection
+        self._children = children
+        self._items: dict[str, tuple[str, ...]] = {}
+        self.inserted: list[tuple[str, tuple[object, ...], tuple[str, ...]]] = []
+        self.columns = ("time", "type", "coin", "direction", "size", "price", "edit", "ro", "trigger", "tpsl", "oid")
+
+    def selection(self) -> tuple[str, ...]:
+        return self._selection
+
+    def get_children(self) -> tuple[str, ...]:
+        return self._children
+
+    def item(self, row_id: str, option: str) -> tuple[str, ...]:
+        if option != "values":
+            return ()
+        return self._items[row_id]
+
+    def __getitem__(self, key: str) -> tuple[str, ...]:
+        if key == "columns":
+            return self.columns
+        raise KeyError(key)
+
+    def delete(self, _row_id: str) -> None:
+        return None
+
+    def insert(self, _parent: str, _index: str, *, iid: str, values: tuple[object, ...], tags: tuple[str, ...]) -> None:
+        self.inserted.append((iid, values, tags))
 
 
 class HyperliquidTradingTests(unittest.TestCase):
@@ -192,6 +224,57 @@ class HyperliquidTradingTests(unittest.TestCase):
 
         self.assertIsNone(_selected_hyperliquid_order(app))  # type: ignore[arg-type]
         self.assertEqual(app.cancel_order_id_var.get(), "stale-oid")
+
+    def test_selected_order_requires_explicit_selection_when_orders_are_loaded(self) -> None:
+        app = type(
+            "App",
+            (),
+            {
+                "cancel_order_id_var": _Var("123"),
+                "hyperliquid_open_order_by_oid": {"123": {"oid": 123, "coin": "BTC"}},
+                "hyperliquid_workspace_open_orders_table": _OpenOrdersTable(children=("row-1",)),
+            },
+        )()
+
+        self.assertIsNone(_selected_hyperliquid_order(app))  # type: ignore[arg-type]
+        self.assertEqual(app.cancel_order_id_var.get(), "123")
+
+    def test_selected_order_uses_selected_table_row_oid(self) -> None:
+        table = _OpenOrdersTable(selection=("row-2",), children=("row-1", "row-2"))
+        table._items["row-2"] = ("16:55", "Limit", "HYPE", "Close Short", "1", "71.951", "Edit", "Yes", "N/A", "TP", "456")
+        app = type(
+            "App",
+            (),
+            {
+                "cancel_order_id_var": _Var("123"),
+                "hyperliquid_open_order_by_oid": {"123": {"oid": 123, "coin": "BTC"}, "456": {"oid": 456, "coin": "HYPE"}},
+                "hyperliquid_workspace_open_orders_table": table,
+            },
+        )()
+
+        self.assertEqual(_selected_hyperliquid_order(app), {"oid": 456, "coin": "HYPE"})  # type: ignore[arg-type]
+        self.assertEqual(app.cancel_order_id_var.get(), "456")
+
+    def test_workspace_open_orders_rows_include_visible_edit_action(self) -> None:
+        table = _OpenOrdersTable()
+
+        _populate_workspace_open_orders_table(
+            table,  # type: ignore[arg-type]
+            [
+                {
+                    "oid": 123,
+                    "coin": "HYPE",
+                    "side": "B",
+                    "sz": "1",
+                    "limitPx": "71.951",
+                    "reduceOnly": True,
+                    "orderType": "Limit",
+                }
+            ],
+        )
+
+        self.assertEqual(table.inserted[0][1][6], "Edit")
+        self.assertEqual(table.inserted[0][1][-1], "123")
 
     def test_update_leverage_normalizes_coin_and_calls_exchange_hook(self) -> None:
         with patch.dict(
