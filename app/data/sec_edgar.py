@@ -5,6 +5,8 @@ import json
 import os
 import re
 import time
+import urllib.parse
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,12 +17,15 @@ import requests
 SEC_TICKER_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik}.json"
 SEC_COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+SEC_CURRENT_FILINGS_URL = "https://www.sec.gov/cgi-bin/browse-edgar"
 SEC_ARCHIVES_BASE_URL = "https://www.sec.gov/Archives/edgar/data"
 DEFAULT_USER_AGENT = "PortfolioRiskCockpit jeremy@secondstate.art"
 DEFAULT_CACHE_DIR = Path("data/sec_cache")
 DEFAULT_CACHE_TTL = timedelta(hours=6)
 TICKER_CACHE_TTL = timedelta(days=1)
+CURRENT_FILINGS_CACHE_TTL = timedelta(minutes=15)
 MIN_SECONDS_BETWEEN_SEC_REQUESTS = 0.12
+SEC_REQUEST_RETRIES = 3
 
 
 @dataclass(frozen=True)
@@ -92,6 +97,36 @@ class SecFilingDocument:
             or "press release" in haystack
             or "results" in haystack
         )
+
+
+@dataclass(frozen=True)
+class SecCurrentFiling:
+    company_name: str
+    cik: str
+    form: str
+    filing_date: str
+    accession_number: str
+    filing_url: str
+    assigned_sic: str = ""
+    assigned_sic_description: str = ""
+    acceptance_datetime: str = ""
+    primary_document: str = ""
+
+    @property
+    def cik_int(self) -> int:
+        return int(self.cik)
+
+    @property
+    def accession_no_dashes(self) -> str:
+        return self.accession_number.replace("-", "")
+
+    @property
+    def filing_directory_url(self) -> str:
+        return f"{SEC_ARCHIVES_BASE_URL}/{self.cik_int}/{self.accession_no_dashes}/"
+
+    @property
+    def filing_index_url(self) -> str:
+        return f"{self.filing_directory_url}index.json"
 
 
 @dataclass(frozen=True)
@@ -173,6 +208,17 @@ class SecEdgarClient:
             raise RuntimeError("SEC submissions API returned an unexpected response shape.")
         return company, payload
 
+    def get_submissions_by_cik(self, cik: str | int) -> dict[str, Any]:
+        normalized_cik = normalize_cik(cik)
+        payload = self._fetch_json(
+            SEC_SUBMISSIONS_URL.format(cik=normalized_cik),
+            cache_name=f"submissions_{normalized_cik}.json",
+            ttl=DEFAULT_CACHE_TTL,
+        )
+        if not isinstance(payload, dict):
+            raise RuntimeError("SEC submissions API returned an unexpected response shape.")
+        return payload
+
     def get_companyfacts(self, ticker: str) -> tuple[SecCompany, dict[str, Any]]:
         company = self.company_for_ticker(ticker)
         payload = self._fetch_json(
@@ -229,6 +275,51 @@ class SecEdgarClient:
             if len(filings) >= limit:
                 break
         return filings
+
+    def recent_current_filings(
+        self,
+        form: str,
+        *,
+        limit: int = 100,
+        start: int = 0,
+    ) -> list[SecCurrentFiling]:
+        normalized_form = form.strip().upper()
+        params = {
+            "action": "getcurrent",
+            "type": normalized_form,
+            "owner": "exclude",
+            "start": str(max(start, 0)),
+            "count": str(max(1, min(limit, 100))),
+            "output": "atom",
+        }
+        url = f"{SEC_CURRENT_FILINGS_URL}?{urllib.parse.urlencode(params)}"
+        raw = self._fetch_text(
+            url,
+            cache_name=f"current_filings_{normalized_form}_{start}_{limit}.atom",
+            ttl=CURRENT_FILINGS_CACHE_TTL,
+        )
+        return parse_current_filings_atom(raw, fallback_form=normalized_form)
+
+    def filing_index_items_for_accession(self, cik: str | int, accession_number: str) -> list[dict[str, Any]]:
+        normalized_cik = normalize_cik(cik)
+        accession_no_dashes = str(accession_number).replace("-", "")
+        index_url = f"{SEC_ARCHIVES_BASE_URL}/{int(normalized_cik)}/{accession_no_dashes}/index.json"
+        payload = self._fetch_json(
+            index_url,
+            cache_name=f"filing_index_{normalized_cik}_{accession_no_dashes}.json",
+            ttl=DEFAULT_CACHE_TTL,
+        )
+        directory = payload.get("directory") if isinstance(payload, dict) else {}
+        raw_items = directory.get("item") if isinstance(directory, dict) else []
+        return raw_items if isinstance(raw_items, list) else []
+
+    def document_text_url(self, url: str, *, cache_name: str | None = None, ttl: timedelta = DEFAULT_CACHE_TTL) -> str:
+        raw = self._fetch_text(
+            url,
+            cache_name=cache_name or f"document_url_{_safe_cache_filename(url)}.txt",
+            ttl=ttl,
+        )
+        return html_to_text(raw)
 
     def filing_documents(self, filing: SecFiling) -> list[SecFilingDocument]:
         payload = self._fetch_json(
@@ -311,18 +402,37 @@ class SecEdgarClient:
         if cached is not None:
             return cached
 
-        self._respect_rate_limit()
-        response = self.session.get(
-            url,
-            headers={
-                "User-Agent": self.user_agent,
-                "Accept-Encoding": "gzip, deflate",
-                "Accept": "application/json,text/html,text/plain,*/*",
-            },
-            timeout=self.timeout_seconds,
-        )
-        response.raise_for_status()
-        text = response.text
+        last_error: Exception | None = None
+        for attempt in range(SEC_REQUEST_RETRIES):
+            try:
+                self._respect_rate_limit()
+                response = self.session.get(
+                    url,
+                    headers={
+                        "User-Agent": self.user_agent,
+                        "Accept-Encoding": "gzip, deflate",
+                        "Accept": "application/json,text/html,text/plain,*/*",
+                    },
+                    timeout=self.timeout_seconds,
+                )
+                if response.status_code == 429 or response.status_code >= 500:
+                    last_error = requests.HTTPError(f"SEC request returned HTTP {response.status_code}", response=response)
+                    if attempt < SEC_REQUEST_RETRIES - 1:
+                        time.sleep(0.6 * (attempt + 1))
+                        continue
+                response.raise_for_status()
+                text = response.text
+                break
+            except requests.RequestException as exc:
+                last_error = exc
+                if attempt >= SEC_REQUEST_RETRIES - 1:
+                    raise
+                time.sleep(0.6 * (attempt + 1))
+        else:
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError(f"SEC request failed for {url}")
+
         self._write_text_cache(cache_path, text)
         return text
 
@@ -388,6 +498,62 @@ def html_to_text(raw: str) -> str:
     return text.strip()
 
 
+def parse_current_filings_atom(raw: str, *, fallback_form: str = "") -> list[SecCurrentFiling]:
+    if not raw.strip():
+        return []
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        return []
+
+    filings: list[SecCurrentFiling] = []
+    for entry in root.iter():
+        if _xml_local_name(entry.tag) != "entry":
+            continue
+
+        title = _xml_first_text(entry, "title")
+        form = (_xml_first_text(entry, "filing-type") or _xml_entry_category_term(entry) or fallback_form).upper()
+        cik = _xml_first_text(entry, "cik") or _parse_cik_from_text(title)
+        accession = _xml_first_text(entry, "accession-number") or _parse_accession_from_text(title)
+        filing_url = _xml_first_text(entry, "filing-href") or _xml_entry_link_href(entry)
+        if not accession and filing_url:
+            accession = _parse_accession_from_text(filing_url)
+
+        if not form or not cik or not accession:
+            continue
+
+        company_name = (
+            _xml_first_text(entry, "company-name")
+            or _parse_company_from_title(title)
+            or "Unknown company"
+        )
+        filing_date = _xml_first_text(entry, "filing-date") or _xml_first_text(entry, "updated")[:10]
+        primary_document = _primary_document_from_filing_href(filing_url)
+        filings.append(
+            SecCurrentFiling(
+                company_name=company_name.strip(),
+                cik=normalize_cik(cik),
+                form=form,
+                filing_date=filing_date,
+                accession_number=accession,
+                filing_url=filing_url,
+                assigned_sic=_xml_first_text(entry, "assigned-sic"),
+                assigned_sic_description=_xml_first_text(entry, "assigned-sic-desc"),
+                acceptance_datetime=_xml_first_text(entry, "acceptance-datetime"),
+                primary_document=primary_document,
+            )
+        )
+    return filings
+
+
+def normalize_cik(cik: str | int) -> str:
+    raw = str(cik).strip().upper().replace("CIK", "")
+    digits = re.sub(r"\D", "", raw)
+    if not digits:
+        raise ValueError(f"{cik!r} does not contain a valid SEC CIK.")
+    return digits.zfill(10)
+
+
 def normalize_ticker(ticker: str) -> str:
     normalized = ticker.strip().upper()
     if normalized.startswith("HL:"):
@@ -398,6 +564,62 @@ def normalize_ticker(ticker: str) -> str:
     if not re.fullmatch(r"[A-Z0-9.\-]{1,12}", normalized):
         raise ValueError(f"{ticker!r} does not look like a stock ticker SEC can resolve.")
     return normalized
+
+
+def _xml_local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1].lower()
+
+
+def _xml_first_text(node: ET.Element, local_name: str) -> str:
+    target = local_name.lower()
+    for child in node.iter():
+        if _xml_local_name(child.tag) == target and child.text:
+            return child.text.strip()
+    return ""
+
+
+def _xml_entry_category_term(entry: ET.Element) -> str:
+    for child in entry.iter():
+        if _xml_local_name(child.tag) != "category":
+            continue
+        term = str(child.attrib.get("term") or "").strip()
+        if term:
+            return term
+    return ""
+
+
+def _xml_entry_link_href(entry: ET.Element) -> str:
+    for child in entry.iter():
+        if _xml_local_name(child.tag) != "link":
+            continue
+        href = str(child.attrib.get("href") or "").strip()
+        if href:
+            return href
+    return ""
+
+
+def _parse_cik_from_text(text: str) -> str:
+    match = re.search(r"\b(\d{10})\b", text or "")
+    return match.group(1) if match else ""
+
+
+def _parse_accession_from_text(text: str) -> str:
+    match = re.search(r"\b(\d{10}-\d{2}-\d{6})\b", text or "")
+    return match.group(1) if match else ""
+
+
+def _parse_company_from_title(title: str) -> str:
+    if " - " in title:
+        tail = title.split(" - ", 1)[1]
+        return re.sub(r"\s*\(\d{10}\).*$", "", tail).strip()
+    return ""
+
+
+def _primary_document_from_filing_href(filing_url: str) -> str:
+    if not filing_url:
+        return ""
+    name = filing_url.rstrip("/").rsplit("/", 1)[-1]
+    return "" if name.endswith("-index.htm") else name
 
 
 def _document_rank(document: SecFilingDocument) -> tuple[int, str]:
