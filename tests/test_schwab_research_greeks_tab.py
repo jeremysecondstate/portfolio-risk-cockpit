@@ -3,8 +3,9 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 import unittest
+from types import SimpleNamespace
 
-from app.ui.schwab_research_workspace_extension import _build_research_right_panel
+from app.ui.schwab_research_workspace_extension import _build_research_right_panel, _risk_scenario_popout_text
 
 
 class SchwabResearchGreeksTabTests(unittest.TestCase):
@@ -31,6 +32,26 @@ class SchwabResearchGreeksTabTests(unittest.TestCase):
             self.assertTrue(hasattr(root, "schwab_research_greeks_frame"))
         finally:
             root.destroy()
+
+    def test_risk_scenario_popout_includes_greeks_decision_before_detail(self) -> None:
+        payload = SimpleNamespace(symbol="LHX")
+        risk_plan = SimpleNamespace(
+            recommendation="Consider starter",
+            reason="Setup is mixed.",
+            confirmation="Confirmation means a move above $315.29.",
+            risk_line="Risk worsens below $314.75.",
+        )
+        text = _risk_scenario_popout_text(
+            payload,
+            risk_plan,
+            ["Starter stock look: 7 shares."],
+            "Recommended move:\n- Existing detail stays here.",
+            "Decision from the Greeks\n\nThe active contract is a short-dated speed trade.",
+        )
+
+        self.assertIn("Decision from the Greeks", text)
+        self.assertIn("Original / detailed readout", text)
+        self.assertLess(text.index("Decision from the Greeks"), text.index("Original / detailed readout"))
 
 
 if __name__ == "__main__":

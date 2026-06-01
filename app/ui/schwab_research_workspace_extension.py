@@ -15,6 +15,7 @@ from app.analytics.options_greeks import (
     GreekValue,
     OptionGreekSnapshot,
     build_greek_summary,
+    build_greek_decision_section,
 )
 from app.analytics.research_scoring import (
     BadgeReadout,
@@ -1292,7 +1293,8 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
         if chain_rows:
             candidates = suggest_option_candidates(chain_rows, payload.indicators, payload.context, macro_label=payload.decision.macro_backdrop.label, earnings_text=payload.earnings_text)
             setattr(self, "schwab_research_option_candidates", candidates)
-    top_candidate = next((item for item in candidates if item.option_type in {"call", "put"}), None)
+    selected_candidate = _selected_option_candidate(self)
+    top_candidate = selected_candidate if selected_candidate is not None and selected_candidate.option_type in {"call", "put"} else next((item for item in candidates if item.option_type in {"call", "put"}), None)
     fundamental_verdict = build_fundamental_verdict(payload.fundamentals_text, payload.indicators, payload.decision.macro_backdrop.label)
     risk_plan = build_risk_plan(payload.indicators, payload.context, payload.decision.macro_backdrop.label, fundamental_verdict.verdict, top_candidate, max_risk)
     negative_rows = [row for row in scenario_rows if row.position_pnl < 0]
@@ -1345,6 +1347,17 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
     target = _float_from_var(getattr(self, "options_target_price_var", None)) or _float_from_var(getattr(self, "limit_price_var", None))
     size = suggested_position_size(entry_price=payload.context.last_price, stop_price=stop, max_risk_dollars=max_risk)
     decision_difference_lines = _decision_difference_lines(top_candidate, payload.context, stock_plan)
+    chain_rows = [row for row in (getattr(self, "schwab_option_chain_rows", {}) or {}).values() if isinstance(row, dict)]
+    if not chain_rows and payload.option_chain_rows:
+        chain_rows = payload.option_chain_rows
+    greek_summary = build_greek_summary(
+        chain_rows,
+        _greek_underlying_price(self, payload),
+        selected_candidate=top_candidate,
+        selected_contract_symbol=str(getattr(top_candidate, "contract_symbol", "") or getattr(self, "schwab_research_selected_contract_symbol", "") or ""),
+    )
+    self.schwab_research_greek_summary = greek_summary
+    greek_decision_text = build_greek_decision_section(greek_summary, atr=payload.indicators.atr_14)
     lines = [
         "Recommended move:",
         f"- {risk_plan.recommendation}: {risk_plan.reason}",
@@ -1377,26 +1390,44 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
         f"- Suggested size at {_money(max_risk)} max risk and ticket stop {_money(stop)}: {_shares(size)}.",
         f"- Scenario basis: {scenario_basis}",
     ]
-    _set_research_text(frame.scenario_note_text, _risk_scenario_popout_text(payload, risk_plan, decision_difference_lines, "\n".join(lines)))  # type: ignore[attr-defined]
+    _set_research_text(frame.scenario_note_text, _risk_scenario_popout_text(payload, risk_plan, decision_difference_lines, "\n".join(lines), greek_decision_text))  # type: ignore[attr-defined]
     _render_option_scenarios_from_top(self)
 
 
-def _risk_scenario_popout_text(payload: _ResearchPayload, risk_plan: Any, decision_difference_lines: list[str], original_text: str) -> str:
-    return _format_beginner_readout(
-        title=f"Risk Scenario Explanation - {payload.symbol}",
-        what_this_means=(
+def _risk_scenario_popout_text(payload: _ResearchPayload, risk_plan: Any, decision_difference_lines: list[str], original_text: str, greek_decision_text: str = "") -> str:
+    title = f"Risk Scenario Explanation - {payload.symbol}"
+    key_points = [
+        f"Recommended move: {risk_plan.recommendation}. {risk_plan.reason}",
+        risk_plan.confirmation,
+        risk_plan.risk_line,
+        *decision_difference_lines,
+    ]
+    lines = [
+        title,
+        "=" * min(len(title), 80),
+        "",
+        "What this means:",
+        (
             "This section explains the suggested risk move, what would confirm it, what would invalidate it, "
             "and how the generated stock scenario size was calculated."
         ),
-        key_points=[
-            f"Recommended move: {risk_plan.recommendation}. {risk_plan.reason}",
-            risk_plan.confirmation,
-            risk_plan.risk_line,
-            *decision_difference_lines,
-        ],
-        why_it_matters="The scenario table shows possible P&L paths, but this readout explains how to use those paths for sizing, hedging, waiting, or rejecting the setup.",
-        original_text=original_text,
+        "",
+        "Key points:",
+    ]
+    lines.extend(_bullet_line(point) for point in key_points if str(point).strip())
+    if greek_decision_text.strip():
+        lines.extend(["", greek_decision_text.strip()])
+    lines.extend(
+        [
+            "",
+            "Why it matters:",
+            "The scenario table shows possible P&L paths, but this readout explains how to use those paths for sizing, hedging, waiting, or rejecting the setup.",
+            "",
+            "Original / detailed readout:",
+            original_text.strip(),
+        ]
     )
+    return "\n".join(lines)
 
 
 def _render_options_strategy(self: tk.Tk) -> None:
@@ -1739,6 +1770,8 @@ def _show_selected_option_candidate(self: tk.Tk) -> None:
     _set_research_text(frame.detail_text, _options_strategy_popout_text(payload, candidate, context, "\n".join(lines)))  # type: ignore[attr-defined]
     self.schwab_research_selected_contract_symbol = candidate.contract_symbol
     _render_greeks(self, payload)
+    if payload is not None:
+        _render_scenarios(self, payload)
 
 
 def _basic_popout_text(title: str, original_text: str) -> str:
@@ -1824,6 +1857,9 @@ def _use_selected_research_option(self: tk.Tk) -> None:
         frame.status_var.set("Option candidate filled into ticket only. No order was submitted.")  # type: ignore[attr-defined]
     self.schwab_research_selected_contract_symbol = candidate.contract_symbol
     _render_greeks(self)
+    payload = getattr(self, "schwab_research_last_payload", None)
+    if payload is not None:
+        _render_scenarios(self, payload)
 
 
 def _render_option_scenarios_from_top(self: tk.Tk) -> None:
@@ -1835,7 +1871,8 @@ def _render_option_scenarios_from_top(self: tk.Tk) -> None:
         tree.delete(row_id)
     payload = getattr(self, "schwab_research_last_payload", None)
     candidates = getattr(self, "schwab_research_option_candidates", []) or []
-    candidate = next((item for item in candidates if item.option_type in {"call", "put"}), None)
+    selected_candidate = _selected_option_candidate(self)
+    candidate = selected_candidate if selected_candidate is not None and selected_candidate.option_type in {"call", "put"} else next((item for item in candidates if item.option_type in {"call", "put"}), None)
     if payload is None or candidate is None:
         tree.insert(
             "",
