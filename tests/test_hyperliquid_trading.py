@@ -12,7 +12,8 @@ from app.brokers.hyperliquid.trading import (
     normalize_hyperliquid_trigger_ticket_for_wire,
 )
 from app.core.portfolio import Portfolio, Position
-from app.ui.options_lab_extension import _populate_workspace_open_orders_table
+from app.ui.cash_positions_extension import _portfolio_display_pnl_summary, _position_pnl_value
+from app.ui.options_lab_extension import _populate_workspace_open_orders_table, _workspace_holding_rows
 from app.ui.hyperliquid_trading_extension import _market_close_limit_price, _normalize_edit_market, _reverse_order_size_for_same_opposite_position, _risk_reward, _selected_hyperliquid_order, _set_hyperliquid_perp_mid_price, normalize_hyperliquid_open_order
 from app.ui.hyperliquid_trading_extension import _current_hyperliquid_perp_position, _perp_position_pnl
 from app.ui.hyperliquid_submit_no_autosync_fix import _apply_ticket_leverage_if_needed, _attached_tpsl_tickets
@@ -275,6 +276,51 @@ class HyperliquidTradingTests(unittest.TestCase):
 
         self.assertEqual(table.inserted[0][1][6], "Edit")
         self.assertEqual(table.inserted[0][1][-1], "123")
+
+    def test_hyperliquid_workspace_holdings_use_one_best_pnl_column(self) -> None:
+        spot = Position(
+            "BTC",
+            0.05,
+            100_000.0,
+            100_000.0,
+            unrealized_profit_loss_known=False,
+            custom_profit_loss=-450.37,
+        )
+        setattr(spot, "asset_type", "Spot")
+        perp = Position(
+            "HYPE-PERP-SHORT",
+            19,
+            59.82,
+            73.59,
+            open_profit_loss=-261.65,
+            raw_profit_loss=-261.65,
+        )
+        setattr(perp, "asset_type", "Perp Short")
+        portfolio = Portfolio(cash=0, positions={"BTC": spot, "HYPE-PERP-SHORT": perp})
+
+        rows = _workspace_holding_rows(portfolio, "Hyperliquid")
+        values = {str(row["symbol"]): row for row in rows}
+
+        self.assertEqual(values["BTC"]["pnl"], -450.37)
+        self.assertEqual(values["BTC"]["pnl_text"], "$-450.37")
+        self.assertEqual(values["HYPE-PERP-SHORT"]["pnl"], -261.65)
+        self.assertEqual(values["HYPE-PERP-SHORT"]["pnl_text"], "$-261.65")
+
+    def test_cockpit_pnl_summary_uses_hyperliquid_custom_fallback(self) -> None:
+        spot = Position(
+            "HYPE",
+            10,
+            50.0,
+            50.0,
+            unrealized_profit_loss_known=False,
+            custom_profit_loss=125.0,
+        )
+        setattr(spot, "asset_type", "Spot")
+        equity = Position("GOOG", 2, 100.0, 125.0)
+        portfolio = Portfolio(cash=0, positions={"HYPE": spot, "GOOG": equity})
+
+        self.assertEqual(_position_pnl_value(spot), 125.0)
+        self.assertEqual(_portfolio_display_pnl_summary(portfolio), (175.0, 25.0))
 
     def test_update_leverage_normalizes_coin_and_calls_exchange_hook(self) -> None:
         with patch.dict(

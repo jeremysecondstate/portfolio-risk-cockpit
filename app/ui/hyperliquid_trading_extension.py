@@ -209,14 +209,15 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
 
     exposure = ttk.LabelFrame(exposure_shell, text="Spot / Perp Exposure Map", style="Card.TLabelframe")
     exposure.pack(fill=tk.BOTH, expand=True)
-    columns = ("coin", "spot", "perp", "net", "readout")
+    columns = ("coin", "spot", "perp", "net", "pnl", "readout")
     self.cockpit_exposure_table = ttk.Treeview(exposure, columns=columns, show="headings", height=7)
     headings = {
         "coin": ("Coin", 80, tk.W),
-        "spot": ("Spot", 110, tk.E),
-        "perp": ("Perp Notional", 120, tk.E),
-        "net": ("Net Read", 110, tk.E),
-        "readout": ("Risk Readout", 230, tk.W),
+        "spot": ("Spot", 100, tk.E),
+        "perp": ("Perp Notional", 110, tk.E),
+        "net": ("Net Read", 100, tk.E),
+        "pnl": ("P&L", 95, tk.E),
+        "readout": ("Risk Readout", 190, tk.W),
     }
     for column, (label, width, anchor) in headings.items():
         self.cockpit_exposure_table.heading(column, text=label)
@@ -320,6 +321,7 @@ def _update_cockpit_exposure_table(self: tk.Tk, exposures: dict[str, dict[str, A
                 _money(row["spot_value"]),
                 _money(abs(row["perp_notional"])),
                 _signed_money(row["net_delta"]),
+                _signed_money(row["pnl"]) if row["pnl_known"] else "--",
                 row["readout"],
             ),
         )
@@ -345,8 +347,15 @@ def _portfolio_coin_exposures(portfolio: Any) -> dict[str, dict[str, Any]]:
                 "perp_notional": 0.0,
                 "perp_signed": 0.0,
                 "perp_quantity": 0.0,
+                "pnl": 0.0,
+                "pnl_known": False,
             },
         )
+
+        position_pnl = _position_display_pnl(position)
+        if position_pnl is not None:
+            row["pnl"] += position_pnl
+            row["pnl_known"] = True
 
         if is_perp:
             signed_notional = abs(position.market_value)
@@ -365,6 +374,20 @@ def _portfolio_coin_exposures(portfolio: Any) -> dict[str, dict[str, Any]]:
         row["net_delta"] = row["spot_value"] + row["perp_signed"]
         row["readout"] = _exposure_readout(row)
     return rows
+
+
+def _position_display_pnl(position: Any) -> float | None:
+    raw_pnl = getattr(position, "raw_profit_loss", None)
+    if isinstance(raw_pnl, (int, float)):
+        return float(raw_pnl)
+    custom_pnl = getattr(position, "custom_profit_loss", None)
+    if isinstance(custom_pnl, (int, float)):
+        return float(custom_pnl)
+    if getattr(position, "unrealized_profit_loss_known", True):
+        unrealized_pnl = getattr(position, "unrealized_profit_loss", None)
+        if isinstance(unrealized_pnl, (int, float)):
+            return float(unrealized_pnl)
+    return None
 
 
 def _coin_from_exposure_symbol(symbol: str) -> str:
@@ -400,9 +423,10 @@ def _exposure_sentence(row: dict[str, Any], total_value: float) -> str:
     direction = "short" if perp < 0 else "long"
     if abs(perp) <= 0.01:
         return f"spot {_money(spot)}, no perp notional. {row['readout']}."
+    pnl = f" Combined P&L {_signed_money(row['pnl'])}." if row.get("pnl_known") else ""
     return (
         f"spot {_money(spot)} versus {_money(abs(perp))} {direction} perp notional; "
-        f"net read {_signed_money(net)} ({abs(net) / total_value:.1%} of portfolio). {row['readout']}."
+        f"net read {_signed_money(net)} ({abs(net) / total_value:.1%} of portfolio).{pnl} {row['readout']}."
     )
 
 

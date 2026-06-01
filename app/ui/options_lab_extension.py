@@ -239,11 +239,7 @@ def _looks_like_table_line(value: str) -> bool:
 
 
 def _workspace_holdings_table(parent: ttk.Frame, include_custom_pnl: bool = False) -> ttk.Treeview:
-    columns = (
-        ("symbol", "type", "qty", "last", "value", "pnl", "custom_pnl", "basis_status")
-        if include_custom_pnl
-        else ("symbol", "type", "qty", "last", "value", "pnl")
-    )
+    columns = ("symbol", "type", "qty", "last", "value", "pnl")
     table = ttk.Treeview(parent, columns=columns, show="headings", height=6, selectmode="browse")
     headings = {
         "symbol": ("Symbol", 90, tk.W),
@@ -251,9 +247,7 @@ def _workspace_holdings_table(parent: ttk.Frame, include_custom_pnl: bool = Fals
         "qty": ("Qty", 90, tk.E),
         "last": ("Last", 90, tk.E),
         "value": ("Value", 100, tk.E),
-        "pnl": ("Raw P&L" if include_custom_pnl else "P&L", 100, tk.E),
-        "custom_pnl": ("Custom P&L", 110, tk.E),
-        "basis_status": ("Basis Status", 180, tk.W),
+        "pnl": ("P&L", 110 if include_custom_pnl else 100, tk.E),
     }
     active_columns = tuple(str(column) for column in table["columns"])
     for column in active_columns:
@@ -532,7 +526,7 @@ def _populate_workspace_holdings_table(table: ttk.Treeview, rows: list[dict[str,
     for row_id in table.get_children():
         table.delete(row_id)
     for index, row in enumerate(rows):
-        pnl = row.get("custom_pnl") if "custom_pnl" in table["columns"] else row.get("pnl")
+        pnl = row.get("pnl")
         tag = "cash" if str(row.get("type", "")).lower() == "cash" else "positive" if isinstance(pnl, (int, float)) and pnl > 0 else "negative" if isinstance(pnl, (int, float)) and pnl < 0 else ""
         values_by_column = {
             "symbol": row.get("symbol", ""),
@@ -625,6 +619,7 @@ def _workspace_holding_rows(portfolio, venue: str) -> list[dict[str, object]]:
         if not custom_status and asset_type.startswith("Perp"):
             custom_status = "Perp P&L separate"
             basis_status = "Perp P&L separate"
+        display_pnl = _workspace_display_pnl(raw_pnl, custom_pnl)
         rows.append(
             {
                 "symbol": position.symbol,
@@ -632,8 +627,8 @@ def _workspace_holding_rows(portfolio, venue: str) -> list[dict[str, object]]:
                 "qty": f"{position.quantity:g}",
                 "last": _fmt_money(position.last_price),
                 "value": _fmt_money(position.market_value),
-                "pnl": raw_pnl,
-                "pnl_text": _fmt_money(raw_pnl) if raw_pnl is not None else "--",
+                "pnl": display_pnl,
+                "pnl_text": _fmt_money(display_pnl) if display_pnl is not None else "--",
                 "raw_pnl": raw_pnl,
                 "raw_pnl_text": _fmt_money(raw_pnl) if raw_pnl is not None else "--",
                 "custom_pnl": custom_pnl,
@@ -671,6 +666,14 @@ def _workspace_is_hyperliquid(asset_type: str, symbol: str) -> bool:
 
 def _fmt_money(value: float) -> str:
     return f"${value:,.2f}"
+
+
+def _workspace_display_pnl(raw_pnl: float | None, custom_pnl: float | None) -> float | None:
+    if raw_pnl is not None:
+        return raw_pnl
+    if custom_pnl is not None:
+        return custom_pnl
+    return None
 
 
 def _short_custom_pnl_status(status: str) -> str:

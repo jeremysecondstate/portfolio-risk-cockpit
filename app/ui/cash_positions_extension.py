@@ -165,13 +165,14 @@ def _merge_hyperliquid_portfolio_with_cash_rows(self: tk.Tk, hyperliquid_portfol
 
 def _refresh_portfolio_with_cash_rows(self: tk.Tk) -> None:
     portfolio = self.broker.get_portfolio()
+    display_pnl, display_pnl_percent = _portfolio_display_pnl_summary(portfolio)
     self.cash_value_label.configure(text=polished_theme._format_money(portfolio.cash))
     self.positions_value_label.configure(text=polished_theme._format_money(portfolio.positions_value))
     self.total_value_label.configure(text=polished_theme._format_money(portfolio.total_value))
     self.unrealized_pnl_value_label.configure(
         text=(
-            f"{polished_theme._format_money(portfolio.unrealized_profit_loss)} "
-            f"({polished_theme._format_percent(portfolio.unrealized_profit_loss_percent)})"
+            f"{polished_theme._format_money(display_pnl)} "
+            f"({polished_theme._format_percent(display_pnl_percent)})"
         )
     )
     self.day_pnl_value_label.configure(text=polished_theme._format_optional_money(portfolio.day_profit_loss))
@@ -216,6 +217,8 @@ def _refresh_portfolio_with_cash_rows(self: tk.Tk) -> None:
         p = portfolio.positions[symbol]
         position_type = _position_type(p)
         weight = (p.market_value / total_value) * 100
+        pnl_value = _position_pnl_value(p)
+        pnl_percent_value = _position_pnl_percent_value(p, pnl_value)
         row_id = f"row_{row_index}"
         row_index += 1
         _insert_position_row(
@@ -230,13 +233,13 @@ def _refresh_portfolio_with_cash_rows(self: tk.Tk) -> None:
                 "cost_basis": polished_theme._format_money(p.cost_basis),
                 "value": polished_theme._format_money(p.market_value),
                 "weight": f"{weight:.1f}%",
-                "pnl": _format_unrealized_money(p),
-                "pnl_pct": _format_unrealized_percent(p),
+                "pnl": _format_position_pnl_money(p),
+                "pnl_pct": _format_position_pnl_percent(p),
                 "day_pnl": polished_theme._format_optional_money(p.day_profit_loss),
             },
             pnl_values={
-                "pnl": p.unrealized_profit_loss if p.unrealized_profit_loss_known else None,
-                "pnl_pct": p.unrealized_profit_loss_percent if p.unrealized_profit_loss_known else None,
+                "pnl": pnl_value,
+                "pnl_pct": pnl_percent_value,
                 "day_pnl": p.day_profit_loss,
             },
             main_tag="data_neutral",
@@ -503,13 +506,60 @@ def _pnl_value_tag(value: float | None) -> str:
     return "pnl_negative"
 
 
-def _format_unrealized_money(position: Position) -> str:
-    if not position.unrealized_profit_loss_known:
-        return "--"
-    return polished_theme._format_money(position.unrealized_profit_loss)
+def _portfolio_display_pnl_summary(portfolio: Portfolio) -> tuple[float, float | None]:
+    pnl_total = 0.0
+    cost_basis_total = 0.0
+    for position in portfolio.positions.values():
+        pnl = _position_pnl_value(position)
+        if pnl is None:
+            continue
+        pnl_total += pnl
+        cost_basis_total += max(float(position.cost_basis or 0.0), 0.0)
+    if cost_basis_total <= 0:
+        return round(pnl_total, 2), None
+    return round(pnl_total, 2), round((pnl_total / cost_basis_total) * 100, 2)
 
 
-def _format_unrealized_percent(position: Position) -> str:
-    if not position.unrealized_profit_loss_known:
+def _position_pnl_value(position: Position) -> float | None:
+    if position.unrealized_profit_loss_known:
+        return position.unrealized_profit_loss
+    raw_pnl = _optional_numeric(getattr(position, "raw_profit_loss", None))
+    if raw_pnl is not None:
+        return round(raw_pnl, 2)
+    custom_pnl = _optional_numeric(getattr(position, "custom_profit_loss", None))
+    if custom_pnl is not None:
+        return round(custom_pnl, 2)
+    return None
+
+
+def _position_pnl_percent_value(position: Position, pnl_value: float | None = None) -> float | None:
+    if position.unrealized_profit_loss_known and position.unrealized_profit_loss_percent is not None:
+        return position.unrealized_profit_loss_percent
+    if pnl_value is None:
+        pnl_value = _position_pnl_value(position)
+    if pnl_value is None:
+        return None
+    cost_basis = float(position.cost_basis or 0.0)
+    if cost_basis <= 0:
+        return None
+    return round((pnl_value / cost_basis) * 100, 2)
+
+
+def _optional_numeric(value: object) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _format_position_pnl_money(position: Position) -> str:
+    pnl = _position_pnl_value(position)
+    if pnl is None:
         return "--"
-    return polished_theme._format_percent(position.unrealized_profit_loss_percent)
+    return polished_theme._format_money(pnl)
+
+
+def _format_position_pnl_percent(position: Position) -> str:
+    pnl_percent = _position_pnl_percent_value(position)
+    if pnl_percent is None:
+        return "--"
+    return polished_theme._format_percent(pnl_percent)
