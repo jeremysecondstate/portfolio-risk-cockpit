@@ -5,6 +5,7 @@ import unittest
 
 from app.brokers.hyperliquid.client import (
     HyperliquidSnapshot,
+    build_custom_hyperliquid_pnl,
     format_hyperliquid_snapshot,
     portfolio_from_hyperliquid_snapshot,
 )
@@ -16,6 +17,9 @@ def _snapshot(
     spot_state: dict | None = None,
     all_mids: dict | None = None,
     user_fills: list[dict] | None = None,
+    user_non_funding_ledger_updates: list[dict] | None = None,
+    user_funding: list[dict] | None = None,
+    historical_prices: dict[tuple[str, int], float] | None = None,
 ) -> HyperliquidSnapshot:
     return HyperliquidSnapshot(
         user="0x0000000000000000000000000000000000000000",
@@ -26,6 +30,9 @@ def _snapshot(
         spot_meta_and_asset_ctxs=None,
         fetched_at=datetime(2026, 5, 28, 15, 30, 0),
         user_fills=user_fills or [],
+        user_non_funding_ledger_updates=user_non_funding_ledger_updates or [],
+        user_funding=user_funding or [],
+        historical_prices=historical_prices or {},
     )
 
 
@@ -207,6 +214,122 @@ class HyperliquidPortfolioTests(unittest.TestCase):
         self.assertEqual(position.cost_basis, 5624.40)
         self.assertEqual(position.unrealized_profit_loss, 107.62)
         self.assertEqual(position.unrealized_profit_loss_percent, 1.91)
+
+    def test_btc_deposit_builds_custom_basis_lot(self) -> None:
+        snapshot = _snapshot(
+            spot_state={"balances": [{"coin": "BTC", "total": "0.1", "usdValue": "120.00"}]},
+            user_non_funding_ledger_updates=[
+                {
+                    "time": 10,
+                    "delta": {
+                        "type": "spotTransfer",
+                        "token": "BTC",
+                        "amount": "0.1",
+                        "usdcValue": "100.00",
+                        "user": "0x1111111111111111111111111111111111111111",
+                        "destination": "0x0000000000000000000000000000000000000000",
+                    },
+                }
+            ],
+        )
+
+        custom = build_custom_hyperliquid_pnl(snapshot)
+        portfolio, _message = portfolio_from_hyperliquid_snapshot(snapshot)
+        position = portfolio.positions["BTC-SPOT"]
+
+        self.assertEqual(custom.coins["BTC"].deposit_basis_usd, 100.00)
+        self.assertEqual(custom.coins["BTC"].unrealized_pnl, 20.00)
+        self.assertEqual(custom.coins["BTC"].total_pnl, 20.00)
+        self.assertEqual(custom.coins["BTC"].basis_status, "Exact")
+        self.assertEqual(position.custom_profit_loss, 20.00)
+        self.assertEqual(position.basis_status, "Exact")
+
+    def test_btc_sale_consumes_deposit_lot_fifo(self) -> None:
+        snapshot = _snapshot(
+            spot_state={"balances": [{"coin": "BTC", "total": "0.05", "usdValue": "75.00"}]},
+            user_non_funding_ledger_updates=[
+                {
+                    "time": 10,
+                    "delta": {
+                        "type": "spotTransfer",
+                        "token": "BTC",
+                        "amount": "0.1",
+                        "usdcValue": "100.00",
+                        "user": "0x1111111111111111111111111111111111111111",
+                        "destination": "0x0000000000000000000000000000000000000000",
+                    },
+                }
+            ],
+            user_fills=[
+                {
+                    "time": 20,
+                    "coin": "BTC/USDC",
+                    "side": "A",
+                    "sz": "0.05",
+                    "px": "1200",
+                    "fee": "1",
+                    "feeToken": "USDC",
+                }
+            ],
+        )
+
+        custom = build_custom_hyperliquid_pnl(snapshot)
+        btc = custom.coins["BTC"]
+
+        self.assertEqual(btc.realized_pnl, 9.00)
+        self.assertEqual(btc.unrealized_pnl, 25.00)
+        self.assertEqual(btc.total_pnl, 34.00)
+        self.assertEqual(btc.remaining_cost_basis_usd, 50.00)
+
+    def test_hype_missing_basis_is_incomplete_not_zero(self) -> None:
+        snapshot = _snapshot(
+            spot_state={"balances": [{"coin": "HYPE", "total": "70", "usdValue": "5100.00"}]},
+        )
+
+        custom = build_custom_hyperliquid_pnl(snapshot)
+        portfolio, _message = portfolio_from_hyperliquid_snapshot(snapshot)
+        position = portfolio.positions["HYPE-SPOT"]
+
+        self.assertIsNone(custom.coins["HYPE"].total_pnl)
+        self.assertIsNone(custom.net_custom_pnl)
+        self.assertIn("Missing HYPE basis", custom.coins["HYPE"].basis_status)
+        self.assertIsNone(position.custom_profit_loss)
+        self.assertIn("Missing HYPE basis", position.custom_pnl_status)
+
+    def test_hype_perp_close_is_not_mixed_into_spot_custom_pnl(self) -> None:
+        snapshot = _snapshot(
+            spot_state={"balances": [{"coin": "HYPE", "total": "1", "usdValue": "100.00"}]},
+            user_non_funding_ledger_updates=[
+                {
+                    "time": 10,
+                    "delta": {
+                        "type": "spotTransfer",
+                        "token": "HYPE",
+                        "amount": "1",
+                        "usdcValue": "80.00",
+                        "user": "0x1111111111111111111111111111111111111111",
+                        "destination": "0x0000000000000000000000000000000000000000",
+                    },
+                }
+            ],
+            user_fills=[
+                {
+                    "time": 20,
+                    "coin": "HYPE",
+                    "dir": "Close Short",
+                    "side": "B",
+                    "sz": "1",
+                    "px": "72",
+                    "closedPnl": "12.34",
+                }
+            ],
+        )
+
+        custom = build_custom_hyperliquid_pnl(snapshot)
+
+        self.assertEqual(custom.coins["HYPE"].total_pnl, 20.00)
+        self.assertEqual(custom.coins["HYPE"].realized_pnl, 0.00)
+        self.assertEqual(custom.perp_realized_pnl, 12.34)
 
 
 if __name__ == "__main__":

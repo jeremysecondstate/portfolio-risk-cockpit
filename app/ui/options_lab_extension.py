@@ -238,8 +238,12 @@ def _looks_like_table_line(value: str) -> bool:
     return len(value) > 45 and bool(re.search(r"\s{3,}", value))
 
 
-def _workspace_holdings_table(parent: ttk.Frame) -> ttk.Treeview:
-    columns = ("symbol", "type", "qty", "last", "value", "pnl")
+def _workspace_holdings_table(parent: ttk.Frame, include_custom_pnl: bool = False) -> ttk.Treeview:
+    columns = (
+        ("symbol", "type", "qty", "last", "value", "raw_pnl", "custom_pnl", "basis_status")
+        if include_custom_pnl
+        else ("symbol", "type", "qty", "last", "value", "pnl")
+    )
     table = ttk.Treeview(parent, columns=columns, show="headings", height=6, selectmode="browse")
     headings = {
         "symbol": ("Symbol", 90, tk.W),
@@ -248,6 +252,9 @@ def _workspace_holdings_table(parent: ttk.Frame) -> ttk.Treeview:
         "last": ("Last", 90, tk.E),
         "value": ("Value", 100, tk.E),
         "pnl": ("P&L", 100, tk.E),
+        "raw_pnl": ("Raw P&L", 96, tk.E),
+        "custom_pnl": ("Custom P&L", 110, tk.E),
+        "basis_status": ("Basis Status", 180, tk.W),
     }
     for column, (label, width, anchor) in headings.items():
         table.heading(column, text=label)
@@ -524,20 +531,24 @@ def _populate_workspace_holdings_table(table: ttk.Treeview, rows: list[dict[str,
     for row_id in table.get_children():
         table.delete(row_id)
     for index, row in enumerate(rows):
-        pnl = row.get("pnl")
+        pnl = row.get("custom_pnl") if "custom_pnl" in table["columns"] else row.get("pnl")
         tag = "cash" if str(row.get("type", "")).lower() == "cash" else "positive" if isinstance(pnl, (int, float)) and pnl > 0 else "negative" if isinstance(pnl, (int, float)) and pnl < 0 else ""
+        values_by_column = {
+            "symbol": row.get("symbol", ""),
+            "type": row.get("type", ""),
+            "qty": row.get("qty", ""),
+            "last": row.get("last", ""),
+            "value": row.get("value", ""),
+            "pnl": row.get("pnl_text", ""),
+            "raw_pnl": row.get("raw_pnl_text", ""),
+            "custom_pnl": row.get("custom_pnl_text", ""),
+            "basis_status": row.get("basis_status", ""),
+        }
         table.insert(
             "",
             tk.END,
             iid=f"holding_{index}",
-            values=(
-                row.get("symbol", ""),
-                row.get("type", ""),
-                row.get("qty", ""),
-                row.get("last", ""),
-                row.get("value", ""),
-                row.get("pnl_text", ""),
-            ),
+            values=tuple(values_by_column.get(str(column), "") for column in table["columns"]),
             tags=(tag,) if tag else (),
         )
 
@@ -589,6 +600,11 @@ def _workspace_holding_rows(portfolio, venue: str) -> list[dict[str, object]]:
                     "value": _fmt_money(cash.market_value),
                     "pnl": None,
                     "pnl_text": "--",
+                    "raw_pnl": None,
+                    "raw_pnl_text": "--",
+                    "custom_pnl": None,
+                    "custom_pnl_text": "--",
+                    "basis_status": "Cash capital",
                 }
             )
 
@@ -599,6 +615,15 @@ def _workspace_holding_rows(portfolio, venue: str) -> list[dict[str, object]]:
             continue
         if venue == "Schwab" and is_hyperliquid:
             continue
+        raw_pnl = getattr(position, "raw_profit_loss", None)
+        if raw_pnl is None and getattr(position, "unrealized_profit_loss_known", True):
+            raw_pnl = position.unrealized_profit_loss
+        custom_pnl = getattr(position, "custom_profit_loss", None)
+        custom_status = str(getattr(position, "custom_pnl_status", "") or "")
+        basis_status = str(getattr(position, "basis_status", "") or custom_status or "")
+        if not custom_status and asset_type.startswith("Perp"):
+            custom_status = "Perp P&L separate"
+            basis_status = "Perp P&L separate"
         rows.append(
             {
                 "symbol": position.symbol,
@@ -606,8 +631,13 @@ def _workspace_holding_rows(portfolio, venue: str) -> list[dict[str, object]]:
                 "qty": f"{position.quantity:g}",
                 "last": _fmt_money(position.last_price),
                 "value": _fmt_money(position.market_value),
-                "pnl": position.unrealized_profit_loss,
-                "pnl_text": _fmt_money(position.unrealized_profit_loss),
+                "pnl": raw_pnl,
+                "pnl_text": _fmt_money(raw_pnl) if raw_pnl is not None else "--",
+                "raw_pnl": raw_pnl,
+                "raw_pnl_text": _fmt_money(raw_pnl) if raw_pnl is not None else "--",
+                "custom_pnl": custom_pnl,
+                "custom_pnl_text": _fmt_money(custom_pnl) if custom_pnl is not None else _short_custom_pnl_status(custom_status),
+                "basis_status": basis_status,
                 "weight": position.market_value / total_value,
             }
         )
@@ -640,6 +670,19 @@ def _workspace_is_hyperliquid(asset_type: str, symbol: str) -> bool:
 
 def _fmt_money(value: float) -> str:
     return f"${value:,.2f}"
+
+
+def _short_custom_pnl_status(status: str) -> str:
+    clean = status.strip()
+    if not clean:
+        return "--"
+    if clean.startswith("Missing") or clean.startswith("Incomplete"):
+        return "Incomplete"
+    if clean.startswith("Estimated"):
+        return "Estimated"
+    if clean.startswith("Perp"):
+        return "Separate"
+    return clean
 
 
 def _money_value(value: str) -> float:
@@ -1148,7 +1191,7 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
 
     hyperliquid_holdings_frame = ttk.LabelFrame(holdings_shell, text="Hyperliquid Balances", style="Card.TLabelframe")
     hyperliquid_holdings_frame.pack(fill=tk.BOTH, expand=True)
-    self.hyperliquid_workspace_holdings_table = _workspace_holdings_table(hyperliquid_holdings_frame)
+    self.hyperliquid_workspace_holdings_table = _workspace_holdings_table(hyperliquid_holdings_frame, include_custom_pnl=True)
     _bind_workspace_holdings_click(self, self.hyperliquid_workspace_holdings_table, "Hyperliquid")
     hyperliquid_position_actions = ttk.Frame(hyperliquid_holdings_frame, style="Panel.TFrame")
     hyperliquid_position_actions.pack(fill=tk.X, pady=(8, 0))

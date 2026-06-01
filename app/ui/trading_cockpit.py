@@ -187,6 +187,12 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
                 open_profit_loss=position.open_profit_loss,
                 unrealized_profit_loss_known=position.unrealized_profit_loss_known,
                 cost_basis_estimated=position.cost_basis_estimated,
+                raw_profit_loss=position.raw_profit_loss,
+                custom_profit_loss=position.custom_profit_loss,
+                custom_realized_profit_loss=position.custom_realized_profit_loss,
+                custom_unrealized_profit_loss=position.custom_unrealized_profit_loss,
+                custom_pnl_status=position.custom_pnl_status,
+                basis_status=position.basis_status,
             )
 
         return Portfolio(

@@ -15,6 +15,12 @@ class Position:
     open_profit_loss: float | None = None
     unrealized_profit_loss_known: bool = True
     cost_basis_estimated: bool = False
+    raw_profit_loss: float | None = None
+    custom_profit_loss: float | None = None
+    custom_realized_profit_loss: float | None = None
+    custom_unrealized_profit_loss: float | None = None
+    custom_pnl_status: str = ""
+    basis_status: str = ""
 
     @property
     def cost_basis(self) -> float:
