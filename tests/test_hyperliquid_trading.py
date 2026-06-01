@@ -11,11 +11,18 @@ from app.brokers.hyperliquid.trading import (
     HyperliquidTriggerTicket,
     normalize_hyperliquid_trigger_ticket_for_wire,
 )
-from app.core.portfolio import Portfolio, Position
+from app.core.portfolio import CashPosition, Portfolio, Position
 from app.ui.cash_positions_extension import _portfolio_display_pnl_summary, _position_pnl_value
 from app.ui.options_lab_extension import _populate_workspace_open_orders_table, _workspace_holding_rows
 from app.ui.hyperliquid_trading_extension import _market_close_limit_price, _normalize_edit_market, _reverse_order_size_for_same_opposite_position, _risk_reward, _selected_hyperliquid_order, _set_hyperliquid_perp_mid_price, normalize_hyperliquid_open_order
 from app.ui.hyperliquid_trading_extension import _current_hyperliquid_perp_position, _perp_position_pnl, _portfolio_coin_exposures
+from app.ui.hyperliquid_existing_perp_what_if_extension import (
+    GoldilocksCashBudget,
+    _build_goldilocks_spot_perp_balance_lines,
+    _generate_goldilocks_candidates,
+    _quote_cash_budget,
+    _select_goldilocks_recommendations,
+)
 from app.ui.hyperliquid_perp_ticket_use_mid_fix import (
     LEVERAGE_PNL_EXPLANATION,
     _estimated_margin_required,
@@ -511,6 +518,199 @@ class HyperliquidTradingTests(unittest.TestCase):
         self.assertLess(short_30x, short_5x)
         self.assertLess(100.0 - long_30x, 100.0 - long_5x)
         self.assertLess(short_30x - 100.0, short_5x - 100.0)
+
+    def test_goldilocks_overhedged_short_perp_preserves_long_when_cash_allows(self) -> None:
+        cash_budget = GoldilocksCashBudget("USDC", 100_000.0, "test cash")
+        lines = _build_goldilocks_spot_perp_balance_lines(
+            coin="BTC",
+            current_spot_qty=0.0687842,
+            reference_price=72_000.0,
+            total_perp_signed_qty=-0.2,
+            existing_perps=[],
+            proposed_tp_net_pnl=2_750.0,
+            proposed_sl_net_pnl=-650.0,
+            tp_price=80_000.0,
+            sl_price=65_000.0,
+            cash_budget=cash_budget,
+            leverage=25.0,
+        )
+        text = "\n".join(lines)
+
+        self.assertIn("Goldilocks Spot / Perp Balance", text)
+        self.assertIn("over-hedged", text)
+        self.assertIn("net short", text)
+        self.assertIn("Best Balance", text)
+        self.assertIn("More Defensive", text)
+        self.assertIn("More Bullish", text)
+
+        candidates = _generate_goldilocks_candidates(
+            current_spot_qty=0.0687842,
+            short_perp_abs=0.2,
+            reference_price=72_000.0,
+            tp_price=80_000.0,
+            sl_price=65_000.0,
+            existing_perps=[],
+            proposed_tp_net_pnl=2_750.0,
+            proposed_sl_net_pnl=-650.0,
+            cash_budget=cash_budget,
+            leverage=25.0,
+        )
+        best = dict(_select_goldilocks_recommendations(candidates))["Best Balance"]
+
+        self.assertGreater(best.net_qty, 0.0)
+        self.assertGreater(best.net_long_pct_of_spot, 0.10)
+        self.assertLess(best.hedge_ratio, 1.0)
+
+    def test_goldilocks_candidate_generation_scans_continuous_range(self) -> None:
+        candidates = _generate_goldilocks_candidates(
+            current_spot_qty=0.0687842,
+            short_perp_abs=0.2,
+            reference_price=72_000.0,
+            tp_price=80_000.0,
+            sl_price=65_000.0,
+            existing_perps=[],
+            proposed_tp_net_pnl=0.0,
+            proposed_sl_net_pnl=0.0,
+            cash_budget=GoldilocksCashBudget("USDC", 100_000.0, "test cash"),
+        )
+        hedge_ratios = [round(candidate.hedge_ratio, 2) for candidate in candidates]
+
+        self.assertIn(0.20, hedge_ratios)
+        self.assertIn(0.50, hedge_ratios)
+        self.assertIn(1.25, hedge_ratios)
+        self.assertIn(2.00, hedge_ratios)
+        self.assertGreater(len(candidates), 20)
+
+    def test_goldilocks_spot_adjustment_math(self) -> None:
+        candidates = _generate_goldilocks_candidates(
+            current_spot_qty=0.0687842,
+            short_perp_abs=0.2,
+            reference_price=72_000.0,
+            tp_price=80_000.0,
+            sl_price=65_000.0,
+            existing_perps=[],
+            proposed_tp_net_pnl=0.0,
+            proposed_sl_net_pnl=0.0,
+            cash_budget=GoldilocksCashBudget("USDC", 100_000.0, "test cash"),
+        )
+        half_hedge = next(candidate for candidate in candidates if round(candidate.hedge_ratio, 2) == 0.50)
+
+        self.assertAlmostEqual(half_hedge.target_spot_qty, 0.4)
+        self.assertAlmostEqual(half_hedge.spot_adjustment_qty, 0.4 - 0.0687842)
+        self.assertAlmostEqual(half_hedge.spot_adjustment_value, (0.4 - 0.0687842) * 72_000.0)
+
+    def test_goldilocks_combined_tp_sl_pnl_changes_with_target_spot(self) -> None:
+        candidates = _generate_goldilocks_candidates(
+            current_spot_qty=0.1,
+            short_perp_abs=0.2,
+            reference_price=72_000.0,
+            tp_price=80_000.0,
+            sl_price=65_000.0,
+            existing_perps=[],
+            proposed_tp_net_pnl=1_000.0,
+            proposed_sl_net_pnl=-500.0,
+            cash_budget=GoldilocksCashBudget("USDC", 100_000.0, "test cash"),
+        )
+        half_hedge = next(candidate for candidate in candidates if round(candidate.hedge_ratio, 2) == 0.50)
+        neutral = next(candidate for candidate in candidates if round(candidate.hedge_ratio, 2) == 1.00)
+
+        self.assertGreater(half_hedge.combined_tp_pnl, neutral.combined_tp_pnl)
+        self.assertLess(half_hedge.combined_sl_pnl, neutral.combined_sl_pnl)
+
+    def test_goldilocks_cash_constraint_excludes_unaffordable_spot_adds(self) -> None:
+        cash_budget = GoldilocksCashBudget("USDC", 1_000.0, "test cash")
+        candidates = _generate_goldilocks_candidates(
+            current_spot_qty=0.0687842,
+            short_perp_abs=0.2,
+            reference_price=72_000.0,
+            tp_price=80_000.0,
+            sl_price=65_000.0,
+            existing_perps=[],
+            proposed_tp_net_pnl=2_750.0,
+            proposed_sl_net_pnl=-650.0,
+            cash_budget=cash_budget,
+        )
+        recommendations = _select_goldilocks_recommendations(candidates)
+        lines = _build_goldilocks_spot_perp_balance_lines(
+            coin="BTC",
+            current_spot_qty=0.0687842,
+            reference_price=72_000.0,
+            total_perp_signed_qty=-0.2,
+            existing_perps=[],
+            proposed_tp_net_pnl=2_750.0,
+            proposed_sl_net_pnl=-650.0,
+            tp_price=80_000.0,
+            sl_price=65_000.0,
+            cash_budget=cash_budget,
+        )
+
+        self.assertEqual(recommendations, [])
+        self.assertIn("No spot-add balance is affordable with current synced cash.", "\n".join(lines))
+        self.assertTrue(all(candidate.spot_adjustment_value > cash_budget.max_spot_add_budget for candidate in candidates if candidate.spot_adjustment_qty > 0))
+
+    def test_goldilocks_quote_budget_uses_synced_hyperliquid_quote_cash(self) -> None:
+        portfolio = Portfolio(
+            cash=99_999.0,
+            cash_positions={
+                "USDC:HYPERLIQUID": CashPosition("USDC", 2_150.0, "Hyperliquid"),
+                "USDC:HYPERLIQUID-PERP": CashPosition("USDC", 25_000.0, "Hyperliquid Perps"),
+            },
+        )
+
+        budget = _quote_cash_budget(portfolio, "USDC")
+
+        self.assertEqual(budget.available_cash, 2_150.0)
+        self.assertEqual(budget.max_spot_add_budget, 1_935.0)
+        self.assertFalse(budget.is_fallback)
+
+    def test_goldilocks_missing_quote_cash_does_not_use_perp_cash_as_spot_budget(self) -> None:
+        portfolio = Portfolio(
+            cash=99_999.0,
+            cash_positions={"USDC:HYPERLIQUID-PERP": CashPosition("USDC", 25_000.0, "Hyperliquid Perps")},
+        )
+
+        budget = _quote_cash_budget(portfolio, "USDC")
+
+        self.assertEqual(budget.available_cash, 0.0)
+        self.assertFalse(budget.is_fallback)
+
+    def test_goldilocks_long_spot_plus_long_perp_is_not_shown_as_hedge(self) -> None:
+        lines = _build_goldilocks_spot_perp_balance_lines(
+            coin="BTC",
+            current_spot_qty=0.25,
+            reference_price=72_000.0,
+            total_perp_signed_qty=0.2,
+            existing_perps=[],
+            proposed_tp_net_pnl=1_000.0,
+            proposed_sl_net_pnl=-500.0,
+            tp_price=80_000.0,
+            sl_price=65_000.0,
+            cash_budget=GoldilocksCashBudget("USDC", 100_000.0, "test cash"),
+        )
+        text = "\n".join(lines)
+
+        self.assertIn("stacked long", text)
+        self.assertIn("not a hedge", text)
+        self.assertNotIn("Best Balance", text)
+
+    def test_goldilocks_no_spot_case_does_not_crash(self) -> None:
+        lines = _build_goldilocks_spot_perp_balance_lines(
+            coin="BTC",
+            current_spot_qty=0.0,
+            reference_price=72_000.0,
+            total_perp_signed_qty=-0.2,
+            existing_perps=[],
+            proposed_tp_net_pnl=1_000.0,
+            proposed_sl_net_pnl=-500.0,
+            tp_price=80_000.0,
+            sl_price=65_000.0,
+            cash_budget=GoldilocksCashBudget("USDC", 100_000.0, "test cash"),
+        )
+        text = "\n".join(lines)
+
+        self.assertIn("No synced spot position exists", text)
+        self.assertIn("50% hedge", text)
+        self.assertIn("100% hedge", text)
 
 
 if __name__ == "__main__":
