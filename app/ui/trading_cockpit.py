@@ -348,4 +348,213 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             self.schwab_status_var.set("Schwab: not connected")
             messagebox.showerror("Load Schwab open orders failed", str(exc))
 
-    # The rest of the trading cockpit implementation is inherited/extended by installed UI modules.
+    def _live_readiness_verdict(
+            self,
+            *,
+            limit_status: str,
+            quantity_status: str,
+            price_status: str,
+            preview_gate: str,
+    ) -> tuple[str, str, str, str]:
+        mechanical_ready = all(status == "PASS" for status in [limit_status, quantity_status, price_status])
+        broker_ready = preview_gate == "PASS"
+        human_ready = False
+        mechanical_label = "PASS" if mechanical_ready else "PARTIAL"
+        broker_label = "PASS" if broker_ready else "PARTIAL"
+        human_label = "REQUIRED" if not human_ready else "PASS"
+        overall = "DISABLED — live submit endpoint is not wired"
+        return overall, mechanical_label, broker_label, human_label
+
+    def _next_live_safety_action(
+            self,
+            *,
+            limit_status: str,
+            quantity_status: str,
+            price_status: str,
+            preview_gate: str,
+    ) -> str:
+        if limit_status != "PASS":
+            return "Set order type to LIMIT."
+        if quantity_status != "PASS":
+            return "Enter a positive quantity."
+        if price_status != "PASS":
+            return "Enter a positive limit price."
+        if preview_gate != "PASS":
+            return "Run Schwab Preview and confirm the Schwab status is ACCEPTED."
+        return "Core gates are green. Intended flow: Schwab Preview → Live Submit → Live Cancel if needed."
+
+    def show_live_submit_safety_review(self) -> None:
+        try:
+            order = self._parse_order()
+            schwab_order = self.build_schwab_order_json_from_ui()
+        except Exception as exc:
+            messagebox.showerror("Live safety review failed", str(exc))
+            return
+
+        env_gate = "SCHWAB_ENABLE_LIVE_ORDERS=true"
+        confirm_phrase = "PLACE"
+        order_type = order.order_type.value.upper()
+        tif = order.time_in_force.value.upper()
+        side = order.side.value.upper()
+        symbol = order.symbol.strip().upper()
+        preview_status = self.last_schwab_preview_status or "NONE"
+        preview_gate = "PASS" if preview_status == "ACCEPTED" else "REQUIRED"
+        limit_status = "PASS" if order_type == "LIMIT" else "BLOCKED"
+        quantity_status = "PASS" if order.quantity > 0 else "BLOCKED"
+        price_status = "PASS" if order.limit_price is not None and order.limit_price > 0 else "BLOCKED"
+        overall, mechanical_label, broker_label, human_label = self._live_readiness_verdict(limit_status=limit_status, quantity_status=quantity_status, price_status=price_status, preview_gate=preview_gate)
+        next_action = self._next_live_safety_action(limit_status=limit_status, quantity_status=quantity_status, price_status=price_status, preview_gate=preview_gate)
+        formatted_schwab_order = json.dumps(schwab_order, indent=2)
+
+        self._set_preview_text(
+            "LIVE SUBMIT SAFETY REVIEW\n"
+            "=========================\n\n"
+            f"Overall live readiness: {overall}\n"
+            f"Next required action: {next_action}\n"
+            f"Mechanical ticket gates: {mechanical_label}\n"
+            f"Broker/session gates: {broker_label}\n"
+            f"Human confirmation gates: {human_label}\n\n"
+            "Status: LIVE SUBMIT DISABLED.\n"
+            "Current ticket:\n"
+            f"- Symbol: {symbol}\n"
+            f"- Side: {side}\n"
+            f"- Type: {order_type}\n"
+            f"- Quantity: {order.quantity:g}\n"
+            f"- Limit price: {order.limit_price}\n"
+            f"- Time in force: {tif}\n\n"
+            "Current Schwab readiness state:\n"
+            f"- Last Schwab preview status: {preview_status}\n"
+            "- Open Only: available separately\n"
+            "- Cancel: available separately\n\n"
+            "Safety gates required before any future live submit:\n"
+            f"- LIMIT order only: {limit_status}\n"
+            f"- Positive quantity: {quantity_status}\n"
+            f"- Positive limit price: {price_status}\n"
+            "- Schwab previewOrder must be run immediately before submit: REQUIRED\n"
+            f"- Schwab previewOrder status must be ACCEPTED: {preview_gate}\n"
+            f"- Local .env must explicitly contain {env_gate}: REQUIRED\n"
+            f"- User must type exact phrase: {confirm_phrase}: REQUIRED\n"
+            "- Final warning dialog must be accepted: REQUIRED\n\n"
+            "Schwab order JSON that would be previewed/submitted in a future live-submit phase:\n"
+            f"{formatted_schwab_order}\n\n"
+            "This screen is informational only. The live submit endpoint is not wired here."
+        )
+
+    def show_cancel_order_placeholder(self) -> None:
+        order_id = self.cancel_order_id_var.get().strip()
+        if not order_id:
+            messagebox.showerror("Cancel blocked", "Enter an active Schwab order ID first.")
+            return
+
+        try:
+            session = self._authorize_schwab_session()
+            if session is None:
+                return
+            status_code, payload = session.cancel_order(order_id)
+            self.schwab_status_var.set("Schwab: connected")
+            if 200 <= status_code < 300:
+                self.cancel_verified_this_session = True
+                self._update_verification_status()
+            self._set_preview_text(
+                "SCHWAB CANCEL ORDER RESULT\n"
+                "==========================\n\n"
+                f"HTTP Status: {status_code}\n"
+                f"Order ID: {order_id}\n\n"
+                f"Response: {payload if payload is not None else '(empty response body)'}\n\n"
+                "Next step: click Open Only to verify the order is no longer active.\n\n"
+                "No order was submitted or replaced."
+            )
+        except Exception as exc:
+            messagebox.showerror("Schwab cancel failed", str(exc))
+
+    def submit_live_schwab_order_guarded(self) -> None:
+        enable_live = os.getenv("SCHWAB_ENABLE_LIVE_ORDERS", "").strip().lower()
+        if enable_live != "true":
+            messagebox.showerror("Live submit blocked", "SCHWAB_ENABLE_LIVE_ORDERS=true is required in your local .env.")
+            return
+
+        try:
+            order = self._parse_order()
+            schwab_order = self.build_schwab_order_json_from_ui()
+        except Exception as exc:
+            messagebox.showerror("Live submit blocked", str(exc))
+            return
+
+        order_type = order.order_type.value.upper()
+        if order_type != "LIMIT":
+            messagebox.showerror("Live submit blocked", "Only LIMIT orders are allowed for this cockpit.")
+            return
+        if order.quantity <= 0:
+            messagebox.showerror("Live submit blocked", "Quantity must be positive.")
+            return
+        if order.limit_price is None or order.limit_price <= 0:
+            messagebox.showerror("Live submit blocked", "A positive limit price is required.")
+            return
+
+        max_notional = float(os.getenv("SCHWAB_MAX_LIVE_ORDER_DOLLARS", "500"))
+        estimated_notional = order.quantity * order.limit_price
+        if estimated_notional > max_notional:
+            messagebox.showerror("Live submit blocked", f"Estimated notional ${estimated_notional:,.2f} exceeds SCHWAB_MAX_LIVE_ORDER_DOLLARS=${max_notional:,.2f}.")
+            return
+
+        confirmation = self.confirmation_var.get().strip()
+        if confirmation != "PLACE":
+            self._set_preview_text(
+                "LIVE SCHWAB SUBMIT BLOCKED\n"
+                "==========================\n\n"
+                "Exact confirmation phrase required.\n\n"
+                "Type exactly into the confirmation field:\n\n"
+                "  PLACE\n\n"
+                "No live order was submitted."
+            )
+            return
+
+        ok = messagebox.askyesno(
+            "FINAL LIVE SCHWAB ORDER CONFIRMATION",
+            "This will submit a LIVE Schwab order.\n\n"
+            f"Symbol: {order.symbol.strip().upper()}\n"
+            f"Side: {order.side.value.upper()}\n"
+            f"Type: {order_type}\n"
+            f"Quantity: {order.quantity:g}\n"
+            f"Limit price: {order.limit_price}\n"
+            f"Estimated notional: ${estimated_notional:,.2f}\n\n"
+            "This order can fill. Continue?",
+        )
+        if not ok:
+            return
+
+        try:
+            session = self._authorize_schwab_session()
+            if session is None:
+                return
+            preview_status_code, preview_payload = session.preview_order(schwab_order)
+            if isinstance(preview_payload, dict):
+                self._record_schwab_preview_status(preview_payload)
+            strategy = (preview_payload or {}).get("orderStrategy", {}) if isinstance(preview_payload, dict) else {}
+            schwab_status = str(strategy.get("status") or "UNKNOWN").upper()
+            if preview_status_code != 200 or schwab_status != "ACCEPTED":
+                self._set_preview_text(
+                    "LIVE SCHWAB SUBMIT BLOCKED\n"
+                    "==========================\n\n"
+                    f"Immediate preview HTTP status: {preview_status_code}\n"
+                    f"Immediate preview Schwab status: {schwab_status}\n\n"
+                    "Schwab previewOrder must return ACCEPTED immediately before submit.\n\n"
+                    "No live order was submitted."
+                )
+                return
+            submit_status_code, submit_payload, location = session.submit_live_order(schwab_order)
+            self.schwab_status_var.set("Schwab: connected")
+            self._set_preview_text(
+                "LIVE SCHWAB ORDER SUBMIT RESULT\n"
+                "===============================\n\n"
+                f"HTTP Status: {submit_status_code}\n"
+                f"Location: {location or '(none returned)'}\n"
+                f"Response: {submit_payload if submit_payload is not None else '(empty response body)'}\n\n"
+                "Next step: use Cancel Order if this is a test order you want to cancel."
+            )
+        except Exception as exc:
+            messagebox.showerror("Live Schwab submit failed", str(exc))
+
+
+def _format_optional_number(value: float | None) -> str:
+    return "--" if value is None else f"{value:,.3f}"
