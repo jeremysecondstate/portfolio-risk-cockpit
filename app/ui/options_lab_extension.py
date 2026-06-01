@@ -679,6 +679,10 @@ def _short_custom_pnl_status(status: str) -> str:
         return "--"
     if clean.startswith("Missing") or clean.startswith("Incomplete"):
         return "Incomplete"
+    if clean.startswith("Partial"):
+        return "Partial"
+    if clean.startswith("History"):
+        return "History unavailable"
     if clean.startswith("Estimated"):
         return "Estimated"
     if clean.startswith("Perp"):

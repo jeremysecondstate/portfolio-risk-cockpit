@@ -41,6 +41,8 @@ SPOT_ENTRY_NOTIONAL_KEYS = (
 SPOT_AVERAGE_COST_KEYS = ("avgEntryPx", "averageEntryPrice", "avgCost", "averageCost")
 CUSTOM_PNL_COINS = {"BTC", "HYPE"}
 HISTORY_PARTIAL_THRESHOLD = 2000
+HISTORY_PAGE_LIMIT = 2000
+HISTORY_MAX_ROWS = 10000
 HISTORICAL_PRICE_INTERVAL = "1h"
 HISTORICAL_PRICE_WINDOW_MS = 6 * 60 * 60 * 1000
 
@@ -102,6 +104,10 @@ class CustomCoinPnl:
     acquired_quantity: float = 0.0
     sold_quantity: float = 0.0
     withdrawn_quantity: float = 0.0
+    sale_proceeds_usd: float = 0.0
+    buy_cost_usd: float = 0.0
+    withdrawal_value_usd: float = 0.0
+    fees_usd: float = 0.0
     missing_basis_quantity: float = 0.0
     missing_disposition_quantity: float = 0.0
     lots: list[CustomSpotLot] = field(default_factory=list)
@@ -165,27 +171,38 @@ class HyperliquidInfoClient:
             open_orders = self.post_info({"type": "openOrders", "user": normalized_user})
         all_mids = self._safe_post_info({"type": "allMids"}, default={})
         spot_meta_and_asset_ctxs = self._safe_post_info({"type": "spotMetaAndAssetCtxs"}, default=None)
+        history_warnings: list[str] = []
         recent_user_fills = self._safe_post_info(
             {"type": "userFills", "user": normalized_user, "aggregateByTime": False},
             default=[],
         )
-        timed_user_fills = self._safe_post_info(
-            {"type": "userFillsByTime", "user": normalized_user, "startTime": 0, "aggregateByTime": False},
-            default=[],
+        timed_user_fills, fill_warnings = self._fetch_time_window_history(
+            {
+                "type": "userFillsByTime",
+                "user": normalized_user,
+                "aggregateByTime": False,
+            },
+            label="fill history",
+            max_rows=HISTORY_MAX_ROWS,
         )
+        history_warnings.extend(fill_warnings)
         user_fills = _dedupe_dict_rows(
             (timed_user_fills if isinstance(timed_user_fills, list) else [])
             + (recent_user_fills if isinstance(recent_user_fills, list) else []),
             key_fields=("hash", "tid", "oid", "time", "coin", "side", "sz", "px"),
         )
-        user_non_funding_ledger_updates = self._safe_post_info(
-            {"type": "userNonFundingLedgerUpdates", "user": normalized_user, "startTime": 0},
-            default=[],
+        user_non_funding_ledger_updates, ledger_warnings = self._fetch_time_window_history(
+            {"type": "userNonFundingLedgerUpdates", "user": normalized_user},
+            label="deposit/withdrawal ledger history",
+            max_rows=HISTORY_MAX_ROWS,
         )
-        user_funding = self._safe_post_info(
-            {"type": "userFunding", "user": normalized_user, "startTime": 0},
-            default=[],
+        history_warnings.extend(ledger_warnings)
+        user_funding, funding_warnings = self._fetch_time_window_history(
+            {"type": "userFunding", "user": normalized_user},
+            label="funding history",
+            max_rows=HISTORY_MAX_ROWS,
         )
+        history_warnings.extend(funding_warnings)
 
         if not isinstance(clearinghouse_state, dict):
             raise RuntimeError("Unexpected Hyperliquid clearinghouseState response shape.")
@@ -200,7 +217,6 @@ class HyperliquidInfoClient:
         if not isinstance(user_funding, list):
             user_funding = []
 
-        history_warnings: list[str] = []
         if len(user_fills) >= HISTORY_PARTIAL_THRESHOLD:
             history_warnings.append("Custom P&L is based on partial loaded fill history.")
         if len(user_non_funding_ledger_updates) >= HISTORY_PARTIAL_THRESHOLD:
@@ -234,6 +250,57 @@ class HyperliquidInfoClient:
             return self.post_info(payload)
         except Exception:
             return default
+
+    def _fetch_time_window_history(
+        self,
+        base_payload: dict[str, Any],
+        *,
+        label: str,
+        max_rows: int,
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        rows: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        cursor = _history_start_time()
+        end_time = int(datetime.now().timestamp() * 1000)
+
+        while len(rows) < max_rows:
+            payload = {
+                **base_payload,
+                "startTime": cursor,
+                "endTime": end_time,
+            }
+            page = self._safe_post_info(payload, default=None)
+            if page is None:
+                warnings.append(f"Custom P&L history unavailable: Hyperliquid {label} could not be loaded.")
+                break
+            if not isinstance(page, list):
+                warnings.append(f"Custom P&L history unavailable: Hyperliquid {label} returned an unexpected shape.")
+                break
+
+            page_rows = [row for row in page if isinstance(row, dict)]
+            if not page_rows:
+                break
+
+            rows.extend(page_rows)
+            page_times = [
+                row_time
+                for row in page_rows
+                for row_time in (_row_time(row),)
+                if row_time is not None and row_time >= cursor
+            ]
+            if len(page_rows) < HISTORY_PAGE_LIMIT or not page_times:
+                break
+
+            next_cursor = max(page_times) + 1
+            if next_cursor <= cursor:
+                warnings.append(f"Custom P&L is based on partial loaded {label}; pagination stopped at {cursor}.")
+                break
+            cursor = next_cursor
+
+        if len(rows) >= max_rows:
+            warnings.append(f"Custom P&L is based on partial loaded {label}; reached the {max_rows:,}-row API cap.")
+
+        return rows[:max_rows], warnings
 
     def _fetch_historical_prices_for_custom_pnl(
         self,
@@ -461,37 +528,46 @@ def format_hyperliquid_snapshot(snapshot: HyperliquidSnapshot, portfolio: Portfo
     lines.extend(
         [
             "",
-            "Custom Hyperliquid P&L:",
-            "- Custom P&L adjusts for deposits. Raw Hyperliquid P&L may show $0.00 for deposited spot assets because there may be no exchange-side entry price.",
-            f"- Current account value: {_format_money(custom_pnl.current_account_value)}",
-            f"- Deposits / contributed capital: {_format_money(custom_pnl.deposits_usd)}",
-            f"- Withdrawals / returned capital: {_format_money(custom_pnl.withdrawals_usd)}",
-            f"- Net custom account P&L: {_format_custom_money(custom_pnl.net_custom_pnl, custom_pnl.history_status)}",
+            "CUSTOM HYPERLIQUID P&L",
             "",
-            "Custom account breakdown:",
-            f"- Spot realized P&L: {_format_custom_money(custom_pnl.spot_realized_pnl, custom_pnl.history_status)}",
-            f"- Spot unrealized P&L: {_format_custom_money(custom_pnl.spot_unrealized_pnl, custom_pnl.history_status)}",
-            f"- Perp realized P&L: {_format_money(custom_pnl.perp_realized_pnl)}",
-            f"- Perp unrealized P&L: {_format_money(custom_pnl.perp_unrealized_pnl)}",
-            f"- Funding: {_format_money(custom_pnl.funding_usd)}",
-            f"- Fees: {_format_money(custom_pnl.fees_usd)}",
+            "Account:",
+            f"- Current total value: {_format_money(custom_pnl.current_account_value)}",
+            f"- Total deposits: {_format_money(custom_pnl.deposits_usd)}",
+            f"- Total withdrawals: {_format_money(custom_pnl.withdrawals_usd)}",
+            f"- Custom account P&L: {_format_custom_money(custom_pnl.net_custom_pnl, custom_pnl.history_status)}",
             "",
-            "Custom coin P&L:",
         ]
     )
     for coin in ("BTC", "HYPE"):
         coin_pnl = custom_pnl.coins.get(coin)
         if coin_pnl is None:
             continue
+        acquisition_label = "BTC deposit basis" if coin == "BTC" else "HYPE deposit/acquisition basis"
         lines.extend(
             [
-                f"- {coin}: current {coin_pnl.current_quantity:g} {coin}, value {_format_money(coin_pnl.current_value)}, "
-                f"realized {_format_custom_money(coin_pnl.realized_pnl, coin_pnl.basis_status)}, "
-                f"unrealized {_format_custom_money(coin_pnl.unrealized_pnl, coin_pnl.basis_status)}, "
-                f"total {_format_custom_money(coin_pnl.total_pnl, coin_pnl.basis_status)}",
-                f"  Basis status: {coin_pnl.basis_status}; history status: {coin_pnl.history_status}",
+                "",
+                f"{coin}:",
+                f"- Current {coin} value: {_format_money(coin_pnl.current_value)}",
+                f"- {coin} buy cost: {_format_money(coin_pnl.buy_cost_usd)}",
+                f"- {coin} sale proceeds: {_format_money(coin_pnl.sale_proceeds_usd)}",
+                f"- {acquisition_label}: {_format_money(coin_pnl.acquisition_basis_usd)}",
+                f"- {coin} withdrawal value: {_format_money(coin_pnl.withdrawal_value_usd)}",
+                f"- {coin} fees: {_format_money(coin_pnl.fees_usd)}",
+                f"- {coin} custom P&L: {_format_custom_money(coin_pnl.total_pnl, coin_pnl.basis_status)}",
+                f"- Status: {coin_pnl.basis_status}",
             ]
         )
+    lines.extend(
+        [
+            "",
+            "Perps:",
+            f"- Closed P&L: {_format_money(custom_pnl.perp_realized_pnl)}",
+            f"- Unrealized P&L: {_format_money(custom_pnl.perp_unrealized_pnl)}",
+            f"- Funding: {_format_money(custom_pnl.funding_usd)}",
+            f"- Fees: {_format_money(custom_pnl.fees_usd)}",
+            f"- Perp custom P&L: {_format_money(custom_pnl.perp_realized_pnl + custom_pnl.perp_unrealized_pnl + custom_pnl.funding_usd - custom_pnl.fees_usd)}",
+        ]
+    )
     if custom_pnl.warnings:
         lines.append("")
         lines.append("Custom P&L warnings:")
@@ -536,8 +612,12 @@ def build_custom_hyperliquid_pnl(snapshot: HyperliquidSnapshot) -> CustomHyperli
     deposits_usd, withdrawals_usd, contribution_warnings = _custom_account_contributions(snapshot)
     current_account_value = _custom_current_account_value(snapshot, current_spot)
     missing_capital_basis = any("Missing historical price" in warning for warning in contribution_warnings)
-    coin_incomplete = any(coin.total_pnl is None for coin in coins.values())
-    net_custom_pnl = None if missing_capital_basis or coin_incomplete else current_account_value + withdrawals_usd - deposits_usd
+    capital_history_unavailable = current_account_value > ZERO_EPSILON and not snapshot.user_non_funding_ledger_updates
+    net_custom_pnl = (
+        None
+        if missing_capital_basis or capital_history_unavailable
+        else current_account_value + withdrawals_usd - deposits_usd
+    )
 
     spot_realized_values = [coin.realized_pnl for coin in coins.values()]
     spot_unrealized_values = [coin.unrealized_pnl for coin in coins.values()]
@@ -553,12 +633,16 @@ def build_custom_hyperliquid_pnl(snapshot: HyperliquidSnapshot) -> CustomHyperli
     if not snapshot.user_fills:
         warnings.append("Custom P&L is based on partial loaded history; no fill history was loaded.")
 
-    history_status = "Exact"
-    if any(coin.basis_status.startswith("Incomplete") or coin.basis_status.startswith("Missing") for coin in coins.values()):
-        history_status = "Incomplete"
+    history_status = "Exact from full history"
+    if capital_history_unavailable or any(coin.basis_status.startswith("History unavailable") for coin in coins.values()):
+        history_status = "History unavailable"
+    elif any(coin.basis_status.startswith("Missing") for coin in coins.values()):
+        history_status = "Missing historical price"
+    elif any(coin.basis_status.startswith("Partial") for coin in coins.values()):
+        history_status = "Partial history"
     elif any(coin.basis_status.startswith("Estimated") for coin in coins.values()):
-        history_status = "Estimated"
-    if warnings and history_status == "Exact":
+        history_status = "Estimated deposit basis"
+    if warnings and history_status == "Exact from full history":
         history_status = "Partial history loaded"
 
     return CustomHyperliquidPnl(
@@ -595,6 +679,10 @@ def _build_custom_coin_pnl(
     withdrawn_quantity = 0.0
     deposit_basis = 0.0
     acquisition_basis = 0.0
+    sale_proceeds = 0.0
+    buy_cost = 0.0
+    withdrawal_value = 0.0
+    fees_usd = 0.0
     missing_basis_quantity = 0.0
     missing_disposition_quantity = 0.0
     incomplete = False
@@ -606,6 +694,7 @@ def _build_custom_coin_pnl(
         timestamp = int(event.get("time") or 0)
         source = str(event.get("source") or "unknown")
         fee_usd = float(event.get("fee_usd") or 0.0)
+        fees_usd += fee_usd
 
         if event["kind"] in {"buy", "acquisition"} and quantity > ZERO_EPSILON:
             basis_value, basis_status, basis_warning = _custom_event_basis_value(
@@ -626,6 +715,12 @@ def _build_custom_coin_pnl(
                 continue
             if basis_status == "estimated":
                 estimated = True
+            if event["kind"] == "buy":
+                buy_cost += basis_value
+            else:
+                acquisition_basis += basis_value
+                if source in {"deposit", "spotTransfer"}:
+                    deposit_basis += basis_value
             lot = CustomSpotLot(
                 coin=coin,
                 quantity=quantity,
@@ -637,14 +732,12 @@ def _build_custom_coin_pnl(
                 basis_status=basis_status,
             )
             lots.append(lot)
-            acquisition_basis += basis_value
-            if source in {"deposit", "spotTransfer"}:
-                deposit_basis += basis_value
             continue
 
         if event["kind"] == "sell" and quantity > ZERO_EPSILON:
             sold_quantity += quantity
             proceeds = float(event.get("usd_value") or 0.0)
+            sale_proceeds += proceeds
             consumed_cost, missing = _consume_custom_lots(lots, quantity)
             if missing > ZERO_EPSILON:
                 missing_basis_quantity += missing
@@ -677,6 +770,7 @@ def _build_custom_coin_pnl(
                 incomplete = True
                 warnings.append(f"{coin} custom P&L incomplete: missing withdrawal/transfer value for {quantity:g} {coin}.")
             else:
+                withdrawal_value += disposition_value
                 realized_pnl += disposition_value - consumed_cost - fee_usd
 
     loaded_remaining_quantity = sum(lot.remaining_quantity for lot in lots)
@@ -699,13 +793,23 @@ def _build_custom_coin_pnl(
     else:
         unrealized_pnl = known_current_value - remaining_cost_basis
 
-    total_pnl = None if incomplete or unrealized_pnl is None else realized_pnl + unrealized_pnl
+    practical_total_pnl = current_value + sale_proceeds + withdrawal_value - buy_cost - acquisition_basis - fees_usd
+    known_basis = buy_cost + acquisition_basis
+    can_show_partial = known_basis > ZERO_EPSILON and current_value is not None
+    if not incomplete and unrealized_pnl is not None:
+        total_pnl = realized_pnl + unrealized_pnl
+    elif can_show_partial:
+        total_pnl = practical_total_pnl
+    else:
+        total_pnl = None
     basis_status = _custom_basis_status(
         coin,
         incomplete=incomplete,
         estimated=estimated,
         missing_basis_quantity=missing_basis_quantity,
         missing_disposition_quantity=missing_disposition_quantity,
+        known_basis=known_basis,
+        has_history=bool(snapshot.user_fills or snapshot.user_non_funding_ledger_updates),
     )
     history_status = "Partial history loaded" if snapshot.history_warnings else basis_status
 
@@ -723,6 +827,10 @@ def _build_custom_coin_pnl(
         acquired_quantity=round(acquired_quantity, 10),
         sold_quantity=round(sold_quantity, 10),
         withdrawn_quantity=round(withdrawn_quantity, 10),
+        sale_proceeds_usd=round(sale_proceeds, 2),
+        buy_cost_usd=round(buy_cost, 2),
+        withdrawal_value_usd=round(withdrawal_value, 2),
+        fees_usd=round(fees_usd, 2),
         missing_basis_quantity=round(missing_basis_quantity, 10),
         missing_disposition_quantity=round(missing_disposition_quantity, 10),
         lots=lots,
@@ -801,7 +909,7 @@ def _custom_coin_events(snapshot: HyperliquidSnapshot, coin: str) -> list[dict[s
                 "kind": "buy" if is_buy else "sell",
                 "coin": coin,
                 "quantity": quantity,
-                "usd_value": notional + fee_usd if is_buy else notional,
+                "usd_value": notional,
                 "fee_usd": fee_usd,
                 "time": int(_to_float(fill.get("time") or fill.get("timestamp")) or 0),
                 "source": "buy" if is_buy else "sell",
@@ -858,21 +966,27 @@ def _custom_basis_status(
     estimated: bool,
     missing_basis_quantity: float,
     missing_disposition_quantity: float,
+    known_basis: float,
+    has_history: bool,
 ) -> str:
     if missing_basis_quantity > ZERO_EPSILON:
-        return f"Missing {coin} basis for {missing_basis_quantity:g} {coin}"
+        if known_basis > ZERO_EPSILON:
+            return "Partial history"
+        return "History unavailable" if not has_history else f"Missing {coin} basis for {missing_basis_quantity:g} {coin}"
     if missing_disposition_quantity > ZERO_EPSILON:
-        return f"Incomplete: missing disposition for {missing_disposition_quantity:g} {coin}"
+        return "Partial history"
     if incomplete:
-        return "Incomplete"
+        return "Partial history"
     if estimated:
-        return "Estimated basis"
-    return "Exact"
+        return "Estimated deposit basis"
+    return "Exact from full history"
 
 
 def _ledger_spot_movements(update: dict[str, Any], user: str) -> list[dict[str, Any]]:
     delta = update.get("delta") if isinstance(update.get("delta"), dict) else update
     if not isinstance(delta, dict):
+        return []
+    if not _ledger_update_is_completed(update, delta):
         return []
 
     update_type = str(delta.get("type") or "").strip()
@@ -884,6 +998,22 @@ def _ledger_spot_movements(update: dict[str, Any], user: str) -> list[dict[str, 
         usdc = _to_float(delta.get("usdc"))
         if usdc is not None:
             movements.append(_movement("USDC", abs(usdc), abs(usdc), timestamp, "deposit", True, delta))
+            return movements
+        coin = _ledger_delta_coin(delta)
+        amount = _ledger_delta_amount(delta)
+        if coin and amount is not None:
+            movements.append(
+                _movement(
+                    coin,
+                    abs(amount),
+                    _first_number(delta, ("usdcValue", "usdValue", "value", "accountValueChange")),
+                    timestamp,
+                    "deposit",
+                    True,
+                    delta,
+                    fee_usd=_spot_transfer_fee_usd(delta, coin),
+                )
+            )
         return movements
 
     if update_type == "withdraw":
@@ -891,14 +1021,30 @@ def _ledger_spot_movements(update: dict[str, Any], user: str) -> list[dict[str, 
         if usdc is not None:
             fee = abs(_to_float(delta.get("fee")) or 0.0)
             movements.append(_movement("USDC", -abs(usdc), abs(usdc), timestamp, "withdraw", True, delta, fee_usd=fee))
+            return movements
+        coin = _ledger_delta_coin(delta)
+        amount = _ledger_delta_amount(delta)
+        if coin and amount is not None:
+            movements.append(
+                _movement(
+                    coin,
+                    -abs(amount),
+                    _first_number(delta, ("usdcValue", "usdValue", "value", "accountValueChange")),
+                    timestamp,
+                    "withdraw",
+                    True,
+                    delta,
+                    fee_usd=_spot_transfer_fee_usd(delta, coin),
+                )
+            )
         return movements
 
     if update_type in {"internalTransfer", "subAccountTransfer"}:
         usdc = _to_float(delta.get("usdc"))
         if usdc is None:
             return movements
-        source_user = str(delta.get("user") or "").lower()
-        destination = str(delta.get("destination") or "").lower()
+        source_user = _ledger_source_user(delta)
+        destination = _ledger_destination_user(delta)
         signed = usdc
         if source_user == user_lc and destination != user_lc:
             signed = -abs(usdc)
@@ -909,12 +1055,12 @@ def _ledger_spot_movements(update: dict[str, Any], user: str) -> list[dict[str, 
         return movements
 
     if update_type == "spotTransfer":
-        coin = _canonical_spot_coin(str(delta.get("token") or delta.get("coin") or "").strip().upper())
-        amount = _to_float(delta.get("amount"))
+        coin = _ledger_delta_coin(delta)
+        amount = _ledger_delta_amount(delta)
         if not coin or amount is None:
             return movements
-        source_user = str(delta.get("user") or "").lower()
-        destination = str(delta.get("destination") or "").lower()
+        source_user = _ledger_source_user(delta)
+        destination = _ledger_destination_user(delta)
         signed = amount
         if source_user == user_lc and destination != user_lc:
             signed = -abs(amount)
@@ -936,21 +1082,50 @@ def _ledger_spot_movements(update: dict[str, Any], user: str) -> list[dict[str, 
         return movements
 
     if update_type == "spotGenesis":
-        coin = _canonical_spot_coin(str(delta.get("token") or delta.get("coin") or "").strip().upper())
-        amount = _to_float(delta.get("amount"))
+        coin = _ledger_delta_coin(delta)
+        amount = _ledger_delta_amount(delta)
         if coin and amount is not None:
             movements.append(_movement(coin, abs(amount), None, timestamp, "spotGenesis", False, delta))
         return movements
 
     if update_type == "cStakingTransfer":
-        coin = _canonical_spot_coin(str(delta.get("token") or delta.get("coin") or "HYPE").strip().upper())
-        amount = _to_float(delta.get("amount"))
+        coin = _ledger_delta_coin(delta) or "HYPE"
+        amount = _ledger_delta_amount(delta)
         if coin and amount is not None:
             is_deposit = bool(delta.get("isDeposit"))
             movements.append(_movement(coin, -abs(amount) if is_deposit else abs(amount), None, timestamp, "cStakingTransfer", False, delta))
         return movements
 
     return movements
+
+
+def _ledger_update_is_completed(update: dict[str, Any], delta: dict[str, Any]) -> bool:
+    status = str(
+        delta.get("status")
+        or update.get("status")
+        or delta.get("state")
+        or update.get("state")
+        or ""
+    ).strip().lower()
+    if not status:
+        return True
+    return status in {"completed", "complete", "success", "succeeded", "confirmed", "ok"}
+
+
+def _ledger_delta_coin(delta: dict[str, Any]) -> str:
+    return _canonical_spot_coin(str(delta.get("token") or delta.get("coin") or delta.get("asset") or "").strip().upper())
+
+
+def _ledger_delta_amount(delta: dict[str, Any]) -> float | None:
+    return _first_number(delta, ("amount", "sz", "size", "quantity", "qty"))
+
+
+def _ledger_source_user(delta: dict[str, Any]) -> str:
+    return str(delta.get("user") or delta.get("source") or delta.get("from") or delta.get("src") or "").lower()
+
+
+def _ledger_destination_user(delta: dict[str, Any]) -> str:
+    return str(delta.get("destination") or delta.get("to") or delta.get("dst") or "").lower()
 
 
 def _spot_transfer_fee_usd(delta: dict[str, Any], coin: str) -> float:
@@ -1056,18 +1231,25 @@ def _custom_funding_total(snapshot: HyperliquidSnapshot) -> float:
 def _custom_fee_total(snapshot: HyperliquidSnapshot) -> float:
     total = 0.0
     for fill in snapshot.user_fills:
+        if _spot_fill(fill, snapshot) is not None:
+            continue
         fee = _first_number(fill, ("fee", "feeUsd", "feeUSDC"))
         fee_token = _canonical_spot_coin(str(fill.get("feeToken") or fill.get("feeCoin") or "USDC"))
         if fee is not None and fee_token in CASH_LIKE_COINS:
             total += abs(fee)
-    for update in snapshot.user_non_funding_ledger_updates:
-        for movement in _ledger_spot_movements(update, snapshot.user):
-            total += abs(float(movement.get("fee_usd") or 0.0))
     return total
 
 
 def _quantity_tolerance(quantity: float) -> float:
     return max(0.0000001, abs(quantity) * 0.0001)
+
+
+def _history_start_time() -> int:
+    return _to_int(os.getenv("HYPERLIQUID_HISTORY_START_TIME_MS")) or 0
+
+
+def _row_time(row: dict[str, Any]) -> int | None:
+    return _to_int(row.get("time") or row.get("timestamp") or row.get("statusTimestamp"))
 
 
 def _dedupe_dict_rows(rows: list[dict[str, Any]], key_fields: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -1380,8 +1562,9 @@ def _spot_fill(fill: dict[str, Any], snapshot: HyperliquidSnapshot) -> tuple[str
         return None
 
     side = str(fill.get("side") or "").strip().upper()
-    is_buy = side in {"B", "BUY"}
-    is_sell = side in {"A", "S", "SELL", "ASK"}
+    direction = str(fill.get("dir") or fill.get("direction") or "").strip().lower()
+    is_buy = side in {"B", "BUY"} or direction in {"buy", "spot buy"}
+    is_sell = side in {"A", "S", "SELL", "ASK"} or direction in {"sell", "spot sell"}
     if not is_buy and not is_sell:
         return None
 
@@ -1408,6 +1591,9 @@ def _spot_fill_coin(fill: dict[str, Any], snapshot: HyperliquidSnapshot) -> str 
 
     separator = "/" if "/" in raw_coin else "-" if "-" in raw_coin else ""
     if not separator:
+        direction = str(fill.get("dir") or fill.get("direction") or "").strip().lower()
+        if direction in {"buy", "sell", "spot buy", "spot sell"}:
+            return _canonical_spot_coin(raw_coin)
         return None
 
     base, quote = raw_coin.split(separator, 1)
