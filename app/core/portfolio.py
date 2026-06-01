@@ -189,28 +189,7 @@ class Portfolio:
 def current_foundation_portfolio() -> Portfolio:
     """Seed the paper broker from the latest portfolio screenshot/PDF."""
     return Portfolio(
-        cash=116_838.39,
+        cash=0.00,
         positions={
-            "AMD": Position("AMD", 3, 323.89, 450.45),
-            "RKLB": Position("RKLB", 5, 86.49, 112.99),
-            "MU": Position("MU", 1, 661.71, 774.52),
-            "SNDK": Position("SNDK", 1, 1398.99, 1491.65),
-            "SPY": Position("SPY", 1.003, 711.05, 738.18),
-            "PL": Position("PL", 10, 38.47, 40.96),
-            "SWMR": Position("SWMR", 5, 29.18, 33.14),
-            "IBRX": Position("IBRX", 10, 7.04, 8.10),
-            "AVGO": Position("AVGO", 0.099, 346.06, 427.01),
-            "NVDA": Position("NVDA", 1.01, 213.41, 218.22),
-            "SEI": Position("SEI", 0.705, 73.34, 75.56),
-            "JPM": Position("JPM", 0.011, 166.28, 300.00),
-            "MSFT": Position("MSFT", 0.049, 402.54, 412.50),
-            "AMZN": Position("AMZN", 0.01, 222.00, 268.15),
-            "AAPL": Position("AAPL", 0.01, 272.00, 293.47),
-            "VOO": Position("VOO", 0.1, 679.40, 678.56),
-            "VPU": Position("VPU", 1.007, 199.92, 197.57),
-            "IREN": Position("IREN", 1, 60.59, 55.05),
-            "TSM": Position("TSM", 0.515, 419.50, 403.69),
-            "MP": Position("MP", 5, 72.32, 67.07),
-            "EPAM": Position("EPAM", 2, 219.15, 97.35),
         },
     )
