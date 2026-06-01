@@ -218,7 +218,88 @@ class OptionsGreeksTests(unittest.TestCase):
 
         section = build_greek_decision_section(summary)
 
-        self.assertIn("Greeks decision unavailable: no usable delta/theta/gamma/vega data for the loaded contract.", section)
+        self.assertIn("Greeks decision unavailable for the active contract", section)
+
+    def test_sentinel_greek_values_are_unavailable_without_estimates(self) -> None:
+        chain = [
+            {
+                "underlying": "LHX",
+                "expiration_label": "Jun 05 2026 (4d)",
+                "dte": 4,
+                "strike": 315.0,
+                "call": {
+                    "symbol": "LHX_CALL_315",
+                    "delta": "-999.000",
+                    "gamma": -999.0,
+                    "theta": -999,
+                    "vega": -999.00,
+                    "rho": -999.000,
+                },
+            }
+        ]
+        summary = build_greek_summary(chain, None, selected_contract_symbol="LHX_CALL_315")
+        assert summary.selected is not None
+
+        self.assertIsNone(summary.selected.delta.value)
+        self.assertEqual(summary.selected.delta.source, SOURCE_UNAVAILABLE)
+        self.assertEqual(summary.selected.gamma.source, SOURCE_UNAVAILABLE)
+        self.assertNotEqual(summary.selected.source_summary, SOURCE_SCHWAB)
+        self.assertEqual(greek_approximation_rows(summary.selected), [])
+        self.assertEqual(rank_greek_contracts(summary, "call"), [])
+
+    def test_sentinel_greek_values_fall_back_to_calculated_estimates(self) -> None:
+        chain = [
+            {
+                "underlying": "LHX",
+                "expiration_label": "Jun 05 2026 (4d)",
+                "dte": 4,
+                "strike": 315.0,
+                "call": {
+                    "symbol": "LHX_CALL_315",
+                    "mark": 4.55,
+                    "impliedVolatility": 0.332,
+                    "delta": -999,
+                    "gamma": -999,
+                    "theta": -999,
+                    "vega": -999,
+                    "rho": -999,
+                },
+            }
+        ]
+        summary = build_greek_summary(chain, 315.18, selected_contract_symbol="LHX_CALL_315")
+        assert summary.selected is not None
+
+        self.assertEqual(summary.selected.delta.source, SOURCE_CALCULATED)
+        self.assertEqual(summary.selected.theta.source, SOURCE_CALCULATED)
+        self.assertNotEqual(summary.selected.delta.value, -999)
+        self.assertNotEqual(summary.selected.source_summary, SOURCE_SCHWAB)
+        self.assertTrue(greek_approximation_rows(summary.selected))
+
+    def test_valid_negative_put_delta_and_theta_remain_valid(self) -> None:
+        chain = [
+            {
+                "underlying": "LHX",
+                "expiration_label": "Jun 05 2026 (4d)",
+                "dte": 4,
+                "strike": 315.0,
+                "put": {
+                    "symbol": "LHX_PUT_315",
+                    "impliedVolatility": 0.39,
+                    "delta": -0.511,
+                    "gamma": 0.034,
+                    "theta": -0.310,
+                    "vega": 0.171,
+                    "rho": -0.031,
+                },
+            }
+        ]
+        summary = build_greek_summary(chain, 315.18, selected_contract_symbol="LHX_PUT_315")
+        assert summary.selected is not None
+
+        self.assertEqual(summary.selected.delta.source, SOURCE_SCHWAB)
+        self.assertEqual(summary.selected.theta.source, SOURCE_SCHWAB)
+        self.assertAlmostEqual(summary.selected.delta.value or 0.0, -0.511)
+        self.assertAlmostEqual(summary.selected.theta.value or 0.0, -0.310)
 
 
 if __name__ == "__main__":

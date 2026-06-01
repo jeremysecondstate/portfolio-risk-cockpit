@@ -1347,17 +1347,6 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
     target = _float_from_var(getattr(self, "options_target_price_var", None)) or _float_from_var(getattr(self, "limit_price_var", None))
     size = suggested_position_size(entry_price=payload.context.last_price, stop_price=stop, max_risk_dollars=max_risk)
     decision_difference_lines = _decision_difference_lines(top_candidate, payload.context, stock_plan)
-    chain_rows = [row for row in (getattr(self, "schwab_option_chain_rows", {}) or {}).values() if isinstance(row, dict)]
-    if not chain_rows and payload.option_chain_rows:
-        chain_rows = payload.option_chain_rows
-    greek_summary = build_greek_summary(
-        chain_rows,
-        _greek_underlying_price(self, payload),
-        selected_candidate=top_candidate,
-        selected_contract_symbol=str(getattr(top_candidate, "contract_symbol", "") or getattr(self, "schwab_research_selected_contract_symbol", "") or ""),
-    )
-    self.schwab_research_greek_summary = greek_summary
-    greek_decision_text = build_greek_decision_section(greek_summary, atr=payload.indicators.atr_14)
     lines = [
         "Recommended move:",
         f"- {risk_plan.recommendation}: {risk_plan.reason}",
@@ -1390,11 +1379,11 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
         f"- Suggested size at {_money(max_risk)} max risk and ticket stop {_money(stop)}: {_shares(size)}.",
         f"- Scenario basis: {scenario_basis}",
     ]
-    _set_research_text(frame.scenario_note_text, _risk_scenario_popout_text(payload, risk_plan, decision_difference_lines, "\n".join(lines), greek_decision_text))  # type: ignore[attr-defined]
+    _set_research_text(frame.scenario_note_text, _risk_scenario_popout_text(payload, risk_plan, decision_difference_lines, "\n".join(lines)))  # type: ignore[attr-defined]
     _render_option_scenarios_from_top(self)
 
 
-def _risk_scenario_popout_text(payload: _ResearchPayload, risk_plan: Any, decision_difference_lines: list[str], original_text: str, greek_decision_text: str = "") -> str:
+def _risk_scenario_popout_text(payload: _ResearchPayload, risk_plan: Any, decision_difference_lines: list[str], original_text: str) -> str:
     title = f"Risk Scenario Explanation - {payload.symbol}"
     key_points = [
         f"Recommended move: {risk_plan.recommendation}. {risk_plan.reason}",
@@ -1415,8 +1404,6 @@ def _risk_scenario_popout_text(payload: _ResearchPayload, risk_plan: Any, decisi
         "Key points:",
     ]
     lines.extend(_bullet_line(point) for point in key_points if str(point).strip())
-    if greek_decision_text.strip():
-        lines.extend(["", greek_decision_text.strip()])
     lines.extend(
         [
             "",
@@ -1599,12 +1586,18 @@ def _greek_metric_cards(active: OptionGreekSnapshot | None) -> list[BadgeReadout
     if active is None:
         return [_synthetic_badge("Option Sensitivities", "Waiting", "info", "No active contract is available yet.")]
     return [
-        _synthetic_badge("Stock Move Sensitivity / Delta", _signed_number(active.delta.value, digits=3), _greek_status(active.delta), f"{active.delta.source}. Approximate contract impact for a $1 stock move."),
-        _synthetic_badge("Time Decay / Theta", _signed_number(active.theta.value, digits=3), _theta_status(active.theta.value), f"{active.theta.source}. Per-day time decay, all else equal."),
-        _synthetic_badge("Volatility Sensitivity / Vega", _signed_number(active.vega.value, digits=3), _greek_status(active.vega), f"{active.vega.source}. Per one-point implied-volatility move."),
-        _synthetic_badge("Delta Acceleration / Gamma", _signed_number(active.gamma.value, digits=4), _greek_status(active.gamma), f"{active.gamma.source}. How much delta changes after a $1 stock move."),
-        _synthetic_badge("Rate Sensitivity / Rho", _signed_number(active.rho.value, digits=3), _greek_status(active.rho), f"{active.rho.source}. Per one-point interest-rate move."),
+        _synthetic_badge("Stock Move Sensitivity / Delta", _signed_number(active.delta.value, digits=3), _greek_status(active.delta), _greek_card_text(active.delta, "Approximate contract impact for a $1 stock move.")),
+        _synthetic_badge("Time Decay / Theta", _signed_number(active.theta.value, digits=3), _theta_status(active.theta.value), _greek_card_text(active.theta, "Per-day time decay, all else equal.")),
+        _synthetic_badge("Volatility Sensitivity / Vega", _signed_number(active.vega.value, digits=3), _greek_status(active.vega), _greek_card_text(active.vega, "Per one-point implied-volatility move.")),
+        _synthetic_badge("Delta Acceleration / Gamma", _signed_number(active.gamma.value, digits=4), _greek_status(active.gamma), _greek_card_text(active.gamma, "How much delta changes after a $1 stock move.")),
+        _synthetic_badge("Rate Sensitivity / Rho", _signed_number(active.rho.value, digits=3), _greek_status(active.rho), _greek_card_text(active.rho, "Per one-point interest-rate move.")),
     ]
+
+
+def _greek_card_text(value: GreekValue, available_text: str) -> str:
+    if value.value is None or value.source == "Unavailable":
+        return "Unavailable for the active contract. Missing from Schwab chain and not enough inputs to estimate."
+    return f"{value.source}. {available_text}"
 
 
 def _greek_source_lines(summary: GreekSummary) -> list[str]:
@@ -1661,7 +1654,7 @@ def _greeks_popout_text(payload: _ResearchPayload | None, summary: GreekSummary)
             f"Vega {_signed_number(snapshot.vega.value, digits=3)} ({snapshot.vega.source}) | "
             f"Rho {_signed_number(snapshot.rho.value, digits=3)} ({snapshot.rho.source})"
         )
-    return _format_beginner_readout(
+    base_text = _format_beginner_readout(
         title=f"Option Sensitivities - {symbol}",
         what_this_means=(
             "This tab shows option Greeks for the loaded Schwab chain. Schwab-provided values are used first; "
@@ -1671,6 +1664,8 @@ def _greeks_popout_text(payload: _ResearchPayload | None, summary: GreekSummary)
         why_it_matters="Greeks translate an option into stock-move, time-decay, volatility, and rate exposures before any order is previewed or submitted.",
         original_text="\n".join(original_lines),
     )
+    decision = build_greek_decision_section(summary, atr=getattr(getattr(payload, "indicators", None), "atr_14", None))
+    return base_text.replace("\n\nOriginal / detailed readout:", f"\n\n{decision}\n\nOriginal / detailed readout:", 1)
 
 
 def _greek_contract_short_label(snapshot: OptionGreekSnapshot | None) -> str:

@@ -305,7 +305,7 @@ def build_greek_decision_section(summary: GreekSummary, *, atr: float | None = N
     if active is None:
         return "Decision from the Greeks\n\nGreeks decision unavailable: no usable option contract loaded."
     if not _has_decision_greeks(active):
-        return "Decision from the Greeks\n\nGreeks decision unavailable: no usable delta/theta/gamma/vega data for the loaded contract."
+        return "Decision from the Greeks\n\nGreeks decision unavailable for the active contract: Schwab returned missing/sentinel values and local estimates could not be produced."
 
     symbol = (summary.underlying or active.underlying or "Underlying").upper()
     underlying_price = summary.underlying_price
@@ -693,13 +693,9 @@ def _source_summary(values: tuple[GreekValue, ...]) -> str:
         return SOURCE_SCHWAB
     if sources <= {SOURCE_CALCULATED}:
         return SOURCE_CALCULATED
-    if SOURCE_SCHWAB in sources and SOURCE_CALCULATED in sources:
-        return "Schwab + calculated"
-    if SOURCE_CALCULATED in sources:
-        return SOURCE_CALCULATED
-    if SOURCE_SCHWAB in sources:
-        return SOURCE_SCHWAB
-    return SOURCE_UNAVAILABLE
+    if sources <= {SOURCE_UNAVAILABLE}:
+        return SOURCE_UNAVAILABLE
+    return "Mixed"
 
 
 def _uses_source(snapshot: OptionGreekSnapshot, source: str) -> bool:
@@ -964,7 +960,7 @@ def _first_number_with_key(source: dict[str, Any], *keys: str) -> tuple[float | 
         if value in (None, ""):
             continue
         parsed = _to_float(value)
-        if parsed is not None:
+        if parsed is not None and not _is_missing_schwab_sentinel(parsed):
             return parsed, key
     return None, ""
 
@@ -975,7 +971,10 @@ def _first_int(source: dict[str, Any], *keys: str) -> int | None:
         if value in (None, ""):
             continue
         try:
-            return int(float(str(value).replace(",", "")))
+            parsed = float(str(value).replace(",", ""))
+            if _is_missing_schwab_sentinel(parsed):
+                continue
+            return int(parsed)
         except (TypeError, ValueError):
             continue
     return None
@@ -998,6 +997,11 @@ def _to_float(value: Any) -> float | None:
         return float(str(value).replace("$", "").replace(",", "").replace("%", ""))
     except (TypeError, ValueError):
         return None
+
+
+def _is_missing_schwab_sentinel(value: Any) -> bool:
+    parsed = _to_float(value)
+    return parsed is not None and parsed <= -900.0
 
 
 def _midpoint(bid: float | None, ask: float | None) -> float | None:

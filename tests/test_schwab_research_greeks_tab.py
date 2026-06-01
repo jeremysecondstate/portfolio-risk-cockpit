@@ -5,7 +5,8 @@ from tkinter import ttk
 import unittest
 from types import SimpleNamespace
 
-from app.ui.schwab_research_workspace_extension import _build_research_right_panel, _risk_scenario_popout_text
+from app.analytics.options_greeks import build_greek_summary
+from app.ui.schwab_research_workspace_extension import _build_research_right_panel, _greek_metric_cards, _greeks_popout_text, _risk_scenario_popout_text
 
 
 class SchwabResearchGreeksTabTests(unittest.TestCase):
@@ -33,7 +34,7 @@ class SchwabResearchGreeksTabTests(unittest.TestCase):
         finally:
             root.destroy()
 
-    def test_risk_scenario_popout_includes_greeks_decision_before_detail(self) -> None:
+    def test_risk_scenario_popout_excludes_greeks_decision(self) -> None:
         payload = SimpleNamespace(symbol="LHX")
         risk_plan = SimpleNamespace(
             recommendation="Consider starter",
@@ -46,12 +47,58 @@ class SchwabResearchGreeksTabTests(unittest.TestCase):
             risk_plan,
             ["Starter stock look: 7 shares."],
             "Recommended move:\n- Existing detail stays here.",
-            "Decision from the Greeks\n\nThe active contract is a short-dated speed trade.",
         )
 
-        self.assertIn("Decision from the Greeks", text)
+        self.assertNotIn("Decision from the Greeks", text)
+        self.assertNotIn("Greek approximation", text)
         self.assertIn("Original / detailed readout", text)
-        self.assertLess(text.index("Decision from the Greeks"), text.index("Original / detailed readout"))
+
+    def test_greeks_popout_includes_decision_section(self) -> None:
+        summary = build_greek_summary(
+            [
+                {
+                    "underlying": "LHX",
+                    "expiration_label": "Jun 05 2026 (4d)",
+                    "dte": 4,
+                    "strike": 315.0,
+                    "call": {"symbol": "LHX_CALL_315", "mark": 4.2, "impliedVolatility": 0.31, "delta": 0.491, "gamma": 0.034, "theta": -0.310, "vega": 0.172, "rho": 0.026},
+                }
+            ],
+            315.18,
+            selected_contract_symbol="LHX_CALL_315",
+        )
+
+        text = _greeks_popout_text(None, summary)
+
+        self.assertIn("Option Sensitivities", text)
+        self.assertIn("Decision from the Greeks", text)
+        self.assertIn("Expected P/L from Greek approximation", text)
+
+    def test_sentinel_values_do_not_appear_in_greek_cards_or_popout(self) -> None:
+        summary = build_greek_summary(
+            [
+                {
+                    "underlying": "LHX",
+                    "expiration_label": "Jun 05 2026 (4d)",
+                    "dte": 4,
+                    "strike": 315.0,
+                    "call": {"symbol": "LHX_CALL_315", "delta": -999, "gamma": "-999.000", "theta": -999.0, "vega": -999, "rho": -999},
+                }
+            ],
+            None,
+            selected_contract_symbol="LHX_CALL_315",
+        )
+        assert summary.selected is not None
+
+        card_text = "\n".join(f"{card.label} {card.why}" for card in _greek_metric_cards(summary.selected))
+        popout_text = _greeks_popout_text(None, summary)
+
+        self.assertNotIn("-999", card_text)
+        self.assertIn("--", card_text)
+        self.assertIn("Unavailable for the active contract", card_text)
+        self.assertNotIn("-999", popout_text)
+        self.assertNotIn("$99,900", popout_text)
+        self.assertIn("Greeks decision unavailable for the active contract", popout_text)
 
 
 if __name__ == "__main__":
