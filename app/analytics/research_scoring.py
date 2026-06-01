@@ -209,6 +209,10 @@ def score_earnings_risk(text: str) -> float:
     lower = text.lower()
     if "unavailable" in lower or "unknown" in lower or not lower.strip():
         return 50.0
+    if "earnings today" in lower or "earnings event: today" in lower or "awaiting release" in lower or "potentially stale" in lower:
+        return 82.0
+    if "earnings imminent" in lower or "earnings event: imminent" in lower:
+        return 78.0
     if "within 10" in lower or "soon" in lower or "next earnings" in lower:
         return 75.0
     if "earnings release" in lower or "8-k" in lower:
@@ -518,6 +522,12 @@ def _earnings_why(text: str) -> str:
     lower = text.lower()
     if "unavailable" in lower or "unknown" in lower:
         return "earnings source is unavailable or incomplete."
+    if "earnings today" in lower or "earnings event: today" in lower or "awaiting release" in lower:
+        return "earnings event is today and the release may still be pending."
+    if "potentially stale" in lower:
+        return "loaded earnings source may be stale versus a near-term event."
+    if "earnings imminent" in lower or "earnings event: imminent" in lower:
+        return "earnings event is near enough to affect risk and options premium."
     if "soon" in lower or "next earnings" in lower:
         return "next earnings timing may be near."
     return "no near-term earnings shock detected in loaded text."

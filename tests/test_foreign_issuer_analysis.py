@@ -171,9 +171,10 @@ class ForeignIssuerAnalysisTests(unittest.TestCase):
         domestic = format_earnings_release_digest(None)
         etf = format_etf_documents_text(build_etf_research_snapshot("SPY", security_kind="etf"))
 
-        self.assertIn("FAST EARNINGS RELEASE LAYER", domestic)
+        self.assertIn("Earnings Release Explanation", domestic)
         self.assertIn("No recent 8-K earnings-release exhibit", domestic)
-        self.assertNotIn("Bottom Line", domestic)
+        self.assertIn("Bottom Line", domestic)
+        self.assertIn("Freshness Check", domestic)
         self.assertIn("ETF DOCUMENTS / UPDATES", etf)
         self.assertNotIn("Foreign Issuer Results Explanation", etf)
 

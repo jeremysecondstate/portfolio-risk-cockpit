@@ -3,12 +3,18 @@ from __future__ import annotations
 import math
 import threading
 import tkinter as tk
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from tkinter import messagebox, ttk
 from typing import Any, Type
 
-from app.analytics.earnings_release import analyze_earnings_release, format_earnings_release_digest
+from app.analytics.earnings_release import (
+    analyze_earnings_release,
+    analyze_earnings_sources,
+    fetch_earnings_calendar_event,
+    fetch_official_company_earnings_release,
+    format_earnings_release_digest,
+)
 from app.analytics.etf_analysis import (
     ETF_SEC_FORMS,
     ETF_SECURITY_KINDS,
@@ -276,7 +282,7 @@ def _build_research_right_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     self.schwab_research_scenarios_frame = _scenarios_tab(self, notebook)
     self.schwab_research_options_frame = _options_strategy_tab(self, notebook)
     self.schwab_research_greeks_frame = _greeks_tab(self, notebook)
-    self.schwab_research_earnings_frame = _earnings_tab(notebook)
+    self.schwab_research_earnings_frame = _earnings_tab(self, notebook)
     self.schwab_research_earnings_text = self.schwab_research_earnings_frame.detail_text  # type: ignore[attr-defined]
     self.schwab_research_fundamentals_frame = _section_summary_tab(notebook, "Fundamentals")
     self.schwab_research_fundamentals_text = self.schwab_research_fundamentals_frame.detail_text  # type: ignore[attr-defined]
@@ -365,7 +371,7 @@ def _macro_tab(notebook: ttk.Notebook) -> ttk.Frame:
     return frame
 
 
-def _earnings_tab(notebook: ttk.Notebook) -> ttk.Frame:
+def _earnings_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     frame = _scrollable_tab(notebook, "Earnings / News")
     frame.columnconfigure(0, weight=1)
     frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
@@ -387,6 +393,8 @@ def _earnings_tab(notebook: ttk.Notebook) -> ttk.Frame:
     tree.bind("<Double-1>", lambda event, source=tree: _open_source_tree_url(source, event), add="+")
     frame.source_tree = tree  # type: ignore[attr-defined]
     frame.detail_text = _readout_launcher(frame, title="Earnings Release Explanation", button_text="Open Earnings Release Explanation", row=3)  # type: ignore[attr-defined]
+    launcher = frame.detail_text._readout_launcher  # type: ignore[attr-defined]
+    ttk.Button(launcher, text="Refresh Earnings", command=lambda app=self: _refresh_earnings_sources(app)).grid(row=0, column=1, sticky="w", padx=(8, 0))
     return frame
 
 
@@ -1070,7 +1078,40 @@ def _fetch_us_domestic_sec_layers(
         active_client = client or SecEdgarClient(timeout_seconds=12)
         filings = active_client.recent_filings(symbol, forms=REPORT_FORMS, limit=10)
         release = active_client.latest_earnings_release(symbol)
-        digest = analyze_earnings_release(release)
+        company_name = release.company.title if release else filings[0].company.title if filings else symbol
+        calendar_event = fetch_earnings_calendar_event(symbol)
+        if calendar_event is not None:
+            statuses.append(
+                DataSourceStatus(
+                    "Earnings calendar",
+                    "fresh/cache",
+                    _now(),
+                    f"{calendar_event.symbol} event {calendar_event.event_date} {calendar_event.timing or ''}".strip(),
+                )
+            )
+        else:
+            statuses.append(DataSourceStatus("Earnings calendar", "not found", _now(), "No same-day or next-trading-day earnings event found."))
+        company_release = (
+            fetch_official_company_earnings_release(
+                symbol,
+                company_name=company_name,
+                event_date=calendar_event.event_date,
+            )
+            if calendar_event is not None
+            else None
+        )
+        if company_release is not None:
+            statuses.append(DataSourceStatus("Company IR earnings", "fresh", _now(), f"{company_release.label} ({company_release.date})"))
+        elif calendar_event is not None:
+            statuses.append(DataSourceStatus("Company IR earnings", "pending", _now(), "Near-term event found; no fresh company IR release was found yet."))
+        digest = analyze_earnings_sources(
+            symbol,
+            release,
+            calendar_event=calendar_event,
+            company_release=company_release,
+            company_name=company_name,
+            latest_sec_filing_date=filings[0].filing_date if filings else "",
+        )
         earnings_text = format_earnings_release_digest(digest)
         filings_lines = [f"{filing.form} filed {filing.filing_date} period {filing.report_date or '--'}: {filing.filing_url}" for filing in filings[:8]]
         statuses.append(DataSourceStatus("SEC filings/earnings", "fresh/cache", _now(), f"{len(filings)} recent filings scanned."))
@@ -2202,6 +2243,69 @@ def _stock_plan_look_lines(context: PortfolioSymbolContext, stock_plan: Any | No
     return lines
 
 
+def _refresh_earnings_sources(self: tk.Tk) -> None:
+    payload = getattr(self, "schwab_research_last_payload", None)
+    if payload is None:
+        messagebox.showinfo("Run analysis first", "Run analysis once before refreshing earnings sources.")
+        return
+    if payload.security_kind in ETF_SECURITY_KINDS or payload.reporting_profile == REPORTING_PROFILE_FOREIGN_ISSUER:
+        _render_earnings_news(self, payload)
+        self.schwab_research_status_var.set(f"{payload.symbol} earnings-style tab refreshed at {_now()}")
+        return
+
+    symbol = payload.symbol
+    self.schwab_research_status_var.set(f"Refreshing earnings sources for {symbol}...")
+    _set_research_text(
+        self.schwab_research_earnings_text,
+        f"Refreshing earnings sources for {symbol}...\n\nChecking earnings calendar, company IR / press releases, recent SEC 8-K filings, and companyfacts.",
+    )
+
+    def worker() -> None:
+        try:
+            earnings_text, fundamentals_text, filings_lines, sec_statuses = _fetch_us_domestic_sec_layers(symbol)
+            statuses = _merge_statuses(payload.statuses, sec_statuses)
+            decision = build_decision_readout(
+                indicators=payload.indicators,
+                context=payload.context,
+                scenario_rows=payload.scenario_rows,
+                earnings_text=earnings_text,
+                fundamentals_text=fundamentals_text,
+                macro_text=payload.macro_text,
+                statuses=statuses,
+            )
+            updated = replace(
+                payload,
+                earnings_text=earnings_text,
+                fundamentals_text=fundamentals_text,
+                filings_lines=filings_lines,
+                statuses=statuses,
+                decision=decision,
+            )
+        except Exception as exc:
+            self.after(0, lambda error=exc: messagebox.showerror("Refresh Earnings failed", str(error)))
+            return
+        self.after(0, lambda result=updated: _finish_earnings_refresh(self, result))
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _finish_earnings_refresh(self: tk.Tk, payload: _ResearchPayload) -> None:
+    self.schwab_research_last_payload = payload
+    _render_at_glance(self, payload)
+    _render_overview(self, payload)
+    _render_earnings_news(self, payload)
+    _render_fundamentals(self, payload)
+    self.schwab_research_status_var.set(f"{payload.symbol} earnings refreshed at {_now()}")
+    output = getattr(self, "schwab_trading_preview_text", None)
+    if output is not None:
+        _set_research_text(output, _overview_text(payload) + "\n\n" + _source_status_text(payload.statuses))
+
+
+def _merge_statuses(existing: list[DataSourceStatus], updates: list[DataSourceStatus]) -> list[DataSourceStatus]:
+    update_sources = {status.source for status in updates}
+    return [status for status in existing if status.source not in update_sources] + updates
+
+
 def _recalculate_research_scenarios(self: tk.Tk) -> None:
     payload = getattr(self, "schwab_research_last_payload", None)
     if payload is None:
@@ -2250,12 +2354,13 @@ def _render_earnings_news(self: tk.Tk, payload: _ResearchPayload) -> None:
         frame.cards,  # type: ignore[attr-defined]
         [
             decision.earnings_risk,
-            _synthetic_badge("Latest Earnings", "SEC Scan", "info", summary.snapshot["Latest earnings release"]),
+            _synthetic_badge("Latest Earnings", summary.earnings_card_label, summary.earnings_card_status, summary.earnings_card_why),
+            _synthetic_badge("Source Freshness", summary.freshness_label.title(), summary.freshness_status, summary.freshness_verdict),
             _synthetic_badge("Guidance Tone", summary.guidance_tone, _tone_status(summary.guidance_tone), "Read from SEC earnings text when available."),
             _synthetic_badge("Revenue Trend", summary.revenue_trend, _trend_status(summary.revenue_trend), "Interpreted from standardized companyfacts where available."),
             _synthetic_badge("Profitability", summary.profitability_trend, _trend_status(summary.profitability_trend), "Net income/EPS/margin read from loaded facts and snippets."),
         ],
-        columns=5,
+        columns=6,
     )
     clear_children(frame.checks)  # type: ignore[attr-defined]
     Checklist(frame.checks, "Plain-English Interpretation", summary.interpretation).grid(row=0, column=0, sticky="ew", padx=(0, 8))  # type: ignore[attr-defined]
@@ -2449,30 +2554,12 @@ def _earnings_news_text(payload: _ResearchPayload) -> str:
         lines.extend(f"- {line}" for line in payload.filings_lines)
     else:
         lines.append("- No SEC filing headlines were available.")
-    lines.extend(["", "News provider note:", "- First version uses official SEC filings and earnings exhibits as the source-labeled company news layer. Investor-relations and broader news feeds can plug into this tab later."])
+    lines.extend(["", "News provider note:", "- Same-day events check the earnings calendar first, then company IR / press releases, then SEC 8-K exhibits. Market/news sources remain fallback context only."])
     return "\n".join(lines)
 
 
 def _earnings_popout_text(payload: _ResearchPayload, summary: Any, original_text: str) -> str:
-    return _format_beginner_readout(
-        title=f"Fast Earnings Release Layer - {payload.symbol}",
-        what_this_means=(
-            "This is a quick official-filings layer for the latest earnings/news context. It uses SEC filings, "
-            "earnings exhibits, and standardized companyfacts when available."
-        ),
-        key_points=[
-            f"Latest earnings release: {summary.snapshot['Latest earnings release']}",
-            f"Latest 10-Q / 10-K: {summary.snapshot['Latest 10-Q / 10-K']}",
-            f"Guidance tone: {summary.guidance_tone}.",
-            f"Revenue trend: {summary.revenue_trend}.",
-            f"Profitability: {summary.profitability_trend}.",
-            *summary.interpretation,
-            *summary.risks,
-        ],
-        why_it_matters="Earnings and filing language can change risk quickly, especially around guidance, backlog, margins, or event risk before option expiration.",
-        original_text=original_text,
-        original_title="Original / detailed earnings and source readout",
-    )
+    return original_text
 
 
 def _etf_documents_popout_text(payload: _ResearchPayload, snapshot: ETFResearchSnapshot, readout: Any) -> str:

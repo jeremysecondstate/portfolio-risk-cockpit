@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -122,6 +123,12 @@ class EarningsWorkspaceSummary:
     risks: list[str]
     source_links: list[tuple[str, str, str]]
     interpretation: list[str]
+    earnings_card_label: str
+    earnings_card_status: str
+    earnings_card_why: str
+    freshness_label: str
+    freshness_status: str
+    freshness_verdict: str
 
 
 TERM_HELPERS = {
@@ -602,20 +609,28 @@ def build_earnings_workspace_summary(
     latest_8k = next((line for line in filings_lines if line.startswith("8-K")), "")
     latest_qk = next((line for line in filings_lines if line.startswith("10-Q") or line.startswith("10-K")), "")
     foreign_mode = "foreign issuer" in f"{earnings_text}\n{fundamentals_text}".lower()
-    source_links = []
+    freshness = _earnings_freshness_fields(earnings_text)
+    card_label, card_status, card_why = _earnings_card_from_freshness(freshness, latest_8k)
+    source_links = _source_links_from_earnings_text(earnings_text)
     for line in filings_lines[:8]:
         label, url = _split_source_line(line)
         source_links.append((label, _filing_date_from_line(line), url))
     if "companyfacts" in fundamentals_text.lower() or fundamentals_text.strip():
         source_links.append(("SEC companyfacts / XBRL", "latest loaded", "https://data.sec.gov/api/xbrl/companyfacts/"))
+    source_links = _dedupe_source_links(source_links)
     revenue = _trend_from_text(fundamentals_text, "revenue")
     profitability = _trend_from_text(fundamentals_text, "net income", "operating income", "eps", "margin")
     guidance = _guidance_tone(earnings_text)
-    interpretation = [
+    interpretation = []
+    if freshness["verdict"] != "--":
+        interpretation.append(freshness["verdict"])
+    interpretation.extend(
+        [
         f"Revenue trend looks {revenue.lower()}.",
         f"Margins/profitability appear {profitability.lower()}.",
         f"Guidance language is {guidance.lower()}.",
-    ]
+        ]
+    )
     if foreign_mode:
         interpretation.append("Foreign issuer mode is active, so official IR results, 6-K, 20-F, and annual reports are the primary source stack.")
     elif "no recent 8-k earnings-release exhibit" in earnings_text.lower() or "unavailable" in earnings_text.lower():
@@ -628,6 +643,11 @@ def build_earnings_workspace_summary(
             "Latest 10-Q / 10-K": latest_qk or "No 10-Q/10-K fallback found",
             "Reporting period": _reporting_period_from_line(latest_qk or latest_8k) or "--",
             "Source": "Foreign issuer IR / 6-K / 20-F" if foreign_mode else "SEC filings and companyfacts",
+            "Earnings event": freshness["event"],
+            "Latest loaded source date": freshness["loaded_date"],
+            "Latest SEC filing date": freshness["sec_date"],
+            "Latest company IR release date": freshness["ir_date"],
+            "Freshness verdict": freshness["verdict"],
         },
         guidance_tone=guidance,
         revenue_trend=revenue,
@@ -635,6 +655,12 @@ def build_earnings_workspace_summary(
         risks=risks,
         source_links=source_links,
         interpretation=interpretation,
+        earnings_card_label=card_label,
+        earnings_card_status=card_status,
+        earnings_card_why=card_why,
+        freshness_label=freshness["event"],
+        freshness_status=card_status,
+        freshness_verdict=freshness["verdict"],
     )
 
 
@@ -1159,3 +1185,72 @@ def _number(value: float | None) -> str:
 def _format_plain_number(value: float) -> str:
     formatted = f"{value:.2f}"
     return formatted.rstrip("0").rstrip(".") if "." in formatted else formatted
+
+
+def _earnings_freshness_fields(earnings_text: str) -> dict[str, str]:
+    fields = {
+        "event": "unknown",
+        "loaded_date": "--",
+        "sec_date": "--",
+        "ir_date": "--",
+        "verdict": "--",
+    }
+    for raw_line in earnings_text.splitlines():
+        line = raw_line.strip().lstrip("-").strip()
+        lower = line.lower()
+        if lower.startswith("earnings event:"):
+            fields["event"] = line.split(":", 1)[1].strip() or "unknown"
+        elif lower.startswith("latest loaded source date:"):
+            fields["loaded_date"] = line.split(":", 1)[1].strip() or "--"
+        elif lower.startswith("latest sec filing date:"):
+            fields["sec_date"] = line.split(":", 1)[1].strip() or "--"
+        elif lower.startswith("latest company ir release date:"):
+            fields["ir_date"] = line.split(":", 1)[1].strip() or "--"
+        elif lower.startswith("freshness verdict:"):
+            fields["verdict"] = line.split(":", 1)[1].strip() or "--"
+    return fields
+
+
+def _earnings_card_from_freshness(fields: dict[str, str], latest_8k: str) -> tuple[str, str, str]:
+    verdict = fields.get("verdict", "--")
+    lower = verdict.lower()
+    event = fields.get("event", "unknown").lower()
+    if "fresh earnings release found" in lower:
+        return "Fresh Release", "good", verdict
+    if "potentially stale" in lower:
+        return "Potentially Stale", "bad", verdict
+    if event == "today" and ("no fresh" in lower or "expected today" in lower):
+        return "Earnings Today / Awaiting Release", "mixed", verdict
+    if event == "today":
+        return "Earnings Today", "mixed", verdict
+    if event == "imminent":
+        return "Earnings Imminent", "mixed", verdict
+    if latest_8k:
+        return "SEC Scan", "info", latest_8k
+    return "No Fresh Release", "info", verdict
+
+
+def _source_links_from_earnings_text(earnings_text: str) -> list[tuple[str, str, str]]:
+    links: list[tuple[str, str, str]] = []
+    for raw_line in earnings_text.splitlines():
+        line = raw_line.strip()
+        match = re.match(r"-\s*(?P<label>.+?)\s*\((?P<date>[^)]*)\):\s*(?P<url>https?://\S+|--)", line)
+        if not match:
+            continue
+        url = match.group("url").rstrip(".,;")
+        if url == "--":
+            continue
+        links.append((match.group("label").strip(), match.group("date").strip() or "--", url))
+    return links
+
+
+def _dedupe_source_links(rows: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
+    deduped: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for label, row_date, url in rows:
+        key = (label.lower(), url)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((label, row_date, url))
+    return deduped
