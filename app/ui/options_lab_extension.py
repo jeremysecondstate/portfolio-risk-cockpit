@@ -240,7 +240,7 @@ def _looks_like_table_line(value: str) -> bool:
 
 def _workspace_holdings_table(parent: ttk.Frame, include_custom_pnl: bool = False) -> ttk.Treeview:
     columns = (
-        ("symbol", "type", "qty", "last", "value", "raw_pnl", "custom_pnl", "basis_status")
+        ("symbol", "type", "qty", "last", "value", "pnl", "custom_pnl", "basis_status")
         if include_custom_pnl
         else ("symbol", "type", "qty", "last", "value", "pnl")
     )
@@ -251,12 +251,12 @@ def _workspace_holdings_table(parent: ttk.Frame, include_custom_pnl: bool = Fals
         "qty": ("Qty", 90, tk.E),
         "last": ("Last", 90, tk.E),
         "value": ("Value", 100, tk.E),
-        "pnl": ("P&L", 100, tk.E),
-        "raw_pnl": ("Raw P&L", 96, tk.E),
+        "pnl": ("Raw P&L" if include_custom_pnl else "P&L", 100, tk.E),
         "custom_pnl": ("Custom P&L", 110, tk.E),
         "basis_status": ("Basis Status", 180, tk.W),
     }
-    for column in columns:
+    active_columns = tuple(str(column) for column in table["columns"])
+    for column in active_columns:
         label, width, anchor = headings[column]
         table.heading(column, text=label)
         table.column(column, width=width, anchor=anchor, stretch=True)
