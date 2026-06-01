@@ -20,6 +20,25 @@ from app.analytics.etf_analysis import (
     format_etf_documents_text,
     format_etf_structure_text,
 )
+from app.analytics.foreign_issuer_analysis import (
+    ALL_COMPANY_REPORT_FORMS,
+    FOREIGN_RESULTS_FORMS,
+    REPORTING_PROFILE_ETF_OR_FUND,
+    REPORTING_PROFILE_FOREIGN_ISSUER,
+    REPORTING_PROFILE_UNKNOWN,
+    REPORTING_PROFILE_US_DOMESTIC_EQUITY,
+    ForeignIssuerSnapshot,
+    build_foreign_issuer_snapshot,
+    detect_reporting_profile,
+    fetch_known_official_ir_texts,
+    foreign_issuer_earnings_cards,
+    foreign_issuer_fundamental_cards,
+    foreign_issuer_interpretation,
+    foreign_issuer_risks,
+    foreign_issuer_source_links,
+    format_foreign_issuer_earnings_text,
+    format_foreign_issuer_fundamentals_text,
+)
 from app.analytics.fundamental_analysis import analyze_company_facts, format_fundamental_analysis
 from app.analytics.options_greeks import (
     GreekSummary,
@@ -100,7 +119,9 @@ class _ResearchPayload:
     option_chain_underlying_price: float | None = None
     greek_summary: GreekSummary | None = None
     security_kind: str = "equity"
+    reporting_profile: str = REPORTING_PROFILE_UNKNOWN
     etf_snapshot: ETFResearchSnapshot | None = None
+    foreign_issuer_snapshot: ForeignIssuerSnapshot | None = None
 
 
 def install_schwab_research_workspace_extension(app_cls: Type[tk.Tk]) -> None:
@@ -853,11 +874,20 @@ def _build_research_payload(session: Any, portfolio, symbol: str) -> _ResearchPa
     scenario_rows = build_scenario_rows(context, moves)
 
     security_kind = detect_security_kind(symbol, quote, _portfolio_position_asset_type(portfolio, symbol))
+    reporting_profile = REPORTING_PROFILE_ETF_OR_FUND if security_kind in ETF_SECURITY_KINDS else REPORTING_PROFILE_UNKNOWN
     etf_snapshot: ETFResearchSnapshot | None = None
+    foreign_issuer_snapshot: ForeignIssuerSnapshot | None = None
     if security_kind in ETF_SECURITY_KINDS:
         earnings_text, fundamentals_text, filings_lines, sec_statuses, etf_snapshot = _fetch_etf_layers(symbol, quote, security_kind)
     else:
-        earnings_text, fundamentals_text, filings_lines, sec_statuses = _fetch_sec_layers(symbol)
+        (
+            earnings_text,
+            fundamentals_text,
+            filings_lines,
+            sec_statuses,
+            reporting_profile,
+            foreign_issuer_snapshot,
+        ) = _fetch_company_layers(symbol, quote, _portfolio_position_asset_type(portfolio, symbol))
     statuses.extend(sec_statuses)
 
     macro_snapshot: MacroSnapshot | None = None
@@ -901,7 +931,9 @@ def _build_research_payload(session: Any, portfolio, symbol: str) -> _ResearchPa
         greek_underlying_price,
         greek_summary,
         security_kind,
+        reporting_profile,
         etf_snapshot,
+        foreign_issuer_snapshot,
     )
 
 
@@ -952,14 +984,80 @@ def _portfolio_position_asset_type(portfolio: Any, symbol: str) -> str:
 
 
 def _fetch_sec_layers(symbol: str) -> tuple[str, str, list[str], list[DataSourceStatus]]:
+    earnings_text, fundamentals_text, filings_lines, statuses, _profile, _snapshot = _fetch_company_layers(symbol)
+    return earnings_text, fundamentals_text, filings_lines, statuses
+
+
+def _fetch_company_layers(
+    symbol: str,
+    quote: dict[str, Any] | None = None,
+    position_asset_type: str | None = None,
+) -> tuple[str, str, list[str], list[DataSourceStatus], str, ForeignIssuerSnapshot | None]:
+    preliminary_profile = detect_reporting_profile(symbol, quote, position_asset_type)
+    try:
+        client = SecEdgarClient(timeout_seconds=12)
+        profile_filings = client.recent_filings(symbol, forms=ALL_COMPANY_REPORT_FORMS, limit=24)
+    except Exception as exc:
+        if preliminary_profile == REPORTING_PROFILE_FOREIGN_ISSUER:
+            snapshot = build_foreign_issuer_snapshot(
+                symbol,
+                source_links=foreign_issuer_source_links(symbol),
+                warnings=[f"SEC foreign issuer filings could not be loaded automatically: {exc}"],
+            )
+            statuses = [
+                DataSourceStatus("Reporting profile", REPORTING_PROFILE_FOREIGN_ISSUER, _now(), "Detected from quote/metadata fallback."),
+                DataSourceStatus("SEC foreign issuer filings", "not found", _now(), str(exc)),
+                DataSourceStatus("Foreign issuer document sources", "pending", _now(), "Official IR, 6-K, and 20-F source links prepared."),
+                DataSourceStatus("SEC companyfacts", "limited", _now(), "Companyfacts is not the primary source for foreign issuer mode."),
+            ]
+            return (
+                format_foreign_issuer_earnings_text(snapshot),
+                format_foreign_issuer_fundamentals_text(snapshot),
+                snapshot.filings_lines or [f"SEC foreign issuer filings unavailable: {exc}"],
+                statuses,
+                REPORTING_PROFILE_FOREIGN_ISSUER,
+                snapshot,
+            )
+
+        statuses = [
+            DataSourceStatus("SEC filings/earnings", "error", _now(), str(exc)),
+            DataSourceStatus("SEC companyfacts", "error", _now(), str(exc)),
+        ]
+        return (
+            "Earnings / News\n\nOfficial SEC earnings-release layer unavailable.",
+            f"Fundamentals\n\nSEC companyfacts unavailable/error: {exc}\n\nFor ETFs, issuer holdings, expense ratio, AUM, and sector exposure remain a future provider hook.",
+            [f"SEC filings unavailable/error: {exc}"],
+            statuses,
+            preliminary_profile,
+            None,
+        )
+
+    forms = [filing.form for filing in profile_filings]
+    company_title = profile_filings[0].company.title if profile_filings else ""
+    reporting_profile = detect_reporting_profile(
+        symbol,
+        quote,
+        position_asset_type,
+        sec_forms=forms,
+        company_title=company_title,
+    )
+    if reporting_profile == REPORTING_PROFILE_FOREIGN_ISSUER:
+        return _fetch_foreign_issuer_layers(symbol, client, profile_filings, company_title)
+    return (*_fetch_us_domestic_sec_layers(symbol, client), reporting_profile or REPORTING_PROFILE_US_DOMESTIC_EQUITY, None)
+
+
+def _fetch_us_domestic_sec_layers(
+    symbol: str,
+    client: SecEdgarClient | None = None,
+) -> tuple[str, str, list[str], list[DataSourceStatus]]:
     statuses: list[DataSourceStatus] = []
     earnings_text = "Earnings / News\n\nOfficial SEC earnings-release layer unavailable."
     fundamentals_text = "Fundamentals\n\nSEC companyfacts unavailable."
     filings_lines: list[str] = []
     try:
-        client = SecEdgarClient(timeout_seconds=12)
-        filings = client.recent_filings(symbol, forms=REPORT_FORMS, limit=10)
-        release = client.latest_earnings_release(symbol)
+        active_client = client or SecEdgarClient(timeout_seconds=12)
+        filings = active_client.recent_filings(symbol, forms=REPORT_FORMS, limit=10)
+        release = active_client.latest_earnings_release(symbol)
         digest = analyze_earnings_release(release)
         earnings_text = format_earnings_release_digest(digest)
         filings_lines = [f"{filing.form} filed {filing.filing_date} period {filing.report_date or '--'}: {filing.filing_url}" for filing in filings[:8]]
@@ -969,14 +1067,84 @@ def _fetch_sec_layers(symbol: str) -> tuple[str, str, list[str], list[DataSource
         filings_lines = [f"SEC filings unavailable/error: {exc}"]
 
     try:
-        client = SecEdgarClient(timeout_seconds=12)
-        company, payload = client.get_companyfacts(symbol)
+        active_client = client or SecEdgarClient(timeout_seconds=12)
+        company, payload = active_client.get_companyfacts(symbol)
         fundamentals_text = format_fundamental_analysis(analyze_company_facts(company, payload))
         statuses.append(DataSourceStatus("SEC companyfacts", "fresh/cache", _now(), "Standardized XBRL fundamentals loaded."))
     except Exception as exc:
         statuses.append(DataSourceStatus("SEC companyfacts", "error", _now(), str(exc)))
         fundamentals_text = f"Fundamentals\n\nSEC companyfacts unavailable/error: {exc}\n\nFor ETFs, issuer holdings, expense ratio, AUM, and sector exposure remain a future provider hook."
     return earnings_text, fundamentals_text, filings_lines, statuses
+
+
+def _fetch_foreign_issuer_layers(
+    symbol: str,
+    client: SecEdgarClient,
+    profile_filings: list[Any],
+    company_title: str = "",
+) -> tuple[str, str, list[str], list[DataSourceStatus], str, ForeignIssuerSnapshot]:
+    statuses: list[DataSourceStatus] = [
+        DataSourceStatus("Reporting profile", REPORTING_PROFILE_FOREIGN_ISSUER, _now(), "Foreign issuer / ADR-style SEC filing profile detected."),
+    ]
+    foreign_filings = [filing for filing in profile_filings if filing.form in FOREIGN_RESULTS_FORMS]
+    filings_lines = [f"{filing.form} filed {filing.filing_date} period {filing.report_date or '--'}: {filing.filing_url}" for filing in foreign_filings[:10]]
+
+    sec_text = ""
+    try:
+        release = client.latest_foreign_issuer_release(symbol)
+        if release is not None:
+            sec_text = release.text
+            statuses.append(DataSourceStatus("SEC 6-K / 20-F scan", "fresh/cache", _now(), f"Loaded {release.filing.form} foreign issuer source text."))
+            release_line = f"{release.filing.form} filed {release.filing.filing_date} period {release.filing.report_date or '--'}: {release.source_url}"
+            if release_line not in filings_lines:
+                filings_lines.insert(0, release_line)
+        elif filings_lines:
+            statuses.append(DataSourceStatus("SEC 6-K / 20-F scan", "not found", _now(), "Foreign issuer filings were listed, but no results document text was selected automatically."))
+        else:
+            statuses.append(DataSourceStatus("SEC 6-K / 20-F scan", "not found", _now(), "No recent 6-K / 20-F / 40-F filings found in this scan."))
+    except Exception as exc:
+        statuses.append(DataSourceStatus("SEC 6-K / 20-F scan", "not found", _now(), f"Foreign issuer SEC document scan did not load: {exc}"))
+
+    official_text, discovered_links, ir_warnings = fetch_known_official_ir_texts(symbol)
+    if official_text.strip():
+        statuses.append(DataSourceStatus("Official IR results", "fresh/cache", _now(), "Official investor relations result text loaded."))
+    else:
+        statuses.append(DataSourceStatus("Official IR results", "pending", _now(), "Official IR result links prepared; parsed text not loaded automatically."))
+
+    companyfacts_text = ""
+    companyfacts_available = False
+    try:
+        company, payload = client.get_companyfacts(symbol)
+        companyfacts_text = format_fundamental_analysis(analyze_company_facts(company, payload))
+        companyfacts_available = True
+        company_title = company_title or company.title
+        statuses.append(DataSourceStatus("SEC companyfacts", "supplemental", _now(), "Companyfacts loaded as supplemental context for foreign issuer mode."))
+    except Exception as exc:
+        statuses.append(DataSourceStatus("SEC companyfacts", "limited", _now(), f"Companyfacts not primary for foreign issuer mode: {exc}"))
+
+    source_links = foreign_issuer_source_links(symbol, company_title, filings_lines, discovered_links)
+    if companyfacts_available:
+        source_links.append(("SEC companyfacts / XBRL", "latest loaded", "https://data.sec.gov/api/xbrl/companyfacts/"))
+    snapshot = build_foreign_issuer_snapshot(
+        symbol,
+        company_name=company_title,
+        filings_lines=filings_lines,
+        sec_text=sec_text,
+        official_text=official_text,
+        companyfacts_text=companyfacts_text,
+        companyfacts_available=companyfacts_available,
+        source_links=source_links,
+        warnings=ir_warnings,
+    )
+    statuses.append(DataSourceStatus("Foreign issuer document sources", "fresh/cache", _now(), f"{len(snapshot.source_links)} IR / SEC source links prepared."))
+    return (
+        format_foreign_issuer_earnings_text(snapshot),
+        format_foreign_issuer_fundamentals_text(snapshot),
+        filings_lines,
+        statuses,
+        REPORTING_PROFILE_FOREIGN_ISSUER,
+        snapshot,
+    )
 
 
 def _fetch_etf_layers(
@@ -1030,12 +1198,22 @@ def _render_research_payload(self: tk.Tk, payload: _ResearchPayload) -> None:
     self.schwab_research_last_payload = payload
     context = payload.context
     quote_price = context.last_price
-    kind_label = f" ({payload.security_kind.upper()})" if payload.security_kind in ETF_SECURITY_KINDS else ""
+    if payload.security_kind in ETF_SECURITY_KINDS:
+        kind_label = f" ({payload.security_kind.upper()})"
+    elif payload.reporting_profile == REPORTING_PROFILE_FOREIGN_ISSUER:
+        kind_label = " (FOREIGN ISSUER)"
+    else:
+        kind_label = ""
     self.schwab_research_quote_var.set(f"{payload.symbol}{kind_label}: {_money(quote_price)}")
     self.schwab_research_held_var.set("Held" if context.is_held else "Not held")
     self.schwab_research_weight_var.set(f"Weight {context.portfolio_weight:.2%}")
     self.schwab_research_risk_var.set(f"{payload.decision.overall.label}; risk {payload.decision.risk_level.label}")
-    mode_text = " ETF/fund research" if payload.security_kind in ETF_SECURITY_KINDS else " research"
+    if payload.security_kind in ETF_SECURITY_KINDS:
+        mode_text = " ETF/fund research"
+    elif payload.reporting_profile == REPORTING_PROFILE_FOREIGN_ISSUER:
+        mode_text = " foreign issuer research"
+    else:
+        mode_text = " research"
     self.schwab_research_status_var.set(f"{payload.symbol}{mode_text} updated at {_now()}")
     _sync_research_option_chain(self, payload)
 
@@ -1087,6 +1265,7 @@ def _overview_text(payload: _ResearchPayload) -> str:
         f"- Position: {context.quantity:g} shares, value {_money(context.market_value)}, weight {context.portfolio_weight:.2%}",
         f"- Unrealized P&L: {_money(context.unrealized_pnl)}; day P&L {_money(context.day_pnl)}",
         f"- Security kind: {payload.security_kind}.",
+        f"- Reporting profile: {payload.reporting_profile}.",
         "",
         "Technical read:",
         f"- Trend: {indicators.trend}; momentum: {indicators.momentum}; volatility: {indicators.volatility}.",
@@ -2033,7 +2212,9 @@ def _recalculate_research_scenarios(self: tk.Tk) -> None:
         payload.option_chain_underlying_price,
         payload.greek_summary,
         payload.security_kind,
+        payload.reporting_profile,
         payload.etf_snapshot,
+        payload.foreign_issuer_snapshot,
     )
     self.schwab_research_last_payload = updated
     _render_scenarios(self, updated)
@@ -2043,6 +2224,9 @@ def _recalculate_research_scenarios(self: tk.Tk) -> None:
 def _render_earnings_news(self: tk.Tk, payload: _ResearchPayload) -> None:
     if payload.security_kind in ETF_SECURITY_KINDS:
         _render_etf_documents(self, payload)
+        return
+    if payload.reporting_profile == REPORTING_PROFILE_FOREIGN_ISSUER:
+        _render_foreign_issuer_documents(self, payload)
         return
 
     frame = self.schwab_research_earnings_frame
@@ -2094,9 +2278,35 @@ def _render_etf_documents(self: tk.Tk, payload: _ResearchPayload) -> None:
     _set_research_text(self.schwab_research_earnings_text, _etf_documents_popout_text(payload, snapshot, readout))
 
 
+def _render_foreign_issuer_documents(self: tk.Tk, payload: _ResearchPayload) -> None:
+    frame = self.schwab_research_earnings_frame
+    snapshot = payload.foreign_issuer_snapshot or build_foreign_issuer_snapshot(payload.symbol)
+    metric_grid(
+        frame.cards,  # type: ignore[attr-defined]
+        [_badge_from_foreign_card(card) for card in foreign_issuer_earnings_cards(snapshot)],
+        columns=4,
+        card_height=104,
+        prominent_height=112,
+        prominent_indexes={0, 1},
+    )
+    clear_children(frame.checks)  # type: ignore[attr-defined]
+    frame.checks.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    Checklist(frame.checks, "Foreign Issuer Read", foreign_issuer_interpretation(snapshot)).grid(row=0, column=0, sticky="ew", padx=(0, 8))  # type: ignore[attr-defined]
+    Checklist(frame.checks, "Risks To Watch", foreign_issuer_risks(snapshot)).grid(row=0, column=1, sticky="ew")  # type: ignore[attr-defined]
+    tree = frame.source_tree  # type: ignore[attr-defined]
+    for row_id in tree.get_children():
+        tree.delete(row_id)
+    for label, date, url in snapshot.source_links:
+        tree.insert("", tk.END, values=(label, date, url or "--"))
+    _set_research_text(self.schwab_research_earnings_text, _foreign_issuer_documents_popout_text(payload, snapshot))
+
+
 def _render_fundamentals(self: tk.Tk, payload: _ResearchPayload) -> None:
     if payload.security_kind in ETF_SECURITY_KINDS:
         _render_etf_fundamentals(self, payload)
+        return
+    if payload.reporting_profile == REPORTING_PROFILE_FOREIGN_ISSUER:
+        _render_foreign_issuer_fundamentals(self, payload)
         return
 
     frame = self.schwab_research_fundamentals_frame
@@ -2136,6 +2346,28 @@ def _render_fundamentals(self: tk.Tk, payload: _ResearchPayload) -> None:
         ]
     )
     _set_research_text(self.schwab_research_fundamentals_text, _fundamentals_popout_text(payload, verdict, details))
+
+
+def _render_foreign_issuer_fundamentals(self: tk.Tk, payload: _ResearchPayload) -> None:
+    frame = self.schwab_research_fundamentals_frame
+    snapshot = payload.foreign_issuer_snapshot or build_foreign_issuer_snapshot(payload.symbol)
+    metric_grid(
+        frame.cards,  # type: ignore[attr-defined]
+        [_badge_from_foreign_card(card) for card in foreign_issuer_fundamental_cards(snapshot)],
+        columns=4,
+        card_height=104,
+        prominent_height=112,
+        prominent_indexes={0, 1},
+    )
+    clear_children(frame.checks)  # type: ignore[attr-defined]
+    frame.checks.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    Checklist(frame.checks, "Investment vs Trade", foreign_issuer_interpretation(snapshot)).grid(row=0, column=0, sticky="ew", padx=(0, 8))  # type: ignore[attr-defined]
+    Checklist(frame.checks, "What To Verify Next", [
+        "Open the official IR result package and annual report before treating companyfacts as complete.",
+        "Review 6-K interim updates for current quarter results, guidance, orders, and management commentary.",
+        "Review 20-F / 40-F annual filings for risk factors, segments, currency, R&D, capex, and concentration.",
+    ]).grid(row=0, column=1, sticky="ew")  # type: ignore[attr-defined]
+    _set_research_text(self.schwab_research_fundamentals_text, _foreign_issuer_fundamentals_popout_text(payload, snapshot))
 
 
 def _render_etf_fundamentals(self: tk.Tk, payload: _ResearchPayload) -> None:
@@ -2270,6 +2502,52 @@ def _etf_fundamentals_popout_text(payload: _ResearchPayload, snapshot: ETFResear
     )
 
 
+def _foreign_issuer_documents_popout_text(payload: _ResearchPayload, snapshot: ForeignIssuerSnapshot) -> str:
+    return _format_beginner_readout(
+        title=f"Foreign Issuer Results - {payload.symbol}",
+        what_this_means=(
+            "This is foreign issuer source mode. A missing U.S. domestic 8-K earnings exhibit is not treated as a failed earnings scan; "
+            "the app uses official IR results, 6-K, 20-F / 40-F, annual reports, and company press releases."
+        ),
+        key_points=[
+            f"Reporting profile: {snapshot.reporting_profile}.",
+            f"Latest results source: {snapshot.latest_source_label}.",
+            f"Revenue / sales trend: {snapshot.revenue_trend}.",
+            f"Profitability: {snapshot.profitability_trend}.",
+            f"Guidance / outlook: {snapshot.guidance_tone}.",
+            f"Orders / bookings: {snapshot.orders_bookings_label}.",
+            f"Currency / reporting basis: {snapshot.reporting_basis_label}.",
+            snapshot.companyfacts_note,
+            *foreign_issuer_interpretation(snapshot),
+            *foreign_issuer_risks(snapshot),
+        ],
+        why_it_matters="Foreign issuers can report the same business reality through different documents, so the source stack needs to match the issuer before the earnings read is judged.",
+        original_text=format_foreign_issuer_earnings_text(snapshot),
+        original_title="Original / detailed foreign issuer result readout",
+    )
+
+
+def _foreign_issuer_fundamentals_popout_text(payload: _ResearchPayload, snapshot: ForeignIssuerSnapshot) -> str:
+    return _format_beginner_readout(
+        title=f"Foreign Issuer Fundamentals - {payload.symbol}",
+        what_this_means=(
+            "This replaces a pure companyfacts read with a foreign issuer fundamentals stack: annual reports, 20-F / 40-F, "
+            "6-K interim reports, official IR result packages, and supplemental XBRL when available."
+        ),
+        key_points=[
+            f"Revenue trend: {snapshot.revenue_trend}.",
+            f"Net income / margin: {snapshot.profitability_trend}.",
+            f"Reporting basis: {snapshot.reporting_basis_label}.",
+            f"Source freshness: {snapshot.source_freshness}.",
+            snapshot.companyfacts_note,
+            *foreign_issuer_interpretation(snapshot),
+        ],
+        why_it_matters="The fundamentals tab should not look broken just because a foreign issuer uses 6-K, 20-F, IFRS, local annual reports, or official IR result packages.",
+        original_text=format_foreign_issuer_fundamentals_text(snapshot),
+        original_title="Original / detailed foreign issuer fundamentals readout",
+    )
+
+
 def _fundamentals_popout_text(payload: _ResearchPayload, verdict: Any, original_text: str) -> str:
     return _format_beginner_readout(
         title=f"Fundamentals Explanation - {payload.symbol}",
@@ -2320,6 +2598,11 @@ def _synthetic_badge(title: str, label: str, status: str, why: str, score: float
 
 def _badge_from_etf_card(card: ETFCard) -> BadgeReadout:
     return _synthetic_badge(card.title, card.label, card.status, card.why)
+
+
+def _badge_from_foreign_card(card: tuple[str, str, str, str]) -> BadgeReadout:
+    title, label, status, why = card
+    return _synthetic_badge(title, label, status, why)
 
 
 def _rsi_badge(indicators: AdvancedIndicatorSnapshot) -> BadgeReadout:

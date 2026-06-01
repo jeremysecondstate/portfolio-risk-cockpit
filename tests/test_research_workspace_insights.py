@@ -288,6 +288,18 @@ class ResearchWorkspaceInsightTests(unittest.TestCase):
         self.assertTrue(summary.source_links)
         self.assertIn("does not appear to include a fresh earnings release", " ".join(summary.interpretation))
 
+    def test_foreign_issuer_summary_does_not_report_missing_exhibit(self) -> None:
+        summary = build_earnings_workspace_summary(
+            "ASML",
+            "FOREIGN ISSUER RESULTS MODE - ASML\nForeign issuer source mode.",
+            "FOREIGN ISSUER FUNDAMENTALS - ASML\nRevenue increased. Net income improved.",
+            ["6-K filed 2026-04-15 period 2026-03-31: https://sec.example/6k"],
+        )
+
+        self.assertEqual(summary.snapshot["Latest earnings release"], "Latest foreign issuer results")
+        self.assertEqual(summary.snapshot["Source"], "Foreign issuer IR / 6-K / 20-F")
+        self.assertNotIn("No earnings exhibit found", " ".join(summary.snapshot.values()))
+
 
 if __name__ == "__main__":
     unittest.main()

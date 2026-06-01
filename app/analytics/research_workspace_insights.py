@@ -601,6 +601,7 @@ def build_earnings_workspace_summary(
 ) -> EarningsWorkspaceSummary:
     latest_8k = next((line for line in filings_lines if line.startswith("8-K")), "")
     latest_qk = next((line for line in filings_lines if line.startswith("10-Q") or line.startswith("10-K")), "")
+    foreign_mode = "foreign issuer" in f"{earnings_text}\n{fundamentals_text}".lower()
     source_links = []
     for line in filings_lines[:8]:
         label, url = _split_source_line(line)
@@ -615,16 +616,18 @@ def build_earnings_workspace_summary(
         f"Margins/profitability appear {profitability.lower()}.",
         f"Guidance language is {guidance.lower()}.",
     ]
-    if "no recent 8-k earnings-release exhibit" in earnings_text.lower() or "unavailable" in earnings_text.lower():
+    if foreign_mode:
+        interpretation.append("Foreign issuer mode is active, so official IR results, 6-K, 20-F, and annual reports are the primary source stack.")
+    elif "no recent 8-k earnings-release exhibit" in earnings_text.lower() or "unavailable" in earnings_text.lower():
         interpretation.append("The latest filing scan does not appear to include a fresh earnings release.")
     risks = _earnings_risks(earnings_text, fundamentals_text)
     return EarningsWorkspaceSummary(
         snapshot={
             "Company": symbol.upper(),
-            "Latest earnings release": latest_8k or "No earnings exhibit found",
+            "Latest earnings release": latest_8k or ("Latest foreign issuer results" if foreign_mode else "No earnings exhibit found"),
             "Latest 10-Q / 10-K": latest_qk or "No 10-Q/10-K fallback found",
             "Reporting period": _reporting_period_from_line(latest_qk or latest_8k) or "--",
-            "Source": "SEC filings and companyfacts",
+            "Source": "Foreign issuer IR / 6-K / 20-F" if foreign_mode else "SEC filings and companyfacts",
         },
         guidance_tone=guidance,
         revenue_trend=revenue,

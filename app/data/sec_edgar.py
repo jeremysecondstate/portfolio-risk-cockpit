@@ -106,6 +106,18 @@ class SecEarningsRelease:
         return self.document.url
 
 
+@dataclass(frozen=True)
+class SecForeignIssuerRelease:
+    company: SecCompany
+    filing: SecFiling
+    document: SecFilingDocument
+    text: str
+
+    @property
+    def source_url(self) -> str:
+        return self.document.url
+
+
 class SecEdgarClient:
     """Small SEC EDGAR/data.sec.gov client with a local JSON/text cache.
 
@@ -272,6 +284,22 @@ class SecEdgarClient:
             return SecEarningsRelease(company=filing.company, filing=filing, document=document, text=text)
         return None
 
+    def latest_foreign_issuer_release(self, ticker: str) -> SecForeignIssuerRelease | None:
+        filings = self.recent_filings(ticker, forms=("6-K", "20-F", "20-F/A", "40-F", "40-F/A"), limit=40)
+        prioritized = sorted(filings, key=_foreign_results_filing_rank)
+        for filing in prioritized:
+            documents = self.filing_documents(filing)
+            document = choose_foreign_results_document(documents, filing)
+            if document is None:
+                continue
+            text = self.document_text(document)
+            if not text.strip():
+                continue
+            if filing.form == "6-K" and not _text_has_foreign_results_keywords(text):
+                continue
+            return SecForeignIssuerRelease(company=filing.company, filing=filing, document=document, text=text)
+        return None
+
     def _fetch_json(self, url: str, *, cache_name: str, ttl: timedelta) -> Any:
         text = self._fetch_text(url, cache_name=cache_name, ttl=ttl)
         return json.loads(text)
@@ -330,6 +358,22 @@ def choose_earnings_exhibit(documents: list[SecFilingDocument]) -> SecFilingDocu
     return None
 
 
+def choose_foreign_results_document(
+    documents: list[SecFilingDocument],
+    filing: SecFiling | None = None,
+) -> SecFilingDocument | None:
+    if not documents:
+        return None
+    primary_candidates = [document for document in documents if _looks_like_foreign_results_document(document)]
+    if primary_candidates:
+        return sorted(primary_candidates, key=_foreign_document_rank)[0]
+    if filing is not None:
+        for document in documents:
+            if document.document == filing.primary_document:
+                return document
+    return documents[0]
+
+
 def html_to_text(raw: str) -> str:
     text = re.sub(r"(?is)<script.*?</script>", " ", raw)
     text = re.sub(r"(?is)<style.*?</style>", " ", text)
@@ -370,6 +414,84 @@ def _document_rank(document: SecFilingDocument) -> tuple[int, str]:
     elif "results" in haystack:
         score = 4
     return score, document.document
+
+
+def _looks_like_foreign_results_document(document: SecFilingDocument) -> bool:
+    haystack = f"{document.type} {document.document} {document.description}".lower()
+    return any(
+        term in haystack
+        for term in (
+            "ex-99",
+            "exhibit 99",
+            "earnings",
+            "results",
+            "press release",
+            "quarter",
+            "annual report",
+            "financial statements",
+            "presentation",
+        )
+    )
+
+
+def _foreign_results_filing_rank(filing: SecFiling) -> tuple[int, str]:
+    haystack = f"{filing.form} {filing.description} {filing.primary_document}".lower()
+    if filing.form == "6-K" and any(term in haystack for term in ("results", "earnings", "quarter", "press release")):
+        score = 0
+    elif filing.form == "6-K":
+        score = 1
+    elif filing.form in {"20-F", "20-F/A"}:
+        score = 2
+    elif filing.form in {"40-F", "40-F/A"}:
+        score = 3
+    else:
+        score = 9
+    return score, _reverse_date_sort_key(filing.filing_date)
+
+
+def _foreign_document_rank(document: SecFilingDocument) -> tuple[int, str]:
+    haystack = f"{document.type} {document.document} {document.description}".lower()
+    score = 10
+    if "ex-99.1" in haystack or "exhibit 99.1" in haystack:
+        score = 0
+    elif "press release" in haystack or "results" in haystack:
+        score = 1
+    elif "quarter" in haystack or "earnings" in haystack:
+        score = 2
+    elif "presentation" in haystack:
+        score = 3
+    elif "annual report" in haystack or "20-f" in haystack or "40-f" in haystack:
+        score = 4
+    return score, document.document
+
+
+def _text_has_foreign_results_keywords(text: str) -> bool:
+    lower = text[:12000].lower()
+    return any(
+        term in lower
+        for term in (
+            "financial results",
+            "quarterly results",
+            "net sales",
+            "revenue",
+            "net income",
+            "earnings per share",
+            "gross margin",
+            "guidance",
+            "outlook",
+            "orders",
+            "bookings",
+            "backlog",
+        )
+    )
+
+
+def _reverse_date_sort_key(value: str) -> str:
+    try:
+        date = datetime.strptime(value, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return "9999-99-99"
+    return f"{9999 - date.year:04d}-{12 - date.month:02d}-{31 - date.day:02d}"
 
 
 def _safe_cache_filename(value: str) -> str:
