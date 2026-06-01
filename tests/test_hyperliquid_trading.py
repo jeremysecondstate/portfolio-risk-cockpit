@@ -15,7 +15,7 @@ from app.core.portfolio import Portfolio, Position
 from app.ui.cash_positions_extension import _portfolio_display_pnl_summary, _position_pnl_value
 from app.ui.options_lab_extension import _populate_workspace_open_orders_table, _workspace_holding_rows
 from app.ui.hyperliquid_trading_extension import _market_close_limit_price, _normalize_edit_market, _reverse_order_size_for_same_opposite_position, _risk_reward, _selected_hyperliquid_order, _set_hyperliquid_perp_mid_price, normalize_hyperliquid_open_order
-from app.ui.hyperliquid_trading_extension import _current_hyperliquid_perp_position, _perp_position_pnl
+from app.ui.hyperliquid_trading_extension import _current_hyperliquid_perp_position, _perp_position_pnl, _portfolio_coin_exposures
 from app.ui.hyperliquid_perp_ticket_use_mid_fix import (
     LEVERAGE_PNL_EXPLANATION,
     _estimated_margin_required,
@@ -313,6 +313,26 @@ class HyperliquidTradingTests(unittest.TestCase):
         self.assertEqual(values["BTC"]["pnl_text"], "$-450.37")
         self.assertEqual(values["HYPE-PERP-SHORT"]["pnl"], -261.65)
         self.assertEqual(values["HYPE-PERP-SHORT"]["pnl_text"], "$-261.65")
+
+    def test_cockpit_exposure_map_includes_equities_spot_and_perps(self) -> None:
+        goog = Position("GOOG", 15, 188.84, 373.78, open_profit_loss=2_774.15)
+        btc = Position("BTC", 0.068784, 72_681.50, 72_681.50, custom_profit_loss=-523.37)
+        setattr(btc, "asset_type", "Spot")
+        hype_spot = Position("HYPE", 68.8208, 72.94, 72.94, custom_profit_loss=667.22)
+        setattr(hype_spot, "asset_type", "Spot")
+        hype_perp = Position("HYPE-PERP-SHORT", 19, 59.82, 72.94, raw_profit_loss=-249.26)
+        setattr(hype_perp, "asset_type", "Perp Short")
+        portfolio = Portfolio(cash=1_000.0, positions={"GOOG": goog, "BTC": btc, "HYPE": hype_spot, "HYPE-PERP-SHORT": hype_perp})
+
+        exposures = _portfolio_coin_exposures(portfolio)
+
+        self.assertEqual(exposures["GOOG"]["asset_class"], "Equity")
+        self.assertEqual(exposures["GOOG"]["readout"], "Equity exposure")
+        self.assertAlmostEqual(exposures["GOOG"]["spot_value"], goog.market_value)
+        self.assertEqual(exposures["BTC"]["asset_class"], "Crypto")
+        self.assertEqual(exposures["BTC"]["readout"], "Spot only")
+        self.assertLess(exposures["HYPE"]["perp_signed"], 0)
+        self.assertIn("short perp", exposures["HYPE"]["readout"])
 
     def test_cockpit_pnl_summary_uses_hyperliquid_custom_fallback(self) -> None:
         spot = Position(

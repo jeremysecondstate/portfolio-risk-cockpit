@@ -121,6 +121,8 @@ def _configure_compact_ticket_styles(self: tk.Tk) -> None:
     style.map("CompactAccent.TButton", background=[("active", polished_theme.ACCENT_DARK), ("pressed", polished_theme.ACCENT_DARK)], foreground=[("active", "#ffffff")])
     style.configure("CompactDanger.TButton", background="#fee2e2", foreground=polished_theme.DANGER, padding=(6, 5), font=("Segoe UI", 9, "bold"))
     style.map("CompactDanger.TButton", background=[("active", "#fecaca")])
+    style.configure("ConnectionGood.TLabel", background=polished_theme.PANEL, foreground="#047857", font=("Segoe UI", 9, "bold"))
+    style.configure("ConnectionMuted.TLabel", background=polished_theme.PANEL, foreground=polished_theme.MUTED, font=("Segoe UI", 9))
 
 
 def _build_action_group(parent: ttk.Frame, title: str, column: int) -> ttk.LabelFrame:
@@ -145,7 +147,7 @@ def _grid_action_button(
         column=column,
         columnspan=columnspan,
         sticky="ew",
-        padx=(0, 6) if column == 0 and columnspan == 1 else 0,
+        padx=(0, 6) if columnspan == 1 and column < 2 else 0,
         pady=(2, 3) if row == 0 else (0, 2),
     )
 
@@ -178,91 +180,83 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
 
     summary_shell = ttk.Frame(stack, style="Canvas.TFrame")
     exposure_shell = ttk.Frame(stack, style="Canvas.TFrame")
-    console_shell = ttk.Frame(stack, style="Canvas.TFrame")
-    stack.add(summary_shell, minsize=150, stretch="never")
-    stack.add(exposure_shell, minsize=220, stretch="never")
-    stack.add(console_shell, minsize=260, stretch="always")
+    stack.add(summary_shell, minsize=145, stretch="never")
+    stack.add(exposure_shell, minsize=420, stretch="always")
 
     summary = ttk.LabelFrame(summary_shell, text="Portfolio Risk Console", style="Card.TLabelframe")
     summary.pack(fill=tk.BOTH, expand=True)
-    summary.columnconfigure((0, 1, 2), weight=1)
+    summary.columnconfigure((0, 1, 2, 3), weight=1)
     self.cockpit_cash_weight_var = tk.StringVar(value="Cash weight: --")
+    self.cockpit_spot_equity_var = tk.StringVar(value="Spot/equity: --")
     self.cockpit_perp_notional_var = tk.StringVar(value="Perp notional: --")
     self.cockpit_largest_risk_var = tk.StringVar(value="Largest risk: --")
     ttk.Label(summary, textvariable=self.cockpit_cash_weight_var, style="MetricValue.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 10))
-    ttk.Label(summary, textvariable=self.cockpit_perp_notional_var, style="MetricValue.TLabel").grid(row=0, column=1, sticky="w", padx=(0, 10))
-    ttk.Label(summary, textvariable=self.cockpit_largest_risk_var, style="MetricValue.TLabel").grid(row=0, column=2, sticky="w")
+    ttk.Label(summary, textvariable=self.cockpit_spot_equity_var, style="MetricValue.TLabel").grid(row=0, column=1, sticky="w", padx=(0, 10))
+    ttk.Label(summary, textvariable=self.cockpit_perp_notional_var, style="MetricValue.TLabel").grid(row=0, column=2, sticky="w", padx=(0, 10))
+    ttk.Label(summary, textvariable=self.cockpit_largest_risk_var, style="MetricValue.TLabel").grid(row=0, column=3, sticky="w")
 
     actions = ttk.Frame(summary, style="Panel.TFrame")
-    actions.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(18, 0))
+    actions.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(16, 0))
     actions.columnconfigure((0, 1, 2), weight=1, uniform="risk_console_actions")
-    _grid_action_button(actions, 0, 0, "Refresh View", self.refresh_portfolio, "CompactAccent.TButton")
-    _grid_action_button(actions, 0, 1, "Sync Schwab", lambda: _run_then_update_risk_console(self, self.refresh_schwab_account))
-    _grid_action_button(actions, 0, 2, "Sync Hyperliquid", lambda: _run_then_update_risk_console(self, self.sync_hyperliquid_account))
+    _grid_action_button(actions, 0, 0, "Refresh", self.refresh_portfolio, "CompactAccent.TButton")
+    _grid_action_button(actions, 0, 1, "Sync Schwab", lambda: _run_then_update_risk_console(self, self.refresh_schwab_account, "schwab_trading_preview_text"))
+    _grid_action_button(actions, 0, 2, "Sync Hyperliquid", lambda: _run_then_update_risk_console(self, self.sync_hyperliquid_account, "hyperliquid_trading_preview_text"))
+    self.cockpit_schwab_connection_var = tk.StringVar(value="Schwab: not connected")
+    self.cockpit_hyperliquid_connection_var = tk.StringVar(value="Hyperliquid: not synced")
+    ttk.Label(actions, text="Live data controls", style="ConnectionMuted.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 0))
+    self.cockpit_schwab_connection_label = ttk.Label(actions, textvariable=self.cockpit_schwab_connection_var, style="ConnectionMuted.TLabel")
+    self.cockpit_schwab_connection_label.grid(row=1, column=1, sticky="w", pady=(2, 0))
+    self.cockpit_hyperliquid_connection_label = ttk.Label(actions, textvariable=self.cockpit_hyperliquid_connection_var, style="ConnectionMuted.TLabel")
+    self.cockpit_hyperliquid_connection_label.grid(row=1, column=2, sticky="w", pady=(2, 0))
 
-    status_bar = ttk.Frame(summary, style="Panel.TFrame")
-    status_bar.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(10, 0))
-    status_bar.columnconfigure((0, 1, 2), weight=1)
-    ttk.Label(status_bar, textvariable=self.schwab_status_var, style="Chip.TLabel").grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=(4, 0))
-    ttk.Label(status_bar, textvariable=self.schwab_preview_status_var, style="Chip.TLabel").grid(row=0, column=1, sticky="ew", padx=(0, 6), pady=(4, 0))
-    ttk.Label(status_bar, textvariable=self.hyperliquid_status_var, style="Chip.TLabel").grid(row=0, column=2, sticky="ew", pady=(4, 0))
-
-    exposure = ttk.LabelFrame(exposure_shell, text="Spot / Perp Exposure Map", style="Card.TLabelframe")
+    exposure = ttk.LabelFrame(exposure_shell, text="Spot / Perp / Equity Exposure Map", style="Card.TLabelframe")
     exposure.pack(fill=tk.BOTH, expand=True)
-    columns = ("coin", "spot", "perp", "net", "pnl", "readout")
-    self.cockpit_exposure_table = ttk.Treeview(exposure, columns=columns, show="headings", height=7)
+    columns = ("asset", "type", "spot_equity", "perp", "net", "weight", "pnl", "readout")
+    self.cockpit_exposure_table = ttk.Treeview(exposure, columns=columns, show="headings", height=16)
     headings = {
-        "coin": ("Coin", 80, tk.W),
-        "spot": ("Spot", 100, tk.E),
-        "perp": ("Perp Notional", 110, tk.E),
-        "net": ("Net Read", 100, tk.E),
+        "asset": ("Asset", 82, tk.W),
+        "type": ("Type", 88, tk.W),
+        "spot_equity": ("Spot / Equity", 112, tk.E),
+        "perp": ("Perp Notional", 112, tk.E),
+        "net": ("Net Exposure", 112, tk.E),
+        "weight": ("Weight", 76, tk.E),
         "pnl": ("P&L", 95, tk.E),
-        "readout": ("Risk Readout", 190, tk.W),
+        "readout": ("Risk Readout", 210, tk.W),
     }
     for column, (label, width, anchor) in headings.items():
         self.cockpit_exposure_table.heading(column, text=label)
         self.cockpit_exposure_table.column(column, width=width, anchor=anchor, stretch=True)
+    self.cockpit_exposure_table.tag_configure("equity", foreground=polished_theme.TEXT)
+    self.cockpit_exposure_table.tag_configure("crypto", foreground="#075985")
+    self.cockpit_exposure_table.tag_configure("cash", foreground=polished_theme.MUTED)
     self.cockpit_exposure_table.pack(fill=tk.BOTH, expand=True)
-
-    results = ttk.LabelFrame(console_shell, text="Portfolio Analysis + Next Checks", style="Card.TLabelframe")
-    results.pack(fill=tk.BOTH, expand=True)
-
-    self.preview_text = tk.Text(
-        results,
-        height=18,
-        wrap=tk.WORD,
-        font=("Cascadia Mono", 10),
-        padx=14,
-        pady=12,
-        relief=tk.FLAT,
-        borderwidth=0,
-        background="#0b1120",
-        foreground="#dbeafe",
-        insertbackground="#dbeafe",
-        selectbackground="#1d4ed8",
-    )
-    self.preview_text.pack(fill=tk.BOTH, expand=True)
-    self.cockpit_risk_console_text = self.preview_text
     _update_cockpit_risk_console(self, self.broker.get_portfolio())
 
 
-def _run_then_update_risk_console(self: tk.Tk, command) -> None:
+def _run_then_update_risk_console(self: tk.Tk, command, output_attr: str | None = None) -> None:
+    output = getattr(self, output_attr, None) if output_attr else None
+    previous_output = getattr(self, "preview_text", None)
+    if output is not None:
+        self.preview_text = output
     command()
+    if output is not None and previous_output is not None:
+        self.preview_text = previous_output
     _update_cockpit_risk_console(self, self.broker.get_portfolio())
 
 
 def _update_cockpit_risk_console(self: tk.Tk, portfolio: Any | None = None) -> None:
-    if not hasattr(self, "cockpit_risk_console_text"):
-        return
     portfolio = portfolio or self.broker.get_portfolio()
     total_value = max(float(getattr(portfolio, "total_value", 0.0) or 0.0), 0.01)
     cash = float(getattr(portfolio, "cash", 0.0) or 0.0)
     exposures = _portfolio_coin_exposures(portfolio)
     total_perp_notional = sum(abs(row["perp_notional"]) for row in exposures.values())
+    total_spot_equity = sum(abs(row["spot_value"]) for row in exposures.values() if row.get("asset_class") in {"Crypto", "Equity"})
     largest = _largest_abs_position(portfolio)
 
     if hasattr(self, "cockpit_cash_weight_var"):
         self.cockpit_cash_weight_var.set(f"Cash weight: {cash / total_value:.1%}")
+    if hasattr(self, "cockpit_spot_equity_var"):
+        self.cockpit_spot_equity_var.set(f"Spot/equity: {_money(total_spot_equity)}")
     if hasattr(self, "cockpit_perp_notional_var"):
         self.cockpit_perp_notional_var.set(f"Perp notional: {_money(total_perp_notional)}")
     if hasattr(self, "cockpit_largest_risk_var"):
@@ -270,8 +264,12 @@ def _update_cockpit_risk_console(self: tk.Tk, portfolio: Any | None = None) -> N
             self.cockpit_largest_risk_var.set("Largest risk: --")
         else:
             self.cockpit_largest_risk_var.set(f"Largest risk: {largest.symbol} {_money(abs(largest.market_value))}")
+    _refresh_cockpit_connection_badges(self)
 
-    _update_cockpit_exposure_table(self, exposures)
+    _update_cockpit_exposure_table(self, exposures, total_value)
+    console_text = getattr(self, "cockpit_risk_console_text", None)
+    if console_text is None:
+        return
 
     lines = [
         "PORTFOLIO RISK CONSOLE",
@@ -306,25 +304,63 @@ def _update_cockpit_risk_console(self: tk.Tk, portfolio: Any | None = None) -> N
     self.cockpit_risk_console_text.configure(state=tk.DISABLED)
 
 
-def _update_cockpit_exposure_table(self: tk.Tk, exposures: dict[str, dict[str, Any]]) -> None:
+def _update_cockpit_exposure_table(self: tk.Tk, exposures: dict[str, dict[str, Any]], total_value: float) -> None:
     table = getattr(self, "cockpit_exposure_table", None)
     if table is None:
         return
     for row_id in table.get_children():
         table.delete(row_id)
-    for coin, row in sorted(exposures.items()):
+    for asset, row in sorted(exposures.items(), key=lambda item: (item[1].get("sort_group", 99), item[0])):
         table.insert(
             "",
             tk.END,
             values=(
-                coin,
+                asset,
+                row["asset_class"],
                 _money(row["spot_value"]),
-                _money(abs(row["perp_notional"])),
+                _money(abs(row["perp_notional"])) if abs(row["perp_notional"]) > 0.01 else "--",
                 _signed_money(row["net_delta"]),
+                f"{abs(row['net_delta']) / total_value:.1%}",
                 _signed_money(row["pnl"]) if row["pnl_known"] else "--",
                 row["readout"],
             ),
+            tags=(str(row.get("tag", "equity")),),
         )
+
+
+def _refresh_cockpit_connection_badges(self: tk.Tk) -> None:
+    schwab_text = str(getattr(getattr(self, "schwab_status_var", None), "get", lambda: "")()).lower()
+    schwab_connected = getattr(self, "schwab_session", None) is not None or "connected" in schwab_text
+    _set_cockpit_connection_badge(
+        self,
+        "cockpit_schwab_connection_var",
+        "cockpit_schwab_connection_label",
+        "Schwab: connected" if schwab_connected else "Schwab: not connected",
+        schwab_connected,
+    )
+
+    hyper_text = str(getattr(getattr(self, "hyperliquid_status_var", None), "get", lambda: "")()).lower()
+    source_text = str(getattr(getattr(self, "broker", None), "source_message", "")).lower()
+    hyper_synced = "synced" in hyper_text or "loaded hyperliquid" in source_text or "hyperliquid account" in source_text
+    _set_cockpit_connection_badge(
+        self,
+        "cockpit_hyperliquid_connection_var",
+        "cockpit_hyperliquid_connection_label",
+        "Hyperliquid: synced" if hyper_synced else "Hyperliquid: not synced",
+        hyper_synced,
+    )
+
+
+def _set_cockpit_connection_badge(self: tk.Tk, var_name: str, label_name: str, text: str, active: bool) -> None:
+    var = getattr(self, var_name, None)
+    if hasattr(var, "set"):
+        var.set(text)
+    label = getattr(self, label_name, None)
+    if label is not None:
+        try:
+            label.configure(style="ConnectionGood.TLabel" if active else "ConnectionMuted.TLabel")
+        except tk.TclError:
+            pass
 
 
 def _portfolio_coin_exposures(portfolio: Any) -> dict[str, dict[str, Any]]:
@@ -334,14 +370,25 @@ def _portfolio_coin_exposures(portfolio: Any) -> dict[str, dict[str, Any]]:
         asset_type = str(getattr(position, "asset_type", "")).lower()
         is_perp = "-PERP" in symbol or asset_type.startswith("perp")
         is_spot = asset_type == "spot" or symbol.endswith("-SPOT")
-        if not is_perp and not is_spot:
-            continue
 
-        coin = _coin_from_exposure_symbol(symbol)
+        if is_perp or is_spot:
+            asset = _coin_from_exposure_symbol(symbol)
+            asset_class = "Crypto"
+            sort_group = 0
+            tag = "crypto"
+        else:
+            asset = symbol
+            asset_class = "Equity"
+            sort_group = 1
+            tag = "equity"
+
         row = rows.setdefault(
-            coin,
+            asset,
             {
-                "coin": coin,
+                "coin": asset,
+                "asset_class": asset_class,
+                "sort_group": sort_group,
+                "tag": tag,
                 "spot_value": 0.0,
                 "spot_quantity": 0.0,
                 "perp_notional": 0.0,
@@ -395,6 +442,8 @@ def _coin_from_exposure_symbol(symbol: str) -> str:
 
 
 def _exposure_readout(row: dict[str, Any]) -> str:
+    if row.get("asset_class") == "Equity":
+        return "Equity exposure"
     spot = float(row["spot_value"])
     perp = float(row["perp_signed"])
     abs_perp = abs(perp)
@@ -417,6 +466,9 @@ def _exposure_readout(row: dict[str, Any]) -> str:
 
 
 def _exposure_sentence(row: dict[str, Any], total_value: float) -> str:
+    if row.get("asset_class") == "Equity":
+        pnl = f" P&L {_signed_money(row['pnl'])}." if row.get("pnl_known") else ""
+        return f"equity exposure {_money(row['spot_value'])} ({abs(row['net_delta']) / total_value:.1%} of portfolio).{pnl} {row['readout']}."
     spot = float(row["spot_value"])
     perp = float(row["perp_signed"])
     net = float(row["net_delta"])
