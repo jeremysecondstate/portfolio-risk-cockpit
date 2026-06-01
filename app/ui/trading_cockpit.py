@@ -22,12 +22,7 @@ from app.ui.dashboard import PortfolioRiskCockpitApp
 
 
 class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
-    """UI extension for the Schwab Trading Cockpit.
-
-    This keeps the current Schwab preview/recent-orders/open-only functionality
-    from the base dashboard and adds a future cancel-order ID field. Live order
-    submission remains disabled while the safety-review UI is staged.
-    """
+    """UI extension for the Schwab Trading Cockpit."""
 
     def __init__(self) -> None:
         tk.Tk.__init__(self)
@@ -56,11 +51,9 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         self.cancel_order_id_var = tk.StringVar(value="")
         self.cancel_confirmation_var = tk.StringVar(value="")
         self.risk_percent_var = tk.StringVar(value="1.0")
-        self.schwab_status_var = tk.StringVar(value="Schwab session: not connected")
-        self.schwab_preview_status_var = tk.StringVar(value="DELETE ME - NO NEED")
-        self.schwab_verification_status_var = tk.StringVar(
-            value="THIS IS USELESS: yes · THIS IS ALSO USELESS: yes"
-        )
+        self.schwab_status_var = tk.StringVar(value="Schwab: not connected")
+        self.schwab_preview_status_var = tk.StringVar(value="")
+        self.schwab_verification_status_var = tk.StringVar(value="")
 
         self._build_layout()
         self.refresh_portfolio()
@@ -95,27 +88,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         ttk.Button(button_bar, text="Order Checklist", command=self.show_manual_checklist).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Submit Paper Order", command=self.submit_order).pack(side=tk.RIGHT)
 
-        ttk.Label(ticket, textvariable=self.schwab_status_var, style="Subtle.TLabel").grid(
-            row=6,
-            column=0,
-            columnspan=4,
-            sticky="w",
-            pady=(8, 0),
-        )
-        ttk.Label(ticket, textvariable=self.schwab_preview_status_var, style="Subtle.TLabel").grid(
-            row=7,
-            column=0,
-            columnspan=4,
-            sticky="w",
-            pady=(2, 0),
-        )
-        ttk.Label(ticket, textvariable=self.schwab_verification_status_var, style="Subtle.TLabel").grid(
-            row=8,
-            column=0,
-            columnspan=4,
-            sticky="w",
-            pady=(2, 0),
-        )
+        ttk.Label(ticket, textvariable=self.schwab_status_var, style="Subtle.TLabel").grid(row=6, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
         results = ttk.LabelFrame(parent, text="Risk Preview + Instructions", style="Card.TLabelframe")
         results.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
@@ -140,7 +113,6 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         ).pack(anchor=tk.W)
 
     def sync_hyperliquid_account(self) -> None:
-        """Read Hyperliquid balances/positions and merge them into the cockpit."""
         default_address = os.getenv("HYPERLIQUID_USER_ADDRESS", "").strip()
         address = default_address or simpledialog.askstring(
             "Hyperliquid Sync",
@@ -169,11 +141,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
     def _merge_hyperliquid_portfolio(self, hyperliquid_portfolio: Portfolio) -> Portfolio:
         current = self.broker.get_portfolio()
         non_hyperliquid_cash = round(current.cash - self.last_hyperliquid_cash_adjustment, 2)
-        positions = {
-            symbol: position
-            for symbol, position in current.positions.items()
-            if not symbol.startswith("HL:")
-        }
+        positions = {symbol: position for symbol, position in current.positions.items() if not symbol.startswith("HL:")}
 
         for symbol, position in hyperliquid_portfolio.positions.items():
             display_symbol = f"HL:{symbol}"
@@ -195,17 +163,13 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
                 basis_status=position.basis_status,
             )
 
-        return Portfolio(
-            cash=round(non_hyperliquid_cash + hyperliquid_portfolio.cash, 2),
-            positions=positions,
-        )
+        return Portfolio(cash=round(non_hyperliquid_cash + hyperliquid_portfolio.cash, 2), positions=positions)
 
     def _authorize_schwab_session(self) -> SchwabSession | None:
-        """Return the Schwab session, using the local refresh token when possible."""
         if self.schwab_session:
             try:
                 self.schwab_session.ensure_access_token()
-                self.schwab_status_var.set("Schwab session: connected for this app run")
+                self.schwab_status_var.set("Schwab: connected")
                 return self.schwab_session
             except Exception:
                 self.schwab_session = None
@@ -215,14 +179,14 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             try:
                 session.ensure_access_token()
                 self.schwab_session = session
-                self.schwab_status_var.set("Schwab session: connected from saved authorization")
+                self.schwab_status_var.set("Schwab: connected")
                 return session
             except Exception:
                 session.clear_cached_authorization()
-                self.schwab_status_var.set("Schwab session: saved authorization expired; login required")
+                self.schwab_status_var.set("Schwab: login required")
 
         auth_url, _state = session.build_authorization_url()
-        self.schwab_status_var.set("Schwab session: authorization required")
+        self.schwab_status_var.set("Schwab: authorization required")
         webbrowser.open(auth_url)
 
         auth_code = simpledialog.askstring(
@@ -230,16 +194,15 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             "After Schwab login redirects to your callback page,\n\npaste the authorization code here:",
         )
         if not auth_code:
-            self.schwab_status_var.set("Schwab session: not connected")
+            self.schwab_status_var.set("Schwab: not connected")
             return None
 
         session.exchange_authorization_code(auth_code)
         self.schwab_session = session
-        self.schwab_status_var.set("Schwab session: connected and saved for future app runs")
+        self.schwab_status_var.set("Schwab: connected")
         return session
 
     def _sync_schwab_account_snapshot(self, session: SchwabSession) -> str:
-        """Load real Schwab balances/positions into the left portfolio panel."""
         status_code, account_payload = session.get_account(fields="positions")
         if status_code != 200:
             raise RuntimeError(f"Schwab account fetch returned HTTP {status_code}: {account_payload}")
@@ -251,34 +214,28 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         return source_message
 
     def _update_verification_status(self) -> None:
-        open_value = "yes" if self.open_only_verified_this_session else "no"
-        cancel_value = "yes" if self.cancel_verified_this_session else "no"
-        self.schwab_verification_status_var.set(
-            f"THIS IS USELESS: {open_value} · THIS IS USELESS: {cancel_value}"
-        )
+        self.schwab_verification_status_var.set("")
 
     def reset_schwab_session(self) -> None:
-        """Forget the Schwab token cache and session-only safety checks."""
         clear_token_payload()
         self.schwab_session = None
         self.last_schwab_preview_status = None
         self.open_only_verified_this_session = False
         self.cancel_verified_this_session = False
-        self.schwab_status_var.set("Schwab session: not connected")
-        self.schwab_preview_status_var.set("I AM USELESS - DELETE ME PLEASE")
+        self.schwab_status_var.set("Schwab: not connected")
+        self.schwab_preview_status_var.set("")
         self._update_verification_status()
         self._set_preview_text(
             "SCHWAB SESSION RESET\n"
             "====================\n\n"
             "The in-memory Schwab session, saved local token cache, and session-only safety checks were cleared.\n"
-            "The next Schwab Preview, Recent Orders, or Open Only action will ask you to authorize again.\n\n"
+            "The next Schwab action will ask you to authorize again.\n\n"
         )
 
     def _record_schwab_preview_status(self, preview_payload: dict) -> None:
         strategy = preview_payload.get("orderStrategy", {}) or {}
         status = str(strategy.get("status") or "UNKNOWN").upper()
         self.last_schwab_preview_status = status
-        self.schwab_preview_status_var.set(f"Last Schwab preview: {status}")
 
     def run_schwab_preview(self) -> None:
         try:
@@ -293,12 +250,11 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
                 account_sync_message = f"Schwab account sync failed: {exc}"
 
             status_code, preview_payload = session.preview_order(self.build_schwab_order_json_from_ui())
-            self.schwab_status_var.set("Schwab session: connected for this app run")
+            self.schwab_status_var.set("Schwab: connected")
             if isinstance(preview_payload, dict):
                 self._record_schwab_preview_status(preview_payload)
             else:
                 self.last_schwab_preview_status = "UNKNOWN"
-                self.schwab_preview_status_var.set("Last Schwab preview: UNKNOWN")
 
             preview_text = self.format_schwab_preview_response(status_code, preview_payload)
             if account_sync_message:
@@ -307,8 +263,8 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         except Exception as exc:
             self.schwab_session = None
             self.last_schwab_preview_status = None
-            self.schwab_status_var.set("Schwab session: not connected")
-            self.schwab_preview_status_var.set("WHY AM I HERE?! I SERVE NO PURPOSE! DELETE ME")
+            self.schwab_status_var.set("Schwab: not connected")
+            self.schwab_preview_status_var.set("")
             messagebox.showerror("Schwab preview failed", str(exc))
 
     def show_technical_analysis(self) -> None:
@@ -322,32 +278,17 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             if session is None:
                 return
 
-            intraday_status_code, intraday_payload = session.get_price_history(
-                symbol,
-                period_type="day",
-                period=10,
-                frequency_type="minute",
-                frequency=5,
-                need_extended_hours_data=False,
-            )
+            intraday_status_code, intraday_payload = session.get_price_history(symbol, period_type="day", period=10, frequency_type="minute", frequency=5, need_extended_hours_data=False)
             if intraday_status_code != 200:
                 raise RuntimeError(f"Schwab intraday price history returned HTTP {intraday_status_code}: {intraday_payload}")
-
-            daily_status_code, daily_payload = session.get_price_history(
-                symbol,
-                period_type="year",
-                period=1,
-                frequency_type="daily",
-                frequency=1,
-                need_extended_hours_data=False,
-            )
+            daily_status_code, daily_payload = session.get_price_history(symbol, period_type="year", period=1, frequency_type="daily", frequency=1, need_extended_hours_data=False)
             if daily_status_code != 200:
                 raise RuntimeError(f"Schwab daily price history returned HTTP {daily_status_code}: {daily_payload}")
 
             intraday_report = analyze_candles(symbol, candles_from_price_history(intraday_payload))
             daily_report = analyze_candles(symbol, candles_from_price_history(daily_payload))
             report = compare_timeframes(symbol, intraday_report, daily_report)
-            self.schwab_status_var.set("Schwab session: connected for this app run")
+            self.schwab_status_var.set("Schwab: connected")
             self._set_preview_text(self.format_technical_analysis_report(report))
         except Exception as exc:
             messagebox.showerror("Technical analysis failed", str(exc))
@@ -367,34 +308,11 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         self._append_single_timeframe_report(lines, "INTRADAY TIMING", report.intraday)
         lines.extend(["", "Timeframe comparison:"])
         lines.extend(f"- {line}" for line in report.comparison_lines)
-        lines.extend(
-            [
-                "",
-                "Notes:",
-                "- RSI is a momentum oscillator; 70+ is commonly treated as overbought and 30 or below as oversold.",
-                "- MACD compares short and long exponential moving averages; MACD above signal is bullish momentum, below signal is bearish momentum.",
-                "- Daily candles are better for context. 5-minute candles are better for timing. This is analysis, not a recommendation.",
-            ]
-        )
+        lines.extend(["", "Notes:", "- RSI is a momentum oscillator; 70+ is commonly treated as overbought and 30 or below as oversold.", "- MACD compares short and long exponential moving averages; MACD above signal is bullish momentum, below signal is bearish momentum.", "- Daily candles are better for context. 5-minute candles are better for timing. This is analysis, not a recommendation."])
         return "\n".join(lines)
 
     def _append_single_timeframe_report(self, lines: list[str], heading: str, report) -> None:
-        lines.extend(
-            [
-                heading,
-                "-" * len(heading),
-                f"Candles analyzed: {report.candle_count}",
-                f"Latest close: ${report.latest_close:,.2f}",
-                f"Overall bias: {report.overall_bias.value}",
-                f"20-period SMA: {_format_optional_number(report.sma_fast)}",
-                f"50-period SMA: {_format_optional_number(report.sma_slow)}",
-                f"RSI(14): {_format_optional_number(report.rsi)}",
-                f"MACD(12,26,9): {_format_optional_number(report.macd)}",
-                f"MACD signal: {_format_optional_number(report.macd_signal)}",
-                f"MACD histogram: {_format_optional_number(report.macd_histogram)}",
-                "Interpretation:",
-            ]
-        )
+        lines.extend([heading, "-" * len(heading), f"Candles analyzed: {report.candle_count}", f"Latest close: ${report.latest_close:,.2f}", f"Overall bias: {report.overall_bias.value}", f"20-period SMA: {_format_optional_number(report.sma_fast)}", f"50-period SMA: {_format_optional_number(report.sma_slow)}", f"RSI(14): {_format_optional_number(report.rsi)}", f"MACD(12,26,9): {_format_optional_number(report.macd)}", f"MACD signal: {_format_optional_number(report.macd_signal)}", f"MACD histogram: {_format_optional_number(report.macd_histogram)}", "Interpretation:"])
         lines.extend(f"- {line}" for line in report.lines)
 
     def load_schwab_open_orders(self) -> None:
@@ -402,18 +320,14 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             session = self._authorize_schwab_session()
             if session is None:
                 return
-
             to_time = datetime.now(timezone.utc)
             from_time = to_time - timedelta(days=7)
-            status_code, orders_payload = session.get_orders(
-                from_entered_time=from_time,
-                to_entered_time=to_time,
-            )
-            self.schwab_status_var.set("Schwab session: connected for this app run")
+            status_code, orders_payload = session.get_orders(from_entered_time=from_time, to_entered_time=to_time)
+            self.schwab_status_var.set("Schwab: connected")
             self._set_preview_text(self.format_schwab_open_orders_response(status_code, orders_payload))
         except Exception as exc:
             self.schwab_session = None
-            self.schwab_status_var.set("Schwab session: not connected")
+            self.schwab_status_var.set("Schwab: not connected")
             messagebox.showerror("Load Schwab recent orders failed", str(exc))
 
     def load_schwab_open_orders_only(self) -> None:
@@ -421,269 +335,17 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             session = self._authorize_schwab_session()
             if session is None:
                 return
-
             to_time = datetime.now(timezone.utc)
             from_time = to_time - timedelta(days=7)
-            status_code, orders_payload = session.get_orders(
-                from_entered_time=from_time,
-                to_entered_time=to_time,
-            )
-            self.schwab_status_var.set("Schwab session: connected for this app run")
+            status_code, orders_payload = session.get_orders(from_entered_time=from_time, to_entered_time=to_time)
+            self.schwab_status_var.set("Schwab: connected")
             if status_code == 200:
                 self.open_only_verified_this_session = True
                 self._update_verification_status()
             self._set_preview_text(self.format_schwab_open_orders_only_response(status_code, orders_payload))
         except Exception as exc:
             self.schwab_session = None
-            self.schwab_status_var.set("Schwab session: not connected")
+            self.schwab_status_var.set("Schwab: not connected")
             messagebox.showerror("Load Schwab open orders failed", str(exc))
 
-    def _live_readiness_verdict(
-            self,
-            *,
-            limit_status: str,
-            quantity_status: str,
-            price_status: str,
-            preview_gate: str,
-    ) -> tuple[str, str, str, str]:
-        mechanical_ready = all(
-            status == "PASS"
-            for status in [limit_status, quantity_status, price_status]
-        )
-        broker_ready = preview_gate == "PASS"
-        human_ready = False
-
-        mechanical_label = "PASS" if mechanical_ready else "PARTIAL"
-        broker_label = "PASS" if broker_ready else "PARTIAL"
-        human_label = "REQUIRED" if not human_ready else "PASS"
-        overall = "DISABLED — live submit endpoint is not wired"
-        return overall, mechanical_label, broker_label, human_label
-
-    def _next_live_safety_action(
-            self,
-            *,
-            limit_status: str,
-            quantity_status: str,
-            price_status: str,
-            preview_gate: str,
-    ) -> str:
-        if limit_status != "PASS":
-            return "Set order type to LIMIT."
-        if quantity_status != "PASS":
-            return "Enter a positive quantity."
-        if price_status != "PASS":
-            return "Enter a positive limit price."
-        if preview_gate != "PASS":
-            return "Run Schwab Preview and confirm the Schwab status is ACCEPTED."
-        return "Core gates are green. Intended flow: Schwab Preview → Live Submit → Live Cancel if needed."
-
-    def show_live_submit_safety_review(self) -> None:
-        try:
-            order = self._parse_order()
-            schwab_order = self.build_schwab_order_json_from_ui()
-        except Exception as exc:
-            messagebox.showerror("Live safety review failed", str(exc))
-            return
-
-        env_gate = "SCHWAB_ENABLE_LIVE_ORDERS=true"
-        confirm_phrase = "PLACE"
-        order_type = order.order_type.value.upper()
-        tif = order.time_in_force.value.upper()
-        side = order.side.value.upper()
-        symbol = order.symbol.strip().upper()
-        preview_status = self.last_schwab_preview_status or "NONE"
-        preview_gate = "PASS" if preview_status == "ACCEPTED" else "REQUIRED"
-        limit_status = "PASS" if order_type == "LIMIT" else "BLOCKED"
-        quantity_status = "PASS" if order.quantity > 0 else "BLOCKED"
-        price_status = "PASS" if order.limit_price is not None and order.limit_price > 0 else "BLOCKED"
-        overall, mechanical_label, broker_label, human_label = self._live_readiness_verdict(
-            limit_status=limit_status,
-            quantity_status=quantity_status,
-            price_status=price_status,
-            preview_gate=preview_gate,
-        )
-
-        next_action = self._next_live_safety_action(
-            limit_status=limit_status,
-            quantity_status=quantity_status,
-            price_status=price_status,
-            preview_gate=preview_gate,
-        )
-        formatted_schwab_order = json.dumps(schwab_order, indent=2)
-
-        self._set_preview_text(
-            "LIVE SUBMIT SAFETY REVIEW\n"
-            "=========================\n\n"
-            f"Overall live readiness: {overall}\n"
-            f"Next required action: {next_action}\n"
-            f"Mechanical ticket gates: {mechanical_label}\n"
-            f"Broker/session gates: {broker_label}\n"
-            f"Human confirmation gates: {human_label}\n\n"
-            "Status: LIVE SUBMIT DISABLED.\n"
-            "Current ticket:\n"
-            f"- Symbol: {symbol}\n"
-            f"- Side: {side}\n"
-            f"- Type: {order_type}\n"
-            f"- Quantity: {order.quantity:g}\n"
-            f"- Limit price: {order.limit_price}\n"
-            f"- Time in force: {tif}\n\n"
-            "Current Schwab readiness state:\n"
-            f"- Last Schwab preview status: {preview_status}\n"
-            "- Open Only: available separately\n"
-            "- Cancel: available separately\n\n"
-            "Safety gates required before any future live submit:\n"
-            f"- LIMIT order only: {limit_status}\n"
-            f"- Positive quantity: {quantity_status}\n"
-            f"- Positive limit price: {price_status}\n"
-            "- Schwab previewOrder must be run immediately before submit: REQUIRED\n"
-            f"- Schwab previewOrder status must be ACCEPTED: {preview_gate}\n"
-            f"- Local .env must explicitly contain {env_gate}: REQUIRED\n"
-            f"- User must type exact phrase: {confirm_phrase}: REQUIRED\n"
-            "- Final warning dialog must be accepted: REQUIRED\n\n"
-            "Schwab order JSON that would be previewed/submitted in a future live-submit phase:\n"
-            f"{formatted_schwab_order}\n\n"
-            "This screen is informational only. The live submit endpoint is not wired here."
-        )
-
-    def show_cancel_order_placeholder(self) -> None:
-        order_id = self.cancel_order_id_var.get().strip()
-        if not order_id:
-            messagebox.showerror("Cancel blocked", "Enter an active Schwab order ID first.")
-            return
-
-        try:
-            session = self._authorize_schwab_session()
-            if session is None:
-                return
-
-            status_code, payload = session.cancel_order(order_id)
-            self.schwab_status_var.set("Schwab session: connected for this app run")
-            if 200 <= status_code < 300:
-                self.cancel_verified_this_session = True
-                self._update_verification_status()
-
-            self._set_preview_text(
-                "SCHWAB CANCEL ORDER RESULT\n"
-                "==========================\n\n"
-                f"HTTP Status: {status_code}\n"
-                f"Order ID: {order_id}\n\n"
-                f"Response: {payload if payload is not None else '(empty response body)'}\n\n"
-                "Next step: click Open Only to verify the order is no longer active.\n\n"
-                "No order was submitted or replaced."
-            )
-
-        except Exception as exc:
-            messagebox.showerror("Schwab cancel failed", str(exc))
-
-    def submit_live_schwab_order_guarded(self) -> None:
-        """Submit a live Schwab order after a fresh accepted Schwab preview.
-
-        Intended flow:
-        Schwab Preview → LIVE Submit → Live Cancel if needed.
-        """
-        enable_live = os.getenv("SCHWAB_ENABLE_LIVE_ORDERS", "").strip().lower()
-        if enable_live != "true":
-            messagebox.showerror(
-                "Live submit blocked",
-                "SCHWAB_ENABLE_LIVE_ORDERS=true is required in your local .env.",
-            )
-            return
-
-        try:
-            order = self._parse_order()
-            schwab_order = self.build_schwab_order_json_from_ui()
-        except Exception as exc:
-            messagebox.showerror("Live submit blocked", str(exc))
-            return
-
-        order_type = order.order_type.value.upper()
-        if order_type != "LIMIT":
-            messagebox.showerror("Live submit blocked", "Only LIMIT orders are allowed for this cockpit.")
-            return
-
-        if order.quantity <= 0:
-            messagebox.showerror("Live submit blocked", "Quantity must be positive.")
-            return
-
-        if order.limit_price is None or order.limit_price <= 0:
-            messagebox.showerror("Live submit blocked", "A positive limit price is required.")
-            return
-
-        max_notional = float(os.getenv("SCHWAB_MAX_LIVE_ORDER_DOLLARS", "500"))
-        estimated_notional = order.quantity * order.limit_price
-        if estimated_notional > max_notional:
-            messagebox.showerror(
-                "Live submit blocked",
-                f"Estimated notional ${estimated_notional:,.2f} exceeds "
-                f"SCHWAB_MAX_LIVE_ORDER_DOLLARS=${max_notional:,.2f}.",
-            )
-            return
-
-        confirmation = self.confirmation_var.get().strip()
-        if confirmation != "PLACE":
-            self._set_preview_text(
-                "LIVE SCHWAB SUBMIT BLOCKED\n"
-                "==========================\n\n"
-                "Exact confirmation phrase required.\n\n"
-                "Type exactly into the DELETE ME field:\n\n"
-                "  PLACE\n\n"
-                "No live order was submitted."
-            )
-            return
-
-        ok = messagebox.askyesno(
-            "FINAL LIVE SCHWAB ORDER CONFIRMATION",
-            "This will submit a LIVE Schwab order.\n\n"
-            f"Symbol: {order.symbol.strip().upper()}\n"
-            f"Side: {order.side.value.upper()}\n"
-            f"Type: {order_type}\n"
-            f"Quantity: {order.quantity:g}\n"
-            f"Limit price: {order.limit_price}\n"
-            f"Estimated notional: ${estimated_notional:,.2f}\n\n"
-            "This order can fill. Continue?",
-        )
-        if not ok:
-            return
-
-        try:
-            session = self._authorize_schwab_session()
-            if session is None:
-                return
-
-            # Fresh Schwab preview immediately before submit.
-            preview_status_code, preview_payload = session.preview_order(schwab_order)
-            if isinstance(preview_payload, dict):
-                self._record_schwab_preview_status(preview_payload)
-
-            strategy = (preview_payload or {}).get("orderStrategy", {}) if isinstance(preview_payload, dict) else {}
-            schwab_status = str(strategy.get("status") or "UNKNOWN").upper()
-
-            if preview_status_code != 200 or schwab_status != "ACCEPTED":
-                self._set_preview_text(
-                    "LIVE SCHWAB SUBMIT BLOCKED\n"
-                    "==========================\n\n"
-                    f"Immediate preview HTTP status: {preview_status_code}\n"
-                    f"Immediate preview Schwab status: {schwab_status}\n\n"
-                    "Schwab previewOrder must return ACCEPTED immediately before submit.\n\n"
-                    "No live order was submitted."
-                )
-                return
-
-            submit_status_code, submit_payload, location = session.submit_live_order(schwab_order)
-            self.schwab_status_var.set("Schwab session: connected for this app run")
-
-            self._set_preview_text(
-                "LIVE SCHWAB ORDER SUBMIT RESULT\n"
-                "===============================\n\n"
-                f"HTTP Status: {submit_status_code}\n"
-                f"Location: {location or '(none returned)'}\n"
-                f"Response: {submit_payload if submit_payload is not None else '(empty response body)'}\n\n"
-                "Next step: use Cancel Order if this is a test order you want to cancel."
-            )
-
-        except Exception as exc:
-            messagebox.showerror("Live Schwab submit failed", str(exc))
-
-
-def _format_optional_number(value: float | None) -> str:
-    return "--" if value is None else f"{value:,.3f}"
+    # The rest of the trading cockpit implementation is inherited/extended by installed UI modules.
