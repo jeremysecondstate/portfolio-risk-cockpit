@@ -578,8 +578,8 @@ def _open_greek_visual_popout(source: tk.Text) -> None:
     window = tk.Toplevel(source.winfo_toplevel())
     title = "Option Sensitivities Visual Guide"
     window.title(title)
-    window.geometry("1120x760")
-    window.minsize(860, 560)
+    window.geometry("1320x880")
+    window.minsize(1060, 720)
     window.columnconfigure(0, weight=1)
     window.rowconfigure(1, weight=1)
 
@@ -587,7 +587,12 @@ def _open_greek_visual_popout(source: tk.Text) -> None:
     toolbar.grid(row=0, column=0, sticky="ew")
     toolbar.columnconfigure(0, weight=1)
     ttk.Label(toolbar, text=title, font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
-    ttk.Button(toolbar, text="Close", command=window.destroy).grid(row=0, column=1, sticky="e")
+    ttk.Label(
+        toolbar,
+        text="Visual Greek readout only. No order is previewed or submitted.",
+        style="Subtle.TLabel",
+    ).grid(row=0, column=1, sticky="e", padx=(12, 8))
+    ttk.Button(toolbar, text="Close", command=window.destroy).grid(row=0, column=2, sticky="e")
 
     scroll = ScrollableFrame(window, padding=14)
     scroll.grid(row=1, column=0, sticky="nsew")
@@ -654,8 +659,8 @@ def _build_greek_visual_popout_body(parent: ttk.Frame, source: tk.Text) -> None:
     pnl_box.grid(row=0, column=1, sticky="nsew")
     sensitivity_box.columnconfigure(0, weight=1)
     pnl_box.columnconfigure(0, weight=1)
-    sensitivity_canvas = tk.Canvas(sensitivity_box, height=230, bg=GREEK_VISUAL_BG, highlightthickness=0)
-    pnl_canvas = tk.Canvas(pnl_box, height=230, bg=GREEK_VISUAL_BG, highlightthickness=0)
+    sensitivity_canvas = tk.Canvas(sensitivity_box, height=300, bg=GREEK_VISUAL_BG, highlightthickness=0)
+    pnl_canvas = tk.Canvas(pnl_box, height=300, bg=GREEK_VISUAL_BG, highlightthickness=0)
     sensitivity_canvas.grid(row=0, column=0, sticky="ew")
     pnl_canvas.grid(row=0, column=0, sticky="ew")
     sensitivity_canvas._greek_summary = summary  # type: ignore[attr-defined]
@@ -816,22 +821,25 @@ def _draw_greek_sensitivity_canvas(canvas: tk.Canvas) -> None:
     usable = [abs(value) for _label, value, _unit, _color in rows if value is not None]
     max_abs = max(usable) if usable else 1.0
     center = int(width * 0.52)
-    left = 110
-    right = width - 88
-    canvas.create_line(center, 28, center, height - 18, fill="#cbd5e1")
-    canvas.create_text(12, 10, text="Positive values help; negative values hurt for that unit move.", anchor="nw", fill=GREEK_MUTED, font=("Segoe UI", 8))
+    left = 145
+    right = width - 106
+    available = max(height - 76, 160)
+    row_step = max(35, min(46, available // max(len(rows), 1)))
+    start_y = 50
+    canvas.create_line(center, 34, center, height - 24, fill="#cbd5e1")
+    canvas.create_text(14, 12, text="Positive values help; negative values hurt for that unit move.", anchor="nw", fill=GREEK_MUTED, font=("Segoe UI", 9))
     for index, (label, value, unit, color) in enumerate(rows):
-        y = 44 + index * 33
-        canvas.create_text(12, y, text=label, anchor="nw", fill=GREEK_TEXT, font=("Segoe UI", 9, "bold"))
-        canvas.create_text(12, y + 15, text=unit, anchor="nw", fill=GREEK_MUTED, font=("Segoe UI", 8))
+        y = start_y + index * row_step
+        canvas.create_text(14, y, text=label, anchor="nw", fill=GREEK_TEXT, font=("Segoe UI", 10, "bold"))
+        canvas.create_text(14, y + 17, text=unit, anchor="nw", fill=GREEK_MUTED, font=("Segoe UI", 8))
         if value is None:
             canvas.create_text(center + 8, y + 4, text="Unavailable", anchor="nw", fill=GREEK_MUTED, font=("Segoe UI", 9))
             continue
         span = max(center - left, right - center)
         bar = int((abs(value) / max_abs) * span)
         x0, x1 = (center - bar, center) if value < 0 else (center, center + bar)
-        canvas.create_rectangle(x0, y + 6, x1, y + 18, fill=color, outline="")
-        canvas.create_text(width - 10, y + 3, text=_greek_signed_money_or_points(value, unit), anchor="ne", fill=color, font=("Segoe UI", 9, "bold"))
+        canvas.create_rectangle(x0, y + 8, x1, y + 23, fill=color, outline="")
+        canvas.create_text(width - 14, y + 6, text=_greek_signed_money_or_points(value, unit), anchor="ne", fill=color, font=("Segoe UI", 10, "bold"))
 
 
 def _draw_greek_pnl_canvas(canvas: tk.Canvas) -> None:
@@ -850,17 +858,17 @@ def _draw_greek_pnl_canvas(canvas: tk.Canvas) -> None:
 
     max_abs = max(max(abs(row.one_day_pnl), abs(row.full_window_pnl)) for row in rows) or 1.0
     center = int(width * 0.52)
-    left = 110
-    right = width - 72
-    row_height = max(22, int((height - 38) / max(len(rows), 1)))
-    canvas.create_text(12, 10, text="Light bar = 1 day. Dark bar = full DTE window.", anchor="nw", fill=GREEK_MUTED, font=("Segoe UI", 8))
-    canvas.create_line(center, 28, center, height - 14, fill="#cbd5e1")
+    left = 145
+    right = width - 96
+    row_height = max(28, int((height - 54) / max(len(rows), 1)))
+    canvas.create_text(14, 12, text="Light bar = 1 day. Dark bar = full DTE window.", anchor="nw", fill=GREEK_MUTED, font=("Segoe UI", 9))
+    canvas.create_line(center, 34, center, height - 18, fill="#cbd5e1")
     for index, row in enumerate(rows):
-        y = 36 + index * row_height
-        canvas.create_text(12, y, text=_move_label_for_visual(row.move), anchor="nw", fill=GREEK_TEXT, font=("Segoe UI", 9, "bold"))
-        _draw_signed_bar(canvas, center, left, right, y + 2, row.one_day_pnl, max_abs, light=True)
-        _draw_signed_bar(canvas, center, left, right, y + 13, row.full_window_pnl, max_abs, light=False)
-        canvas.create_text(width - 10, y + 3, text=_greek_signed_money(row.full_window_pnl), anchor="ne", fill=GREEK_GREEN if row.full_window_pnl >= 0 else GREEK_RED, font=("Segoe UI", 8, "bold"))
+        y = 46 + index * row_height
+        canvas.create_text(14, y, text=_move_label_for_visual(row.move), anchor="nw", fill=GREEK_TEXT, font=("Segoe UI", 9, "bold"))
+        _draw_signed_bar(canvas, center, left, right, y + 1, row.one_day_pnl, max_abs, light=True)
+        _draw_signed_bar(canvas, center, left, right, y + 15, row.full_window_pnl, max_abs, light=False)
+        canvas.create_text(width - 14, y + 4, text=_greek_signed_money(row.full_window_pnl), anchor="ne", fill=GREEK_GREEN if row.full_window_pnl >= 0 else GREEK_RED, font=("Segoe UI", 9, "bold"))
 
 
 def _draw_signed_bar(canvas: tk.Canvas, center: int, left: int, right: int, y: int, value: float, max_abs: float, *, light: bool) -> None:
@@ -868,7 +876,7 @@ def _draw_signed_bar(canvas: tk.Canvas, center: int, left: int, right: int, y: i
     bar = int((abs(value) / max_abs) * span)
     x0, x1 = (center - bar, center) if value < 0 else (center, center + bar)
     color = "#86efac" if value >= 0 and light else GREEK_GREEN if value >= 0 else "#fca5a5" if light else GREEK_RED
-    canvas.create_rectangle(x0, y, x1, y + 8, fill=color, outline="")
+    canvas.create_rectangle(x0, y, x1, y + 10, fill=color, outline="")
 
 
 def _scaled_greek_value(value: float | None) -> float | None:
@@ -1164,16 +1172,8 @@ def _greeks_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.cards.grid(row=1, column=0, sticky="ew")
 
-    visual_box = ttk.LabelFrame(frame, text="Active Contract Visuals", style="Card.TLabelframe")
-    visual_box.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-    visual_box.columnconfigure((0, 1), weight=1, uniform="greek_visuals")
-    frame.greek_sensitivity_canvas = tk.Canvas(visual_box, height=150, bg=GREEK_VISUAL_BG, highlightthickness=1, highlightbackground=GREEK_BORDER)  # type: ignore[attr-defined]
-    frame.greek_pnl_canvas = tk.Canvas(visual_box, height=150, bg=GREEK_VISUAL_BG, highlightthickness=1, highlightbackground=GREEK_BORDER)  # type: ignore[attr-defined]
-    frame.greek_sensitivity_canvas.grid(row=0, column=0, sticky="ew", padx=(0, 8), pady=(0, 4))  # type: ignore[attr-defined]
-    frame.greek_pnl_canvas.grid(row=0, column=1, sticky="ew", pady=(0, 4))  # type: ignore[attr-defined]
-
     tree_box = ttk.LabelFrame(frame, text="Greek Chain Table", style="Card.TLabelframe")
-    tree_box.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+    tree_box.grid(row=2, column=0, sticky="ew", pady=(8, 0))
     tree_box.columnconfigure(0, weight=1)
     columns = ("expiration", "dte", "strike", "type", "bid", "ask", "mark", "iv", "delta", "gamma", "theta", "vega", "rho", "source")
     tree = ttk.Treeview(tree_box, columns=columns, show="headings", height=9, selectmode="browse")
@@ -1206,9 +1206,9 @@ def _greeks_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     frame.greek_tree = tree  # type: ignore[attr-defined]
 
     frame.interpretation = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
-    frame.interpretation.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+    frame.interpretation.grid(row=3, column=0, sticky="ew", pady=(8, 0))
     frame.interpretation.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
-    frame.detail_text = _readout_launcher(frame, title="Option Sensitivities Explanation", button_text="Open Greeks Explanation", row=5)  # type: ignore[attr-defined]
+    frame.detail_text = _readout_launcher(frame, title="Option Sensitivities Explanation", button_text="Open Greeks Visual Guide", row=4)  # type: ignore[attr-defined]
     return frame
 
 
@@ -2203,7 +2203,6 @@ def _render_greeks(self: tk.Tk, payload: _ResearchPayload | None = None) -> None
         frame.status_var.set(f"{len(summary.rows)} contracts loaded. Active Greeks: {active_label}. Source: {source}.")  # type: ignore[attr-defined]
         metric_grid(frame.cards, _greek_metric_cards(active), columns=5, prominent_indexes={0}, card_height=118, prominent_height=118)  # type: ignore[attr-defined]
     _render_greek_table(frame, summary)
-    _render_greek_visual_summary(frame, summary)
     _render_greek_interpretation(frame, summary)
     frame.detail_text._greek_summary = summary  # type: ignore[attr-defined]
     frame.detail_text._greek_payload = payload  # type: ignore[attr-defined]
@@ -2251,19 +2250,6 @@ def _render_greek_table(frame: ttk.Frame, summary: GreekSummary) -> None:
         tree.selection_set(selected_iid)
         tree.focus(selected_iid)
         tree.see(selected_iid)
-
-
-def _render_greek_visual_summary(frame: ttk.Frame, summary: GreekSummary) -> None:
-    sensitivity_canvas = getattr(frame, "greek_sensitivity_canvas", None)
-    pnl_canvas = getattr(frame, "greek_pnl_canvas", None)
-    if sensitivity_canvas is None or pnl_canvas is None:
-        return
-    sensitivity_canvas._greek_summary = summary  # type: ignore[attr-defined]
-    pnl_canvas._greek_summary = summary  # type: ignore[attr-defined]
-    sensitivity_canvas.bind("<Configure>", lambda event: _draw_greek_sensitivity_canvas(event.widget))
-    pnl_canvas.bind("<Configure>", lambda event: _draw_greek_pnl_canvas(event.widget))
-    _draw_greek_sensitivity_canvas(sensitivity_canvas)
-    _draw_greek_pnl_canvas(pnl_canvas)
 
 
 def _render_greek_interpretation(frame: ttk.Frame, summary: GreekSummary) -> None:
