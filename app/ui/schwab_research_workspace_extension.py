@@ -53,6 +53,11 @@ from app.analytics.options_greeks import (
     OptionGreekSnapshot,
     build_greek_summary,
     build_greek_decision_section,
+    classify_greek_contract,
+    greek_approximation_rows,
+    greek_dollar_meanings,
+    rank_greek_contracts,
+    theta_offset_moves,
 )
 from app.analytics.research_scoring import (
     BadgeReadout,
@@ -106,6 +111,17 @@ from app.ui.schwab_option_chain_extension import _option_chain_rows, _populate_o
 from app.ui.schwab_output_popout_extension import _apply_report_tags, _open_external_url
 
 REPORT_FORMS = ("10-K", "10-Q", "8-K")
+GREEK_VISUAL_BG = "#ffffff"
+GREEK_SURFACE = "#f8fafc"
+GREEK_BORDER = "#cbd5e1"
+GREEK_TEXT = "#0f172a"
+GREEK_MUTED = "#64748b"
+GREEK_BLUE = "#2563eb"
+GREEK_GREEN = "#16a34a"
+GREEK_RED = "#dc2626"
+GREEK_AMBER = "#d97706"
+GREEK_TEAL = "#0f766e"
+GREEK_PURPLE = "#7c3aed"
 
 
 @dataclass(frozen=True)
@@ -450,6 +466,10 @@ def _readout_storage_text(parent: ttk.Frame) -> tk.Text:
 
 
 def _open_readout_popout(source: tk.Text) -> None:
+    if _is_greek_readout_source(source):
+        _open_greek_visual_popout(source)
+        return
+
     existing = getattr(source, "_readout_window", None)
     if existing is not None:
         try:
@@ -516,6 +536,11 @@ def _open_readout_popout(source: tk.Text) -> None:
 
 
 def _refresh_readout_popout(source: tk.Text) -> None:
+    visual_refresh = getattr(source, "_readout_popout_refresh", None)
+    if callable(visual_refresh):
+        visual_refresh()
+        return
+
     target = getattr(source, "_readout_popout_text", None)
     if target is None:
         return
@@ -530,6 +555,349 @@ def _refresh_readout_popout(source: tk.Text) -> None:
         target.configure(state=tk.DISABLED)
     except tk.TclError:
         return
+
+
+def _is_greek_readout_source(source: tk.Text) -> bool:
+    title = str(getattr(source, "_readout_title", ""))
+    return title == "Option Sensitivities Explanation" or hasattr(source, "_greek_summary")
+
+
+def _open_greek_visual_popout(source: tk.Text) -> None:
+    existing = getattr(source, "_readout_window", None)
+    if existing is not None:
+        try:
+            if existing.winfo_exists():
+                _refresh_readout_popout(source)
+                existing.deiconify()
+                existing.lift()
+                existing.focus_force()
+                return
+        except tk.TclError:
+            pass
+
+    window = tk.Toplevel(source.winfo_toplevel())
+    title = "Option Sensitivities Visual Guide"
+    window.title(title)
+    window.geometry("1120x760")
+    window.minsize(860, 560)
+    window.columnconfigure(0, weight=1)
+    window.rowconfigure(1, weight=1)
+
+    toolbar = ttk.Frame(window, padding=(12, 9), style="Panel.TFrame")
+    toolbar.grid(row=0, column=0, sticky="ew")
+    toolbar.columnconfigure(0, weight=1)
+    ttk.Label(toolbar, text=title, font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
+    ttk.Button(toolbar, text="Close", command=window.destroy).grid(row=0, column=1, sticky="e")
+
+    scroll = ScrollableFrame(window, padding=14)
+    scroll.grid(row=1, column=0, sticky="nsew")
+    scroll.body.columnconfigure(0, weight=1)
+
+    def refresh() -> None:
+        try:
+            clear_children(scroll.body)
+            _build_greek_visual_popout_body(scroll.body, source)
+        except tk.TclError:
+            return
+
+    source._readout_window = window  # type: ignore[attr-defined]
+    source._readout_popout_text = scroll.body  # type: ignore[attr-defined]
+    source._readout_popout_refresh = refresh  # type: ignore[attr-defined]
+
+    def _on_close() -> None:
+        source._readout_window = None  # type: ignore[attr-defined]
+        source._readout_popout_text = None  # type: ignore[attr-defined]
+        source._readout_popout_refresh = None  # type: ignore[attr-defined]
+        window.destroy()
+
+    for child in toolbar.winfo_children():
+        if _widget_class(child) == "TButton":
+            try:
+                child.configure(command=_on_close)
+            except tk.TclError:
+                pass
+    window.protocol("WM_DELETE_WINDOW", _on_close)
+    refresh()
+
+
+def _build_greek_visual_popout_body(parent: ttk.Frame, source: tk.Text) -> None:
+    summary = getattr(source, "_greek_summary", None)
+    payload = getattr(source, "_greek_payload", None)
+    if summary is None or not isinstance(summary, GreekSummary) or not summary.rows:
+        empty = tk.Frame(parent, bg=GREEK_VISUAL_BG, highlightbackground=GREEK_BORDER, highlightthickness=1)
+        empty.grid(row=0, column=0, sticky="ew")
+        empty.columnconfigure(0, weight=1)
+        tk.Label(empty, text="Load / Refresh Greeks to build the visual guide.", bg=GREEK_VISUAL_BG, fg=GREEK_TEXT, font=("Segoe UI", 14, "bold")).grid(row=0, column=0, sticky="w", padx=18, pady=(18, 6))
+        tk.Label(empty, text="The explanation will switch from plain text to charts once a Schwab option chain is available.", bg=GREEK_VISUAL_BG, fg=GREEK_MUTED, font=("Segoe UI", 10), wraplength=760, justify=tk.LEFT).grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 18))
+        return
+
+    active = _active_greek_snapshot(summary)
+    symbol = (getattr(payload, "symbol", None) or summary.underlying or getattr(active, "underlying", "") or "Symbol").upper()
+    classification = classify_greek_contract(active, summary.underlying_price) if active is not None else "No active contract"
+
+    _build_greek_visual_hero(parent, symbol, summary, active, classification)
+
+    metrics = ttk.Frame(parent, style="Panel.TFrame")
+    metrics.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+    for column in range(5):
+        metrics.columnconfigure(column, weight=1, uniform="greek_metric_cards")
+    if active is not None:
+        for column, spec in enumerate(_greek_visual_metric_specs(active)):
+            _greek_metric_visual_card(metrics, spec).grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 8, 0))
+
+    chart_grid = ttk.Frame(parent, style="Panel.TFrame")
+    chart_grid.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+    chart_grid.columnconfigure((0, 1), weight=1, uniform="greek_charts")
+    sensitivity_box = ttk.LabelFrame(chart_grid, text="Dollar Sensitivity Map", style="Card.TLabelframe")
+    pnl_box = ttk.LabelFrame(chart_grid, text="Move vs Greek P/L Estimate", style="Card.TLabelframe")
+    sensitivity_box.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+    pnl_box.grid(row=0, column=1, sticky="nsew")
+    sensitivity_box.columnconfigure(0, weight=1)
+    pnl_box.columnconfigure(0, weight=1)
+    sensitivity_canvas = tk.Canvas(sensitivity_box, height=230, bg=GREEK_VISUAL_BG, highlightthickness=0)
+    pnl_canvas = tk.Canvas(pnl_box, height=230, bg=GREEK_VISUAL_BG, highlightthickness=0)
+    sensitivity_canvas.grid(row=0, column=0, sticky="ew")
+    pnl_canvas.grid(row=0, column=0, sticky="ew")
+    sensitivity_canvas._greek_summary = summary  # type: ignore[attr-defined]
+    pnl_canvas._greek_summary = summary  # type: ignore[attr-defined]
+    sensitivity_canvas.bind("<Configure>", lambda event: _draw_greek_sensitivity_canvas(event.widget), add="+")
+    pnl_canvas.bind("<Configure>", lambda event: _draw_greek_pnl_canvas(event.widget), add="+")
+    _draw_greek_sensitivity_canvas(sensitivity_canvas)
+    _draw_greek_pnl_canvas(pnl_canvas)
+
+    insight_grid = ttk.Frame(parent, style="Panel.TFrame")
+    insight_grid.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+    insight_grid.columnconfigure((0, 1, 2), weight=1, uniform="greek_insights")
+    _greek_text_panel(insight_grid, "Plain-English Read", summary.plain_english or ["No plain-English read is available yet."], 0)
+    _greek_text_panel(insight_grid, "Theta Offset", _theta_offset_visual_lines(active, symbol), 1)
+    _greek_text_panel(insight_grid, "Sources / Caveats", _greek_source_lines(summary), 2)
+
+    ranks = rank_greek_contracts(summary, active.option_type if active is not None else None)
+    if ranks:
+        rank_box = ttk.LabelFrame(parent, text="Best Nearby Contracts By Greek Efficiency", style="Card.TLabelframe")
+        rank_box.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        rank_box.columnconfigure(0, weight=1)
+        for index, rank in enumerate(ranks[:5], start=1):
+            _rank_row(rank_box, index, rank.label, rank.reason, rank.score).grid(row=index - 1, column=0, sticky="ew", pady=(0 if index == 1 else 6, 0))
+
+
+def _build_greek_visual_hero(parent: ttk.Frame, symbol: str, summary: GreekSummary, active: OptionGreekSnapshot | None, classification: str) -> None:
+    hero = tk.Frame(parent, bg="#eff6ff", highlightbackground="#bfdbfe", highlightthickness=1)
+    hero.grid(row=0, column=0, sticky="ew")
+    hero.columnconfigure(0, weight=1)
+    hero.columnconfigure(1, weight=0)
+    contract = _greek_contract_short_label(active)
+    title = f"{symbol} Greeks: {contract}" if active is not None else f"{symbol} Greeks"
+    tk.Label(hero, text=title, bg="#eff6ff", fg="#1e3a8a", font=("Segoe UI", 18, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 4))
+    subtitle = f"Underlying {_money(summary.underlying_price)}. {classification}. Source mix: {active.source_summary if active is not None else 'Unavailable'}."
+    tk.Label(hero, text=subtitle, bg="#eff6ff", fg=GREEK_TEXT, font=("Segoe UI", 10), anchor="w", justify=tk.LEFT, wraplength=820).grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 16))
+    badge = tk.Frame(hero, bg="#dbeafe", highlightbackground=GREEK_BLUE, highlightthickness=1)
+    badge.grid(row=0, column=1, rowspan=2, sticky="e", padx=18, pady=16)
+    tk.Label(badge, text="Decision Support", bg="#dbeafe", fg="#1d4ed8", font=("Segoe UI", 9, "bold")).pack(padx=12, pady=(8, 2))
+    tk.Label(badge, text="No order action", bg="#dbeafe", fg="#1e3a8a", font=("Segoe UI", 11, "bold")).pack(padx=12, pady=(0, 8))
+
+
+def _greek_visual_metric_specs(active: OptionGreekSnapshot) -> list[dict[str, Any]]:
+    return [
+        {
+            "title": "Delta",
+            "value": _signed_number(active.delta.value, digits=3),
+            "caption": _greek_dollar_caption(active, "Delta"),
+            "color": GREEK_BLUE,
+            "source": active.delta.source,
+        },
+        {
+            "title": "Theta",
+            "value": _signed_number(active.theta.value, digits=3),
+            "caption": _greek_dollar_caption(active, "Theta"),
+            "color": GREEK_RED if (active.theta.value or 0) < 0 else GREEK_AMBER,
+            "source": active.theta.source,
+        },
+        {
+            "title": "Vega",
+            "value": _signed_number(active.vega.value, digits=3),
+            "caption": _greek_dollar_caption(active, "Vega"),
+            "color": GREEK_TEAL,
+            "source": active.vega.source,
+        },
+        {
+            "title": "Gamma",
+            "value": _signed_number(active.gamma.value, digits=4),
+            "caption": _greek_dollar_caption(active, "Gamma"),
+            "color": GREEK_PURPLE,
+            "source": active.gamma.source,
+        },
+        {
+            "title": "Rho",
+            "value": _signed_number(active.rho.value, digits=3),
+            "caption": _greek_dollar_caption(active, "Rho"),
+            "color": GREEK_AMBER,
+            "source": active.rho.source,
+        },
+    ]
+
+
+def _greek_metric_visual_card(parent: tk.Widget, spec: dict[str, Any]) -> tk.Frame:
+    frame = tk.Frame(parent, bg=GREEK_VISUAL_BG, highlightbackground=GREEK_BORDER, highlightthickness=1, height=126)
+    frame.grid_propagate(False)
+    frame.columnconfigure(0, weight=1)
+    tk.Frame(frame, bg=str(spec["color"]), height=5).grid(row=0, column=0, sticky="ew")
+    tk.Label(frame, text=str(spec["title"]).upper(), bg=GREEK_VISUAL_BG, fg=GREEK_MUTED, font=("Segoe UI", 8, "bold"), anchor="w").grid(row=1, column=0, sticky="ew", padx=12, pady=(9, 0))
+    tk.Label(frame, text=str(spec["value"]), bg=GREEK_VISUAL_BG, fg=str(spec["color"]), font=("Segoe UI", 18, "bold"), anchor="w").grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 0))
+    tk.Label(frame, text=str(spec["caption"]), bg=GREEK_VISUAL_BG, fg=GREEK_TEXT, font=("Segoe UI", 8), anchor="nw", justify=tk.LEFT, wraplength=180).grid(row=3, column=0, sticky="nsew", padx=12, pady=(3, 0))
+    tk.Label(frame, text=str(spec["source"]), bg=GREEK_VISUAL_BG, fg=GREEK_MUTED, font=("Segoe UI", 8, "italic"), anchor="w").grid(row=4, column=0, sticky="ew", padx=12, pady=(4, 8))
+    return frame
+
+
+def _greek_text_panel(parent: ttk.Frame, title: str, rows: list[str], column: int) -> None:
+    box = tk.Frame(parent, bg=GREEK_VISUAL_BG, highlightbackground=GREEK_BORDER, highlightthickness=1)
+    box.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 8, 0))
+    box.columnconfigure(0, weight=1)
+    tk.Label(box, text=title.upper(), bg=GREEK_VISUAL_BG, fg=GREEK_MUTED, font=("Segoe UI", 8, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
+    for index, row in enumerate(rows[:7], start=1):
+        tk.Label(box, text=row, bg=GREEK_VISUAL_BG, fg=GREEK_TEXT, font=("Segoe UI", 9), anchor="w", justify=tk.LEFT, wraplength=320).grid(row=index, column=0, sticky="ew", padx=12, pady=(0, 4))
+
+
+def _rank_row(parent: ttk.Frame, index: int, label: str, reason: str, score: float) -> tk.Frame:
+    frame = tk.Frame(parent, bg=GREEK_VISUAL_BG, highlightbackground=GREEK_BORDER, highlightthickness=1)
+    frame.columnconfigure(1, weight=1)
+    color = GREEK_GREEN if index == 1 else GREEK_BLUE if index <= 3 else GREEK_MUTED
+    tk.Label(frame, text=str(index), bg=color, fg="#ffffff", font=("Segoe UI", 11, "bold"), width=3).grid(row=0, column=0, rowspan=2, sticky="nsw")
+    tk.Label(frame, text=label, bg=GREEK_VISUAL_BG, fg=GREEK_TEXT, font=("Segoe UI", 10, "bold"), anchor="w").grid(row=0, column=1, sticky="ew", padx=10, pady=(7, 0))
+    tk.Label(frame, text=reason, bg=GREEK_VISUAL_BG, fg=GREEK_MUTED, font=("Segoe UI", 9), anchor="w", justify=tk.LEFT, wraplength=920).grid(row=1, column=1, sticky="ew", padx=10, pady=(2, 7))
+    tk.Label(frame, text=f"Score {score:.1f}", bg=GREEK_VISUAL_BG, fg=color, font=("Segoe UI", 9, "bold"), anchor="e").grid(row=0, column=2, rowspan=2, sticky="e", padx=10)
+    return frame
+
+
+def _active_greek_snapshot(summary: GreekSummary) -> OptionGreekSnapshot | None:
+    return summary.selected or summary.nearest_call or summary.nearest_put
+
+
+def _greek_dollar_caption(active: OptionGreekSnapshot, greek: str) -> str:
+    meanings = dict(greek_dollar_meanings(active))
+    for label, meaning in meanings.items():
+        if label.lower().startswith(greek.lower()):
+            return meaning
+    return "--"
+
+
+def _theta_offset_visual_lines(active: OptionGreekSnapshot | None, symbol: str) -> list[str]:
+    if active is None:
+        return ["No active contract is loaded."]
+    offset = theta_offset_moves(active)
+    if offset.one_day_move is None or offset.full_window_move is None:
+        return ["Theta offset cannot be calculated because delta or theta is missing."]
+    direction = "rise" if active.option_type == "call" else "fall"
+    sign = "+" if active.option_type == "call" else "-"
+    fallback = " DTE was missing, so the multi-day estimate uses 5 days." if offset.used_dte_fallback else ""
+    return [
+        f"After 1 day, {symbol} needs to {direction} about {sign}${offset.one_day_move:,.2f} to offset theta.",
+        f"Over {offset.full_window_days} days, it needs about {sign}${offset.full_window_move:,.2f} before premium and IV changes.{fallback}",
+    ]
+
+
+def _draw_greek_sensitivity_canvas(canvas: tk.Canvas) -> None:
+    summary = getattr(canvas, "_greek_summary", None)
+    canvas.delete("all")
+    width = max(canvas.winfo_width(), 360)
+    height = max(canvas.winfo_height(), 220)
+    active = _active_greek_snapshot(summary) if isinstance(summary, GreekSummary) else None
+    if active is None:
+        canvas.create_text(12, 16, text="Load Greeks to see sensitivity bars.", anchor="nw", fill=GREEK_MUTED, font=("Segoe UI", 10))
+        return
+
+    rows = [
+        ("Delta", _scaled_greek_value(active.delta.value), "$ / +$1 stock move", GREEK_BLUE),
+        ("Theta", _scaled_greek_value(active.theta.value), "$ / day", GREEK_RED if (active.theta.value or 0) < 0 else GREEK_AMBER),
+        ("Vega", _scaled_greek_value(active.vega.value), "$ / +1 IV point", GREEK_TEAL),
+        ("Gamma", _scaled_greek_value(active.gamma.value), "delta points / $1", GREEK_PURPLE),
+        ("Rho", _scaled_greek_value(active.rho.value), "$ / +1 rate point", GREEK_AMBER),
+    ]
+    usable = [abs(value) for _label, value, _unit, _color in rows if value is not None]
+    max_abs = max(usable) if usable else 1.0
+    center = int(width * 0.52)
+    left = 110
+    right = width - 88
+    canvas.create_line(center, 28, center, height - 18, fill="#cbd5e1")
+    canvas.create_text(12, 10, text="Positive values help; negative values hurt for that unit move.", anchor="nw", fill=GREEK_MUTED, font=("Segoe UI", 8))
+    for index, (label, value, unit, color) in enumerate(rows):
+        y = 44 + index * 33
+        canvas.create_text(12, y, text=label, anchor="nw", fill=GREEK_TEXT, font=("Segoe UI", 9, "bold"))
+        canvas.create_text(12, y + 15, text=unit, anchor="nw", fill=GREEK_MUTED, font=("Segoe UI", 8))
+        if value is None:
+            canvas.create_text(center + 8, y + 4, text="Unavailable", anchor="nw", fill=GREEK_MUTED, font=("Segoe UI", 9))
+            continue
+        span = max(center - left, right - center)
+        bar = int((abs(value) / max_abs) * span)
+        x0, x1 = (center - bar, center) if value < 0 else (center, center + bar)
+        canvas.create_rectangle(x0, y + 6, x1, y + 18, fill=color, outline="")
+        canvas.create_text(width - 10, y + 3, text=_greek_signed_money_or_points(value, unit), anchor="ne", fill=color, font=("Segoe UI", 9, "bold"))
+
+
+def _draw_greek_pnl_canvas(canvas: tk.Canvas) -> None:
+    summary = getattr(canvas, "_greek_summary", None)
+    canvas.delete("all")
+    width = max(canvas.winfo_width(), 360)
+    height = max(canvas.winfo_height(), 220)
+    active = _active_greek_snapshot(summary) if isinstance(summary, GreekSummary) else None
+    if active is None:
+        canvas.create_text(12, 16, text="No active contract is loaded.", anchor="nw", fill=GREEK_MUTED, font=("Segoe UI", 10))
+        return
+    rows = greek_approximation_rows(active)
+    if not rows:
+        canvas.create_text(12, 16, text="P/L approximation needs delta, gamma, and theta.", anchor="nw", fill=GREEK_MUTED, font=("Segoe UI", 10))
+        return
+
+    max_abs = max(max(abs(row.one_day_pnl), abs(row.full_window_pnl)) for row in rows) or 1.0
+    center = int(width * 0.52)
+    left = 110
+    right = width - 72
+    row_height = max(22, int((height - 38) / max(len(rows), 1)))
+    canvas.create_text(12, 10, text="Light bar = 1 day. Dark bar = full DTE window.", anchor="nw", fill=GREEK_MUTED, font=("Segoe UI", 8))
+    canvas.create_line(center, 28, center, height - 14, fill="#cbd5e1")
+    for index, row in enumerate(rows):
+        y = 36 + index * row_height
+        canvas.create_text(12, y, text=_move_label_for_visual(row.move), anchor="nw", fill=GREEK_TEXT, font=("Segoe UI", 9, "bold"))
+        _draw_signed_bar(canvas, center, left, right, y + 2, row.one_day_pnl, max_abs, light=True)
+        _draw_signed_bar(canvas, center, left, right, y + 13, row.full_window_pnl, max_abs, light=False)
+        canvas.create_text(width - 10, y + 3, text=_greek_signed_money(row.full_window_pnl), anchor="ne", fill=GREEK_GREEN if row.full_window_pnl >= 0 else GREEK_RED, font=("Segoe UI", 8, "bold"))
+
+
+def _draw_signed_bar(canvas: tk.Canvas, center: int, left: int, right: int, y: int, value: float, max_abs: float, *, light: bool) -> None:
+    span = max(center - left, right - center)
+    bar = int((abs(value) / max_abs) * span)
+    x0, x1 = (center - bar, center) if value < 0 else (center, center + bar)
+    color = "#86efac" if value >= 0 and light else GREEK_GREEN if value >= 0 else "#fca5a5" if light else GREEK_RED
+    canvas.create_rectangle(x0, y, x1, y + 8, fill=color, outline="")
+
+
+def _scaled_greek_value(value: float | None) -> float | None:
+    return None if value is None else value * 100.0
+
+
+def _greek_signed_money_or_points(value: float, unit: str) -> str:
+    if "delta points" in unit:
+        return f"{value:+.1f} pts"
+    return _greek_signed_money(value)
+
+
+def _greek_signed_money(value: float) -> str:
+    prefix = "-$" if value < 0 else "+$"
+    return f"{prefix}{abs(value):,.0f}"
+
+
+def _move_label_for_visual(move: float) -> str:
+    if abs(move) < 0.001:
+        return "$0 move"
+    prefix = "+$" if move > 0 else "-$"
+    return f"{prefix}{abs(move):g}"
+
+
+def _widget_class(widget: tk.Widget) -> str:
+    try:
+        return str(widget.winfo_class())
+    except Exception:
+        return ""
 
 
 def _sync_readout_window_title(source: tk.Text) -> None:
@@ -796,8 +1164,16 @@ def _greeks_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.cards.grid(row=1, column=0, sticky="ew")
 
+    visual_box = ttk.LabelFrame(frame, text="Active Contract Visuals", style="Card.TLabelframe")
+    visual_box.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+    visual_box.columnconfigure((0, 1), weight=1, uniform="greek_visuals")
+    frame.greek_sensitivity_canvas = tk.Canvas(visual_box, height=150, bg=GREEK_VISUAL_BG, highlightthickness=1, highlightbackground=GREEK_BORDER)  # type: ignore[attr-defined]
+    frame.greek_pnl_canvas = tk.Canvas(visual_box, height=150, bg=GREEK_VISUAL_BG, highlightthickness=1, highlightbackground=GREEK_BORDER)  # type: ignore[attr-defined]
+    frame.greek_sensitivity_canvas.grid(row=0, column=0, sticky="ew", padx=(0, 8), pady=(0, 4))  # type: ignore[attr-defined]
+    frame.greek_pnl_canvas.grid(row=0, column=1, sticky="ew", pady=(0, 4))  # type: ignore[attr-defined]
+
     tree_box = ttk.LabelFrame(frame, text="Greek Chain Table", style="Card.TLabelframe")
-    tree_box.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+    tree_box.grid(row=3, column=0, sticky="ew", pady=(8, 0))
     tree_box.columnconfigure(0, weight=1)
     columns = ("expiration", "dte", "strike", "type", "bid", "ask", "mark", "iv", "delta", "gamma", "theta", "vega", "rho", "source")
     tree = ttk.Treeview(tree_box, columns=columns, show="headings", height=9, selectmode="browse")
@@ -830,9 +1206,9 @@ def _greeks_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     frame.greek_tree = tree  # type: ignore[attr-defined]
 
     frame.interpretation = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
-    frame.interpretation.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+    frame.interpretation.grid(row=4, column=0, sticky="ew", pady=(8, 0))
     frame.interpretation.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
-    frame.detail_text = _readout_launcher(frame, title="Option Sensitivities Explanation", button_text="Open Greeks Explanation", row=4)  # type: ignore[attr-defined]
+    frame.detail_text = _readout_launcher(frame, title="Option Sensitivities Explanation", button_text="Open Greeks Explanation", row=5)  # type: ignore[attr-defined]
     return frame
 
 
@@ -1827,7 +2203,10 @@ def _render_greeks(self: tk.Tk, payload: _ResearchPayload | None = None) -> None
         frame.status_var.set(f"{len(summary.rows)} contracts loaded. Active Greeks: {active_label}. Source: {source}.")  # type: ignore[attr-defined]
         metric_grid(frame.cards, _greek_metric_cards(active), columns=5, prominent_indexes={0}, card_height=118, prominent_height=118)  # type: ignore[attr-defined]
     _render_greek_table(frame, summary)
+    _render_greek_visual_summary(frame, summary)
     _render_greek_interpretation(frame, summary)
+    frame.detail_text._greek_summary = summary  # type: ignore[attr-defined]
+    frame.detail_text._greek_payload = payload  # type: ignore[attr-defined]
     _set_research_text(frame.detail_text, _greeks_popout_text(payload, summary))  # type: ignore[attr-defined]
 
 
@@ -1872,6 +2251,19 @@ def _render_greek_table(frame: ttk.Frame, summary: GreekSummary) -> None:
         tree.selection_set(selected_iid)
         tree.focus(selected_iid)
         tree.see(selected_iid)
+
+
+def _render_greek_visual_summary(frame: ttk.Frame, summary: GreekSummary) -> None:
+    sensitivity_canvas = getattr(frame, "greek_sensitivity_canvas", None)
+    pnl_canvas = getattr(frame, "greek_pnl_canvas", None)
+    if sensitivity_canvas is None or pnl_canvas is None:
+        return
+    sensitivity_canvas._greek_summary = summary  # type: ignore[attr-defined]
+    pnl_canvas._greek_summary = summary  # type: ignore[attr-defined]
+    sensitivity_canvas.bind("<Configure>", lambda event: _draw_greek_sensitivity_canvas(event.widget))
+    pnl_canvas.bind("<Configure>", lambda event: _draw_greek_pnl_canvas(event.widget))
+    _draw_greek_sensitivity_canvas(sensitivity_canvas)
+    _draw_greek_pnl_canvas(pnl_canvas)
 
 
 def _render_greek_interpretation(frame: ttk.Frame, summary: GreekSummary) -> None:
