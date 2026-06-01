@@ -90,11 +90,11 @@ def build_greek_summary(
     selected_candidate: Any | None = None,
     selected_contract_symbol: str | None = None,
 ) -> GreekSummary:
-    """Normalize Schwab option-chain contracts into Greek snapshots.
+    """Normalize Schwab option-chain rows into option Greek snapshots.
 
-    Schwab fields are used first. Missing Greeks are estimated with Black-Scholes
-    when the contract has enough price/volatility inputs. Values that cannot be
-    sourced or estimated remain explicitly unavailable.
+    Schwab fields are used first. Sentinel values such as -999 are treated as
+    missing, and missing Greeks are estimated locally when there are enough
+    price, strike, DTE, and volatility inputs.
     """
 
     snapshots = [
@@ -106,10 +106,7 @@ def build_greek_summary(
     nearest_call = _nearest_snapshot(snapshots, underlying_price, "call")
     nearest_put = _nearest_snapshot(snapshots, underlying_price, "put")
     primary = selected or nearest_call or nearest_put
-    marked_rows = [
-        _mark_selected(snapshot, primary)
-        for snapshot in snapshots
-    ]
+    marked_rows = [_mark_selected(snapshot, primary) for snapshot in snapshots]
     selected = _mark_selected(selected, selected) if selected is not None else None
     nearest_call = _replace_from_marked(marked_rows, nearest_call)
     nearest_put = _replace_from_marked(marked_rows, nearest_put)
@@ -126,6 +123,7 @@ def build_greek_summary(
     if any(_uses_source(snapshot, SOURCE_UNAVAILABLE) for snapshot in marked_rows):
         warnings.append("Some values remain unavailable because the contract lacked enough data to estimate them.")
 
+    active = selected or nearest_call or nearest_put
     return GreekSummary(
         underlying=_summary_underlying(marked_rows, selected_candidate),
         underlying_price=underlying_price,
@@ -134,7 +132,7 @@ def build_greek_summary(
         nearest_call=nearest_call,
         nearest_put=nearest_put,
         warnings=warnings,
-        plain_english=plain_english_greek_readout(selected or nearest_call or nearest_put, underlying_price, warnings),
+        plain_english=plain_english_greek_readout(active, underlying_price, warnings),
     )
 
 
@@ -148,8 +146,7 @@ def plain_english_greek_readout(
         lines.extend(warnings)
         return lines
 
-    contract_label = _contract_label(snapshot)
-    lines = [f"{contract_label} is the active contract for the Greeks readout."]
+    lines = [f"{_contract_label(snapshot)} is the active contract for the Greeks readout."]
     if underlying_price is not None:
         lines.append(f"Underlying reference price is ${underlying_price:,.2f}.")
     if snapshot.delta.value is not None:
@@ -166,8 +163,12 @@ def plain_english_greek_readout(
         lines.append("Vega is unavailable for this contract.")
     if snapshot.gamma.value is not None:
         lines.append(f"Gamma {snapshot.gamma.value:+.4f} shows how much delta changes after a $1 move in the stock.")
+    else:
+        lines.append("Gamma is unavailable for this contract.")
     if snapshot.rho.value is not None:
         lines.append(f"Rho {snapshot.rho.value:+.3f} estimates the option-price impact from a one-point rate move.")
+    else:
+        lines.append("Rho is unavailable for this contract.")
     lines.append(f"Source mix: {snapshot.source_summary}.")
     lines.extend(warnings)
     return lines
@@ -185,26 +186,11 @@ def greek_dollar_meanings(snapshot: OptionGreekSnapshot) -> list[tuple[str, str]
     rho = snapshot.rho.value
     dte = snapshot.dte
     return [
-        (
-            f"Delta {_signed_decimal(delta, digits=3)}",
-            "--" if delta is None else f"{_signed_money(delta * 100, digits=0)} per +$1 stock move",
-        ),
-        (
-            f"Gamma {_signed_decimal(gamma, digits=4)}",
-            "--" if gamma is None else f"Delta changes by about {_signed_points(gamma * 100)} points per $1 move",
-        ),
-        (
-            f"Theta {_signed_decimal(theta, digits=3)}",
-            "--" if theta is None else f"{_signed_money(theta * 100, digits=0)} per day",
-        ),
-        (
-            f"Vega {_signed_decimal(vega, digits=3)}",
-            "--" if vega is None else f"{_signed_money(vega * 100, digits=0)} per +1 vol point",
-        ),
-        (
-            f"Rho {_signed_decimal(rho, digits=3)}",
-            _rho_meaning(rho, dte),
-        ),
+        (f"Delta {_signed_decimal(delta, digits=3)}", "--" if delta is None else f"{_signed_money(delta * 100, digits=0)} per +$1 stock move"),
+        (f"Gamma {_signed_decimal(gamma, digits=4)}", "--" if gamma is None else f"Delta changes by about {_signed_points(gamma * 100)} points per $1 move"),
+        (f"Theta {_signed_decimal(theta, digits=3)}", "--" if theta is None else f"{_signed_money(theta * 100, digits=0)} per day"),
+        (f"Vega {_signed_decimal(vega, digits=3)}", "--" if vega is None else f"{_signed_money(vega * 100, digits=0)} per +1 vol point"),
+        (f"Rho {_signed_decimal(rho, digits=3)}", _rho_meaning(rho, dte)),
     ]
 
 
@@ -251,11 +237,7 @@ def rank_greek_contracts(
     side = (option_type or (active.option_type if active is not None else "")).lower()
     if side not in {"call", "put"}:
         return []
-    candidates = [
-        snapshot
-        for snapshot in summary.rows
-        if snapshot.option_type == side and _has_rankable_greeks(snapshot)
-    ]
+    candidates = [snapshot for snapshot in summary.rows if snapshot.option_type == side and _has_rankable_greeks(snapshot)]
     if not candidates:
         return []
     if active is not None and active.dte is not None:
@@ -310,7 +292,6 @@ def build_greek_decision_section(summary: GreekSummary, *, atr: float | None = N
     symbol = (summary.underlying or active.underlying or "Underlying").upper()
     underlying_price = summary.underlying_price
     label = _contract_label(active)
-    dte_text = "--" if active.dte is None else f"{active.dte}"
     classification = classify_greek_contract(active, underlying_price)
     option_word = active.option_type.lower()
     direction_word = "rise" if option_word == "call" else "fall"
@@ -333,25 +314,15 @@ def build_greek_decision_section(summary: GreekSummary, *, atr: float | None = N
         "",
         f"The {active.strike:g} {option_word} means this:" if active.strike is not None else f"The active {option_word} means this:",
         "",
-        "| Greek | Meaning in dollars |",
-        "| ----- | ----- |",
     ]
-    for greek, meaning in greek_dollar_meanings(active):
-        lines.append(f"| {greek} | {meaning} |")
+    lines.extend(_format_two_column_block("Greek", "Meaning in dollars", greek_dollar_meanings(active)))
 
-    lines.extend(
-        [
-            "",
-            "Expected P/L from Greek approximation",
-            "",
-            "Assuming IV does not change.",
-            "",
-            f"| {symbol} move | Approx P/L after 1 day | Approx P/L after {offset.full_window_days} days |",
-            "| ----- | ----- | ----- |",
-        ]
-    )
-    for row in rows:
-        lines.append(f"| {_move_label(row.move)} | {_money(row.one_day_pnl, digits=0)} | {_money(row.full_window_pnl, digits=0)} |")
+    lines.extend(["", "Expected P/L from Greek approximation", "", "Assuming IV does not change.", ""])
+    pnl_rows = [
+        (_move_label(row.move), _money(row.one_day_pnl, digits=0), _money(row.full_window_pnl, digits=0))
+        for row in rows
+    ]
+    lines.extend(_format_three_column_block(f"{symbol} move", "Approx P/L after 1 day", f"Approx P/L after {offset.full_window_days} days", pnl_rows))
 
     lines.extend(["", "Theta offset math:"])
     if offset.one_day_move is None or offset.full_window_move is None:
@@ -406,6 +377,29 @@ def build_greek_decision_section(summary: GreekSummary, *, atr: float | None = N
     return "\n".join(lines)
 
 
+def _format_two_column_block(header_a: str, header_b: str, rows: list[tuple[str, str]]) -> list[str]:
+    width_a = max([len(header_a), *(len(str(row[0])) for row in rows)], default=len(header_a))
+    width_b = max([len(header_b), *(len(str(row[1])) for row in rows)], default=len(header_b))
+    lines = [
+        f"{header_a:<{width_a}}  {header_b:<{width_b}}",
+        f"{'-' * width_a}  {'-' * width_b}",
+    ]
+    lines.extend(f"{str(left):<{width_a}}  {str(right):<{width_b}}" for left, right in rows)
+    return lines
+
+
+def _format_three_column_block(header_a: str, header_b: str, header_c: str, rows: list[tuple[str, str, str]]) -> list[str]:
+    width_a = max([len(header_a), *(len(str(row[0])) for row in rows)], default=len(header_a))
+    width_b = max([len(header_b), *(len(str(row[1])) for row in rows)], default=len(header_b))
+    width_c = max([len(header_c), *(len(str(row[2])) for row in rows)], default=len(header_c))
+    lines = [
+        f"{header_a:<{width_a}}  {header_b:>{width_b}}  {header_c:>{width_c}}",
+        f"{'-' * width_a}  {'-' * width_b}  {'-' * width_c}",
+    ]
+    lines.extend(f"{str(first):<{width_a}}  {str(second):>{width_b}}  {str(third):>{width_c}}" for first, second, third in rows)
+    return lines
+
+
 def _snapshots_from_chain_row(row: dict[str, Any], underlying_price: float | None) -> list[OptionGreekSnapshot]:
     snapshots: list[OptionGreekSnapshot] = []
     for option_type in ("call", "put"):
@@ -415,12 +409,7 @@ def _snapshots_from_chain_row(row: dict[str, Any], underlying_price: float | Non
     return snapshots
 
 
-def _snapshot_from_contract(
-    row: dict[str, Any],
-    contract: dict[str, Any],
-    option_type: str,
-    underlying_price: float | None,
-) -> OptionGreekSnapshot:
+def _snapshot_from_contract(row: dict[str, Any], contract: dict[str, Any], option_type: str, underlying_price: float | None) -> OptionGreekSnapshot:
     underlying = str(row.get("underlying") or _first_text(contract, "underlying") or "").upper()
     contract_symbol = str(_first_text(contract, "symbol", "contractSymbol", "optionSymbol") or "")
     expiration = str(row.get("expiration_label") or _first_text(contract, "expirationDate") or row.get("expiration_date") or "--")
@@ -524,20 +513,12 @@ def _calculated_greeks(
     vega = underlying_price * disc_q * pdf * sqrt_t / 100.0
     if option_type == "put":
         delta = disc_q * (_normal_cdf(d1) - 1.0)
-        theta_annual = (
-            -(underlying_price * disc_q * pdf * sigma) / (2.0 * sqrt_t)
-            + risk_free_rate * strike * disc_r * _normal_cdf(-d2)
-            - dividend_yield * underlying_price * disc_q * _normal_cdf(-d1)
-        )
+        theta_annual = (-(underlying_price * disc_q * pdf * sigma) / (2.0 * sqrt_t) + risk_free_rate * strike * disc_r * _normal_cdf(-d2) - dividend_yield * underlying_price * disc_q * _normal_cdf(-d1))
         rho = -strike * t * disc_r * _normal_cdf(-d2) / 100.0
         value = strike * disc_r * _normal_cdf(-d2) - underlying_price * disc_q * _normal_cdf(-d1)
     else:
         delta = disc_q * _normal_cdf(d1)
-        theta_annual = (
-            -(underlying_price * disc_q * pdf * sigma) / (2.0 * sqrt_t)
-            - risk_free_rate * strike * disc_r * _normal_cdf(d2)
-            + dividend_yield * underlying_price * disc_q * _normal_cdf(d1)
-        )
+        theta_annual = (-(underlying_price * disc_q * pdf * sigma) / (2.0 * sqrt_t) - risk_free_rate * strike * disc_r * _normal_cdf(d2) + dividend_yield * underlying_price * disc_q * _normal_cdf(d1))
         rho = strike * t * disc_r * _normal_cdf(d2) / 100.0
         value = underlying_price * disc_q * _normal_cdf(d1) - strike * disc_r * _normal_cdf(d2)
 
@@ -606,11 +587,7 @@ def _black_scholes_price(
     return underlying_price * disc_q * _normal_cdf(d1) - strike * disc_r * _normal_cdf(d2)
 
 
-def _match_selected_snapshot(
-    snapshots: list[OptionGreekSnapshot],
-    selected_candidate: Any | None,
-    selected_contract_symbol: str | None,
-) -> OptionGreekSnapshot | None:
+def _match_selected_snapshot(snapshots: list[OptionGreekSnapshot], selected_candidate: Any | None, selected_contract_symbol: str | None) -> OptionGreekSnapshot | None:
     requested_symbol = (selected_contract_symbol or str(getattr(selected_candidate, "contract_symbol", "") or "")).strip()
     if requested_symbol:
         match = next((snapshot for snapshot in snapshots if snapshot.contract_symbol and snapshot.contract_symbol == requested_symbol), None)
@@ -633,11 +610,7 @@ def _match_selected_snapshot(
     return matches[0] if matches else None
 
 
-def _nearest_snapshot(
-    snapshots: list[OptionGreekSnapshot],
-    underlying_price: float | None,
-    option_type: str,
-) -> OptionGreekSnapshot | None:
+def _nearest_snapshot(snapshots: list[OptionGreekSnapshot], underlying_price: float | None, option_type: str) -> OptionGreekSnapshot | None:
     candidates = [snapshot for snapshot in snapshots if snapshot.option_type == option_type and snapshot.strike is not None]
     if not candidates:
         return None
@@ -666,13 +639,7 @@ def _same_contract(left: OptionGreekSnapshot, right: OptionGreekSnapshot) -> boo
     return left.option_type == right.option_type and left.strike == right.strike and left.expiration == right.expiration
 
 
-def _calculation_warnings(
-    underlying_price: float | None,
-    strike: float | None,
-    dte: int | None,
-    iv: float | None,
-    *values: GreekValue,
-) -> list[str]:
+def _calculation_warnings(underlying_price: float | None, strike: float | None, dte: int | None, iv: float | None, *values: GreekValue) -> list[str]:
     if not any(value.source == SOURCE_UNAVAILABLE for value in values):
         return []
     missing = []
@@ -699,10 +666,7 @@ def _source_summary(values: tuple[GreekValue, ...]) -> str:
 
 
 def _uses_source(snapshot: OptionGreekSnapshot, source: str) -> bool:
-    return any(
-        value.source == source
-        for value in (snapshot.delta, snapshot.gamma, snapshot.theta, snapshot.vega, snapshot.rho, snapshot.implied_volatility)
-    )
+    return any(value.source == source for value in (snapshot.delta, snapshot.gamma, snapshot.theta, snapshot.vega, snapshot.rho, snapshot.implied_volatility))
 
 
 def _summary_underlying(rows: list[OptionGreekSnapshot], selected_candidate: Any | None) -> str:
@@ -717,10 +681,7 @@ def _contract_label(snapshot: OptionGreekSnapshot) -> str:
 
 
 def _has_decision_greeks(snapshot: OptionGreekSnapshot) -> bool:
-    return all(
-        value.value is not None
-        for value in (snapshot.delta, snapshot.gamma, snapshot.theta, snapshot.vega)
-    )
+    return all(value.value is not None for value in (snapshot.delta, snapshot.gamma, snapshot.theta, snapshot.vega))
 
 
 def _has_rankable_greeks(snapshot: OptionGreekSnapshot) -> bool:
@@ -745,11 +706,7 @@ def _rank_snapshot(snapshot: OptionGreekSnapshot, underlying_price: float | None
     theta_per_delta = None if theta is None else abs(theta) / max(delta, SMALL_DELTA)
     premium = _snapshot_premium(snapshot)
     breakeven = _breakeven(snapshot, premium) if premium is not None else None
-    breakeven_distance = (
-        _breakeven_distance(snapshot, underlying_price, premium)
-        if underlying_price is not None and premium is not None
-        else None
-    )
+    breakeven_distance = _breakeven_distance(snapshot, underlying_price, premium) if underlying_price is not None and premium is not None else None
     premium_efficiency = delta / premium if premium is not None and premium > 0 else None
     moneyness = _moneyness(snapshot, underlying_price)
     score = delta * 80.0
@@ -767,26 +724,10 @@ def _rank_snapshot(snapshot: OptionGreekSnapshot, underlying_price: float | None
         elif delta < 0.25:
             score -= 12.0
     reason = _rank_reason(snapshot, theta_per_delta, premium, breakeven_distance, premium_efficiency)
-    return GreekContractRank(
-        snapshot=snapshot,
-        label=_rank_label(snapshot),
-        score=score,
-        theta_per_delta=theta_per_delta,
-        premium=premium,
-        breakeven=breakeven,
-        breakeven_distance=breakeven_distance,
-        premium_efficiency=premium_efficiency,
-        reason=reason,
-    )
+    return GreekContractRank(snapshot, _rank_label(snapshot), score, theta_per_delta, premium, breakeven, breakeven_distance, premium_efficiency, reason)
 
 
-def _rank_reason(
-    snapshot: OptionGreekSnapshot,
-    theta_per_delta: float | None,
-    premium: float | None,
-    breakeven_distance: float | None,
-    premium_efficiency: float | None,
-) -> str:
+def _rank_reason(snapshot: OptionGreekSnapshot, theta_per_delta: float | None, premium: float | None, breakeven_distance: float | None, premium_efficiency: float | None) -> str:
     parts = [f"delta {_signed_decimal(snapshot.delta.value, digits=3)}"]
     if theta_per_delta is not None:
         parts.append(f"theta/delta {theta_per_delta:.2f}")
@@ -814,18 +755,14 @@ def _snapshot_premium(snapshot: OptionGreekSnapshot) -> float | None:
 def _breakeven(snapshot: OptionGreekSnapshot, premium: float | None) -> float | None:
     if snapshot.strike is None or premium is None:
         return None
-    if snapshot.option_type == "put":
-        return snapshot.strike - premium
-    return snapshot.strike + premium
+    return snapshot.strike - premium if snapshot.option_type == "put" else snapshot.strike + premium
 
 
 def _breakeven_distance(snapshot: OptionGreekSnapshot, underlying_price: float | None, premium: float | None) -> float | None:
     breakeven = _breakeven(snapshot, premium)
     if breakeven is None or underlying_price is None:
         return None
-    if snapshot.option_type == "put":
-        return underlying_price - breakeven
-    return breakeven - underlying_price
+    return underlying_price - breakeven if snapshot.option_type == "put" else breakeven - underlying_price
 
 
 def _moneyness(snapshot: OptionGreekSnapshot, underlying_price: float | None) -> float | None:
@@ -842,12 +779,8 @@ def _moneyness_phrase(snapshot: OptionGreekSnapshot, underlying_price: float | N
     if pct <= 0.01:
         return "It is basically at the money."
     if snapshot.option_type == "call":
-        if distance < 0:
-            return f"It is in the money by {_money(abs(distance))}."
-        return f"It is out of the money by {_money(abs(distance))}."
-    if distance > 0:
-        return f"It is in the money by {_money(abs(distance))}."
-    return f"It is out of the money by {_money(abs(distance))}."
+        return f"It is in the money by {_money(abs(distance))}." if distance < 0 else f"It is out of the money by {_money(abs(distance))}."
+    return f"It is in the money by {_money(abs(distance))}." if distance > 0 else f"It is out of the money by {_money(abs(distance))}."
 
 
 def _highest_gamma_contract(snapshots: list[OptionGreekSnapshot]) -> OptionGreekSnapshot | None:
@@ -896,8 +829,8 @@ def _rho_meaning(rho: float | None, dte: int | None) -> str:
     return f"{_signed_money(rho * 100, digits=0)} per +1 rate point"
 
 
-def _atr_distance_text(distance: float, atr: float | None) -> str:
-    if atr is None or atr <= 0:
+def _atr_distance_text(distance: float | None, atr: float | None) -> str:
+    if distance is None or atr is None or atr <= 0:
         return ""
     return f" That is {distance / atr:.1f} ATR."
 
@@ -919,7 +852,9 @@ def _signed_points(value: float) -> str:
     return f"{'-' if value < 0 else '+'}{formatted}"
 
 
-def _signed_money(value: float, *, digits: int = 2) -> str:
+def _signed_money(value: float | None, *, digits: int = 2) -> str:
+    if value is None:
+        return "--"
     rounded = round(value, digits)
     if abs(rounded) < (0.5 if digits == 0 else 0.005):
         return "$0" if digits == 0 else "$0.00"
