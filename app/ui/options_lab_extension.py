@@ -1131,13 +1131,6 @@ def _build_schwab_trading_tab(
     _add_workspace_button(actions, row=3, column=1, text="Live Safety", command=schwab_action("show_live_submit_safety_review"))
     _add_workspace_button(actions, row=3, column=2, text="LIVE Submit", command=schwab_action("submit_selected_venue", "submit_live_schwab_order_guarded"), style="Danger.TButton")
 
-    status = ttk.Frame(ticket, style="Panel.TFrame")
-    status.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(8, 0))
-    status.columnconfigure((0, 1, 2), weight=1)
-    ttk.Label(status, textvariable=self.schwab_status_var, style="Chip.TLabel").grid(row=0, column=0, sticky="ew", padx=(0, 6))
-    ttk.Label(status, textvariable=self.schwab_preview_status_var, style="Chip.TLabel").grid(row=0, column=1, sticky="ew", padx=(0, 6))
-    ttk.Label(status, textvariable=self.schwab_verification_status_var, style="Chip.TLabel").grid(row=0, column=2, sticky="ew")
-
     _set_workspace_text(
         self.schwab_trading_preview_text,
         "SCHWAB TRADING WORKSPACE\n"

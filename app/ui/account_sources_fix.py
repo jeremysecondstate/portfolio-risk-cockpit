@@ -181,8 +181,6 @@ def _rebuild_schwab_ticket_side_by_side(self: tk.Tk, ticket: ttk.LabelFrame) -> 
     _grid_pair(options, 5, "Credit", ttk.Entry(options, textvariable=self.options_credit_var), "Target price", ttk.Entry(options, textvariable=self.options_target_price_var))
 
     _build_schwab_action_grid(self, ticket)
-    _build_schwab_status_bar(self, ticket)
-
     self._schwab_ticket_side_by_side_built = True
     self._schwab_options_fields_integrated = True
 
@@ -290,15 +288,6 @@ def _add_action_button(parent: ttk.Frame, *, row: int, column: int, text: str, c
         pady=(0 if row == 0 else 6, 6),
         ipady=1,
     )
-
-
-def _build_schwab_status_bar(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
-    status = ttk.Frame(ticket, style="Panel.TFrame")
-    status.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-    status.columnconfigure((0, 1, 2), weight=1)
-    ttk.Label(status, textvariable=self.schwab_status_var, style="Chip.TLabel").grid(row=0, column=0, sticky="ew", padx=(0, 6))
-    ttk.Label(status, textvariable=self.schwab_preview_status_var, style="Chip.TLabel").grid(row=0, column=1, sticky="ew", padx=(0, 6))
-    ttk.Label(status, textvariable=self.schwab_verification_status_var, style="Chip.TLabel").grid(row=0, column=2, sticky="ew")
 
 
 def _run_schwab_workspace_action(self: tk.Tk, *command_names: str) -> None:
