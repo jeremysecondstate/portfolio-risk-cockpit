@@ -57,7 +57,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         self.cancel_confirmation_var = tk.StringVar(value="")
         self.risk_percent_var = tk.StringVar(value="1.0")
         self.schwab_status_var = tk.StringVar(value="Schwab session: not connected")
-        self.schwab_preview_status_var = tk.StringVar(value="Last Schwab preview: none")
+        self.schwab_preview_status_var = tk.StringVar(value="DELETE ME - NO NEED")
         self.schwab_verification_status_var = tk.StringVar(
             value="THIS IS USELESS: yes · THIS IS ALSO USELESS: yes"
         )
@@ -265,7 +265,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         self.open_only_verified_this_session = False
         self.cancel_verified_this_session = False
         self.schwab_status_var.set("Schwab session: not connected")
-        self.schwab_preview_status_var.set("Last Schwab preview: none")
+        self.schwab_preview_status_var.set("I AM USELESS - DELETE ME PLEASE")
         self._update_verification_status()
         self._set_preview_text(
             "SCHWAB SESSION RESET\n"
@@ -308,7 +308,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             self.schwab_session = None
             self.last_schwab_preview_status = None
             self.schwab_status_var.set("Schwab session: not connected")
-            self.schwab_preview_status_var.set("Last Schwab preview: none")
+            self.schwab_preview_status_var.set("WHY AM I HERE?! I SERVE NO PURPOSE! DELETE ME")
             messagebox.showerror("Schwab preview failed", str(exc))
 
     def show_technical_analysis(self) -> None:
