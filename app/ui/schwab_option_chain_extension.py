@@ -155,9 +155,42 @@ def _request_option_chain(session: Any, symbol: str, *, strike_count: int) -> tu
     return response.status_code, payload
 
 
-def _populate_option_chain_tree(self: tk.Tk, rows: list[dict[str, Any]]) -> None:
+def _widget_exists(widget: Any) -> bool:
+    try:
+        return bool(widget is not None and widget.winfo_exists())
+    except tk.TclError:
+        return False
+
+
+def _find_option_chain_tree(root: tk.Misc) -> ttk.Treeview | None:
+    for child in root.winfo_children():
+        if isinstance(child, ttk.Treeview):
+            try:
+                if tuple(child.cget("columns")) == _OPTION_CHAIN_COLUMNS:
+                    return child
+            except tk.TclError:
+                pass
+        found = _find_option_chain_tree(child)
+        if found is not None:
+            return found
+    return None
+
+
+def _resolve_option_chain_tree(self: tk.Tk) -> ttk.Treeview | None:
     tree = getattr(self, "schwab_option_chain_tree", None)
+    if _widget_exists(tree):
+        return tree
+    tree = _find_option_chain_tree(self)
+    if tree is not None:
+        self.schwab_option_chain_tree = tree
+        return tree
+    return None
+
+
+def _populate_option_chain_tree(self: tk.Tk, rows: list[dict[str, Any]]) -> None:
+    tree = _resolve_option_chain_tree(self)
     if tree is None:
+        self.schwab_option_chain_rows = {}
         return
 
     for iid in tree.get_children():
@@ -185,7 +218,7 @@ def _populate_option_chain_tree(self: tk.Tk, rows: list[dict[str, Any]]) -> None
 
 
 def _use_selected_schwab_option(self: tk.Tk, option_type: str) -> None:
-    tree = getattr(self, "schwab_option_chain_tree", None)
+    tree = _resolve_option_chain_tree(self)
     rows = getattr(self, "schwab_option_chain_rows", {})
     if tree is None:
         messagebox.showerror("Option selection blocked", "Load the Schwab option chain first.")
