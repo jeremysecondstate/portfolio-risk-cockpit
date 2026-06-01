@@ -256,7 +256,8 @@ def _workspace_holdings_table(parent: ttk.Frame, include_custom_pnl: bool = Fals
         "custom_pnl": ("Custom P&L", 110, tk.E),
         "basis_status": ("Basis Status", 180, tk.W),
     }
-    for column, (label, width, anchor) in headings.items():
+    for column in columns:
+        label, width, anchor = headings[column]
         table.heading(column, text=label)
         table.column(column, width=width, anchor=anchor, stretch=True)
     table.pack(fill=tk.BOTH, expand=True)
