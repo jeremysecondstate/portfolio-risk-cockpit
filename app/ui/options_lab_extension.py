@@ -26,6 +26,8 @@ def install_options_lab_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls.use_current_cockpit_source_portfolio = _use_current_cockpit_source_portfolio  # type: ignore[attr-defined]
     app_cls.use_hyperliquid_mid_market = _use_hyperliquid_mid_market  # type: ignore[attr-defined]
     app_cls.run_hyperliquid_perp_what_if = _run_hyperliquid_perp_what_if  # type: ignore[attr-defined]
+    app_cls.open_hyperliquid_output_popout = _open_hyperliquid_output_popout  # type: ignore[attr-defined]
+    app_cls.refresh_hyperliquid_output_popout = _refresh_hyperliquid_output_popout  # type: ignore[attr-defined]
     app_cls.update_workspace_holdings_tables = _update_workspace_holdings_tables  # type: ignore[attr-defined]
     app_cls.set_hyperliquid_sync_status = _set_hyperliquid_sync_status  # type: ignore[attr-defined]
 
@@ -295,6 +297,117 @@ def _set_workspace_text(widget: tk.Text, content: str) -> None:
     if callable(styler):
         styler(content)
     widget.configure(state=tk.DISABLED)
+
+
+def _open_hyperliquid_output_popout(self: tk.Tk) -> None:
+    existing = getattr(self, "hyperliquid_output_popout_window", None)
+    if existing is not None:
+        try:
+            if existing.winfo_exists():
+                existing.deiconify()
+                existing.lift()
+                existing.focus_force()
+                self.refresh_hyperliquid_output_popout(force=True)
+                return
+        except tk.TclError:
+            pass
+
+    window = tk.Toplevel(self)
+    window.title("Hyperliquid Analysis + Order Output")
+    window.geometry("980x720")
+    window.minsize(620, 420)
+    window.rowconfigure(1, weight=1)
+    window.columnconfigure(0, weight=1)
+
+    toolbar = ttk.Frame(window, padding=(10, 8), style="Panel.TFrame")
+    toolbar.grid(row=0, column=0, sticky="ew")
+    toolbar.columnconfigure(0, weight=1)
+    ttk.Label(toolbar, text="Hyperliquid ticket analysis and order output.", style="Subtle.TLabel").grid(row=0, column=0, sticky="w")
+    ttk.Button(toolbar, text="Refresh", command=lambda: self.refresh_hyperliquid_output_popout(force=True)).grid(row=0, column=1, sticky="e", padx=(8, 0))
+
+    body = ttk.Frame(window, padding=(10, 0, 10, 10), style="Panel.TFrame")
+    body.grid(row=1, column=0, sticky="nsew")
+    body.rowconfigure(0, weight=1)
+    body.columnconfigure(0, weight=1)
+
+    text = tk.Text(
+        body,
+        wrap=tk.WORD,
+        font=("Segoe UI", 10),
+        padx=18,
+        pady=16,
+        relief=tk.FLAT,
+        borderwidth=0,
+        background="#f8fafc",
+        foreground="#0f172a",
+        insertbackground="#0f172a",
+        selectbackground="#bfdbfe",
+        spacing1=3,
+        spacing2=1,
+        spacing3=6,
+    )
+    _configure_workspace_report_tags(text)
+    text.grid(row=0, column=0, sticky="nsew")
+    scrollbar = ttk.Scrollbar(body, orient=tk.VERTICAL, command=text.yview)
+    scrollbar.grid(row=0, column=1, sticky="ns")
+    text.configure(yscrollcommand=scrollbar.set)
+
+    self.hyperliquid_output_popout_window = window
+    self.hyperliquid_output_popout_text = text
+    self.hyperliquid_output_popout_last_content = None
+
+    def _on_close() -> None:
+        self.hyperliquid_output_popout_window = None
+        self.hyperliquid_output_popout_text = None
+        self.hyperliquid_output_popout_last_content = None
+        window.destroy()
+
+    window.protocol("WM_DELETE_WINDOW", _on_close)
+    self.refresh_hyperliquid_output_popout(force=True)
+    _schedule_hyperliquid_output_popout_refresh(self)
+
+
+def _refresh_hyperliquid_output_popout(self: tk.Tk, *, force: bool = False) -> None:
+    source = getattr(self, "hyperliquid_trading_preview_text", None)
+    target = getattr(self, "hyperliquid_output_popout_text", None)
+    if source is None or target is None:
+        return
+
+    try:
+        content = source.get("1.0", tk.END)
+        last_content = getattr(self, "hyperliquid_output_popout_last_content", None)
+        if not force and content == last_content:
+            return
+
+        current_yview = target.yview()
+        top_fraction = current_yview[0] if current_yview else 0.0
+
+        target.configure(state=tk.NORMAL)
+        target.delete("1.0", tk.END)
+        target.insert(tk.END, content)
+        _apply_workspace_report_tags(target, content)
+        target.configure(state=tk.DISABLED)
+        target.yview_moveto(top_fraction)
+        self.hyperliquid_output_popout_last_content = content
+    except tk.TclError:
+        return
+
+
+def _schedule_hyperliquid_output_popout_refresh(self: tk.Tk) -> None:
+    window = getattr(self, "hyperliquid_output_popout_window", None)
+    if window is None:
+        return
+    try:
+        if not window.winfo_exists():
+            return
+    except tk.TclError:
+        return
+
+    self.refresh_hyperliquid_output_popout()
+    try:
+        window.after(750, lambda: _schedule_hyperliquid_output_popout_refresh(self))
+    except tk.TclError:
+        return
 
 
 def _bind_workspace_holdings_click(self: tk.Tk, table: ttk.Treeview, venue: str) -> None:
@@ -1264,6 +1377,53 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
 
         return run
 
+    def hyperliquid_research_action(ticket_kind: str, tab_attr: str) -> Callable[[], None]:
+        def run() -> None:
+            _sync_hyperliquid_ticket_to_shared(self, ticket_kind)
+            try:
+                self.trade_venue_var.set("Hyperliquid")
+                if hasattr(self, "on_trading_venue_changed"):
+                    try:
+                        self.on_trading_venue_changed()
+                    except Exception:
+                        pass
+                opener = getattr(self, "show_hyperliquid_crypto_research_workspace", None)
+                if not callable(opener):
+                    messagebox.showinfo("Technical analysis unavailable", "Hyperliquid research workspace is not installed.")
+                    return
+                opener()
+
+                def select_tab() -> None:
+                    notebook = getattr(self, "hyperliquid_research_tabs", None)
+                    frame = getattr(self, tab_attr, None)
+                    target = getattr(frame, "_scrollable_outer", frame)
+                    if notebook is None or target is None:
+                        return
+                    try:
+                        notebook.select(target)
+                    except tk.TclError:
+                        pass
+
+                self.after(250, select_tab)
+            finally:
+                _sync_hyperliquid_ticket_from_shared(self, ticket_kind)
+
+        return run
+
+    def hyperliquid_popout_action(ticket_kind: str, *names: str) -> Callable[[], None]:
+        def run() -> None:
+            _run_hyperliquid_ticket_action(
+                self,
+                ticket_kind=ticket_kind,
+                preview_widget=self.hyperliquid_trading_preview_text,
+                command=_first_available_command(self, *names),
+            )
+            opener = getattr(self, "open_hyperliquid_output_popout", None)
+            if callable(opener):
+                opener()
+
+        return run
+
     from app.ui import hyperliquid_trading_extension as hyperliquid_ui
 
     hyperliquid_ui._ensure_hyperliquid_vars(self)
@@ -1340,7 +1500,22 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     )
     self._grid_row(ticket, 2, "Size", ttk.Entry(ticket, textvariable=self.hyperliquid_perp_quantity_var), "Entry / Limit", ttk.Entry(ticket, textvariable=self.hyperliquid_perp_limit_price_var))
     self._grid_row(ticket, 3, "TP price", ttk.Entry(ticket, textvariable=self.hyperliquid_perp_target_price_var), "SL price", ttk.Entry(ticket, textvariable=self.hyperliquid_perp_stop_price_var))
-    self._grid_row(ticket, 4, "HL TIF", ttk.Combobox(ticket, textvariable=self.hyperliquid_perp_tif_var, values=["Alo", "Ioc", "Gtc"], state="readonly"), "Reduce-only", ttk.Checkbutton(ticket, variable=self.hyperliquid_perp_reduce_only_var),
+    reduce_only_controls = ttk.Frame(ticket, style="Canvas.TFrame")
+    reduce_only_controls.columnconfigure(1, weight=1)
+    ttk.Checkbutton(reduce_only_controls, variable=self.hyperliquid_perp_reduce_only_var).grid(row=0, column=0, sticky="w")
+    ttk.Button(
+        reduce_only_controls,
+        text="Use Mid",
+        command=hyperliquid_action("perp", "use_hyperliquid_mid_market"),
+        style="Accent.TButton",
+    ).grid(row=0, column=1, sticky="ew", padx=(8, 0))
+    self._grid_row(
+        ticket,
+        4,
+        "HL TIF",
+        ttk.Combobox(ticket, textvariable=self.hyperliquid_perp_tif_var, values=["Alo", "Ioc", "Gtc"], state="readonly"),
+        "Reduce-only",
+        reduce_only_controls,
     )
     leverage_combo = ttk.Combobox(ticket, textvariable=self.hyperliquid_perp_leverage_var, values=["1", "2", "3", "5", "10", "20", "50"], width=8)
     margin_combo = ttk.Combobox(ticket, textvariable=self.hyperliquid_perp_margin_mode_var, values=["Cross", "Isolated"], state="readonly")
@@ -1361,8 +1536,8 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     for column in range(3):
         actions.columnconfigure(column, weight=1, uniform="hyperliquid_actions")
 
-    _add_workspace_button(actions, row=0, column=0, text="Use Mid", command=hyperliquid_action("perp", "use_hyperliquid_mid_market"), style="Accent.TButton")
-    _add_workspace_button(actions, row=0, column=1, text="Perp What-If", command=hyperliquid_workspace_action("perp", "hyperliquid_crypto_scenarios_frame", "run_hyperliquid_perp_what_if"), style="Accent.TButton")
+    _add_workspace_button(actions, row=0, column=0, text="Technical Analysis", command=hyperliquid_research_action("perp", "hyperliquid_crypto_technicals_frame"), style="Accent.TButton")
+    _add_workspace_button(actions, row=0, column=1, text="Perp What-If", command=hyperliquid_popout_action("perp", "run_hyperliquid_perp_what_if"), style="Accent.TButton")
     _add_workspace_button(actions, row=0, column=2, text="Preview Perp Ticket", command=hyperliquid_action("perp", "preview_hyperliquid_ticket", "preview_order"))
     _add_workspace_button(actions, row=1, column=0, text="TP/SL", command=hyperliquid_action("perp", "show_hyperliquid_position_tpsl_dialog"))
     _add_workspace_button(actions, row=1, column=1, text="Edit Position", command=hyperliquid_action("perp", "show_hyperliquid_perp_position_editor"))
@@ -1378,7 +1553,8 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
         "=============================\n\n"
         "Use Mid pulls the current Hyperliquid allMids price into Entry / Limit.\n\n"
         "Spot What-If compares the spot ticket against the matching perp exposure so you can see whether a spot add/sell hedges or stacks the current position.\n\n"
-        "Perp What-If compares your target and pain prices against the entry. It estimates gross P&L, fees, net P&L, account-risk-style ROI on margin, and a rough liquidation line.\n\n"
+        "Technical Analysis opens the Hyperliquid crypto research and risk workspace.\n\n"
+        "Perp What-If compares your target and pain prices against the entry, then opens a popout copy of this output. It estimates gross P&L, fees, net P&L, account-risk-style ROI on margin, and a rough liquidation line.\n\n"
         "The rough liquidation line ignores maintenance margin, funding, slippage, partial fills, and account-wide margin. Treat it as a planning warning, not an exchange quote.",
     )
 
