@@ -95,6 +95,18 @@ def _load_schwab_option_chain(self: tk.Tk) -> None:
         messagebox.showerror("Option chain blocked", "Chain strikes must be positive.")
         return
 
+    already_loaded_symbol = str(getattr(self, "schwab_option_chain_loaded_symbol", "") or "").upper()
+    already_loaded_count = getattr(self, "schwab_option_chain_loaded_strike_count", None)
+    if (
+        already_loaded_symbol == symbol
+        and already_loaded_count == strike_count
+        and getattr(self, "schwab_option_chain_rows", {})
+        and _resolve_option_chain_tree(self) is not None
+    ):
+        row_count = len(getattr(self, "schwab_option_chain_rows", {}) or {})
+        self.schwab_option_chain_status_var.set(f"✓ Option chain already loaded for {symbol} ({row_count} rows)")
+        return
+
     try:
         session = self._authorize_schwab_session()
         if session is None:
@@ -107,6 +119,8 @@ def _load_schwab_option_chain(self: tk.Tk) -> None:
 
         rows = _option_chain_rows(payload)
         _populate_option_chain_tree(self, rows)
+        self.schwab_option_chain_loaded_symbol = symbol
+        self.schwab_option_chain_loaded_strike_count = strike_count
 
         underlying_price = _underlying_price(payload)
         if underlying_price is not None and hasattr(self, "options_underlying_price_var"):
@@ -115,7 +129,7 @@ def _load_schwab_option_chain(self: tk.Tk) -> None:
             self.options_symbol_var.set(symbol)
 
         self.schwab_status_var.set("Schwab session: connected")
-        self.schwab_option_chain_status_var.set(f"Option chain: {len(rows)} rows loaded for {symbol}")
+        self.schwab_option_chain_status_var.set(f"✓ Option chain loaded for {symbol} ({len(rows)} rows)")
         _set_schwab_mode_text(
             self,
             "SCHWAB OPTION CHAIN\n"
@@ -193,28 +207,33 @@ def _populate_option_chain_tree(self: tk.Tk, rows: list[dict[str, Any]]) -> None
         self.schwab_option_chain_rows = {}
         return
 
-    for iid in tree.get_children():
-        tree.delete(iid)
-    self.schwab_option_chain_rows = {}
+    try:
+        for iid in tree.get_children():
+            tree.delete(iid)
+        self.schwab_option_chain_rows = {}
 
-    for index, row in enumerate(rows):
-        iid = f"option_{index}"
-        self.schwab_option_chain_rows[iid] = row
-        tree.insert(
-            "",
-            tk.END,
-            iid=iid,
-            values=(
-                row["expiration_label"],
-                _format_number(row["strike"], digits=2),
-                _contract_price(row.get("call"), "bid"),
-                _contract_price(row.get("call"), "ask"),
-                _contract_price(row.get("put"), "bid"),
-                _contract_price(row.get("put"), "ask"),
-                _contract_int(row.get("call"), "totalVolume", "volume"),
-                _contract_int(row.get("put"), "totalVolume", "volume"),
-            ),
-        )
+        for index, row in enumerate(rows):
+            iid = f"option_{index}"
+            self.schwab_option_chain_rows[iid] = row
+            tree.insert(
+                "",
+                tk.END,
+                iid=iid,
+                values=(
+                    row["expiration_label"],
+                    _format_number(row["strike"], digits=2),
+                    _contract_price(row.get("call"), "bid"),
+                    _contract_price(row.get("call"), "ask"),
+                    _contract_price(row.get("put"), "bid"),
+                    _contract_price(row.get("put"), "ask"),
+                    _contract_int(row.get("call"), "totalVolume", "volume"),
+                    _contract_int(row.get("put"), "totalVolume", "volume"),
+                ),
+            )
+    except tk.TclError:
+        self.schwab_option_chain_tree = None
+        self.schwab_option_chain_rows = {}
+        return
 
 
 def _use_selected_schwab_option(self: tk.Tk, option_type: str) -> None:
