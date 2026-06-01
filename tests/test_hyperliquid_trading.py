@@ -14,7 +14,7 @@ from app.brokers.hyperliquid.trading import (
 from app.core.portfolio import CashPosition, Portfolio, Position
 from app.ui.cash_positions_extension import _portfolio_display_pnl_summary, _position_pnl_value
 from app.ui.options_lab_extension import _populate_workspace_open_orders_table, _workspace_holding_rows
-from app.ui.hyperliquid_trading_extension import _market_close_limit_price, _normalize_edit_market, _reverse_order_size_for_same_opposite_position, _risk_reward, _selected_hyperliquid_order, _set_hyperliquid_perp_mid_price, normalize_hyperliquid_open_order
+from app.ui.hyperliquid_trading_extension import _market_close_limit_price, _normalize_edit_market, _price_edit_trigger_fields, _reverse_order_size_for_same_opposite_position, _risk_reward, _selected_hyperliquid_order, _set_hyperliquid_perp_mid_price, normalize_hyperliquid_open_order
 from app.ui.hyperliquid_trading_extension import _current_hyperliquid_perp_position, _perp_position_pnl, _portfolio_coin_exposures
 from app.ui.hyperliquid_existing_perp_what_if_extension import (
     GoldilocksCashBudget,
@@ -156,6 +156,41 @@ class HyperliquidTradingTests(unittest.TestCase):
         self.assertEqual(order.price_label, "Market")
         self.assertEqual(order.trigger_condition, "Price above 81698")
         self.assertEqual(order.tpsl_label, "SL")
+
+    def test_price_edit_does_not_carry_invalid_limit_trigger_state(self) -> None:
+        order = normalize_hyperliquid_open_order(
+            {
+                "oid": 451323805673,
+                "coin": "@107",
+                "side": "B",
+                "sz": "2.73",
+                "limitPx": "73.01",
+                "orderType": "Limit",
+                "isTrigger": True,
+                "triggerPx": "0",
+                "isPositionTpsl": True,
+                "tpsl": "tp",
+            }
+        )
+
+        self.assertTrue(order.is_trigger)
+        self.assertEqual(_price_edit_trigger_fields(order), (False, "", "tp", False, "Numeric size"))
+
+    def test_price_edit_preserves_valid_close_position_trigger_state(self) -> None:
+        order = normalize_hyperliquid_open_order(
+            {
+                "oid": 444774652117,
+                "coin": "BTC",
+                "side": "B",
+                "sz": "0.0",
+                "orderType": "Stop Market",
+                "reduceOnly": True,
+                "triggerPx": "81698",
+                "isTrigger": True,
+            }
+        )
+
+        self.assertEqual(_price_edit_trigger_fields(order), (True, "81698", "sl", True, "Close Position"))
 
     def test_close_position_trigger_edit_does_not_require_positive_size(self) -> None:
         ticket = HyperliquidOrderEditTicket(

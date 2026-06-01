@@ -832,70 +832,38 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
     )
     tif = normalized_order.tif if normalized_order else str((cached_order or {}).get("tif") or (cached_order or {}).get("timeInForce") or self.hyperliquid_tif_var.get() or "Gtc")
     reduce_only = normalized_order.reduce_only if normalized_order else bool((cached_order or {}).get("reduceOnly", (cached_order or {}).get("reduce_only", self.hyperliquid_reduce_only_var.get())))
-    close_position = normalized_order.close_position if normalized_order else False
-    is_trigger = normalized_order.is_trigger if normalized_order else False
-    trigger_price = "" if normalized_order is None or normalized_order.trigger_price is None else _format_hyperliquid_size(normalized_order.trigger_price)
-    trigger_kind = normalized_order.trigger_kind if normalized_order else "sl"
-    is_market_trigger = normalized_order.is_market_trigger if normalized_order else False
+    is_trigger, trigger_price, trigger_kind, is_market_trigger, size_mode = _price_edit_trigger_fields(normalized_order)
+    price_field_label = "Trigger price" if is_trigger and is_market_trigger else "Price"
+    if is_trigger and is_market_trigger and trigger_price:
+        price = trigger_price
 
     dialog = tk.Toplevel(self)
-    dialog.title("Edit Hyperliquid Open Order")
+    dialog.title("Edit Hyperliquid Order Price")
     dialog.transient(self)
     dialog.resizable(False, False)
 
-    shell = ttk.Frame(dialog, style="Panel.TFrame", padding=16)
+    shell = ttk.Frame(dialog, style="Panel.TFrame", padding=14)
     shell.pack(fill=tk.BOTH, expand=True)
     shell.columnconfigure(0, weight=1)
 
-    order_id_var = tk.StringVar(value=raw_order_id)
     market_var = tk.StringVar(value=market)
-    side_var = tk.StringVar(value=side)
-    size_var = tk.StringVar(value=size)
     price_var = tk.StringVar(value=price)
-    tif_var = tk.StringVar(value=tif if tif in HYPERLIQUID_TIFS else "Gtc")
     context_var = tk.StringVar(value=context)
-    order_kind_var = tk.StringVar(value=normalized_order.order_kind if normalized_order else "Limit")
-    reduce_only_var = tk.BooleanVar(value=reduce_only if context == "Perp" else False)
-    size_mode_var = tk.StringVar(value="Close Position" if close_position else "Numeric size")
-    trigger_enabled_var = tk.BooleanVar(value=is_trigger)
-    trigger_price_var = tk.StringVar(value=trigger_price)
-    trigger_kind_var = tk.StringVar(value=trigger_kind)
-    market_trigger_var = tk.BooleanVar(value=is_market_trigger)
     mid_status_var = tk.StringVar(value="")
 
-    summary = ttk.LabelFrame(shell, text="Order Summary", style="Card.TLabelframe")
-    summary.grid(row=0, column=0, sticky="ew")
-    for column in range(4):
-        summary.columnconfigure(column, weight=1)
-    _summary_cell(summary, 0, 0, "Coin", market or "--")
-    _summary_cell(summary, 0, 1, "Type", order_kind_var.get())
-    _summary_cell(summary, 0, 2, "Direction", normalized_order.direction if normalized_order else side)
-    _summary_cell(summary, 0, 3, "OID", raw_order_id or "--")
-    _summary_cell(summary, 1, 0, "Size", normalized_order.size_label if normalized_order else size)
-    _summary_cell(summary, 1, 1, "Original size", normalized_order.original_size_label if normalized_order else "--")
-    _summary_cell(summary, 1, 2, "Price", normalized_order.price_label if normalized_order else price)
-    _summary_cell(summary, 1, 3, "Time", _order_time_label(cached_order or {}))
-    _summary_cell(summary, 2, 0, "Reduce-only", "Yes" if reduce_only else "No")
-    _summary_cell(summary, 2, 1, "Trigger", normalized_order.trigger_condition if normalized_order else "--")
-    _summary_cell(summary, 2, 2, "TP/SL", normalized_order.tpsl_label if normalized_order else "--")
-    _summary_cell(summary, 2, 3, "Venue", context)
+    selected_text = (
+        f"{context} {normalized_order.direction if normalized_order else side.title()} "
+        f"{normalized_order.size_label if normalized_order else size} {market or '--'}"
+    )
+    ttk.Label(shell, text=selected_text, style="Mono.TLabel").grid(row=0, column=0, sticky="w")
+    ttk.Label(shell, text=f"OID {raw_order_id or '--'}", style="Subtle.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 12))
 
-    editable = ttk.LabelFrame(shell, text="Editable Fields", style="Card.TLabelframe")
-    editable.grid(row=1, column=0, sticky="ew", pady=(10, 0))
-    editable.columnconfigure(1, weight=1)
-
-    editable_fields = [
-        ("Size mode", ttk.Combobox(editable, textvariable=size_mode_var, values=["Numeric size", "Close Position"], state="readonly")),
-        ("Size", ttk.Entry(editable, textvariable=size_var)),
-    ]
-    for row, (label, widget) in enumerate(editable_fields):
-        ttk.Label(editable, text=label, style="Subtle.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 10), pady=4)
-        widget.grid(row=row, column=1, sticky="ew", pady=4)
-
-    price_row = len(editable_fields)
-    ttk.Label(editable, text="Price", style="Subtle.TLabel").grid(row=price_row, column=0, sticky="w", padx=(0, 10), pady=4)
-    price_controls = ttk.Frame(editable, style="Panel.TFrame")
-    price_controls.grid(row=price_row, column=1, sticky="ew", pady=4)
+    editor = ttk.Frame(shell, style="Panel.TFrame")
+    editor.grid(row=2, column=0, sticky="ew")
+    editor.columnconfigure(1, weight=1)
+    ttk.Label(editor, text=price_field_label, style="Subtle.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 10))
+    price_controls = ttk.Frame(editor, style="Panel.TFrame")
+    price_controls.grid(row=0, column=1, sticky="ew")
     price_controls.columnconfigure(0, weight=1)
     ttk.Entry(price_controls, textvariable=price_var).grid(row=0, column=0, sticky="ew", padx=(0, 8))
     ttk.Button(
@@ -906,77 +874,50 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
     ).grid(row=0, column=1, sticky="ew")
     ttk.Label(price_controls, textvariable=mid_status_var, style="Subtle.TLabel").grid(row=1, column=0, columnspan=2, sticky="w", pady=(3, 0))
 
-    ttk.Label(editable, text="TIF", style="Subtle.TLabel").grid(row=price_row + 1, column=0, sticky="w", padx=(0, 10), pady=4)
-    tif_combo = ttk.Combobox(editable, textvariable=tif_var, values=HYPERLIQUID_TIFS, state="readonly")
-    tif_combo.grid(row=price_row + 1, column=1, sticky="ew", pady=4)
-
-    trigger = ttk.LabelFrame(shell, text="Trigger / TP-SL", style="Card.TLabelframe")
-    trigger.grid(row=2, column=0, sticky="ew", pady=(10, 0))
-    trigger.columnconfigure(1, weight=1)
-    ttk.Checkbutton(trigger, text="Trigger order", variable=trigger_enabled_var).grid(row=0, column=0, sticky="w", pady=4)
-    ttk.Combobox(trigger, textvariable=trigger_kind_var, values=["sl", "tp"], state="readonly").grid(row=0, column=1, sticky="ew", pady=4)
-    ttk.Label(trigger, text="Trigger price", style="Subtle.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 10), pady=4)
-    ttk.Entry(trigger, textvariable=trigger_price_var).grid(row=1, column=1, sticky="ew", pady=4)
-    ttk.Checkbutton(trigger, text="Market when triggered", variable=market_trigger_var).grid(row=2, column=1, sticky="w", pady=4)
-
-    advanced = ttk.LabelFrame(shell, text="Advanced", style="Card.TLabelframe")
-    advanced.grid(row=3, column=0, sticky="ew", pady=(10, 0))
-    advanced.columnconfigure(0, weight=1)
-    reduce_only_check = ttk.Checkbutton(advanced, text="Reduce-only", variable=reduce_only_var)
-    reduce_only_check.grid(row=0, column=0, sticky="w", pady=4)
-
-    def refresh_context_fields(*_args: Any) -> None:
-        if context_var.get() == "Spot":
-            reduce_only_var.set(False)
-            reduce_only_check.configure(state="disabled")
-            if size_mode_var.get() == "Close Position":
-                size_mode_var.set("Numeric size")
-        else:
-            reduce_only_check.configure(state="normal")
-        close_mode = size_mode_var.get() == "Close Position"
-        trigger_state = "normal" if trigger_enabled_var.get() else "disabled"
-        tif_combo.configure(state="disabled" if trigger_enabled_var.get() else "readonly")
-        if close_mode:
-            trigger_enabled_var.set(True)
-            trigger_state = "normal"
-
-    context_var.trace_add("write", refresh_context_fields)
-    size_mode_var.trace_add("write", refresh_context_fields)
-    trigger_enabled_var.trace_add("write", refresh_context_fields)
-    refresh_context_fields()
-
     note = ttk.Label(
         shell,
-        text="This uses Hyperliquid's modify order flow for the selected OID. Price and size are the primary edits; reduce-only and trigger fields are carried forward from the selected order unless changed below.",
+        text="Only the selected order price is changed. Size, side, TIF, reduce-only, and valid trigger metadata are carried forward from the selected order.",
         style="Subtle.TLabel",
-        wraplength=520,
+        wraplength=400,
     )
-    note.grid(row=4, column=0, sticky="w", pady=(10, 2))
+    note.grid(row=3, column=0, sticky="w", pady=(12, 2))
 
     buttons = ttk.Frame(shell, style="Panel.TFrame")
-    buttons.grid(row=5, column=0, sticky="ew", pady=(12, 0))
+    buttons.grid(row=4, column=0, sticky="ew", pady=(12, 0))
     buttons.columnconfigure((0, 1), weight=1)
 
     def submit_edit() -> None:
+        new_price = price_var.get()
         self.edit_hyperliquid_order_guarded(
-            order_id_var.get(),
-            market_var.get(),
-            side_var.get(),
-            size_var.get(),
-            price_var.get(),
-            tif_var.get(),
-            context_var.get(),
-            reduce_only_var.get(),
-            size_mode_var.get(),
-            trigger_enabled_var.get(),
-            trigger_price_var.get(),
-            trigger_kind_var.get(),
-            market_trigger_var.get(),
+            raw_order_id,
+            market,
+            side,
+            size,
+            new_price,
+            tif if tif in HYPERLIQUID_TIFS else "Gtc",
+            context,
+            reduce_only,
+            size_mode,
+            is_trigger,
+            new_price if is_trigger and is_market_trigger else trigger_price,
+            trigger_kind,
+            is_market_trigger,
             dialog,
         )
 
-    ttk.Button(buttons, text="Close", command=dialog.destroy).grid(row=0, column=0, sticky="ew", padx=(0, 8))
-    ttk.Button(buttons, text="Submit Edit", command=submit_edit, style="CompactDanger.TButton").grid(row=0, column=1, sticky="ew")
+    ttk.Button(buttons, text="Cancel", command=dialog.destroy).grid(row=0, column=0, sticky="ew", padx=(0, 8))
+    ttk.Button(buttons, text="Confirm Price Edit", command=submit_edit, style="CompactDanger.TButton").grid(row=0, column=1, sticky="ew")
+    dialog.bind("<Return>", lambda _event: submit_edit())
+
+
+def _price_edit_trigger_fields(order: HyperliquidOpenOrder | None) -> tuple[bool, str, str, bool, str]:
+    if order is None:
+        return False, "", "sl", False, "Numeric size"
+    trigger_kind = order.trigger_kind or "sl"
+    if order.is_trigger and order.trigger_price is not None and order.trigger_price > 0:
+        size_mode = "Close Position" if order.close_position else "Numeric size"
+        return True, _format_hyperliquid_size(order.trigger_price), trigger_kind, order.is_market_trigger, size_mode
+    return False, "", trigger_kind, False, "Numeric size"
 
 
 def _summary_cell(parent: ttk.Frame, row: int, column: int, label: str, value: str) -> None:
