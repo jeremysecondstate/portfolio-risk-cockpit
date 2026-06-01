@@ -93,6 +93,20 @@ class GeneratedStockPosition:
 
 
 @dataclass(frozen=True)
+class CurrentModelScenarioRow:
+    scenario: str
+    symbol_price: float
+    current_shares: float
+    current_position_pnl: float
+    current_portfolio_pnl_impact: float
+    current_new_portfolio_value: float
+    model_shares: float | None
+    model_position_pnl: float | None
+    model_portfolio_pnl_impact: float | None
+    model_new_portfolio_value: float | None
+
+
+@dataclass(frozen=True)
 class DataSourceStatus:
     source: str
     status: str
@@ -315,6 +329,45 @@ def build_planned_stock_context(
         basis=basis,
     )
     return planned, position
+
+
+def build_current_model_scenario_rows(
+    current_context: PortfolioSymbolContext,
+    model_position: GeneratedStockPosition | None,
+    moves: tuple[float, ...] = (-0.10, -0.05, -0.02, 0.02, 0.05, 0.10),
+) -> list[CurrentModelScenarioRow]:
+    base_price = current_context.last_price or (model_position.entry_price if model_position else None) or 0.0
+    model_quantity = float(model_position.quantity) if model_position is not None and model_position.quantity > 0 else None
+    model_entry = model_position.entry_price if model_position is not None else None
+    has_model = model_quantity is not None and model_entry is not None and model_entry > 0
+    rows: list[CurrentModelScenarioRow] = []
+    for move in moves:
+        price = base_price * (1 + move)
+        current_pnl = (price - base_price) * current_context.quantity if current_context.quantity else 0.0
+        model_pnl = (price - model_entry) * model_quantity if has_model else None
+        rows.append(
+            CurrentModelScenarioRow(
+                scenario=f"{move:+.0%}",
+                symbol_price=price,
+                current_shares=current_context.quantity,
+                current_position_pnl=current_pnl,
+                current_portfolio_pnl_impact=current_pnl / max(current_context.portfolio_value, 0.01),
+                current_new_portfolio_value=current_context.portfolio_value + current_pnl,
+                model_shares=model_quantity if has_model else None,
+                model_position_pnl=model_pnl,
+                model_portfolio_pnl_impact=(
+                    model_pnl / max(current_context.portfolio_value, 0.01)
+                    if model_pnl is not None
+                    else None
+                ),
+                model_new_portfolio_value=(
+                    current_context.portfolio_value + model_pnl
+                    if model_pnl is not None
+                    else None
+                ),
+            )
+        )
+    return rows
 
 
 def technical_scenario_moves(context: PortfolioSymbolContext, indicators: AdvancedIndicatorSnapshot) -> tuple[float, ...]:

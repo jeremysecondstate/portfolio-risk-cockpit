@@ -32,6 +32,7 @@ from app.analytics.research_workspace_insights import (
     build_macro_metric_cards,
     build_risk_plan,
     build_technical_narrative,
+    combined_current_model_option_scenarios,
     combined_option_scenarios,
     inflation_read_from_metrics,
     macro_why_it_matters,
@@ -44,6 +45,7 @@ from app.analytics.stock_research import (
     AdvancedIndicatorSnapshot,
     DataSourceStatus,
     PortfolioSymbolContext,
+    build_current_model_scenario_rows,
     build_planned_stock_context,
     build_portfolio_symbol_context,
     build_scenario_rows,
@@ -569,21 +571,36 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     tree_box = ttk.Frame(frame, style="Panel.TFrame")
     tree_box.grid(row=4, column=0, sticky="ew")
     tree_box.columnconfigure(0, weight=1)
-    tree = ttk.Treeview(tree_box, columns=("scenario", "price", "pnl", "impact", "portfolio"), show="headings", height=7)
+    ttk.Label(
+        tree_box,
+        text="Current columns use shares already held in the portfolio. Model columns use the generated stock scenario position from the card above.",
+        style="Subtle.TLabel",
+        wraplength=1120,
+        justify=tk.LEFT,
+    ).grid(row=0, column=0, sticky="ew", pady=(0, 6))
+    tree = ttk.Treeview(
+        tree_box,
+        columns=("scenario", "price", "current_shares", "current_pnl", "model_shares", "model_pnl", "model_impact", "model_portfolio"),
+        show="headings",
+        height=7,
+    )
     for column, label, width in (
-        ("scenario", "Scenario", 100),
-        ("price", "Symbol Price", 130),
-        ("pnl", "Position P&L", 130),
-        ("impact", "Portfolio Impact", 140),
-        ("portfolio", "New Portfolio Value", 160),
+        ("scenario", "Move", 72),
+        ("price", "Stock Price", 105),
+        ("current_shares", "Current Sh", 88),
+        ("current_pnl", "Current P&L", 112),
+        ("model_shares", "Model Sh", 88),
+        ("model_pnl", "Model P&L", 112),
+        ("model_impact", "Model Impact", 112),
+        ("model_portfolio", "Model Portfolio", 130),
     ):
         tree.heading(column, text=label)
         tree.column(column, width=width, anchor=tk.E if column != "scenario" else tk.W, stretch=True)
     tree.tag_configure("positive", foreground="#047857")
     tree.tag_configure("negative", foreground="#b91c1c")
-    tree.grid(row=0, column=0, sticky="ew")
+    tree.grid(row=1, column=0, sticky="ew")
     y_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
-    y_scroll.grid(row=0, column=1, sticky="ns")
+    y_scroll.grid(row=1, column=1, sticky="ns")
     tree.configure(yscrollcommand=y_scroll.set)
     note = _readout_launcher(frame, title="Risk Scenario Explanation", button_text="Open Risk Scenario Explanation", row=5, pady=(10, 0))
     frame.scenario_tree = tree  # type: ignore[attr-defined]
@@ -595,22 +612,36 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     option_controls.grid(row=0, column=0, sticky="ew", pady=(0, 6))
     ttk.Button(option_controls, text="Run Option Scenario From Top Candidate", command=lambda app=self: _render_option_scenarios_from_top(app)).pack(side=tk.LEFT)
     ttk.Button(option_controls, text="Load Chain", command=lambda app=self: _load_chain_from_research_tab(app)).pack(side=tk.LEFT, padx=(8, 0))
-    option_tree = ttk.Treeview(option_box, columns=("move", "stock", "option", "combined", "impact", "read"), show="headings", height=6)
+    ttk.Label(
+        option_box,
+        text="Current columns use actual shares held now. Model columns use the generated stock scenario position; no holdings or orders are changed.",
+        style="Subtle.TLabel",
+        wraplength=1120,
+        justify=tk.LEFT,
+    ).grid(row=1, column=0, sticky="ew", pady=(0, 6))
+    option_tree = ttk.Treeview(
+        option_box,
+        columns=("move", "price", "current_stock", "model_stock", "option", "current_combined", "model_combined", "read"),
+        show="headings",
+        height=6,
+    )
     for column, label, width in (
-        ("move", "Underlying Move", 130),
-        ("stock", "Stock P&L", 120),
-        ("option", "Option P&L", 120),
-        ("combined", "Combined P&L", 130),
-        ("impact", "Portfolio Impact", 140),
-        ("read", "Read", 180),
+        ("move", "Move", 70),
+        ("price", "Stock Price", 100),
+        ("current_stock", "Current Stock", 110),
+        ("model_stock", "Model Stock", 110),
+        ("option", "Option P&L", 105),
+        ("current_combined", "Current Combo", 118),
+        ("model_combined", "Model Combo", 118),
+        ("read", "Read", 310),
     ):
         option_tree.heading(column, text=label)
         option_tree.column(column, width=width, anchor=tk.E if column not in {"move", "read"} else tk.W, stretch=True)
     option_tree.tag_configure("positive", foreground="#047857")
     option_tree.tag_configure("negative", foreground="#b91c1c")
-    option_tree.grid(row=1, column=0, sticky="ew")
+    option_tree.grid(row=2, column=0, sticky="ew")
     option_scroll = ttk.Scrollbar(option_box, orient=tk.VERTICAL, command=option_tree.yview)
-    option_scroll.grid(row=1, column=1, sticky="ns")
+    option_scroll.grid(row=2, column=1, sticky="ns")
     option_tree.configure(yscrollcommand=option_scroll.set)
     option_tree.bind("<Double-1>", lambda _event, app=self: _load_chain_from_option_scenario_row(app), add="+")
     option_tree.bind("<Return>", lambda _event, app=self: _load_chain_from_option_scenario_row(app), add="+")
@@ -1251,7 +1282,9 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
     self.schwab_research_stock_plan = stock_plan
     scenario_basis = technical_scenario_basis(payload.context, payload.indicators)
     self.schwab_research_scenario_basis_var.set(scenario_basis)
-    scenario_rows = build_scenario_rows(scenario_context, technical_scenario_moves(payload.context, payload.indicators))
+    scenario_moves = technical_scenario_moves(payload.context, payload.indicators)
+    scenario_rows = build_scenario_rows(scenario_context, scenario_moves)
+    comparison_rows = build_current_model_scenario_rows(payload.context, stock_plan, scenario_moves)
     candidates = getattr(self, "schwab_research_option_candidates", []) or []
     if not candidates:
         rows_map = getattr(self, "schwab_option_chain_rows", {}) or {}
@@ -1268,8 +1301,8 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
     best = max(positive_rows or scenario_rows, key=lambda row: row.position_pnl, default=None)
     cards = [
         _synthetic_badge("Recommended Move", risk_plan.recommendation, risk_plan.status, risk_plan.reason),
-        _synthetic_badge("Current Exposure", _money(payload.context.market_value), "mixed" if payload.context.is_held else "info", f"{payload.context.quantity:g} shares; {payload.context.portfolio_weight:.2%} of portfolio."),
-        _synthetic_badge("Stock Scenario Position", _shares(stock_plan.quantity), "info", _stock_plan_card_text(stock_plan)),
+        _synthetic_badge("Current Actual Exposure", _money(payload.context.market_value), "mixed" if payload.context.is_held else "info", f"{payload.context.quantity:g} shares; {payload.context.portfolio_weight:.2%} of portfolio."),
+        _synthetic_badge("Model Stock Scenario Position", _shares(stock_plan.quantity), "info", _stock_plan_card_text(stock_plan)),
         _synthetic_badge("Generated Risk Budget", _money(max_risk), "info", _risk_budget_card_text(risk_budget)),
         _synthetic_badge("Paired Option", risk_plan.paired_option, "info", "Best loaded option candidate for this risk plan."),
     ]
@@ -1289,13 +1322,29 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
     tree = frame.scenario_tree  # type: ignore[attr-defined]
     for row_id in tree.get_children():
         tree.delete(row_id)
-    for row in scenario_rows:
-        tag = "positive" if row.position_pnl > 0 else "negative" if row.position_pnl < 0 else ""
-        tree.insert("", tk.END, values=(row.scenario, _money(row.symbol_price), _money(row.position_pnl), f"{row.portfolio_pnl_impact:+.2%}", _money(row.new_portfolio_value)), tags=(tag,) if tag else ())
+    for row in comparison_rows:
+        model_pnl = row.model_position_pnl
+        tag_basis = model_pnl if model_pnl is not None else row.current_position_pnl
+        tag = "positive" if tag_basis > 0 else "negative" if tag_basis < 0 else ""
+        tree.insert(
+            "",
+            tk.END,
+            values=(
+                row.scenario,
+                _money(row.symbol_price),
+                _number(row.current_shares),
+                _money(row.current_position_pnl),
+                _number(row.model_shares),
+                _money(row.model_position_pnl),
+                _percent(row.model_portfolio_pnl_impact),
+                _money(row.model_new_portfolio_value),
+            ),
+            tags=(tag,) if tag else (),
+        )
     stop = _float_from_var(getattr(self, "stop_price_var", None))
     target = _float_from_var(getattr(self, "options_target_price_var", None)) or _float_from_var(getattr(self, "limit_price_var", None))
     size = suggested_position_size(entry_price=payload.context.last_price, stop_price=stop, max_risk_dollars=max_risk)
-    decision_difference_lines = _decision_difference_lines(top_candidate, scenario_context, stock_plan)
+    decision_difference_lines = _decision_difference_lines(top_candidate, payload.context, stock_plan)
     lines = [
         "Recommended move:",
         f"- {risk_plan.recommendation}: {risk_plan.reason}",
@@ -1306,7 +1355,9 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
         *[f"- {line}" for line in decision_difference_lines],
         "",
         "How to read this:",
-        "- Stock-only rows show direct share P&L. Combined rows below use expiration-style option payoff, not live option pricing.",
+        "- Current columns use actual shares already held in the portfolio.",
+        "- Model columns use the generated stock scenario position from the card above.",
+        "- Combined rows below use expiration-style option payoff, not live option pricing.",
         "- Protective put: insurance that can gain value if your shares fall, but the premium is paid upfront.",
         "- Covered call: income against held shares, but upside can be capped above the strike.",
         "",
@@ -1786,12 +1837,32 @@ def _render_option_scenarios_from_top(self: tk.Tk) -> None:
     candidates = getattr(self, "schwab_research_option_candidates", []) or []
     candidate = next((item for item in candidates if item.option_type in {"call", "put"}), None)
     if payload is None or candidate is None:
-        tree.insert("", tk.END, iid="load_chain_row", values=("Load chain", "--", "--", "--", "--", "Double-click this row or use Load Chain above to generate option scenarios."))
+        tree.insert(
+            "",
+            tk.END,
+            iid="load_chain_row",
+            values=("Load chain", "--", "--", "--", "--", "--", "--", "Double-click this row or use Load Chain above to generate option scenarios."),
+        )
         return
-    context = _active_stock_scenario_context(self, payload)
-    for row in combined_option_scenarios(candidate, context):
-        tag = "positive" if row.combined_pnl > 0 else "negative" if row.combined_pnl < 0 else ""
-        tree.insert("", tk.END, values=(row.move_label, _money(row.stock_pnl), _money(row.option_pnl), _money(row.combined_pnl), f"{row.portfolio_impact:+.2%}", f"{row.read}; expiration-style estimate"), tags=(tag,) if tag else ())
+    stock_plan = getattr(self, "schwab_research_stock_plan", None)
+    for row in combined_current_model_option_scenarios(candidate, payload.context, stock_plan):
+        tag_basis = row.model_combined_pnl if row.model_combined_pnl is not None else row.current_combined_pnl
+        tag = "positive" if tag_basis > 0 else "negative" if tag_basis < 0 else ""
+        tree.insert(
+            "",
+            tk.END,
+            values=(
+                row.move_label,
+                _money(row.underlying_price),
+                _money(row.current_stock_pnl),
+                _money(row.model_stock_pnl),
+                _money(row.option_pnl),
+                _money(row.current_combined_pnl),
+                _money(row.model_combined_pnl),
+                f"{row.read}; expiration-style estimate",
+            ),
+            tags=(tag,) if tag else (),
+        )
 
 
 def _active_stock_scenario_context(self: tk.Tk, payload: _ResearchPayload) -> PortfolioSymbolContext:
@@ -1806,19 +1877,22 @@ def _decision_difference_lines(candidate: OptionCandidate | None, context: Portf
     if candidate is None or candidate.option_type not in {"call", "put"}:
         lines.append("No loaded option candidate yet. Load the chain to compare those stock looks against option structures.")
         return lines
-    rows = combined_option_scenarios(candidate, context, moves=(-0.05,))
+    rows = combined_current_model_option_scenarios(candidate, context, stock_plan, moves=(-0.05,))
     if not rows:
         lines.append("Combined option math is unavailable for the selected candidate.")
         return lines
     row = rows[0]
-    difference = row.combined_pnl - row.stock_pnl
+    if row.model_stock_pnl is None or row.model_combined_pnl is None:
+        lines.append("Model stock comparison is unavailable, so the option scenario can only show current-position math.")
+        return lines
+    difference = row.model_combined_pnl - row.model_stock_pnl
     premium = (candidate.midpoint or 0.0) * 100
     if candidate.option_type == "put":
         worth = "This hedge may not be worth the premium." if difference < premium * 0.5 else "This hedge provides visible downside offset in the -5% case."
-        lines.append(f"At the model stock look, if {context.symbol} falls -5%, stock-only is {_money(row.stock_pnl)}; with {candidate.strategy}, combined is {_money(row.combined_pnl)}. Net protection benefit: {_money(difference)}. Trade-off: upfront debit about {_money(premium)}. {worth}")
+        lines.append(f"At the model stock look, if {context.symbol} falls -5%, stock-only is {_money(row.model_stock_pnl)}; with {candidate.strategy}, combined is {_money(row.model_combined_pnl)}. Net protection benefit: {_money(difference)}. Trade-off: upfront debit about {_money(premium)}. {worth}")
         return lines
     worth = "This call needs too much move before expiration." if row.option_pnl < 0 else "This call adds upside leverage in the + path, but premium is still the defined risk."
-    lines.append(f"At the model stock look, if {context.symbol} falls -5%, stock-only is {_money(row.stock_pnl)}; with {candidate.strategy}, combined is {_money(row.combined_pnl)}. Option difference: {_money(difference)}. Trade-off: upfront debit about {_money(premium)}. {worth}")
+    lines.append(f"At the model stock look, if {context.symbol} falls -5%, stock-only is {_money(row.model_stock_pnl)}; with {candidate.strategy}, combined is {_money(row.model_combined_pnl)}. Option difference: {_money(difference)}. Trade-off: upfront debit about {_money(premium)}. {worth}")
     return lines
 
 

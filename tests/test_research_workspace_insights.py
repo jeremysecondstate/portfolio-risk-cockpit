@@ -8,6 +8,7 @@ from app.analytics.research_workspace_insights import (
     build_macro_metric_cards,
     build_risk_plan,
     build_technical_narrative,
+    combined_current_model_option_scenarios,
     combined_option_scenarios,
     confirmation_text,
     fibonacci_explanation,
@@ -20,7 +21,7 @@ from app.analytics.research_workspace_insights import (
     suggest_option_candidates,
     ticket_fields_for_option_candidate,
 )
-from app.analytics.stock_research import AdvancedIndicatorSnapshot, PortfolioSymbolContext
+from app.analytics.stock_research import AdvancedIndicatorSnapshot, GeneratedStockPosition, PortfolioSymbolContext
 from app.macro.models import MacroRelease, MacroSnapshot
 
 
@@ -205,6 +206,39 @@ class ResearchWorkspaceInsightTests(unittest.TestCase):
 
         self.assertGreater(row.option_value, 0)
         self.assertAlmostEqual(row.combined_pnl, row.stock_pnl + row.option_pnl)
+
+    def test_current_model_option_scenario_shows_watchlist_current_zero_and_model_stock_pnl(self) -> None:
+        candidate = next(item for item in suggest_option_candidates(_chain(), _indicators(), _context(), macro_label="Tailwind") if item.option_type == "call")
+        model = GeneratedStockPosition(22.0, 100.0, 96.0, 88.0, 2_200.0, 0.11, 4.0, "Generated watchlist stock plan.")
+
+        rows = combined_current_model_option_scenarios(candidate, _context(held=False), model, moves=(-0.10, 0.10))
+
+        self.assertEqual(rows[0].current_stock_pnl, 0.0)
+        self.assertEqual(rows[1].current_stock_pnl, 0.0)
+        self.assertAlmostEqual(rows[0].model_stock_pnl or 0.0, -220.0)
+        self.assertAlmostEqual(rows[1].model_stock_pnl or 0.0, 220.0)
+        self.assertAlmostEqual(rows[1].model_combined_pnl or 0.0, (rows[1].model_stock_pnl or 0.0) + rows[1].option_pnl)
+        self.assertIn("No current shares", rows[0].read)
+
+    def test_current_model_option_scenario_computes_held_and_model_independently(self) -> None:
+        candidate = next(item for item in suggest_option_candidates(_chain(), _indicators(), _context(held=True), macro_label="Tailwind") if item.option_type == "call")
+        model = GeneratedStockPosition(5.0, 100.0, 96.0, 20.0, 500.0, 0.025, 4.0, "Separate model plan.")
+
+        row = combined_current_model_option_scenarios(candidate, _context(held=True), model, moves=(-0.10,))[0]
+
+        self.assertAlmostEqual(row.current_stock_pnl, -150.0)
+        self.assertAlmostEqual(row.model_stock_pnl or 0.0, -50.0)
+        self.assertNotEqual(row.current_stock_pnl, row.model_stock_pnl)
+
+    def test_current_model_option_scenario_handles_missing_model_size(self) -> None:
+        candidate = next(item for item in suggest_option_candidates(_chain(), _indicators(), _context(), macro_label="Tailwind") if item.option_type == "call")
+        model = GeneratedStockPosition(0.0, 100.0, None, None, 0.0, 0.0, None, "Insufficient price or risk budget.")
+
+        row = combined_current_model_option_scenarios(candidate, _context(held=False), model, moves=(0.10,))[0]
+
+        self.assertIsNone(row.model_stock_pnl)
+        self.assertIsNone(row.model_combined_pnl)
+        self.assertIn("unavailable", row.read.lower())
 
     def test_protective_put_hedge_benefit_math(self) -> None:
         candidate = next(item for item in suggest_option_candidates(_chain(), _indicators("sideways", "neutral"), _context(held=True), macro_label="Headwind") if item.option_type == "put")

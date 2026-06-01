@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from app.analytics.stock_research import AdvancedIndicatorSnapshot, PortfolioSymbolContext
+from app.analytics.stock_research import AdvancedIndicatorSnapshot, GeneratedStockPosition, PortfolioSymbolContext
 from app.macro.models import MacroRelease, MacroSnapshot
 
 
@@ -70,6 +70,23 @@ class CombinedOptionScenarioRow:
     option_pnl: float
     combined_pnl: float
     portfolio_impact: float
+    read: str
+
+
+@dataclass(frozen=True)
+class CurrentModelOptionScenarioRow:
+    move_label: str
+    underlying_price: float
+    current_shares: float
+    current_stock_pnl: float
+    model_shares: float | None
+    model_stock_pnl: float | None
+    option_value: float
+    option_pnl: float
+    current_combined_pnl: float
+    model_combined_pnl: float | None
+    current_portfolio_impact: float
+    model_portfolio_impact: float | None
     read: str
 
 
@@ -412,6 +429,79 @@ def combined_option_scenarios(
             read = "Flat"
         rows.append(CombinedOptionScenarioRow(f"{move:+.0%}", price, stock_pnl, option_value, option_pnl, combined, combined / total, read))
     return rows
+
+
+def combined_current_model_option_scenarios(
+    candidate: OptionCandidate | None,
+    current_context: PortfolioSymbolContext,
+    model_position: GeneratedStockPosition | None,
+    moves: tuple[float, ...] = (-0.10, -0.05, -0.03, -0.02, 0.0, 0.02, 0.03, 0.05, 0.10),
+) -> list[CurrentModelOptionScenarioRow]:
+    if candidate is None or candidate.underlying_price is None:
+        return []
+    rows: list[CurrentModelOptionScenarioRow] = []
+    base = candidate.underlying_price
+    current_entry = current_context.last_price or base
+    current_quantity = float(current_context.quantity or 0.0)
+    total = max(current_context.portfolio_value, 0.01)
+    model_quantity = float(model_position.quantity) if model_position is not None and model_position.quantity > 0 else None
+    model_entry = model_position.entry_price if model_position is not None else None
+    has_model = model_quantity is not None and model_entry is not None and model_entry > 0
+    for move in moves:
+        price = base * (1 + move)
+        current_stock_pnl = (price - current_entry) * current_quantity if current_quantity else 0.0
+        model_stock_pnl = (price - model_entry) * model_quantity if has_model else None
+        option_value = option_expiration_value(candidate, price)
+        option_pnl = option_expiration_payoff(candidate, price)
+        current_combined = current_stock_pnl + option_pnl
+        model_combined = model_stock_pnl + option_pnl if model_stock_pnl is not None else None
+        rows.append(
+            CurrentModelOptionScenarioRow(
+                move_label=f"{move:+.0%}",
+                underlying_price=price,
+                current_shares=current_quantity,
+                current_stock_pnl=current_stock_pnl,
+                model_shares=model_quantity if has_model else None,
+                model_stock_pnl=model_stock_pnl,
+                option_value=option_value,
+                option_pnl=option_pnl,
+                current_combined_pnl=current_combined,
+                model_combined_pnl=model_combined,
+                current_portfolio_impact=current_combined / total,
+                model_portfolio_impact=(model_combined / total if model_combined is not None else None),
+                read=_current_model_option_read(
+                    candidate,
+                    current_quantity=current_quantity,
+                    current_combined=current_combined,
+                    model_stock_pnl=model_stock_pnl,
+                    model_combined=model_combined,
+                ),
+            )
+        )
+    return rows
+
+
+def _current_model_option_read(
+    candidate: OptionCandidate,
+    *,
+    current_quantity: float,
+    current_combined: float,
+    model_stock_pnl: float | None,
+    model_combined: float | None,
+) -> str:
+    if model_stock_pnl is None or model_combined is None:
+        return "Model stock scenario unavailable; option estimate still shown"
+    if current_quantity <= 0:
+        return "No current shares; model columns show the generated starter path"
+    if candidate.option_type == "put" and model_stock_pnl < 0 and model_combined > model_stock_pnl:
+        return f"Model hedge benefit {_money(model_combined - model_stock_pnl)}"
+    if candidate.option_type == "call" and model_combined > current_combined:
+        return "Model path shows added upside leverage"
+    if model_combined > 0:
+        return "Model combined helps"
+    if model_combined < 0:
+        return "Model combined hurts"
+    return "Model path flat"
 
 
 def option_breakeven_explanation(candidate: OptionCandidate) -> str:

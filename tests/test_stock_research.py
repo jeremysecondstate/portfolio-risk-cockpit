@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 from app.analytics.stock_research import (
     DataSourceStatus,
+    GeneratedStockPosition,
+    build_current_model_scenario_rows,
     build_planned_stock_context,
     build_portfolio_symbol_context,
     build_scenario_rows,
@@ -286,6 +288,42 @@ class StockResearchAnalyticsTests(unittest.TestCase):
         self.assertIs(planned_context, context)
         self.assertEqual(stock_plan.quantity, 15)
         self.assertIn("Current held shares", stock_plan.basis)
+
+    def test_current_model_scenario_rows_show_watchlist_current_zero_and_model_path(self) -> None:
+        context = build_portfolio_symbol_context(Portfolio(cash=50_000.0), "LHX", fallback_price=100.0)
+        model = GeneratedStockPosition(22.0, 100.0, 95.0, 110.0, 2_200.0, 0.044, 5.0, "Generated watchlist stock plan.")
+
+        down, up = build_current_model_scenario_rows(context, model, moves=(-0.10, 0.10))
+
+        self.assertEqual(down.current_shares, 0.0)
+        self.assertEqual(down.current_position_pnl, 0.0)
+        self.assertEqual(up.current_position_pnl, 0.0)
+        self.assertAlmostEqual(down.model_position_pnl or 0.0, -220.0)
+        self.assertAlmostEqual(up.model_position_pnl or 0.0, 220.0)
+
+    def test_current_model_scenario_rows_compute_held_and_model_independently(self) -> None:
+        context = build_portfolio_symbol_context(
+            Portfolio(cash=10_000.0, positions={"NVDA": Position("NVDA", 15, 90.0, 100.0)}),
+            "NVDA",
+            fallback_price=100.0,
+        )
+        model = GeneratedStockPosition(5.0, 100.0, 95.0, 25.0, 500.0, 0.05, 5.0, "Separate model plan.")
+
+        row = build_current_model_scenario_rows(context, model, moves=(-0.10,))[0]
+
+        self.assertAlmostEqual(row.current_position_pnl, -150.0)
+        self.assertAlmostEqual(row.model_position_pnl or 0.0, -50.0)
+        self.assertNotEqual(row.current_position_pnl, row.model_position_pnl)
+
+    def test_current_model_scenario_rows_tolerate_missing_model_size(self) -> None:
+        context = build_portfolio_symbol_context(Portfolio(cash=50_000.0), "LHX", fallback_price=100.0)
+        model = GeneratedStockPosition(0.0, 100.0, None, None, 0.0, 0.0, None, "Insufficient price or risk budget.")
+
+        row = build_current_model_scenario_rows(context, model, moves=(0.10,))[0]
+
+        self.assertEqual(row.current_position_pnl, 0.0)
+        self.assertIsNone(row.model_position_pnl)
+        self.assertIsNone(row.model_portfolio_pnl_impact)
 
     def test_friendly_meter_labels_are_readable(self) -> None:
         self.assertEqual(direction_strength_label(87), "Very Strong")
