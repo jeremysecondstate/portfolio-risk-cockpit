@@ -281,7 +281,7 @@ def _position_from_schwab(raw_position: Any) -> Position | None:
 
     average_cost = _average_cost(raw_position, quantity, last_price)
 
-    return Position(
+    position = Position(
         symbol=symbol,
         quantity=round(quantity, 8),
         average_cost=round(average_cost, 4),
@@ -290,6 +290,18 @@ def _position_from_schwab(raw_position: Any) -> Position | None:
         day_profit_loss_percent=_first_number(raw_position, _DAY_PNL_PERCENT_KEYS),
         open_profit_loss=_open_profit_loss(raw_position),
     )
+    asset_type = _instrument_asset_type(instrument)
+    if asset_type:
+        setattr(position, "asset_type", asset_type)
+    return position
+
+
+def _instrument_asset_type(instrument: dict[str, Any]) -> str:
+    pieces = [
+        str(instrument.get("assetType") or "").strip(),
+        str(instrument.get("assetSubType") or instrument.get("type") or "").strip(),
+    ]
+    return " ".join(piece for piece in pieces if piece)
 
 
 def _average_cost(raw_position: dict[str, Any], quantity: float, fallback_price: float | None) -> float:

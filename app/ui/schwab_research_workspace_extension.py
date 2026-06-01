@@ -9,6 +9,17 @@ from tkinter import messagebox, ttk
 from typing import Any, Type
 
 from app.analytics.earnings_release import analyze_earnings_release, format_earnings_release_digest
+from app.analytics.etf_analysis import (
+    ETF_SEC_FORMS,
+    ETF_SECURITY_KINDS,
+    ETFCard,
+    ETFResearchSnapshot,
+    build_etf_readout,
+    build_etf_research_snapshot,
+    detect_security_kind,
+    format_etf_documents_text,
+    format_etf_structure_text,
+)
 from app.analytics.fundamental_analysis import analyze_company_facts, format_fundamental_analysis
 from app.analytics.options_greeks import (
     GreekSummary,
@@ -88,6 +99,8 @@ class _ResearchPayload:
     option_chain_rows: list[dict[str, Any]] | None = None
     option_chain_underlying_price: float | None = None
     greek_summary: GreekSummary | None = None
+    security_kind: str = "equity"
+    etf_snapshot: ETFResearchSnapshot | None = None
 
 
 def install_schwab_research_workspace_extension(app_cls: Type[tk.Tk]) -> None:
@@ -839,7 +852,12 @@ def _build_research_payload(session: Any, portfolio, symbol: str) -> _ResearchPa
     moves = technical_scenario_moves(context, indicators)
     scenario_rows = build_scenario_rows(context, moves)
 
-    earnings_text, fundamentals_text, filings_lines, sec_statuses = _fetch_sec_layers(symbol)
+    security_kind = detect_security_kind(symbol, quote, _portfolio_position_asset_type(portfolio, symbol))
+    etf_snapshot: ETFResearchSnapshot | None = None
+    if security_kind in ETF_SECURITY_KINDS:
+        earnings_text, fundamentals_text, filings_lines, sec_statuses, etf_snapshot = _fetch_etf_layers(symbol, quote, security_kind)
+    else:
+        earnings_text, fundamentals_text, filings_lines, sec_statuses = _fetch_sec_layers(symbol)
     statuses.extend(sec_statuses)
 
     macro_snapshot: MacroSnapshot | None = None
@@ -882,6 +900,8 @@ def _build_research_payload(session: Any, portfolio, symbol: str) -> _ResearchPa
         option_chain_rows,
         greek_underlying_price,
         greek_summary,
+        security_kind,
+        etf_snapshot,
     )
 
 
@@ -921,6 +941,16 @@ def _fetch_daily_history(session: Any, symbol: str) -> tuple[dict[str, Any] | No
         return None, DataSourceStatus("Schwab price history", "error", _now(), str(exc))
 
 
+def _portfolio_position_asset_type(portfolio: Any, symbol: str) -> str:
+    try:
+        position = portfolio.get_position(symbol) if hasattr(portfolio, "get_position") else None
+        if position is None:
+            position = getattr(portfolio, "positions", {}).get(symbol.strip().upper())
+        return str(getattr(position, "asset_type", "") or "")
+    except Exception:
+        return ""
+
+
 def _fetch_sec_layers(symbol: str) -> tuple[str, str, list[str], list[DataSourceStatus]]:
     statuses: list[DataSourceStatus] = []
     earnings_text = "Earnings / News\n\nOfficial SEC earnings-release layer unavailable."
@@ -949,6 +979,39 @@ def _fetch_sec_layers(symbol: str) -> tuple[str, str, list[str], list[DataSource
     return earnings_text, fundamentals_text, filings_lines, statuses
 
 
+def _fetch_etf_layers(
+    symbol: str,
+    quote: dict[str, Any] | None = None,
+    security_kind: str = "etf",
+) -> tuple[str, str, list[str], list[DataSourceStatus], ETFResearchSnapshot]:
+    statuses: list[DataSourceStatus] = []
+    filings_lines: list[str] = []
+    sec_error = ""
+    try:
+        client = SecEdgarClient(timeout_seconds=12)
+        filings = client.recent_filings(symbol, forms=ETF_SEC_FORMS, limit=12)
+        filings_lines = [f"{filing.form} filed {filing.filing_date} period {filing.report_date or '--'}: {filing.filing_url}" for filing in filings[:10]]
+        if filings_lines:
+            statuses.append(DataSourceStatus("SEC fund filings", "fresh/cache", _now(), f"{len(filings_lines)} ETF/fund filings scanned."))
+        else:
+            statuses.append(DataSourceStatus("SEC fund filings", "not found", _now(), "No ETF/fund filings resolved by ticker in this scan."))
+            sec_error = "No ETF/fund filings resolved by ticker in this scan."
+    except Exception as exc:
+        sec_error = str(exc)
+        statuses.append(DataSourceStatus("SEC fund filings", "not found", _now(), f"ETF/fund SEC lookup did not resolve by ticker: {exc}"))
+
+    snapshot = build_etf_research_snapshot(
+        symbol,
+        quote=quote,
+        security_kind=security_kind,
+        sec_filing_lines=filings_lines,
+        sec_error=sec_error,
+    )
+    statuses.append(DataSourceStatus("ETF document sources", "pending", _now(), "Issuer factsheet, prospectus, holdings, SAI, shareholder report, and distribution links prepared."))
+    statuses.append(DataSourceStatus("SEC companyfacts", "not-applicable", _now(), "ETF companyfacts are not applicable; using ETF/fund document sources."))
+    return format_etf_documents_text(snapshot), format_etf_structure_text(snapshot), filings_lines, statuses, snapshot
+
+
 def _fetch_research_option_chain(session: Any, symbol: str) -> tuple[list[dict[str, Any]], float | None, DataSourceStatus]:
     try:
         status_code, payload = _request_option_chain(session, symbol, strike_count=20)
@@ -967,11 +1030,13 @@ def _render_research_payload(self: tk.Tk, payload: _ResearchPayload) -> None:
     self.schwab_research_last_payload = payload
     context = payload.context
     quote_price = context.last_price
-    self.schwab_research_quote_var.set(f"{payload.symbol}: {_money(quote_price)}")
+    kind_label = f" ({payload.security_kind.upper()})" if payload.security_kind in ETF_SECURITY_KINDS else ""
+    self.schwab_research_quote_var.set(f"{payload.symbol}{kind_label}: {_money(quote_price)}")
     self.schwab_research_held_var.set("Held" if context.is_held else "Not held")
     self.schwab_research_weight_var.set(f"Weight {context.portfolio_weight:.2%}")
     self.schwab_research_risk_var.set(f"{payload.decision.overall.label}; risk {payload.decision.risk_level.label}")
-    self.schwab_research_status_var.set(f"{payload.symbol} research updated at {_now()}")
+    mode_text = " ETF/fund research" if payload.security_kind in ETF_SECURITY_KINDS else " research"
+    self.schwab_research_status_var.set(f"{payload.symbol}{mode_text} updated at {_now()}")
     _sync_research_option_chain(self, payload)
 
     _render_at_glance(self, payload)
@@ -1021,6 +1086,7 @@ def _overview_text(payload: _ResearchPayload) -> str:
         f"- Held: {'yes' if context.is_held else 'no'}",
         f"- Position: {context.quantity:g} shares, value {_money(context.market_value)}, weight {context.portfolio_weight:.2%}",
         f"- Unrealized P&L: {_money(context.unrealized_pnl)}; day P&L {_money(context.day_pnl)}",
+        f"- Security kind: {payload.security_kind}.",
         "",
         "Technical read:",
         f"- Trend: {indicators.trend}; momentum: {indicators.momentum}; volatility: {indicators.volatility}.",
@@ -1966,6 +2032,8 @@ def _recalculate_research_scenarios(self: tk.Tk) -> None:
         payload.option_chain_rows,
         payload.option_chain_underlying_price,
         payload.greek_summary,
+        payload.security_kind,
+        payload.etf_snapshot,
     )
     self.schwab_research_last_payload = updated
     _render_scenarios(self, updated)
@@ -1973,6 +2041,10 @@ def _recalculate_research_scenarios(self: tk.Tk) -> None:
 
 
 def _render_earnings_news(self: tk.Tk, payload: _ResearchPayload) -> None:
+    if payload.security_kind in ETF_SECURITY_KINDS:
+        _render_etf_documents(self, payload)
+        return
+
     frame = self.schwab_research_earnings_frame
     decision = payload.decision
     summary = build_earnings_workspace_summary(payload.symbol, payload.earnings_text, payload.fundamentals_text, payload.filings_lines)
@@ -1998,7 +2070,35 @@ def _render_earnings_news(self: tk.Tk, payload: _ResearchPayload) -> None:
     _set_research_text(self.schwab_research_earnings_text, _earnings_popout_text(payload, summary, _earnings_news_text(payload)))
 
 
+def _render_etf_documents(self: tk.Tk, payload: _ResearchPayload) -> None:
+    frame = self.schwab_research_earnings_frame
+    snapshot = payload.etf_snapshot or build_etf_research_snapshot(payload.symbol, quote=payload.quote, security_kind=payload.security_kind)
+    readout = build_etf_readout(snapshot)
+    metric_grid(
+        frame.cards,  # type: ignore[attr-defined]
+        [_badge_from_etf_card(card) for card in readout.document_cards],
+        columns=3,
+        card_height=104,
+        prominent_height=112,
+        prominent_indexes={0},
+    )
+    clear_children(frame.checks)  # type: ignore[attr-defined]
+    frame.checks.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    Checklist(frame.checks, "ETF Read", readout.interpretation).grid(row=0, column=0, sticky="ew", padx=(0, 8))  # type: ignore[attr-defined]
+    Checklist(frame.checks, "ETF Risks To Watch", readout.risks).grid(row=0, column=1, sticky="ew")  # type: ignore[attr-defined]
+    tree = frame.source_tree  # type: ignore[attr-defined]
+    for row_id in tree.get_children():
+        tree.delete(row_id)
+    for label, date, url in readout.source_links:
+        tree.insert("", tk.END, values=(label, date, url or "--"))
+    _set_research_text(self.schwab_research_earnings_text, _etf_documents_popout_text(payload, snapshot, readout))
+
+
 def _render_fundamentals(self: tk.Tk, payload: _ResearchPayload) -> None:
+    if payload.security_kind in ETF_SECURITY_KINDS:
+        _render_etf_fundamentals(self, payload)
+        return
+
     frame = self.schwab_research_fundamentals_frame
     decision = payload.decision
     verdict = build_fundamental_verdict(payload.fundamentals_text, payload.indicators, decision.macro_backdrop.label)
@@ -2036,6 +2136,33 @@ def _render_fundamentals(self: tk.Tk, payload: _ResearchPayload) -> None:
         ]
     )
     _set_research_text(self.schwab_research_fundamentals_text, _fundamentals_popout_text(payload, verdict, details))
+
+
+def _render_etf_fundamentals(self: tk.Tk, payload: _ResearchPayload) -> None:
+    frame = self.schwab_research_fundamentals_frame
+    snapshot = payload.etf_snapshot or build_etf_research_snapshot(payload.symbol, quote=payload.quote, security_kind=payload.security_kind)
+    readout = build_etf_readout(snapshot)
+    metric_grid(
+        frame.cards,  # type: ignore[attr-defined]
+        [_badge_from_etf_card(card) for card in readout.structure_cards],
+        columns=4,
+        card_height=104,
+        prominent_height=112,
+        prominent_indexes={0, 7},
+    )
+    clear_children(frame.checks)  # type: ignore[attr-defined]
+    frame.checks.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    Checklist(frame.checks, "ETF Structure Read", readout.interpretation).grid(row=0, column=0, sticky="ew", padx=(0, 8))  # type: ignore[attr-defined]
+    Checklist(
+        frame.checks,
+        "What To Verify Next",
+        [
+            "Open the issuer fund page and factsheet for objective, fee, AUM, yield, holdings, and sector/country exposures.",
+            "Open the prospectus and SAI for principal strategy, fees, derivatives/leverage rules, securities lending, and creation/redemption mechanics.",
+            "Open shareholder reports or N-PORT for holdings, concentration, derivatives exposure, and portfolio discussion.",
+        ],
+    ).grid(row=0, column=1, sticky="ew")  # type: ignore[attr-defined]
+    _set_research_text(self.schwab_research_fundamentals_text, _etf_fundamentals_popout_text(payload, snapshot, readout))
 
 
 def _render_macro(self: tk.Tk, payload: _ResearchPayload) -> None:
@@ -2100,6 +2227,49 @@ def _earnings_popout_text(payload: _ResearchPayload, summary: Any, original_text
     )
 
 
+def _etf_documents_popout_text(payload: _ResearchPayload, snapshot: ETFResearchSnapshot, readout: Any) -> str:
+    return _format_beginner_readout(
+        title=f"ETF Documents / Updates - {payload.symbol}",
+        what_this_means=(
+            "This is ETF research mode. Company earnings, revenue, EPS, margins, and guidance do not apply; "
+            "the useful sources are issuer documents, holdings, fund filings, distributions, and index methodology."
+        ),
+        key_points=[
+            f"Fund type: {snapshot.fund_type}.",
+            f"Issuer: {snapshot.issuer}.",
+            f"Strategy: {snapshot.strategy}.",
+            "ETF companyfacts are not applicable. Using ETF/fund document sources instead.",
+            *readout.interpretation,
+            *readout.risks,
+        ],
+        why_it_matters="ETF risk comes from what the fund owns, how it is built, how liquid it is, what it costs, and whether distributions or structure add hidden risk.",
+        original_text=payload.earnings_text,
+        original_title="Original / detailed ETF document readout",
+    )
+
+
+def _etf_fundamentals_popout_text(payload: _ResearchPayload, snapshot: ETFResearchSnapshot, readout: Any) -> str:
+    return _format_beginner_readout(
+        title=f"ETF Structure / Holdings - {payload.symbol}",
+        what_this_means=(
+            "This replaces operating-company fundamentals with ETF structure and holdings checks: expense ratio, AUM, "
+            "top holdings, concentration, sector/theme exposure, distribution profile, liquidity, and index/strategy."
+        ),
+        key_points=[
+            f"Expense ratio: {snapshot.expense_ratio}.",
+            f"AUM / assets: {snapshot.aum}.",
+            f"Top 10 weight: {snapshot.top_10_weight}.",
+            f"Liquidity: {snapshot.liquidity}.",
+            f"Index / strategy: {snapshot.index_name or snapshot.strategy}.",
+            *readout.interpretation,
+            *readout.risks,
+        ],
+        why_it_matters="An ETF can look diversified by ticker count but still be concentrated by top holdings, sector, theme, duration, commodity, crypto, leverage, or option structure.",
+        original_text=payload.fundamentals_text,
+        original_title="Original / detailed ETF structure readout",
+    )
+
+
 def _fundamentals_popout_text(payload: _ResearchPayload, verdict: Any, original_text: str) -> str:
     return _format_beginner_readout(
         title=f"Fundamentals Explanation - {payload.symbol}",
@@ -2146,6 +2316,10 @@ def _macro_popout_text(payload: _ResearchPayload, readouts: list[Any]) -> str:
 
 def _synthetic_badge(title: str, label: str, status: str, why: str, score: float = 0.0) -> BadgeReadout:
     return BadgeReadout(title=title, label=label, status=status, score=score, why=why)
+
+
+def _badge_from_etf_card(card: ETFCard) -> BadgeReadout:
+    return _synthetic_badge(card.title, card.label, card.status, card.why)
 
 
 def _rsi_badge(indicators: AdvancedIndicatorSnapshot) -> BadgeReadout:
