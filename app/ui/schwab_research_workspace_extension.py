@@ -10,6 +10,12 @@ from typing import Any, Type
 
 from app.analytics.earnings_release import analyze_earnings_release, format_earnings_release_digest
 from app.analytics.fundamental_analysis import analyze_company_facts, format_fundamental_analysis
+from app.analytics.options_greeks import (
+    GreekSummary,
+    GreekValue,
+    OptionGreekSnapshot,
+    build_greek_summary,
+)
 from app.analytics.research_scoring import (
     BadgeReadout,
     ResearchDecisionReadout,
@@ -56,6 +62,7 @@ from app.macro.analysis import format_macro_report
 from app.macro.models import MacroSnapshot
 from app.macro.releases import fetch_macro_release_snapshot
 from app.ui.research_widgets import Checklist, ScenarioImpactBars, ScoreMeter, ScrollableFrame, clear_children, freshness_badges, labeled_value_grid, metric_grid
+from app.ui.schwab_option_chain_extension import _option_chain_rows, _populate_option_chain_tree, _request_option_chain, _underlying_price
 from app.ui.schwab_output_popout_extension import _apply_report_tags, _open_external_url
 
 REPORT_FORMS = ("10-K", "10-Q", "8-K")
@@ -75,10 +82,14 @@ class _ResearchPayload:
     statuses: list[DataSourceStatus]
     decision: ResearchDecisionReadout
     macro_snapshot: MacroSnapshot | None = None
+    option_chain_rows: list[dict[str, Any]] | None = None
+    option_chain_underlying_price: float | None = None
+    greek_summary: GreekSummary | None = None
 
 
 def install_schwab_research_workspace_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls.show_technical_analysis = _open_schwab_research_workspace  # type: ignore[method-assign]
+    app_cls.render_schwab_research_greeks = _render_greeks  # type: ignore[attr-defined]
 
 
 def _open_schwab_research_workspace(self: tk.Tk) -> None:
@@ -226,6 +237,7 @@ def _build_research_right_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     self.schwab_research_technicals_frame = _technicals_tab(notebook)
     self.schwab_research_scenarios_frame = _scenarios_tab(self, notebook)
     self.schwab_research_options_frame = _options_strategy_tab(self, notebook)
+    self.schwab_research_greeks_frame = _greeks_tab(self, notebook)
     self.schwab_research_earnings_frame = _earnings_tab(notebook)
     self.schwab_research_earnings_text = self.schwab_research_earnings_frame.detail_text  # type: ignore[attr-defined]
     self.schwab_research_fundamentals_frame = _section_summary_tab(notebook, "Fundamentals")
@@ -685,6 +697,59 @@ def _options_strategy_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     return frame
 
 
+def _greeks_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
+    frame = _scrollable_tab(notebook, "Greeks")
+    frame.columnconfigure(0, weight=1)
+    controls = ttk.LabelFrame(frame, text="Option Sensitivities", style="Card.TLabelframe")
+    controls.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    controls.columnconfigure(1, weight=1)
+    ttk.Button(controls, text="Load / Refresh Greeks", command=lambda app=self: _load_greeks_from_research_tab(app), style="Accent.TButton").grid(row=0, column=0, sticky="w", padx=(10, 8), pady=8)
+    frame.status_var = tk.StringVar(value="Run analysis or load an option chain to populate option sensitivities.")  # type: ignore[attr-defined]
+    ttk.Label(controls, textvariable=frame.status_var, style="Subtle.TLabel").grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=8)  # type: ignore[attr-defined]
+
+    frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.cards.grid(row=1, column=0, sticky="ew")
+
+    tree_box = ttk.LabelFrame(frame, text="Greek Chain Table", style="Card.TLabelframe")
+    tree_box.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+    tree_box.columnconfigure(0, weight=1)
+    columns = ("expiration", "dte", "strike", "type", "bid", "ask", "mark", "iv", "delta", "gamma", "theta", "vega", "rho", "source")
+    tree = ttk.Treeview(tree_box, columns=columns, show="headings", height=9, selectmode="browse")
+    specs = (
+        ("expiration", "Expiration", 130, tk.W),
+        ("dte", "DTE", 56, tk.E),
+        ("strike", "Strike", 78, tk.E),
+        ("type", "Type", 58, tk.W),
+        ("bid", "Bid", 68, tk.E),
+        ("ask", "Ask", 68, tk.E),
+        ("mark", "Mark", 68, tk.E),
+        ("iv", "IV", 72, tk.E),
+        ("delta", "Delta", 76, tk.E),
+        ("gamma", "Gamma", 76, tk.E),
+        ("theta", "Theta", 76, tk.E),
+        ("vega", "Vega", 76, tk.E),
+        ("rho", "Rho", 76, tk.E),
+        ("source", "Source", 150, tk.W),
+    )
+    for column, label, width, anchor in specs:
+        tree.heading(column, text=label)
+        tree.column(column, width=width, anchor=anchor, stretch=column in {"expiration", "source"})
+    tree.tag_configure("selected", background="#dbeafe", foreground="#0f172a")
+    tree.grid(row=0, column=0, sticky="ew")
+    y_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
+    y_scroll.grid(row=0, column=1, sticky="ns")
+    x_scroll = ttk.Scrollbar(tree_box, orient=tk.HORIZONTAL, command=tree.xview)
+    x_scroll.grid(row=1, column=0, sticky="ew")
+    tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+    frame.greek_tree = tree  # type: ignore[attr-defined]
+
+    frame.interpretation = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.interpretation.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+    frame.interpretation.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    frame.detail_text = _readout_launcher(frame, title="Option Sensitivities Explanation", button_text="Open Greeks Explanation", row=4)  # type: ignore[attr-defined]
+    return frame
+
+
 def _run_research_analysis(self: tk.Tk) -> None:
     symbol = self.schwab_research_symbol_var.get().strip().upper()
     if not symbol:
@@ -764,7 +829,28 @@ def _build_research_payload(session: Any, portfolio, symbol: str) -> _ResearchPa
         statuses=statuses,
     )
 
-    return _ResearchPayload(symbol, quote, indicators, context, scenario_rows, earnings_text, fundamentals_text, filings_lines, macro_text, statuses, decision, macro_snapshot)
+    option_chain_rows, option_chain_underlying_price, option_chain_status = _fetch_research_option_chain(session, symbol)
+    statuses.append(option_chain_status)
+    greek_underlying_price = option_chain_underlying_price or context.last_price
+    greek_summary = build_greek_summary(option_chain_rows, greek_underlying_price)
+
+    return _ResearchPayload(
+        symbol,
+        quote,
+        indicators,
+        context,
+        scenario_rows,
+        earnings_text,
+        fundamentals_text,
+        filings_lines,
+        macro_text,
+        statuses,
+        decision,
+        macro_snapshot,
+        option_chain_rows,
+        greek_underlying_price,
+        greek_summary,
+    )
 
 
 def _fetch_quote(session: Any, symbol: str) -> tuple[dict[str, Any] | None, DataSourceStatus]:
@@ -831,6 +917,20 @@ def _fetch_sec_layers(symbol: str) -> tuple[str, str, list[str], list[DataSource
     return earnings_text, fundamentals_text, filings_lines, statuses
 
 
+def _fetch_research_option_chain(session: Any, symbol: str) -> tuple[list[dict[str, Any]], float | None, DataSourceStatus]:
+    try:
+        status_code, payload = _request_option_chain(session, symbol, strike_count=20)
+        if status_code != 200:
+            return [], None, DataSourceStatus("Schwab option chain", "error", _now(), f"HTTP {status_code}: {payload}")
+        if not isinstance(payload, dict):
+            return [], None, DataSourceStatus("Schwab option chain", "error", _now(), "Unexpected option-chain payload.")
+        rows = _option_chain_rows(payload)
+        underlying_price = _underlying_price(payload)
+        return rows, underlying_price, DataSourceStatus("Schwab option chain", "fresh", _now(), f"{len(rows)} option rows loaded for Greeks and strategy candidates.")
+    except Exception as exc:
+        return [], None, DataSourceStatus("Schwab option chain", "error", _now(), str(exc))
+
+
 def _render_research_payload(self: tk.Tk, payload: _ResearchPayload) -> None:
     self.schwab_research_last_payload = payload
     context = payload.context
@@ -840,12 +940,14 @@ def _render_research_payload(self: tk.Tk, payload: _ResearchPayload) -> None:
     self.schwab_research_weight_var.set(f"Weight {context.portfolio_weight:.2%}")
     self.schwab_research_risk_var.set(f"{payload.decision.overall.label}; risk {payload.decision.risk_level.label}")
     self.schwab_research_status_var.set(f"{payload.symbol} research updated at {_now()}")
+    _sync_research_option_chain(self, payload)
 
     _render_at_glance(self, payload)
     _render_overview(self, payload)
     _render_technicals(self, payload)
     _render_scenarios(self, payload)
     _render_options_strategy(self)
+    _render_greeks(self, payload)
     _render_earnings_news(self, payload)
     _render_fundamentals(self, payload)
     _render_macro(self, payload)
@@ -853,6 +955,18 @@ def _render_research_payload(self: tk.Tk, payload: _ResearchPayload) -> None:
     output = getattr(self, "schwab_trading_preview_text", None)
     if output is not None:
         _set_research_text(output, _overview_text(payload) + "\n\n" + _source_status_text(payload.statuses))
+
+
+def _sync_research_option_chain(self: tk.Tk, payload: _ResearchPayload) -> None:
+    rows = payload.option_chain_rows if payload.option_chain_rows is not None else []
+    if getattr(self, "schwab_option_chain_tree", None) is not None:
+        _populate_option_chain_tree(self, rows)
+    else:
+        self.schwab_option_chain_rows = {f"research_option_{index}": row for index, row in enumerate(rows)}
+    if hasattr(self, "schwab_option_chain_status_var"):
+        self.schwab_option_chain_status_var.set(f"Option chain: {len(rows)} rows loaded for {payload.symbol}" if rows else "Option chain: not loaded")
+    if payload.option_chain_underlying_price is not None and hasattr(self, "options_underlying_price_var"):
+        self.options_underlying_price_var.set(_format_number(payload.option_chain_underlying_price))
 
 
 def _overview_text(payload: _ResearchPayload) -> str:
@@ -1309,6 +1423,211 @@ def _load_chain_from_research_tab(self: tk.Tk) -> None:
         return
     command()
     _render_options_strategy(self)
+    _render_greeks(self)
+
+
+def _load_greeks_from_research_tab(self: tk.Tk) -> None:
+    _load_chain_from_research_tab(self)
+
+
+def _render_greeks(self: tk.Tk, payload: _ResearchPayload | None = None) -> None:
+    frame = getattr(self, "schwab_research_greeks_frame", None)
+    if frame is None:
+        return
+    payload = payload or getattr(self, "schwab_research_last_payload", None)
+    rows_map = getattr(self, "schwab_option_chain_rows", {}) or {}
+    chain_rows = [row for row in rows_map.values() if isinstance(row, dict)]
+    selected_candidate = _selected_option_candidate(self)
+    selected_contract_symbol = str(getattr(self, "schwab_research_selected_contract_symbol", "") or "")
+    underlying_price = _greek_underlying_price(self, payload)
+    if not chain_rows and payload is not None and payload.greek_summary is not None:
+        summary = payload.greek_summary
+    else:
+        summary = build_greek_summary(
+            chain_rows,
+            underlying_price,
+            selected_candidate=selected_candidate,
+            selected_contract_symbol=selected_contract_symbol,
+        )
+    self.schwab_research_greek_summary = summary
+    active = summary.selected or summary.nearest_call or summary.nearest_put
+    if not summary.rows:
+        frame.status_var.set("Greeks unavailable until a Schwab option chain is loaded.")  # type: ignore[attr-defined]
+        metric_grid(frame.cards, [_synthetic_badge("Option Sensitivities", "Waiting", "info", "Run analysis or load/refresh Greeks to fetch the option chain.")], columns=1)  # type: ignore[attr-defined]
+    else:
+        source = active.source_summary if active is not None else "Mixed"
+        active_label = _greek_contract_short_label(active) if active is not None else "ATM contract"
+        frame.status_var.set(f"{len(summary.rows)} contracts loaded. Active Greeks: {active_label}. Source: {source}.")  # type: ignore[attr-defined]
+        metric_grid(frame.cards, _greek_metric_cards(active), columns=5, prominent_indexes={0}, card_height=118, prominent_height=118)  # type: ignore[attr-defined]
+    _render_greek_table(frame, summary)
+    _render_greek_interpretation(frame, summary)
+    _set_research_text(frame.detail_text, _greeks_popout_text(payload, summary))  # type: ignore[attr-defined]
+
+
+def _greek_underlying_price(self: tk.Tk, payload: _ResearchPayload | None) -> float | None:
+    if payload is not None:
+        return payload.option_chain_underlying_price or payload.context.last_price
+    value = _float_from_var(getattr(self, "options_underlying_price_var", None))
+    if value is not None:
+        return value
+    last_payload = getattr(self, "schwab_research_last_payload", None)
+    return getattr(getattr(last_payload, "context", None), "last_price", None)
+
+
+def _render_greek_table(frame: ttk.Frame, summary: GreekSummary) -> None:
+    tree = frame.greek_tree  # type: ignore[attr-defined]
+    for row_id in tree.get_children():
+        tree.delete(row_id)
+    selected_iid = ""
+    for index, snapshot in enumerate(summary.rows):
+        iid = f"greek_{index}"
+        values = (
+            snapshot.expiration,
+            "--" if snapshot.dte is None else str(snapshot.dte),
+            _plain_number(snapshot.strike, digits=2),
+            snapshot.option_type.upper(),
+            _plain_number(snapshot.bid, digits=2),
+            _plain_number(snapshot.ask, digits=2),
+            _plain_number(snapshot.mark, digits=2),
+            _iv_label(snapshot.implied_volatility.value),
+            _signed_number(snapshot.delta.value, digits=3),
+            _signed_number(snapshot.gamma.value, digits=4),
+            _signed_number(snapshot.theta.value, digits=3),
+            _signed_number(snapshot.vega.value, digits=3),
+            _signed_number(snapshot.rho.value, digits=3),
+            snapshot.source_summary,
+        )
+        tags = ("selected",) if snapshot.selected else ()
+        tree.insert("", tk.END, iid=iid, values=values, tags=tags)
+        if snapshot.selected:
+            selected_iid = iid
+    if selected_iid:
+        tree.selection_set(selected_iid)
+        tree.focus(selected_iid)
+        tree.see(selected_iid)
+
+
+def _render_greek_interpretation(frame: ttk.Frame, summary: GreekSummary) -> None:
+    clear_children(frame.interpretation)  # type: ignore[attr-defined]
+    Checklist(frame.interpretation, "Plain-English Interpretation", summary.plain_english).grid(row=0, column=0, sticky="nsew", padx=(0, 8))  # type: ignore[attr-defined]
+    Checklist(frame.interpretation, "Sources / Caveats", _greek_source_lines(summary)).grid(row=0, column=1, sticky="nsew")  # type: ignore[attr-defined]
+
+
+def _greek_metric_cards(active: OptionGreekSnapshot | None) -> list[BadgeReadout]:
+    if active is None:
+        return [_synthetic_badge("Option Sensitivities", "Waiting", "info", "No active contract is available yet.")]
+    return [
+        _synthetic_badge("Stock Move Sensitivity / Delta", _signed_number(active.delta.value, digits=3), _greek_status(active.delta), f"{active.delta.source}. Approximate contract impact for a $1 stock move."),
+        _synthetic_badge("Time Decay / Theta", _signed_number(active.theta.value, digits=3), _theta_status(active.theta.value), f"{active.theta.source}. Per-day time decay, all else equal."),
+        _synthetic_badge("Volatility Sensitivity / Vega", _signed_number(active.vega.value, digits=3), _greek_status(active.vega), f"{active.vega.source}. Per one-point implied-volatility move."),
+        _synthetic_badge("Delta Acceleration / Gamma", _signed_number(active.gamma.value, digits=4), _greek_status(active.gamma), f"{active.gamma.source}. How much delta changes after a $1 stock move."),
+        _synthetic_badge("Rate Sensitivity / Rho", _signed_number(active.rho.value, digits=3), _greek_status(active.rho), f"{active.rho.source}. Per one-point interest-rate move."),
+    ]
+
+
+def _greek_source_lines(summary: GreekSummary) -> list[str]:
+    active = summary.selected or summary.nearest_call or summary.nearest_put
+    lines: list[str] = []
+    if active is None:
+        lines.append("No active contract is loaded.")
+    else:
+        lines.extend(
+            [
+                f"Active contract: {_greek_contract_short_label(active)}.",
+                f"IV: {active.implied_volatility.source}.",
+                f"Delta: {active.delta.source}.",
+                f"Gamma: {active.gamma.source}.",
+                f"Theta: {active.theta.source}.",
+                f"Vega: {active.vega.source}.",
+                f"Rho: {active.rho.source}.",
+            ]
+        )
+        lines.extend(active.warnings)
+    lines.extend(summary.warnings)
+    if not lines:
+        lines.append("All displayed active values have explicit source labels.")
+    return lines
+
+
+def _greeks_popout_text(payload: _ResearchPayload | None, summary: GreekSummary) -> str:
+    symbol = payload.symbol if payload is not None else summary.underlying or "Symbol"
+    active = summary.selected or summary.nearest_call or summary.nearest_put
+    key_points = summary.plain_english or ["Load an option chain to see option sensitivities."]
+    if active is not None:
+        key_points.extend(
+            [
+                f"Active source mix: {active.source_summary}.",
+                f"Delta source: {active.delta.source}; gamma source: {active.gamma.source}; theta source: {active.theta.source}.",
+                f"Vega source: {active.vega.source}; rho source: {active.rho.source}; IV source: {active.implied_volatility.source}.",
+            ]
+        )
+    original_lines = [
+        f"Underlying price: {_money(summary.underlying_price)}",
+        f"Rows loaded: {len(summary.rows)}",
+        "",
+        "Warnings / caveats:",
+        *[f"- {line}" for line in (summary.warnings or ["None."])],
+        "",
+        "Contract rows:",
+    ]
+    for snapshot in summary.rows[:30]:
+        original_lines.append(
+            f"- {_greek_contract_short_label(snapshot)} | IV {_iv_label(snapshot.implied_volatility.value)} ({snapshot.implied_volatility.source}) | "
+            f"Delta {_signed_number(snapshot.delta.value, digits=3)} ({snapshot.delta.source}) | "
+            f"Gamma {_signed_number(snapshot.gamma.value, digits=4)} ({snapshot.gamma.source}) | "
+            f"Theta {_signed_number(snapshot.theta.value, digits=3)} ({snapshot.theta.source}) | "
+            f"Vega {_signed_number(snapshot.vega.value, digits=3)} ({snapshot.vega.source}) | "
+            f"Rho {_signed_number(snapshot.rho.value, digits=3)} ({snapshot.rho.source})"
+        )
+    return _format_beginner_readout(
+        title=f"Option Sensitivities - {symbol}",
+        what_this_means=(
+            "This tab shows option Greeks for the loaded Schwab chain. Schwab-provided values are used first; "
+            "missing sensitivities are estimated locally when the contract has enough inputs."
+        ),
+        key_points=key_points,
+        why_it_matters="Greeks translate an option into stock-move, time-decay, volatility, and rate exposures before any order is previewed or submitted.",
+        original_text="\n".join(original_lines),
+    )
+
+
+def _greek_contract_short_label(snapshot: OptionGreekSnapshot | None) -> str:
+    if snapshot is None:
+        return "--"
+    strike = _plain_number(snapshot.strike, digits=2)
+    return f"{snapshot.expiration} {strike} {snapshot.option_type.upper()}"
+
+
+def _greek_status(value: GreekValue) -> str:
+    if value.source == "Unavailable" or value.value is None:
+        return "info"
+    if value.source == "Schwab provided":
+        return "good"
+    return "mixed"
+
+
+def _theta_status(value: float | None) -> str:
+    if value is None:
+        return "info"
+    return "bad" if value < 0 else "mixed"
+
+
+def _plain_number(value: float | None, *, digits: int = 2) -> str:
+    if value is None:
+        return "--"
+    return _format_number(value, digits=digits)
+
+
+def _signed_number(value: float | None, *, digits: int = 3) -> str:
+    if value is None:
+        return "--"
+    return f"{value:+.{digits}f}"
+
+
+def _iv_label(value: float | None) -> str:
+    if value is None:
+        return "--"
+    return f"{value * 100:.1f}%"
 
 
 def _load_chain_from_option_scenario_row(self: tk.Tk) -> None:
@@ -1367,6 +1686,8 @@ def _show_selected_option_candidate(self: tk.Tk) -> None:
         lines = [f"{candidate.group}: {candidate.strategy}", "Run analysis to see combined stock + option scenarios."]
     lines.extend(["", "Use This Option fills the existing options ticket only. It does not submit, preview, or stage an order."])
     _set_research_text(frame.detail_text, _options_strategy_popout_text(payload, candidate, context, "\n".join(lines)))  # type: ignore[attr-defined]
+    self.schwab_research_selected_contract_symbol = candidate.contract_symbol
+    _render_greeks(self, payload)
 
 
 def _basic_popout_text(title: str, original_text: str) -> str:
@@ -1450,6 +1771,8 @@ def _use_selected_research_option(self: tk.Tk) -> None:
     frame = getattr(self, "schwab_research_options_frame", None)
     if frame is not None:
         frame.status_var.set("Option candidate filled into ticket only. No order was submitted.")  # type: ignore[attr-defined]
+    self.schwab_research_selected_contract_symbol = candidate.contract_symbol
+    _render_greeks(self)
 
 
 def _render_option_scenarios_from_top(self: tk.Tk) -> None:
@@ -1534,9 +1857,13 @@ def _recalculate_research_scenarios(self: tk.Tk) -> None:
         payload.statuses,
         payload.decision,
         payload.macro_snapshot,
+        payload.option_chain_rows,
+        payload.option_chain_underlying_price,
+        payload.greek_summary,
     )
     self.schwab_research_last_payload = updated
     _render_scenarios(self, updated)
+    _render_greeks(self, updated)
 
 
 def _render_earnings_news(self: tk.Tk, payload: _ResearchPayload) -> None:

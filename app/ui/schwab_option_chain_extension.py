@@ -193,6 +193,9 @@ def _load_schwab_option_chain(self: tk.Tk) -> None:
             "Select a row in the Schwab Option Chain table, then click Use Call Ask or Use Put Ask.\n\n"
             "This only fills the options what-if fields. It does not submit, preview, or stage a live Schwab order.",
         )
+        render_greeks = getattr(self, "render_schwab_research_greeks", None)
+        if callable(render_greeks):
+            render_greeks()
     except Exception as exc:
         self.schwab_option_chain_status_var.set("Option chain: load failed")
         messagebox.showerror("Load Schwab option chain failed", str(exc))
@@ -298,6 +301,7 @@ def _use_selected_schwab_option(self: tk.Tk, option_type: str) -> None:
 
     contract_symbol = str(contract.get("symbol") or "")
     description = str(contract.get("description") or "")
+    self.schwab_research_selected_contract_symbol = contract_symbol
     self.schwab_option_chain_status_var.set(
         f"Selected {symbol} {row['expiration_label']} {row['strike']:g} {option_type.upper()} @ {_format_number(limit_price, digits=2)}"
     )
@@ -321,6 +325,9 @@ def _use_selected_schwab_option(self: tk.Tk, option_type: str) -> None:
         "The options what-if fields were populated from the chain.\n"
         "No order was submitted or previewed. The current Schwab live-submit path remains the stock/ETF path.",
     )
+    render_greeks = getattr(self, "render_schwab_research_greeks", None)
+    if callable(render_greeks):
+        render_greeks()
 
 
 def _option_chain_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
