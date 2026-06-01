@@ -204,7 +204,7 @@ def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
     _add_action_button(actions, row=2, column=1, text="Open Only", command=schwab_action("load_selected_open_orders_only", "load_schwab_open_orders_only"))
     _add_action_button(actions, row=2, column=2, text="Options Strategy", command=schwab_action("show_technical_analysis"))
     _add_action_button(actions, row=3, column=0, text="Recent Orders", command=schwab_action("load_selected_recent_orders", "load_schwab_open_orders"))
-    _add_action_button(actions, row=3, column=1, text="Live Safety", command=schwab_action("show_live_submit_safety_review"))
+    _add_action_button(actions, row=3, column=1, text="NOT UNIQUE BUTTON", command=schwab_action("show_live_submit_safety_review"))
     _add_action_button(actions, row=3, column=2, text="LIVE Submit", command=schwab_action("submit_selected_venue", "submit_live_schwab_order_guarded"), style="Danger.TButton")
     _add_action_button(actions, row=4, column=0, text="Cancel Order", command=schwab_action("cancel_selected_order", "show_cancel_order_placeholder"), style="Danger.TButton")
 

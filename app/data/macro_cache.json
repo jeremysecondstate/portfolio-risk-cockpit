@@ -1,5 +1,5 @@
 {
-  "fetched_at": "2026-06-01T08:57:15+00:00",
+  "fetched_at": "2026-06-01T10:45:25+00:00",
   "releases": [
     {
       "category": "inflation",
@@ -14,7 +14,7 @@
       "unit": "index",
       "raw_source": "https://api.bls.gov/publicAPI/v2/timeseries/data/",
       "freshness_status": "fresh",
-      "fetch_timestamp": "2026-06-01T08:57:11+00:00",
+      "fetch_timestamp": "2026-06-01T10:45:21+00:00",
       "notes": ""
     },
     {
@@ -30,7 +30,7 @@
       "unit": "index",
       "raw_source": "https://api.bls.gov/publicAPI/v2/timeseries/data/",
       "freshness_status": "fresh",
-      "fetch_timestamp": "2026-06-01T08:57:11+00:00",
+      "fetch_timestamp": "2026-06-01T10:45:21+00:00",
       "notes": ""
     },
     {
@@ -46,7 +46,7 @@
       "unit": "index",
       "raw_source": "https://api.bls.gov/publicAPI/v2/timeseries/data/",
       "freshness_status": "fresh",
-      "fetch_timestamp": "2026-06-01T08:57:11+00:00",
+      "fetch_timestamp": "2026-06-01T10:45:21+00:00",
       "notes": ""
     },
     {
@@ -62,7 +62,7 @@
       "unit": "thousands",
       "raw_source": "https://api.bls.gov/publicAPI/v2/timeseries/data/",
       "freshness_status": "fresh",
-      "fetch_timestamp": "2026-06-01T08:57:11+00:00",
+      "fetch_timestamp": "2026-06-01T10:45:21+00:00",
       "notes": ""
     },
     {
@@ -78,7 +78,7 @@
       "unit": "percent",
       "raw_source": "https://api.bls.gov/publicAPI/v2/timeseries/data/",
       "freshness_status": "fresh",
-      "fetch_timestamp": "2026-06-01T08:57:11+00:00",
+      "fetch_timestamp": "2026-06-01T10:45:21+00:00",
       "notes": ""
     },
     {
@@ -94,7 +94,7 @@
       "unit": "percent",
       "raw_source": "https://api.bls.gov/publicAPI/v2/timeseries/data/",
       "freshness_status": "fresh",
-      "fetch_timestamp": "2026-06-01T08:57:11+00:00",
+      "fetch_timestamp": "2026-06-01T10:45:21+00:00",
       "notes": ""
     },
     {
@@ -110,7 +110,7 @@
       "unit": "dollars",
       "raw_source": "https://api.bls.gov/publicAPI/v2/timeseries/data/",
       "freshness_status": "fresh",
-      "fetch_timestamp": "2026-06-01T08:57:11+00:00",
+      "fetch_timestamp": "2026-06-01T10:45:21+00:00",
       "notes": ""
     },
     {
@@ -126,7 +126,7 @@
       "unit": "thousands",
       "raw_source": "https://api.bls.gov/publicAPI/v2/timeseries/data/",
       "freshness_status": "fresh",
-      "fetch_timestamp": "2026-06-01T08:57:11+00:00",
+      "fetch_timestamp": "2026-06-01T10:45:21+00:00",
       "notes": ""
     },
     {
@@ -142,7 +142,7 @@
       "unit": "",
       "raw_source": "DOL.gov",
       "freshness_status": "planned",
-      "fetch_timestamp": "2026-06-01T08:57:15+00:00",
+      "fetch_timestamp": "2026-06-01T10:45:25+00:00",
       "notes": "Official weekly claims feed hook planned."
     },
     {
@@ -158,7 +158,7 @@
       "unit": "",
       "raw_source": "FederalReserve.gov",
       "freshness_status": "planned",
-      "fetch_timestamp": "2026-06-01T08:57:15+00:00",
+      "fetch_timestamp": "2026-06-01T10:45:25+00:00",
       "notes": "Official Federal Reserve feed hook planned."
     },
     {
@@ -174,7 +174,7 @@
       "unit": "",
       "raw_source": "EIA.gov",
       "freshness_status": "planned",
-      "fetch_timestamp": "2026-06-01T08:57:15+00:00",
+      "fetch_timestamp": "2026-06-01T10:45:25+00:00",
       "notes": "Official EIA API hook planned; EIA_API_KEY may be used later."
     },
     {
@@ -190,7 +190,7 @@
       "unit": "",
       "raw_source": "Census.gov",
       "freshness_status": "planned",
-      "fetch_timestamp": "2026-06-01T08:57:15+00:00",
+      "fetch_timestamp": "2026-06-01T10:45:25+00:00",
       "notes": "Official Census API hook planned."
     },
     {
@@ -206,7 +206,7 @@
       "unit": "",
       "raw_source": "USDA.gov",
       "freshness_status": "planned",
-      "fetch_timestamp": "2026-06-01T08:57:15+00:00",
+      "fetch_timestamp": "2026-06-01T10:45:25+00:00",
       "notes": "Official USDA feed hook planned."
     }
   ],
@@ -214,7 +214,7 @@
     {
       "source": "BLS.gov",
       "status": "fresh",
-      "fetched_at": "2026-06-01T08:57:11+00:00",
+      "fetched_at": "2026-06-01T10:45:21+00:00",
       "url": "https://api.bls.gov/publicAPI/v2/timeseries/data/",
       "message": "8 BLS series loaded.",
       "cached_fallback": false
@@ -222,7 +222,7 @@
     {
       "source": "BEA.gov",
       "status": "unavailable",
-      "fetched_at": "2026-06-01T08:57:12+00:00",
+      "fetched_at": "2026-06-01T10:45:22+00:00",
       "url": "https://apps.bea.gov/api/data",
       "message": "0 BEA series loaded.",
       "cached_fallback": false
@@ -230,7 +230,7 @@
     {
       "source": "Treasury.gov",
       "status": "error",
-      "fetched_at": "2026-06-01T08:57:15+00:00",
+      "fetched_at": "2026-06-01T10:45:25+00:00",
       "url": "https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v2/accounting/od/daily_treasury_rates",
       "message": "404 Client Error: Not Found for url: https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v2/accounting/od/daily_treasury_rates?sort=-record_date&page%5Bsize%5D=2",
       "cached_fallback": false

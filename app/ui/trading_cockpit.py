@@ -82,7 +82,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         ttk.Button(button_bar, text="Reset Session", command=self.reset_schwab_session).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Cancel Order", command=self.show_cancel_order_placeholder).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Technical Analysis", command=self.show_technical_analysis).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(button_bar, text="Live Safety", command=self.show_live_submit_safety_review).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(button_bar, text="NOT UNIQUE BUTTON", command=self.show_live_submit_safety_review).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="LIVE Submit", command=self.submit_live_schwab_order_guarded).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Position Size", command=self.show_position_size).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Order Checklist", command=self.show_manual_checklist).pack(side=tk.LEFT, padx=(8, 0))
@@ -388,7 +388,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             order = self._parse_order()
             schwab_order = self.build_schwab_order_json_from_ui()
         except Exception as exc:
-            messagebox.showerror("Live safety review failed", str(exc))
+            messagebox.showerror("NOT UNIQUE BUTTON review failed", str(exc))
             return
 
         env_gate = "SCHWAB_ENABLE_LIVE_ORDERS=true"
