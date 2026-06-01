@@ -38,6 +38,7 @@ from app.analytics.foreign_issuer_analysis import (
     foreign_issuer_source_links,
     format_foreign_issuer_earnings_text,
     format_foreign_issuer_fundamentals_text,
+    format_foreign_issuer_results_explanation,
 )
 from app.analytics.fundamental_analysis import analyze_company_facts, format_fundamental_analysis
 from app.analytics.options_greeks import (
@@ -519,6 +520,17 @@ def _refresh_readout_popout(source: tk.Text) -> None:
         target.insert(tk.END, content)
         _apply_report_tags(target, content)
         target.configure(state=tk.DISABLED)
+    except tk.TclError:
+        return
+
+
+def _sync_readout_window_title(source: tk.Text) -> None:
+    window = getattr(source, "_readout_window", None)
+    if window is None:
+        return
+    try:
+        if window.winfo_exists():
+            window.title(str(getattr(source, "_readout_title", "Detailed Readout")))
     except tk.TclError:
         return
 
@@ -2230,6 +2242,8 @@ def _render_earnings_news(self: tk.Tk, payload: _ResearchPayload) -> None:
         return
 
     frame = self.schwab_research_earnings_frame
+    self.schwab_research_earnings_text._readout_title = "Earnings Release Explanation"  # type: ignore[attr-defined]
+    _sync_readout_window_title(self.schwab_research_earnings_text)
     decision = payload.decision
     summary = build_earnings_workspace_summary(payload.symbol, payload.earnings_text, payload.fundamentals_text, payload.filings_lines)
     metric_grid(
@@ -2281,6 +2295,8 @@ def _render_etf_documents(self: tk.Tk, payload: _ResearchPayload) -> None:
 def _render_foreign_issuer_documents(self: tk.Tk, payload: _ResearchPayload) -> None:
     frame = self.schwab_research_earnings_frame
     snapshot = payload.foreign_issuer_snapshot or build_foreign_issuer_snapshot(payload.symbol)
+    self.schwab_research_earnings_text._readout_title = "Foreign Issuer Results Explanation"  # type: ignore[attr-defined]
+    _sync_readout_window_title(self.schwab_research_earnings_text)
     metric_grid(
         frame.cards,  # type: ignore[attr-defined]
         [_badge_from_foreign_card(card) for card in foreign_issuer_earnings_cards(snapshot)],
@@ -2503,28 +2519,7 @@ def _etf_fundamentals_popout_text(payload: _ResearchPayload, snapshot: ETFResear
 
 
 def _foreign_issuer_documents_popout_text(payload: _ResearchPayload, snapshot: ForeignIssuerSnapshot) -> str:
-    return _format_beginner_readout(
-        title=f"Foreign Issuer Results - {payload.symbol}",
-        what_this_means=(
-            "This is foreign issuer source mode. A missing U.S. domestic 8-K earnings exhibit is not treated as a failed earnings scan; "
-            "the app uses official IR results, 6-K, 20-F / 40-F, annual reports, and company press releases."
-        ),
-        key_points=[
-            f"Reporting profile: {snapshot.reporting_profile}.",
-            f"Latest results source: {snapshot.latest_source_label}.",
-            f"Revenue / sales trend: {snapshot.revenue_trend}.",
-            f"Profitability: {snapshot.profitability_trend}.",
-            f"Guidance / outlook: {snapshot.guidance_tone}.",
-            f"Orders / bookings: {snapshot.orders_bookings_label}.",
-            f"Currency / reporting basis: {snapshot.reporting_basis_label}.",
-            snapshot.companyfacts_note,
-            *foreign_issuer_interpretation(snapshot),
-            *foreign_issuer_risks(snapshot),
-        ],
-        why_it_matters="Foreign issuers can report the same business reality through different documents, so the source stack needs to match the issuer before the earnings read is judged.",
-        original_text=format_foreign_issuer_earnings_text(snapshot),
-        original_title="Original / detailed foreign issuer result readout",
-    )
+    return format_foreign_issuer_results_explanation(snapshot)
 
 
 def _foreign_issuer_fundamentals_popout_text(payload: _ResearchPayload, snapshot: ForeignIssuerSnapshot) -> str:

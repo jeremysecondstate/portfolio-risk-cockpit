@@ -48,6 +48,11 @@ FOREIGN_METRIC_KEYWORDS: dict[str, tuple[str, ...]] = {
     "geography_customer": ("geography", "geographic", "customer concentration", "customers", "china", "taiwan"),
 }
 
+NOT_CLEANLY_EXTRACTED = "Not cleanly extracted yet"
+VALUES_NOT_EXTRACTED = "values not extracted yet"
+MONEY_RE = r"(?:(?:EUR|USD)\s?|\u20ac|\$)\s?[\d,.]+(?:\s?(?:billion|bn|million|m))?"
+PERCENT_RE = r"\d+(?:\.\d+)?%"
+
 KNOWN_FOREIGN_IR_SOURCES: dict[str, list[tuple[str, str, str]]] = {
     "ASML": [
         ("Official investor relations financial results page", "--", "https://www.asml.com/en/investors/financial-results"),
@@ -312,6 +317,82 @@ def format_foreign_issuer_fundamentals_text(snapshot: ForeignIssuerSnapshot) -> 
     return "\n".join(lines)
 
 
+def format_foreign_issuer_results_explanation(snapshot: ForeignIssuerSnapshot) -> str:
+    fields = _clean_result_fields(snapshot)
+    verdicts = _result_verdicts(snapshot, fields)
+    source_groups = _group_source_links(snapshot.source_links)
+    history_rows = _results_history_rows(snapshot, fields)
+    raw_extracts = _raw_extract_lines(snapshot)
+
+    lines = [
+        f"Foreign Issuer Results Explanation - {snapshot.symbol}",
+        "=" * (39 + len(snapshot.symbol)),
+        "",
+        "1. Bottom Line",
+        _bottom_line(snapshot, verdicts, fields),
+        "",
+        "2. What Foreign Issuer Means",
+        (
+            f"{snapshot.symbol} is not a normal U.S. domestic filer. It may report through investor relations pages, "
+            "annual reports, 6-K filings, and 20-F filings instead of the usual 10-Q / 8-K earnings exhibit path. "
+            "That means foreign issuer mode is a source-routing choice, not a broken earnings scan."
+        ),
+        "",
+        "3. Latest Results Snapshot",
+        f"- Latest period detected: {fields['period']}",
+        f"- Revenue / sales: {fields['revenue']}",
+        f"- Net income: {fields['net_income']}",
+        f"- EPS: {fields['eps']}",
+        f"- Gross margin: {fields['gross_margin']}",
+        f"- Guidance / outlook: {fields['guidance']}",
+        f"- Orders / bookings / backlog: {fields['orders_bookings']}",
+        f"- Reporting currency / accounting basis: {fields['reporting_basis']}",
+        f"- Source freshness: {snapshot.source_freshness}",
+        "",
+        "4. Good / Bad / Watch",
+        "Good:",
+        *_prefixed_lines(_good_lines(snapshot, fields)),
+        "",
+        "Bad / Missing:",
+        *_prefixed_lines(_bad_missing_lines(snapshot, fields)),
+        "",
+        "Watch:",
+        *_prefixed_lines(_watch_lines(snapshot, fields)),
+        "",
+        "5. Results History Read",
+        "Period | Sales / revenue | Net income | EPS | Gross margin | Guidance / key note | Source",
+        "--- | --- | --- | --- | --- | --- | ---",
+        *[_history_row_text(row) for row in history_rows],
+        "",
+        "6. Result Verdict",
+        f"- Revenue trend: {verdicts['revenue']} - {_verdict_reason('revenue', verdicts['revenue'], fields)}",
+        f"- Profitability trend: {verdicts['profitability']} - {_verdict_reason('profitability', verdicts['profitability'], fields)}",
+        f"- Guidance: {verdicts['guidance']} - {_verdict_reason('guidance', verdicts['guidance'], fields)}",
+        f"- Source quality: {verdicts['source_quality']} - {_verdict_reason('source_quality', verdicts['source_quality'], fields)}",
+        f"- Confidence: {verdicts['confidence']} - {_verdict_reason('confidence', verdicts['confidence'], fields)}",
+        "",
+        "7. Source Links",
+        "Official company sources:",
+        *_prefixed_lines(_source_lines(source_groups["official"])),
+        "",
+        "SEC foreign issuer filings:",
+        *_prefixed_lines(_source_lines(source_groups["sec"])),
+        "",
+        "Supplemental:",
+        *_prefixed_lines(_source_lines(source_groups["supplemental"])),
+        "",
+        "8. Foreign Issuer Source Glossary",
+        "- 6-K: foreign issuer interim/current report, often used for quarterly results or material updates.",
+        "- 20-F: annual report equivalent for foreign issuers.",
+        "- IR results page: official company investor results hub.",
+        "- Companyfacts/XBRL: supplemental structured SEC data, but it may be limited for foreign issuers.",
+        "",
+        "9. Source Details / Raw Extracts",
+        *raw_extracts,
+    ]
+    return "\n".join(lines)
+
+
 def foreign_issuer_earnings_cards(snapshot: ForeignIssuerSnapshot) -> list[tuple[str, str, str, str]]:
     return [
         ("Foreign Issuer Mode", "IR Results", "info", "Uses official IR results, 6-K, 20-F / 40-F, annual reports, and company press releases."),
@@ -360,6 +441,532 @@ def foreign_issuer_risks(snapshot: ForeignIssuerSnapshot) -> list[str]:
     if snapshot.reporting_basis_label in {"Not detected", "Limited"}:
         risks.append("Reporting currency and accounting basis should be verified from the official result package.")
     return risks
+
+
+def _clean_result_fields(snapshot: ForeignIssuerSnapshot) -> dict[str, str]:
+    period = _latest_period_detected(snapshot)
+    return {
+        "period": period,
+        "revenue": _clean_revenue(snapshot, period),
+        "net_income": _clean_money_metric(snapshot, "net_income", ("net income", "profit for the period", "profit attributable", "income from operations"), period=period),
+        "eps": _clean_eps(snapshot, period),
+        "gross_margin": _clean_gross_margin(snapshot, period),
+        "guidance": _clean_guidance(snapshot, period),
+        "orders_bookings": _clean_money_metric(snapshot, "orders_bookings", ("order intake", "orders", "net bookings", "bookings", "backlog")),
+        "reporting_basis": snapshot.reporting_basis_label if snapshot.reporting_basis_label not in {"", "Not detected"} else NOT_CLEANLY_EXTRACTED,
+    }
+
+
+def _bottom_line(snapshot: ForeignIssuerSnapshot, verdicts: dict[str, str], fields: dict[str, str]) -> str:
+    result = _overall_result_picture(verdicts)
+    reasons = []
+    if fields["revenue"] != NOT_CLEANLY_EXTRACTED:
+        reasons.append("sales were found")
+    if fields["net_income"] != NOT_CLEANLY_EXTRACTED:
+        reasons.append("profit was found")
+    if verdicts["guidance"] == "Positive":
+        reasons.append("guidance appears constructive")
+    if fields["orders_bookings"] == NOT_CLEANLY_EXTRACTED:
+        reasons.append("orders/bookings are not cleanly extracted yet")
+    if not reasons:
+        reasons.append("source links are prepared, but clean result values are still limited")
+    return (
+        f"{snapshot.symbol}'s latest foreign-issuer result read is {result.lower()}. "
+        f"The main reasons: {', '.join(reasons)}. Treat this as an earnings-equivalent read from IR, 6-K, and 20-F sources, "
+        "not as a failed U.S.-style earnings exhibit scan."
+    )
+
+
+def _overall_result_picture(verdicts: dict[str, str]) -> str:
+    if verdicts["revenue"] == "Weak" or verdicts["profitability"] == "Weak":
+        return "Weak"
+    if verdicts["revenue"] == "Positive" and verdicts["profitability"] == "Positive" and verdicts["guidance"] == "Positive":
+        return "Good"
+    if "Positive" in {verdicts["revenue"], verdicts["profitability"], verdicts["guidance"]}:
+        return "Mixed"
+    if "Mixed" in {verdicts["revenue"], verdicts["profitability"], verdicts["guidance"]}:
+        return "Mixed"
+    return "Unclear"
+
+
+def _good_lines(snapshot: ForeignIssuerSnapshot, fields: dict[str, str]) -> list[str]:
+    lines = []
+    if snapshot.guidance_tone == "Positive" or fields["guidance"] != NOT_CLEANLY_EXTRACTED:
+        lines.append("Guidance or outlook language appears positive or at least usable.")
+    if fields["revenue"] != NOT_CLEANLY_EXTRACTED:
+        lines.append("Revenue/sales figures were found.")
+    if fields["net_income"] != NOT_CLEANLY_EXTRACTED or fields["gross_margin"] != NOT_CLEANLY_EXTRACTED or fields["eps"] != NOT_CLEANLY_EXTRACTED:
+        lines.append("Profitability figures were found.")
+    if "loaded" in snapshot.source_freshness.lower():
+        lines.append("Official IR and SEC foreign issuer sources are loaded.")
+    return lines or ["Official foreign issuer source links are prepared."]
+
+
+def _bad_missing_lines(snapshot: ForeignIssuerSnapshot, fields: dict[str, str]) -> list[str]:
+    lines = []
+    if fields["orders_bookings"] == NOT_CLEANLY_EXTRACTED:
+        lines.append("Orders/bookings/backlog were not cleanly found.")
+    if not _history_has_values(snapshot):
+        lines.append("Quarterly trend history is not yet cleanly extracted.")
+    if any(_snippet_is_noisy(snippet) for snippets in snapshot.metric_snippets.values() for snippet in snippets):
+        lines.append("Some raw snippets are noisy and need better parsing.")
+    for label in ("revenue", "net_income", "eps", "gross_margin"):
+        if fields[label] == NOT_CLEANLY_EXTRACTED and snapshot.metric_snippets.get(label):
+            lines.append(f"{_field_display_name(label)} was mentioned, but the parser did not isolate a clean value.")
+            break
+    return lines or ["No major missing item was obvious from the loaded result text."]
+
+
+def _watch_lines(snapshot: ForeignIssuerSnapshot, fields: dict[str, str]) -> list[str]:
+    lines = [
+        "Gross margin guidance and whether the achieved margin matches the outlook.",
+        "Sales guidance range and whether quarterly sales are tracking toward it.",
+    ]
+    if fields["orders_bookings"] == NOT_CLEANLY_EXTRACTED:
+        lines.append("Bookings/orders/backlog when available, because they can lead future sales for equipment companies.")
+    else:
+        lines.append("Bookings/orders/backlog trend and whether it confirms demand.")
+    lines.append("Currency/reporting basis so EUR, USD, IFRS, and US GAAP numbers are not mixed incorrectly.")
+    source_text = " ".join(snippet for snippets in snapshot.metric_snippets.values() for snippet in snippets).lower()
+    if any(term in source_text for term in ("china", "export control", "export controls", "macro", "demand")):
+        lines.append("China/export controls and macro demand, because those themes appeared in loaded source text.")
+    else:
+        lines.append("China/export controls and macro demand if they appear in future result text.")
+    return lines
+
+
+def _result_verdicts(snapshot: ForeignIssuerSnapshot, fields: dict[str, str]) -> dict[str, str]:
+    clean_count = sum(1 for key in ("revenue", "net_income", "eps", "gross_margin", "guidance") if fields[key] != NOT_CLEANLY_EXTRACTED)
+    source_quality = _source_quality(snapshot)
+    confidence = "High" if source_quality == "Good" and clean_count >= 4 else "Medium" if source_quality in {"Good", "Partial"} and clean_count >= 2 else "Low"
+    return {
+        "revenue": _verdict_from_trend(snapshot.revenue_trend, fields["revenue"]),
+        "profitability": _verdict_from_trend(snapshot.profitability_trend, fields["net_income"], fields["eps"], fields["gross_margin"]),
+        "guidance": _verdict_from_guidance(snapshot.guidance_tone, fields["guidance"]),
+        "source_quality": source_quality,
+        "confidence": confidence,
+    }
+
+
+def _verdict_from_trend(trend: str, *values: str) -> str:
+    if any(value != NOT_CLEANLY_EXTRACTED for value in values):
+        if trend == "Weak":
+            return "Weak"
+        if trend == "Improving":
+            return "Positive"
+        return "Mixed"
+    return "Unclear"
+
+
+def _verdict_from_guidance(guidance_tone: str, value: str) -> str:
+    if value == NOT_CLEANLY_EXTRACTED and guidance_tone == "Limited":
+        return "Unclear"
+    if guidance_tone == "Positive":
+        return "Positive"
+    if guidance_tone == "Negative":
+        return "Weak"
+    return "Mixed" if value != NOT_CLEANLY_EXTRACTED else "Unclear"
+
+
+def _source_quality(snapshot: ForeignIssuerSnapshot) -> str:
+    groups = _group_source_links(snapshot.source_links)
+    has_official = bool(groups["official"])
+    has_sec = bool(groups["sec"])
+    loaded = "loaded" in snapshot.source_freshness.lower()
+    if has_official and has_sec and loaded:
+        return "Good"
+    if has_official or has_sec:
+        return "Partial"
+    return "Weak"
+
+
+def _verdict_reason(kind: str, verdict: str, fields: dict[str, str]) -> str:
+    if kind == "revenue":
+        if fields["revenue"] == NOT_CLEANLY_EXTRACTED:
+            return "Revenue was not isolated as a clean period/value pair."
+        return f"Sales value parsed as {fields['revenue']}."
+    if kind == "profitability":
+        clean = [fields[key] for key in ("net_income", "eps", "gross_margin") if fields[key] != NOT_CLEANLY_EXTRACTED]
+        return "Profitability fields parsed: " + "; ".join(clean[:2]) + "." if clean else "Profitability was mentioned but not isolated cleanly."
+    if kind == "guidance":
+        return f"Guidance read: {fields['guidance']}." if fields["guidance"] != NOT_CLEANLY_EXTRACTED else "No clean guidance value was isolated."
+    if kind == "source_quality":
+        return "Official company and SEC foreign issuer sources are both represented." if verdict == "Good" else "Only part of the preferred source stack is loaded or linked."
+    if kind == "confidence":
+        return "Confidence reflects clean value extraction plus source quality."
+    return ""
+
+
+def _clean_revenue(snapshot: ForeignIssuerSnapshot, period: str = "") -> str:
+    return _clean_money_metric(snapshot, "revenue", ("total net sales", "net sales", "revenue", "sales"), period=period)
+
+
+def _clean_money_metric(
+    snapshot: ForeignIssuerSnapshot,
+    key: str,
+    metric_terms: tuple[str, ...],
+    *,
+    period: str = "",
+    strict_period: bool = False,
+) -> str:
+    for snippet in _preferred_snippets(snapshot.metric_snippets.get(key, []), period=period, strict_period=strict_period):
+        for term in sorted(metric_terms, key=len, reverse=True):
+            clean_term = re.escape(term)
+            before = re.search(rf"(?P<value>{MONEY_RE})\s+(?P<metric>{clean_term})\b", snippet, flags=re.IGNORECASE)
+            after = re.search(rf"\b(?P<metric>{clean_term})\b\s*(?:of|was|were|to|at|:)?\s*(?P<value>{MONEY_RE})", snippet, flags=re.IGNORECASE)
+            match = before or after
+            if match:
+                return f"{_metric_display_name(term)}: {_clean_value(match.group('value'))}"
+    return NOT_CLEANLY_EXTRACTED
+
+
+def _clean_eps(snapshot: ForeignIssuerSnapshot, period: str = "") -> str:
+    for snippet in _preferred_snippets(snapshot.metric_snippets.get("eps", []), period=period, strict_period=period.startswith("Q")):
+        before = re.search(rf"(?P<value>{MONEY_RE})\s+(?:diluted\s+|basic\s+)?(?:earnings per share|eps)", snippet, flags=re.IGNORECASE)
+        after = re.search(rf"(?:diluted\s+|basic\s+)?(?:earnings per share|eps)\s*(?:of|was|were|:)?\s*(?P<value>{MONEY_RE})", snippet, flags=re.IGNORECASE)
+        match = before or after
+        if match:
+            label = "Diluted EPS" if "diluted" in snippet.lower() else "Basic EPS" if "basic" in snippet.lower() else "EPS"
+            return f"{label}: {_clean_value(match.group('value'))}"
+    return NOT_CLEANLY_EXTRACTED
+
+
+def _clean_gross_margin(snapshot: ForeignIssuerSnapshot, period: str = "") -> str:
+    snippets = _preferred_snippets(snapshot.metric_snippets.get("gross_margin", []) + snapshot.metric_snippets.get("guidance_outlook", []), period=period)
+    for snippet in snippets:
+        range_match = re.search(rf"gross margin\s+(?:between|of between|range of)?\s*(?P<low>{PERCENT_RE})\s*(?:and|to|-)\s*(?P<high>{PERCENT_RE})", snippet, flags=re.IGNORECASE)
+        if range_match:
+            return f"Gross margin: {range_match.group('low')} to {range_match.group('high')}"
+        before = re.search(rf"(?P<value>{PERCENT_RE})\s+gross margin", snippet, flags=re.IGNORECASE)
+        after = re.search(rf"gross margin\s*(?:of|was|at|:)?\s*(?P<value>{PERCENT_RE})", snippet, flags=re.IGNORECASE)
+        match = before or after
+        if match:
+            return f"Gross margin: {match.group('value')}"
+    return NOT_CLEANLY_EXTRACTED
+
+
+def _clean_guidance(snapshot: ForeignIssuerSnapshot, period: str = "") -> str:
+    for snippet in _preferred_snippets(snapshot.metric_snippets.get("guidance_outlook", []), period=period):
+        sales_range = re.search(
+            rf"(?P<year>20\d{{2}})?.{{0,80}}(?:total\s+)?(?:net sales|revenue|sales).{{0,60}}between\s+(?P<low>{MONEY_RE})\s+and\s+(?P<high>{MONEY_RE})",
+            snippet,
+            flags=re.IGNORECASE,
+        )
+        margin_range = re.search(rf"gross margin.{0,40}?between\s+(?P<low>{PERCENT_RE})\s+and\s+(?P<high>{PERCENT_RE})", snippet, flags=re.IGNORECASE)
+        parts = []
+        if sales_range:
+            year = sales_range.group("year") or "Latest"
+            parts.append(f"{year} sales guidance: {_clean_value(sales_range.group('low'))} to {_clean_value(sales_range.group('high'))}")
+        if margin_range:
+            parts.append(f"gross margin: {margin_range.group('low')} to {margin_range.group('high')}")
+        if parts:
+            return "; ".join(parts)
+        clean_sentence = _clean_guidance_sentence(snippet)
+        if clean_sentence:
+            return clean_sentence
+    return NOT_CLEANLY_EXTRACTED
+
+
+def _clean_guidance_sentence(snippet: str) -> str:
+    sentences = re.split(r"(?<=[.!?])\s+", _remove_nav_noise(snippet))
+    for sentence in sentences:
+        lower = sentence.lower()
+        if any(term in lower for term in ("guidance", "outlook", "expects", "forecast")) and len(sentence) <= 180:
+            return sentence.strip()
+    return ""
+
+
+def _latest_period_detected(snapshot: ForeignIssuerSnapshot) -> str:
+    all_text = " ".join(snippet for snippets in snapshot.metric_snippets.values() for snippet in snippets)
+    period = _period_from_text(all_text)
+    if period:
+        return period
+    for _label, _date, url in snapshot.source_links:
+        period = _period_from_url(url)
+        if period:
+            return period
+    return NOT_CLEANLY_EXTRACTED
+
+
+def _period_from_text(text: str) -> str:
+    match = re.search(r"\b(Q[1-4])\s+(20\d{2})\b", text, flags=re.IGNORECASE)
+    if match:
+        return f"{match.group(1).upper()} {match.group(2)}"
+    match = re.search(r"\b(20\d{2})\s+(?:full-year|full year|annual)\b", text, flags=re.IGNORECASE)
+    if match:
+        return f"FY {match.group(1)}"
+    return ""
+
+
+def _period_from_url(url: str) -> str:
+    match = re.search(r"/q([1-4])-(20\d{2})\b", url.lower())
+    if match:
+        return f"Q{match.group(1)} {match.group(2)}"
+    match = re.search(r"/(20\d{2})(?:\b|/)", url.lower())
+    if match and "annual" in url.lower():
+        return f"FY {match.group(1)}"
+    return ""
+
+
+def _results_history_rows(snapshot: ForeignIssuerSnapshot, fields: dict[str, str]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for label, _date, url in snapshot.source_links:
+        if "quarter" not in label.lower() and "/q" not in url.lower():
+            continue
+        period = _period_from_url(url)
+        if not period or period in seen:
+            continue
+        seen.add(period)
+        is_latest = period == fields["period"]
+        rows.append(
+            {
+                "period": period,
+                "revenue": fields["revenue"] if is_latest and fields["revenue"] != NOT_CLEANLY_EXTRACTED else VALUES_NOT_EXTRACTED,
+                "net_income": fields["net_income"] if is_latest and fields["net_income"] != NOT_CLEANLY_EXTRACTED else VALUES_NOT_EXTRACTED,
+                "eps": fields["eps"] if is_latest and fields["eps"] != NOT_CLEANLY_EXTRACTED else VALUES_NOT_EXTRACTED,
+                "gross_margin": fields["gross_margin"] if is_latest and fields["gross_margin"] != NOT_CLEANLY_EXTRACTED else VALUES_NOT_EXTRACTED,
+                "guidance": fields["guidance"] if is_latest and fields["guidance"] != NOT_CLEANLY_EXTRACTED else VALUES_NOT_EXTRACTED,
+                "source": _history_source_label(label, url),
+            }
+        )
+        if len(rows) >= 5:
+            break
+    if not rows:
+        rows.append(
+            {
+                "period": fields["period"],
+                "revenue": fields["revenue"] if fields["revenue"] != NOT_CLEANLY_EXTRACTED else VALUES_NOT_EXTRACTED,
+                "net_income": fields["net_income"] if fields["net_income"] != NOT_CLEANLY_EXTRACTED else VALUES_NOT_EXTRACTED,
+                "eps": fields["eps"] if fields["eps"] != NOT_CLEANLY_EXTRACTED else VALUES_NOT_EXTRACTED,
+                "gross_margin": fields["gross_margin"] if fields["gross_margin"] != NOT_CLEANLY_EXTRACTED else VALUES_NOT_EXTRACTED,
+                "guidance": fields["guidance"] if fields["guidance"] != NOT_CLEANLY_EXTRACTED else VALUES_NOT_EXTRACTED,
+                "source": _short_label(snapshot.latest_source_label),
+            }
+        )
+    return rows
+
+
+def _history_has_values(snapshot: ForeignIssuerSnapshot) -> bool:
+    return False
+
+
+def _history_row_text(row: dict[str, str]) -> str:
+    return " | ".join(
+        _table_cell(row[key])
+        for key in ("period", "revenue", "net_income", "eps", "gross_margin", "guidance", "source")
+    )
+
+
+def _table_cell(value: str) -> str:
+    clean = re.sub(r"\s+", " ", value).strip()
+    if len(clean) > 70:
+        clean = clean[:67].rstrip() + "..."
+    return clean.replace("|", "/")
+
+
+def _history_source_label(label: str, url: str) -> str:
+    lower = f"{label} {url}".lower()
+    if "sec" in lower:
+        return "SEC filing"
+    if "annual" in lower:
+        return "Annual report"
+    if "quarter" in lower or "/q" in lower:
+        return "IR result page"
+    return _short_label(label)
+
+
+def _group_source_links(source_links: list[tuple[str, str, str]]) -> dict[str, list[tuple[str, str, str]]]:
+    groups = {"official": [], "sec": [], "supplemental": []}
+    for row in source_links:
+        label = row[0].lower()
+        if "companyfacts" in label or "xbrl" in label:
+            groups["supplemental"].append(row)
+        elif label.startswith("sec ") or " sec " in f" {label}":
+            groups["sec"].append(row)
+        else:
+            groups["official"].append(row)
+    groups["official"] = groups["official"][:10]
+    groups["sec"] = groups["sec"][:8]
+    groups["supplemental"] = groups["supplemental"][:4]
+    return groups
+
+
+def _source_lines(rows: list[tuple[str, str, str]]) -> list[str]:
+    if not rows:
+        return ["Not loaded yet."]
+    lines = []
+    for label, date, url in rows:
+        date_part = "" if not date or date == "--" else f" ({date})"
+        lines.append(f"{label}{date_part}: {url or '--'}")
+    return lines
+
+
+def _raw_extract_lines(snapshot: ForeignIssuerSnapshot) -> list[str]:
+    lines: list[str] = []
+    order = ("revenue", "net_income", "eps", "gross_margin", "guidance_outlook", "orders_bookings", "dividend_buyback", "currency_basis")
+    for key in order:
+        snippets = snapshot.metric_snippets.get(key, [])
+        if not snippets:
+            continue
+        section_lines = []
+        for snippet in snippets[:2]:
+            excerpt = _raw_excerpt(snippet)
+            if _raw_excerpt_is_noise(excerpt):
+                continue
+            section_lines.append(f"- {excerpt}")
+        if section_lines:
+            lines.append(f"{_field_display_name(key)}:")
+            lines.extend(section_lines)
+    if not lines:
+        lines.append("- No raw extracts loaded.")
+    return lines
+
+
+def _raw_excerpt(snippet: str) -> str:
+    clean = _remove_nav_noise(snippet)
+    clean = re.sub(r"\s+", " ", clean).strip(" -|")
+    if len(clean) > 150:
+        clean = clean[:147].rstrip() + "..."
+    return clean or NOT_CLEANLY_EXTRACTED
+
+
+def _raw_excerpt_is_noise(excerpt: str) -> bool:
+    lower = excerpt.lower()
+    if any(
+        term in lower
+        for term in (
+            "news back",
+            "customer support",
+            "media library",
+            "contact media",
+            "search search",
+            "back financial results overview",
+            "return & financing",
+        )
+    ):
+        return not re.search(MONEY_RE, excerpt, flags=re.IGNORECASE) and not re.search(PERCENT_RE, excerpt)
+    return False
+
+
+def _preferred_snippets(snippets: list[str], *, period: str = "", strict_period: bool = False) -> list[str]:
+    clean = [_remove_nav_noise(snippet) for snippet in snippets]
+    if strict_period:
+        clean = [snippet for snippet in clean if _snippet_matches_period(snippet, period)]
+    return sorted(clean, key=lambda value: (_snippet_period_priority(value, period), _snippet_is_noisy(value), len(value)))
+
+
+def _snippet_period_priority(snippet: str, period: str) -> int:
+    lower = snippet.lower()
+    if _snippet_matches_period(snippet, period):
+        return 0
+    if re.search(r"\bq[1-4]\s+20\d{2}\b", lower) or "quarter" in lower:
+        return 1
+    if "reports" in lower or "financial results" in lower:
+        return 2
+    if "annual" in lower or "full-year" in lower or "full year" in lower:
+        return 4
+    return 3
+
+
+def _snippet_matches_period(snippet: str, period: str) -> bool:
+    if not period or period == NOT_CLEANLY_EXTRACTED:
+        return False
+    lower = snippet.lower()
+    clean_period = period.lower()
+    if clean_period in lower:
+        return True
+    q_match = re.match(r"q([1-4])\s+(20\d{2})", clean_period)
+    if q_match:
+        return f"q{q_match.group(1)}-{q_match.group(2)}" in lower or f"first quarter {q_match.group(2)}" in lower
+    fy_match = re.match(r"fy\s+(20\d{2})", clean_period)
+    return bool(fy_match and fy_match.group(1) in lower and ("annual" in lower or "full-year" in lower or "full year" in lower))
+
+
+def _remove_nav_noise(snippet: str) -> str:
+    value = re.sub(r"\s+", " ", snippet or "").strip()
+    lower = value.lower()
+    noisy_terms = ("suppliernet", "customernet", "search search home", "home investors", "news back news overview")
+    useful_terms = (
+        "reports ",
+        "q1 ",
+        "q2 ",
+        "q3 ",
+        "q4 ",
+        "20",
+        "total net sales",
+        "net sales",
+        "revenue",
+        "net income",
+        "gross margin",
+        "earnings per share",
+        "outlook",
+        "guidance",
+        "order intake",
+        "bookings",
+        "backlog",
+    )
+    if any(term in lower for term in noisy_terms):
+        starts = [
+            lower.find(term)
+            for term in useful_terms
+            if lower.find(term) >= 0
+        ]
+        if starts:
+            value = value[min(starts):]
+    else:
+        starts = [lower.find(term) for term in useful_terms if 0 < lower.find(term) <= 80]
+        if starts:
+            value = value[min(starts):]
+    value = re.sub(r"\b(?:SupplierNet|CustomerNet)\b", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bSearch Search Home\b", "", value, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _snippet_is_noisy(snippet: str) -> bool:
+    lower = snippet.lower()
+    return any(term in lower for term in ("suppliernet", "customernet", "search search", "home investors", "news back news"))
+
+
+def _clean_value(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _metric_display_name(term: str) -> str:
+    labels = {
+        "total net sales": "Total net sales",
+        "net sales": "Net sales",
+        "revenue": "Revenue",
+        "sales": "Sales",
+        "net income": "Net income",
+        "profit for the period": "Profit for the period",
+        "profit attributable": "Profit attributable",
+        "income from operations": "Income from operations",
+        "order intake": "Order intake",
+        "orders": "Orders",
+        "net bookings": "Net bookings",
+        "bookings": "Bookings",
+        "backlog": "Backlog",
+    }
+    return labels.get(term, term.title())
+
+
+def _field_display_name(key: str) -> str:
+    labels = {
+        "revenue": "Revenue",
+        "net_income": "Net income",
+        "eps": "EPS",
+        "gross_margin": "Gross margin",
+        "guidance_outlook": "Guidance / outlook",
+        "orders_bookings": "Orders / bookings",
+        "dividend_buyback": "Dividend / buyback",
+        "currency_basis": "Currency / basis",
+    }
+    return labels.get(key, key.replace("_", " ").title())
+
+
+def _prefixed_lines(lines: list[str]) -> list[str]:
+    return [f"- {line}" for line in lines]
 
 
 def _profile_strings(quote: dict[str, Any] | None, position_asset_type: str | None, company_title: str) -> list[str]:
