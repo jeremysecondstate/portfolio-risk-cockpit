@@ -18,7 +18,8 @@ venv/
 /data/*tokens*.json
 /data/secrets/
 !/data/.gitkeep
-/app/data/sec_cache/*.json
+/app/data/sec_cache/*
+!/app/data/sec_cache/.gitkeep
 
 # OS
 .DS_Store
