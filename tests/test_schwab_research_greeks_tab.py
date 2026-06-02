@@ -28,7 +28,7 @@ class SchwabResearchGreeksTabTests(unittest.TestCase):
 
             self.assertEqual(
                 labels,
-                ["Overview", "Technicals", "Risk Scenarios", "Options Strategy", "Greeks", "Earnings / News", "Fundamentals", "Macro Context"],
+                ["Overview", "Evidence Desk", "Technicals", "Risk Scenarios", "Options Strategy", "Greeks", "Earnings / News", "Fundamentals", "Macro Context"],
             )
             self.assertTrue(hasattr(root, "schwab_research_greeks_frame"))
         finally:

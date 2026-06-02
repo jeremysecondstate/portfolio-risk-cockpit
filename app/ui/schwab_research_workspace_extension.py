@@ -101,7 +101,14 @@ from app.analytics.stock_research import (
     technical_scenario_basis,
     technical_scenario_moves,
 )
-from app.analytics.technical_analysis import candles_from_price_history
+from app.analytics.technical_analysis import Candle, candles_from_price_history
+from app.analytics.trade_evidence import (
+    TradeEvidenceReport,
+    append_trade_evidence_snapshot,
+    build_trade_evidence_report,
+    evidence_scorecards,
+    format_trade_evidence_report,
+)
 from app.data.sec_edgar import SecEdgarClient, normalize_ticker
 from app.macro.analysis import format_macro_report
 from app.macro.models import MacroSnapshot
@@ -145,6 +152,10 @@ class _ResearchPayload:
     reporting_profile: str = REPORTING_PROFILE_UNKNOWN
     etf_snapshot: ETFResearchSnapshot | None = None
     foreign_issuer_snapshot: ForeignIssuerSnapshot | None = None
+    daily_candles: list[Candle] | None = None
+    market_indicators: dict[str, AdvancedIndicatorSnapshot] | None = None
+    market_candles: dict[str, list[Candle]] | None = None
+    trade_evidence_report: TradeEvidenceReport | None = None
 
 
 def install_schwab_research_workspace_extension(app_cls: Type[tk.Tk]) -> None:
@@ -294,6 +305,7 @@ def _build_research_right_panel(self: tk.Tk, parent: ttk.Frame) -> None:
 
     self.schwab_research_overview_frame = _overview_tab(notebook)
     self.schwab_research_overview_text = self.schwab_research_overview_frame.detail_text  # type: ignore[attr-defined]
+    self.schwab_trade_evidence_frame = _evidence_tab(self, notebook)
     self.schwab_research_technicals_frame = _technicals_tab(notebook)
     self.schwab_research_scenarios_frame = _scenarios_tab(self, notebook)
     self.schwab_research_options_frame = _options_strategy_tab(self, notebook)
@@ -332,6 +344,49 @@ def _overview_tab(notebook: ttk.Notebook) -> ttk.Frame:
     frame.freshness = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.freshness.grid(row=4, column=0, sticky="ew", pady=(8, 0))
     frame.detail_text = _readout_launcher(frame, title="Overview Explanation", button_text="Open Overview Explanation", row=5)  # type: ignore[attr-defined]
+    return frame
+
+
+def _evidence_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
+    frame = _scrollable_tab(notebook, "Evidence Desk")
+    frame.columnconfigure(0, weight=1)
+    controls = ttk.Frame(frame, style="Panel.TFrame")
+    controls.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    controls.columnconfigure(1, weight=1)
+    ttk.Button(controls, text="Save Snapshot", command=lambda app=self: _save_trade_evidence_snapshot(app)).grid(row=0, column=0, sticky="w")
+    frame.snapshot_status_var = tk.StringVar(value="Snapshot --")  # type: ignore[attr-defined]
+    ttk.Label(controls, textvariable=frame.snapshot_status_var, style="Subtle.TLabel").grid(row=0, column=1, sticky="w", padx=(8, 0))  # type: ignore[attr-defined]
+    frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.cards.grid(row=1, column=0, sticky="ew")
+    frame.verdict = ttk.LabelFrame(frame, text="Verdict", style="Card.TLabelframe")  # type: ignore[attr-defined]
+    frame.verdict.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+    frame.verdict.columnconfigure(0, weight=1)  # type: ignore[attr-defined]
+    score_box = ttk.LabelFrame(frame, text="Courtroom Scorecard", style="Card.TLabelframe")
+    score_box.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+    score_box.columnconfigure(0, weight=1)
+    tree = ttk.Treeview(score_box, columns=("category", "grade", "read"), show="headings", height=9)
+    for column, label, width, anchor in (
+        ("category", "Evidence", 190, tk.W),
+        ("grade", "Grade", 80, tk.CENTER),
+        ("read", "Read", 620, tk.W),
+    ):
+        tree.heading(column, text=label)
+        tree.column(column, width=width, anchor=anchor, stretch=column == "read")
+    tree.grid(row=0, column=0, sticky="ew")
+    y_scroll = ttk.Scrollbar(score_box, orient=tk.VERTICAL, command=tree.yview)
+    y_scroll.grid(row=0, column=1, sticky="ns")
+    tree.configure(yscrollcommand=y_scroll.set)
+    frame.score_tree = tree  # type: ignore[attr-defined]
+    frame.evidence_columns = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.evidence_columns.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+    frame.evidence_columns.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    frame.risk_columns = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.risk_columns.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+    frame.risk_columns.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    frame.decision_columns = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.decision_columns.grid(row=6, column=0, sticky="ew", pady=(8, 0))
+    frame.decision_columns.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    frame.detail_text = _readout_launcher(frame, title="Trade Evidence Report", button_text="Open Full Evidence Report", row=7, pady=(10, 0))  # type: ignore[attr-defined]
     return frame
 
 
@@ -1263,6 +1318,8 @@ def _build_research_payload(session: Any, portfolio, symbol: str) -> _ResearchPa
     statuses.append(history_status)
     candles = candles_from_price_history(daily_payload) if daily_payload else []
     indicators = calculate_advanced_indicators(symbol, candles)
+    market_indicators, market_candles, market_statuses = _fetch_market_evidence_context(session, symbol, candles)
+    statuses.extend(market_statuses)
 
     fallback_price = _last_price_from_quote(quote) or indicators.latest_close
     context = build_portfolio_symbol_context(portfolio, symbol, fallback_price)
@@ -1309,6 +1366,21 @@ def _build_research_payload(session: Any, portfolio, symbol: str) -> _ResearchPa
     statuses.append(option_chain_status)
     greek_underlying_price = option_chain_underlying_price or context.last_price
     greek_summary = build_greek_summary(option_chain_rows, greek_underlying_price)
+    trade_evidence_report = build_trade_evidence_report(
+        symbol=symbol,
+        indicators=indicators,
+        context=context,
+        decision=decision,
+        scenario_rows=scenario_rows,
+        earnings_text=earnings_text,
+        macro_text=macro_text,
+        statuses=statuses,
+        quote=quote,
+        option_chain_rows=option_chain_rows,
+        symbol_candles=candles,
+        market_indicators=market_indicators,
+        market_candles=market_candles,
+    )
 
     return _ResearchPayload(
         symbol,
@@ -1330,6 +1402,10 @@ def _build_research_payload(session: Any, portfolio, symbol: str) -> _ResearchPa
         reporting_profile,
         etf_snapshot,
         foreign_issuer_snapshot,
+        candles,
+        market_indicators,
+        market_candles,
+        trade_evidence_report,
     )
 
 
@@ -1367,6 +1443,31 @@ def _fetch_daily_history(session: Any, symbol: str) -> tuple[dict[str, Any] | No
         if cached:
             return cached, DataSourceStatus("Schwab price history", "cached", _now(), f"{exc}; using cached candles.")
         return None, DataSourceStatus("Schwab price history", "error", _now(), str(exc))
+
+
+def _fetch_market_evidence_context(
+    session: Any,
+    symbol: str,
+    symbol_candles: list[Candle],
+) -> tuple[dict[str, AdvancedIndicatorSnapshot], dict[str, list[Candle]], list[DataSourceStatus]]:
+    indicators: dict[str, AdvancedIndicatorSnapshot] = {}
+    candles_by_symbol: dict[str, list[Candle]] = {}
+    statuses: list[DataSourceStatus] = []
+    selected = symbol.strip().upper()
+    for benchmark in ("SPY", "QQQ", "IWM"):
+        if benchmark == selected:
+            candles = list(symbol_candles)
+            indicators[benchmark] = calculate_advanced_indicators(benchmark, candles)
+            candles_by_symbol[benchmark] = candles
+            statuses.append(DataSourceStatus(f"Market regime {benchmark}", "fresh", _now(), "Using selected-symbol daily candles because it is a benchmark."))
+            continue
+        payload, status = _fetch_daily_history(session, benchmark)
+        candles = candles_from_price_history(payload) if payload else []
+        if candles:
+            indicators[benchmark] = calculate_advanced_indicators(benchmark, candles)
+            candles_by_symbol[benchmark] = candles
+        statuses.append(DataSourceStatus(f"Market regime {benchmark}", status.status, status.fetched_at, status.message))
+    return indicators, candles_by_symbol, statuses
 
 
 def _portfolio_position_asset_type(portfolio: Any, symbol: str) -> str:
@@ -1648,6 +1749,7 @@ def _render_research_payload(self: tk.Tk, payload: _ResearchPayload) -> None:
 
     _render_at_glance(self, payload)
     _render_overview(self, payload)
+    _render_trade_evidence(self, payload)
     _render_technicals(self, payload)
     _render_scenarios(self, payload)
     _render_options_strategy(self)
@@ -1658,7 +1760,8 @@ def _render_research_payload(self: tk.Tk, payload: _ResearchPayload) -> None:
 
     output = getattr(self, "schwab_trading_preview_text", None)
     if output is not None:
-        _set_research_text(output, _overview_text(payload) + "\n\n" + _source_status_text(payload.statuses))
+        evidence_text = _trade_evidence_text(payload)
+        _set_research_text(output, evidence_text + "\n\n" + _overview_text(payload) + "\n\n" + _source_status_text(payload.statuses))
 
 
 def _sync_research_option_chain(self: tk.Tk, payload: _ResearchPayload) -> None:
@@ -1677,6 +1780,7 @@ def _overview_text(payload: _ResearchPayload) -> str:
     context = payload.context
     indicators = payload.indicators
     decision = payload.decision
+    evidence = _trade_evidence_report(payload)
     lines = [
         f"Schwab Research Workspace - {payload.symbol}",
         "",
@@ -1684,6 +1788,7 @@ def _overview_text(payload: _ResearchPayload) -> str:
         f"- Overall: {decision.overall.label} ({decision.overall.why})",
         f"- Risk: {decision.risk_level.label} ({decision.risk_level.why})",
         f"- Action bias: {decision.action_bias.label} ({decision.action_bias.why})",
+        f"- Evidence posture: {evidence.posture}; setup type {evidence.setup_type}.",
         "",
         "Plain-English summary:",
         *[f"- {line}" for line in decision.summary],
@@ -1712,6 +1817,7 @@ def _overview_text(payload: _ResearchPayload) -> str:
 
 def _overview_popout_text(payload: _ResearchPayload) -> str:
     decision = payload.decision
+    evidence = _trade_evidence_report(payload)
     return _format_beginner_readout(
         title=f"Overview Explanation - {payload.symbol}",
         what_this_means=(
@@ -1719,6 +1825,8 @@ def _overview_popout_text(payload: _ResearchPayload) -> str:
             "the technical setup, current risk level, action bias, and data freshness."
         ),
         key_points=[
+            f"Evidence verdict: {evidence.verdict}",
+            f"Evidence posture: {evidence.posture}; setup type: {evidence.setup_type}.",
             f"Overall read: {decision.overall.label} ({decision.overall.why})",
             f"Risk level: {decision.risk_level.label} ({decision.risk_level.why})",
             f"Action bias: {decision.action_bias.label} ({decision.action_bias.why})",
@@ -1821,6 +1929,84 @@ def _render_overview(self: tk.Tk, payload: _ResearchPayload) -> None:
     Checklist(frame.checks, "What Would Change The View", decision.changes_view).grid(row=0, column=1, sticky="nsew")  # type: ignore[attr-defined]
     freshness_badges(frame.freshness, payload.statuses)  # type: ignore[attr-defined]
     _set_research_text(self.schwab_research_overview_text, _overview_popout_text(payload))
+
+
+def _render_trade_evidence(self: tk.Tk, payload: _ResearchPayload) -> None:
+    frame = getattr(self, "schwab_trade_evidence_frame", None)
+    if frame is None:
+        return
+    report = _trade_evidence_report(payload)
+    metric_grid(frame.cards, evidence_scorecards(report), columns=4, card_height=122, prominent_height=128, prominent_indexes={0})  # type: ignore[attr-defined]
+    clear_children(frame.verdict)  # type: ignore[attr-defined]
+    ttk.Label(
+        frame.verdict,
+        text=report.verdict,
+        style="Chip.TLabel",
+        wraplength=1050,
+        justify=tk.LEFT,
+    ).grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 4))  # type: ignore[attr-defined]
+    ttk.Label(
+        frame.verdict,
+        text=f"Posture {report.posture} | Setup type {report.setup_type} | Confidence {report.confidence}",
+        style="Subtle.TLabel",
+        wraplength=1050,
+        justify=tk.LEFT,
+    ).grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))  # type: ignore[attr-defined]
+
+    tree = frame.score_tree  # type: ignore[attr-defined]
+    for row_id in tree.get_children():
+        tree.delete(row_id)
+    for grade in report.grades:
+        tree.insert("", tk.END, values=(grade.category, grade.grade, grade.why))
+
+    clear_children(frame.evidence_columns)  # type: ignore[attr-defined]
+    Checklist(frame.evidence_columns, "Supporting Evidence", report.supporting_evidence).grid(row=0, column=0, sticky="nsew", padx=(0, 8))  # type: ignore[attr-defined]
+    Checklist(frame.evidence_columns, "Contradictions", report.contradictory_evidence).grid(row=0, column=1, sticky="nsew")  # type: ignore[attr-defined]
+    clear_children(frame.risk_columns)  # type: ignore[attr-defined]
+    Checklist(frame.risk_columns, "Event + Execution Risk", [*report.event_risk[:4], *report.liquidity_execution[:4]]).grid(row=0, column=0, sticky="nsew", padx=(0, 8))  # type: ignore[attr-defined]
+    Checklist(frame.risk_columns, "Portfolio + Options Impact", [*report.portfolio_impact[:4], *report.options_iv[:4]]).grid(row=0, column=1, sticky="nsew")  # type: ignore[attr-defined]
+    clear_children(frame.decision_columns)  # type: ignore[attr-defined]
+    Checklist(frame.decision_columns, "What Would Make This Dumb", report.dumb_if).grid(row=0, column=0, sticky="nsew", padx=(0, 8))  # type: ignore[attr-defined]
+    Checklist(frame.decision_columns, "What Would Change The View", report.changes_mind).grid(row=0, column=1, sticky="nsew")  # type: ignore[attr-defined]
+    _set_research_text(frame.detail_text, format_trade_evidence_report(report))  # type: ignore[attr-defined]
+
+
+def _trade_evidence_report(payload: _ResearchPayload) -> TradeEvidenceReport:
+    if payload.trade_evidence_report is not None:
+        return payload.trade_evidence_report
+    return build_trade_evidence_report(
+        symbol=payload.symbol,
+        indicators=payload.indicators,
+        context=payload.context,
+        decision=payload.decision,
+        scenario_rows=payload.scenario_rows,
+        earnings_text=payload.earnings_text,
+        macro_text=payload.macro_text,
+        statuses=payload.statuses,
+        quote=payload.quote,
+        option_chain_rows=payload.option_chain_rows or [],
+        symbol_candles=payload.daily_candles or [],
+        market_indicators=payload.market_indicators or {},
+        market_candles=payload.market_candles or {},
+    )
+
+
+def _trade_evidence_text(payload: _ResearchPayload) -> str:
+    return format_trade_evidence_report(_trade_evidence_report(payload))
+
+
+def _save_trade_evidence_snapshot(self: tk.Tk) -> None:
+    payload = getattr(self, "schwab_research_last_payload", None)
+    frame = getattr(self, "schwab_trade_evidence_frame", None)
+    if payload is None:
+        messagebox.showinfo("Run analysis first", "Run analysis once before saving a trade evidence snapshot.")
+        return
+    try:
+        path = append_trade_evidence_snapshot(_trade_evidence_report(payload))
+        if frame is not None and hasattr(frame, "snapshot_status_var"):
+            frame.snapshot_status_var.set(f"Saved {path.name} at {_now()}")  # type: ignore[attr-defined]
+    except Exception as exc:
+        messagebox.showerror("Save snapshot failed", str(exc))
 
 
 def _risk_lines(payload: _ResearchPayload) -> list[str]:
@@ -2165,12 +2351,49 @@ def _load_chain_from_research_tab(self: tk.Tk) -> None:
         messagebox.showerror("Option chain unavailable", "The Schwab option-chain loader is not installed.")
         return
     command()
+    _refresh_payload_option_chain_evidence(self)
     _render_options_strategy(self)
     _render_greeks(self)
 
 
 def _load_greeks_from_research_tab(self: tk.Tk) -> None:
     _load_chain_from_research_tab(self)
+
+
+def _refresh_payload_option_chain_evidence(self: tk.Tk) -> None:
+    payload = getattr(self, "schwab_research_last_payload", None)
+    if payload is None:
+        return
+    rows_map = getattr(self, "schwab_option_chain_rows", {}) or {}
+    chain_rows = [row for row in rows_map.values() if isinstance(row, dict)]
+    if not chain_rows:
+        return
+    underlying_price = _float_from_var(getattr(self, "options_underlying_price_var", None)) or payload.option_chain_underlying_price or payload.context.last_price
+    greek_summary = build_greek_summary(chain_rows, underlying_price)
+    trade_evidence_report = build_trade_evidence_report(
+        symbol=payload.symbol,
+        indicators=payload.indicators,
+        context=payload.context,
+        decision=payload.decision,
+        scenario_rows=payload.scenario_rows,
+        earnings_text=payload.earnings_text,
+        macro_text=payload.macro_text,
+        statuses=payload.statuses,
+        quote=payload.quote,
+        option_chain_rows=chain_rows,
+        symbol_candles=payload.daily_candles or [],
+        market_indicators=payload.market_indicators or {},
+        market_candles=payload.market_candles or {},
+    )
+    updated = replace(
+        payload,
+        option_chain_rows=chain_rows,
+        option_chain_underlying_price=underlying_price,
+        greek_summary=greek_summary,
+        trade_evidence_report=trade_evidence_report,
+    )
+    self.schwab_research_last_payload = updated
+    _render_trade_evidence(self, updated)
 
 
 def _render_greeks(self: tk.Tk, payload: _ResearchPayload | None = None) -> None:
@@ -2651,6 +2874,21 @@ def _refresh_earnings_sources(self: tk.Tk) -> None:
                 macro_text=payload.macro_text,
                 statuses=statuses,
             )
+            trade_evidence_report = build_trade_evidence_report(
+                symbol=payload.symbol,
+                indicators=payload.indicators,
+                context=payload.context,
+                decision=decision,
+                scenario_rows=payload.scenario_rows,
+                earnings_text=earnings_text,
+                macro_text=payload.macro_text,
+                statuses=statuses,
+                quote=payload.quote,
+                option_chain_rows=payload.option_chain_rows or [],
+                symbol_candles=payload.daily_candles or [],
+                market_indicators=payload.market_indicators or {},
+                market_candles=payload.market_candles or {},
+            )
             updated = replace(
                 payload,
                 earnings_text=earnings_text,
@@ -2658,6 +2896,7 @@ def _refresh_earnings_sources(self: tk.Tk) -> None:
                 filings_lines=filings_lines,
                 statuses=statuses,
                 decision=decision,
+                trade_evidence_report=trade_evidence_report,
             )
         except Exception as exc:
             self.after(0, lambda error=exc: messagebox.showerror("Refresh Earnings failed", str(error)))
@@ -2671,12 +2910,13 @@ def _finish_earnings_refresh(self: tk.Tk, payload: _ResearchPayload) -> None:
     self.schwab_research_last_payload = payload
     _render_at_glance(self, payload)
     _render_overview(self, payload)
+    _render_trade_evidence(self, payload)
     _render_earnings_news(self, payload)
     _render_fundamentals(self, payload)
     self.schwab_research_status_var.set(f"{payload.symbol} earnings refreshed at {_now()}")
     output = getattr(self, "schwab_trading_preview_text", None)
     if output is not None:
-        _set_research_text(output, _overview_text(payload) + "\n\n" + _source_status_text(payload.statuses))
+        _set_research_text(output, _trade_evidence_text(payload) + "\n\n" + _overview_text(payload) + "\n\n" + _source_status_text(payload.statuses))
 
 
 def _merge_statuses(existing: list[DataSourceStatus], updates: list[DataSourceStatus]) -> list[DataSourceStatus]:
@@ -2689,28 +2929,25 @@ def _recalculate_research_scenarios(self: tk.Tk) -> None:
     if payload is None:
         return
     moves = technical_scenario_moves(payload.context, payload.indicators)
-    updated = _ResearchPayload(
-        payload.symbol,
-        payload.quote,
-        payload.indicators,
-        payload.context,
-        build_scenario_rows(payload.context, moves),
-        payload.earnings_text,
-        payload.fundamentals_text,
-        payload.filings_lines,
-        payload.macro_text,
-        payload.statuses,
-        payload.decision,
-        payload.macro_snapshot,
-        payload.option_chain_rows,
-        payload.option_chain_underlying_price,
-        payload.greek_summary,
-        payload.security_kind,
-        payload.reporting_profile,
-        payload.etf_snapshot,
-        payload.foreign_issuer_snapshot,
+    scenario_rows = build_scenario_rows(payload.context, moves)
+    trade_evidence_report = build_trade_evidence_report(
+        symbol=payload.symbol,
+        indicators=payload.indicators,
+        context=payload.context,
+        decision=payload.decision,
+        scenario_rows=scenario_rows,
+        earnings_text=payload.earnings_text,
+        macro_text=payload.macro_text,
+        statuses=payload.statuses,
+        quote=payload.quote,
+        option_chain_rows=payload.option_chain_rows or [],
+        symbol_candles=payload.daily_candles or [],
+        market_indicators=payload.market_indicators or {},
+        market_candles=payload.market_candles or {},
     )
+    updated = replace(payload, scenario_rows=scenario_rows, trade_evidence_report=trade_evidence_report)
     self.schwab_research_last_payload = updated
+    _render_trade_evidence(self, updated)
     _render_scenarios(self, updated)
     _render_greeks(self, updated)
 
