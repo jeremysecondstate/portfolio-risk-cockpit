@@ -15,7 +15,7 @@ from app.brokers.hyperliquid.client import (
 from app.brokers.paper import PaperBroker
 from app.brokers.schwab.account_adapter import portfolio_from_schwab_account
 from app.brokers.schwab.session import SchwabSession, schwab_auth_error_requires_reauthorization
-from app.brokers.schwab.token_store import clear_token_payload
+# from app.brokers.schwab.token_store import clear_token_payload
 from app.core.order_models import SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, OrderSide, OrderType, TimeInForce
 from app.core.portfolio import Portfolio, Position
 from app.ui.dashboard import PortfolioRiskCockpitApp
@@ -238,7 +238,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         self.schwab_verification_status_var.set("")
 
     def reset_schwab_session(self) -> None:
-        clear_token_payload()
+        # clear_token_payload()
         self.schwab_session = None
         self.last_schwab_preview_status = None
         self.open_only_verified_this_session = False
