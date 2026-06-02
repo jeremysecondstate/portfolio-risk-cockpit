@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import json
+from pathlib import Path
 import re
 from statistics import median
 from typing import Any
@@ -9,6 +11,8 @@ from typing import Any
 
 ACTIVE_SET_TARGET = 24
 ZERO_EPSILON = 0.00000001
+CHAIN_HEALTH_HISTORY_PATH = Path("data") / "hyperliquid_chain_health_history.jsonl"
+HISTORICAL_EVIDENCE_MIN_OBSERVATIONS = 30
 
 
 @dataclass(frozen=True)
@@ -19,6 +23,7 @@ class HyperliquidValidatorHealthSnapshot:
     validator_l1_votes: Any
     exchange_status: Any | None
     all_mids_ok: bool | None
+    all_mids: dict[str, Any] | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     raw_validator_summaries: Any | None = None
@@ -34,6 +39,17 @@ class HyperliquidChainHealthAssessment:
     criticals: list[str]
     counterfactuals: list[str]
     raw_data_notes: list[str]
+
+
+@dataclass(frozen=True)
+class HyperliquidMarketImpactRead:
+    execution_risk: str
+    liquidity_confidence: str
+    hype_price_pressure: str
+    evidence_quality: str
+    trading_posture: str
+    hypothesis: str
+    watch_next: list[str]
 
 
 def normalize_validator_summaries_payload(payload: Any) -> list[dict[str, Any]]:
@@ -91,10 +107,10 @@ def assess_hyperliquid_chain_health(snapshot: HyperliquidValidatorHealthSnapshot
     outside_jailed = max(0, jailed_total - jailed_top24)
     if outside_jailed >= 8:
         _append_unique(warnings, f"{outside_jailed} jailed validator(s) were detected outside the top 24.")
-        score -= 10
+        score -= 6
     elif outside_jailed >= 3:
         _append_unique(warnings, f"{outside_jailed} jailed validator(s) were detected outside the top 24.")
-        score -= 5
+        score -= 3
     if jailed_total:
         _append_unique(
             warnings,
@@ -137,6 +153,24 @@ def assess_hyperliquid_chain_health(snapshot: HyperliquidValidatorHealthSnapshot
 
     score = max(0, min(100, int(round(score))))
     temperature = _temperature(score, criticals)
+    stake_display = _stake_display_context(rows, active_stake, total_stake)
+    if stake_display["raw_data_note"]:
+        raw_data_notes.append(stake_display["raw_data_note"])
+    health_score = _chain_operating_health_score(
+        positive_validator_count=len(positive_rows),
+        jailed_top24=jailed_top24,
+        inactive_top24=inactive_top24,
+        all_mids_ok=snapshot.all_mids_ok,
+        exchange_status_read=exchange_read,
+    )
+    decentralization_score = _decentralization_score(concentration)
+    confidence_score = _data_confidence_score(
+        has_summaries=bool(validators),
+        has_stats=snapshot.validator_stats is not None,
+        has_l1_votes=snapshot.validator_l1_votes is not None,
+        all_mids_ok=snapshot.all_mids_ok,
+        exchange_status=snapshot.exchange_status,
+    )
     key_metrics = {
         "validator_count": len(validators),
         "active_set_target": ACTIVE_SET_TARGET,
@@ -144,9 +178,18 @@ def assess_hyperliquid_chain_health(snapshot: HyperliquidValidatorHealthSnapshot
         "top24_active_approximation": top_24_count,
         "total_stake": total_stake,
         "active_stake": active_stake,
+        "total_stake_display": stake_display["total_stake_display"],
+        "active_stake_display": stake_display["active_stake_display"],
+        "stake_unit_label": stake_display["unit_label"],
+        "stake_scale": stake_display["scale"],
+        "stake_scale_source": stake_display["scale_source"],
         "jailed_total": jailed_total,
         "jailed_top24": jailed_top24,
         "inactive_top24": inactive_top24,
+        "outside_jailed": outside_jailed,
+        "chain_operating_health_score": health_score,
+        "decentralization_score": decentralization_score,
+        "data_confidence_score": confidence_score,
         "exchange_status_read": exchange_read,
         "validator_stats_loaded": snapshot.validator_stats is not None,
         "validator_l1_votes_loaded": snapshot.validator_l1_votes is not None,
@@ -193,7 +236,7 @@ def format_hyperliquid_chain_health_report(
         f"- Validators with positive stake: {metrics.get('validators_with_positive_stake', 0)}",
         f"- Top-24 active approximation: {metrics.get('top24_active_approximation', 0)}",
         f"- Jailed validators: {metrics.get('jailed_total', 0)} total, {metrics.get('jailed_top24', 0)} in top 24",
-        f"- Active stake: {_format_number(metrics.get('active_stake'))} HYPE",
+        f"- Active stake: {_format_stake_display(metrics.get('active_stake_display'), metrics.get('stake_unit_label'))}",
         "",
         "Stake concentration:",
         f"- Top 1: {_format_percent(metrics.get('top1_pct'))}",
@@ -233,6 +276,510 @@ def format_hyperliquid_chain_health_report(
         ]
     )
     return "\n".join(lines)
+
+
+def format_hyperliquid_chain_health_human_report(
+    snapshot: HyperliquidValidatorHealthSnapshot,
+    assessment: HyperliquidChainHealthAssessment,
+) -> str:
+    metrics = assessment.key_metrics
+    market = build_hyperliquid_market_impact_read(snapshot, assessment)
+    score_text = "--" if assessment.score is None else f"{assessment.score}/100"
+    concentration_status = _concentration_status(metrics)
+    validator_set_status = _validator_set_status(metrics)
+    jailed_status = _jailed_status(metrics)
+    data_status = _data_confidence_status(metrics)
+    market_status = _market_evidence_status(market)
+
+    lines = [
+        "HYPERLIQUID CHAIN VIBE CHECK",
+        "============================",
+        "",
+        f"Vibe: {assessment.temperature} - {_vibe_word(assessment.temperature, market.trading_posture)}",
+        f"Score: {score_text}",
+        "",
+        "Plain-English read:",
+        _plain_english_read(assessment, market),
+        "",
+        "What this means:",
+    ]
+    lines.extend(f"- {line}" for line in plain_english_chain_health_explanations(assessment))
+    lines.extend(
+        [
+            "",
+            "Trading impact:",
+            f"- Execution risk: {_title_label(market.execution_risk)}",
+            f"- Liquidity confidence: {_title_label(market.liquidity_confidence)}",
+            f"- HYPE price pressure from validator data alone: {_title_label(market.hype_price_pressure)}",
+            f"- Overall trading posture: {_title_label(market.trading_posture)}",
+            "- This is infrastructure/risk context, not a buy/sell recommendation.",
+            "",
+            "Market / price-impact hypothesis:",
+            market.hypothesis,
+            "",
+            "What would change the read:",
+            "- Greener if validatorStats loads, top validators look healthy, jailed count stays outside the main squad, and public API checks remain normal.",
+            "- Redder if top-24 validators are jailed/offline, allMids or exchangeStatus degrades, or the top few validators become even more dominant.",
+            "- More market-relevant if validator issues coincide with HYPE price weakness, falling liquidity/open interest, wider spreads, or negative news.",
+            "",
+            "Simple scorecard:",
+            f"- Main validator set: {validator_set_status}",
+            f"- Jailed validators: {jailed_status}",
+            f"- Stake concentration: {concentration_status}",
+            f"- API/data confidence: {data_status}",
+            f"- Market impact evidence: {market_status}",
+            "",
+            "Split scores:",
+            f"- Chain operating health: {_format_score(metrics.get('chain_operating_health_score'))}",
+            f"- Validator concentration / decentralization: {_format_score(metrics.get('decentralization_score'))}",
+            f"- Data confidence: {_format_score(metrics.get('data_confidence_score'))}",
+            "",
+            "Key numbers, translated:",
+            f"- Validators found: {metrics.get('validator_count', 0)}",
+            f"- Active validator target: {metrics.get('active_set_target', ACTIVE_SET_TARGET)}",
+            f"- Main squad approximation: {metrics.get('top24_active_approximation', 0)} of {ACTIVE_SET_TARGET}",
+            f"- Jailed validators: {metrics.get('jailed_total', 0)} total, {metrics.get('jailed_top24', 0)} in the top 24",
+            f"- Active stake display: {_format_stake_display(metrics.get('active_stake_display'), metrics.get('stake_unit_label'))}",
+            f"- Top 3 validators control: {_format_percent(metrics.get('top3_pct'))} of active stake",
+            f"- Top 5 validators control: {_format_percent(metrics.get('top5_pct'))} of active stake",
+            f"- Validators needed to control more than 1/3: {_format_optional_int(metrics.get('validators_to_exceed_one_third'))}",
+            f"- Validators needed to control more than 2/3: {_format_optional_int(metrics.get('validators_to_exceed_two_thirds'))}",
+            "",
+            "What to watch next:",
+        ]
+    )
+    lines.extend(f"- {line}" for line in market.watch_next)
+    lines.extend(
+        [
+            "",
+            "Historical evidence: not enough yet",
+            _historical_evidence_paragraph(),
+            "",
+            "Bottom line:",
+            _human_bottom_line(assessment, market),
+        ]
+    )
+    if assessment.raw_data_notes:
+        lines.extend(["", "Raw data notes:"])
+        lines.extend(f"- {line}" for line in assessment.raw_data_notes)
+    return "\n".join(lines)
+
+
+def plain_english_chain_health_explanations(assessment: HyperliquidChainHealthAssessment) -> list[str]:
+    missing_metrics = set(assessment.key_metrics.get("missing_metrics") or [])
+    lines = [
+        "A validator is a computer/operator helping run the chain.",
+        "The top 24 are the main squad currently running the chain by stake.",
+        "A jailed validator is benched because it was not behaving or responding correctly.",
+        "Stake concentration means a few operators have a lot of the control.",
+    ]
+    if "validatorStats" in missing_metrics or not assessment.key_metrics.get("validator_stats_loaded"):
+        lines.append("validatorStats missing means we cannot see the detailed fitness tracker for each validator.")
+    if assessment.key_metrics.get("jailed_top24", 0) == 0:
+        lines.append("No jailed validator was found in the main squad, so the active set appears intact from summary data.")
+    return lines
+
+
+def build_hyperliquid_market_impact_read(
+    snapshot: HyperliquidValidatorHealthSnapshot,
+    assessment: HyperliquidChainHealthAssessment,
+) -> HyperliquidMarketImpactRead:
+    metrics = assessment.key_metrics
+    if assessment.temperature == "UNKNOWN" or not metrics.get("validator_count"):
+        return HyperliquidMarketImpactRead(
+            execution_risk="UNKNOWN",
+            liquidity_confidence="UNKNOWN",
+            hype_price_pressure="UNKNOWN",
+            evidence_quality="WEAK",
+            trading_posture="NO_READ",
+            hypothesis=(
+                "Validator data was not complete enough to judge chain conditions. That is a no-read, not proof that "
+                "the chain is healthy or broken."
+            ),
+            watch_next=[
+                "Rerun the check after validatorSummaries is available.",
+                "Confirm allMids and exchangeStatus are loading.",
+                "Use external status/news sources if the API remains unavailable.",
+            ],
+        )
+
+    jailed_top24 = int(metrics.get("jailed_top24", 0) or 0)
+    inactive_top24 = int(metrics.get("inactive_top24", 0) or 0)
+    outside_jailed = int(metrics.get("outside_jailed", 0) or 0)
+    data_confidence = float(metrics.get("data_confidence_score", 0) or 0)
+    concentration = _concentration_status(metrics)
+    exchange_read = str(metrics.get("exchange_status_read") or "").lower()
+    api_degraded = snapshot.all_mids_ok is False or any(token in exchange_read for token in ("halt", "offline", "outage", "down", "degraded", "maintenance"))
+
+    if jailed_top24 or inactive_top24 or (api_degraded and concentration == "Bad"):
+        execution_risk = "HIGH"
+    elif api_degraded or concentration in {"Warning", "Bad"}:
+        execution_risk = "MEDIUM"
+    else:
+        execution_risk = "LOW"
+
+    if snapshot.all_mids_ok is False or jailed_top24:
+        liquidity_confidence = "LOW"
+    elif data_confidence < 70 or api_degraded or concentration in {"Warning", "Bad"}:
+        liquidity_confidence = "MEDIUM"
+    else:
+        liquidity_confidence = "HIGH"
+
+    if jailed_top24 and api_degraded:
+        hype_price_pressure = "MEDIUM"
+    else:
+        hype_price_pressure = "LOW"
+
+    if data_confidence >= 85 and metrics.get("validator_stats_loaded") and metrics.get("validator_l1_votes_loaded"):
+        evidence_quality = "MEDIUM"
+    else:
+        evidence_quality = "WEAK"
+
+    if jailed_top24 or inactive_top24 or snapshot.all_mids_ok is False:
+        trading_posture = "DEFENSIVE"
+    elif concentration in {"Warning", "Bad"} or outside_jailed or data_confidence < 85:
+        trading_posture = "CAUTIOUS"
+    else:
+        trading_posture = "NORMAL"
+
+    hypothesis = (
+        "Validator concentration by itself does not mean price goes down. It becomes price-relevant if it turns into "
+        "user-visible problems: downtime, delayed trading, failed transactions, social panic, or major validator failures. "
+        "Current read: caution flag, not a standalone bearish HYPE signal."
+    )
+    watch_next = [
+        "Whether any top-24 validator becomes jailed, inactive, or visibly slow.",
+        "Whether validatorStats starts loading and shows strong uptime/participation.",
+        "Whether allMids and exchangeStatus remain normal during busy trading periods.",
+        "Whether HYPE price weakness lines up with liquidity stress, wider spreads, open-interest drops, or negative news.",
+    ]
+    return HyperliquidMarketImpactRead(
+        execution_risk=execution_risk,
+        liquidity_confidence=liquidity_confidence,
+        hype_price_pressure=hype_price_pressure,
+        evidence_quality=evidence_quality,
+        trading_posture=trading_posture,
+        hypothesis=hypothesis,
+        watch_next=watch_next,
+    )
+
+
+def save_hyperliquid_chain_health_observation(
+    snapshot: HyperliquidValidatorHealthSnapshot,
+    assessment: HyperliquidChainHealthAssessment,
+    path: Path | str = CHAIN_HEALTH_HISTORY_PATH,
+) -> int:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics = assessment.key_metrics
+    row = {
+        "timestamp": snapshot.fetched_at.isoformat(),
+        "temperature": assessment.temperature,
+        "score": assessment.score,
+        "top1_pct": metrics.get("top1_pct"),
+        "top3_pct": metrics.get("top3_pct"),
+        "top5_pct": metrics.get("top5_pct"),
+        "top10_pct": metrics.get("top10_pct"),
+        "jailed_total": metrics.get("jailed_total"),
+        "jailed_top24": metrics.get("jailed_top24"),
+        "missing_endpoints": _missing_endpoints(snapshot),
+        "hype_mid": _hype_mid(snapshot.all_mids),
+    }
+    with output_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+    return chain_health_history_count(output_path)
+
+
+def chain_health_history_count(path: Path | str = CHAIN_HEALTH_HISTORY_PATH) -> int:
+    output_path = Path(path)
+    if not output_path.exists():
+        return 0
+    try:
+        with output_path.open("r", encoding="utf-8") as handle:
+            return sum(1 for line in handle if line.strip())
+    except OSError:
+        return 0
+
+
+def _stake_display_context(rows: list[dict[str, Any]], active_stake: float, total_stake: float) -> dict[str, Any]:
+    scale, source = _stake_scale(rows, total_stake)
+    note = ""
+    if scale is None:
+        if total_stake > 1_000_000_000_000:
+            unit_label = "raw stake units"
+            note = (
+                "Stake values look like raw smallest units, but no safe decimal scale was detected; "
+                "absolute stake is labeled raw units. Concentration percentages remain valid."
+            )
+        else:
+            unit_label = "HYPE"
+        return {
+            "active_stake_display": active_stake,
+            "total_stake_display": total_stake,
+            "unit_label": unit_label,
+            "scale": None,
+            "scale_source": "none",
+            "raw_data_note": note,
+        }
+
+    if source.startswith("endpoint"):
+        note = f"Stake display normalized using endpoint-provided decimals ({source})."
+    elif source.startswith("inferred"):
+        note = f"Stake values looked like raw smallest units; display normalized by {scale:g} ({source})."
+    return {
+        "active_stake_display": active_stake / scale,
+        "total_stake_display": total_stake / scale,
+        "unit_label": "HYPE",
+        "scale": scale,
+        "scale_source": source,
+        "raw_data_note": note,
+    }
+
+
+def _stake_scale(rows: list[dict[str, Any]], total_stake: float) -> tuple[float | None, str]:
+    max_stake = max((row.get("stake", 0.0) for row in rows), default=0.0)
+    if max_stake <= 1_000_000_000 and total_stake <= 10_000_000_000:
+        return None, "none"
+
+    for row in rows:
+        raw = row.get("raw")
+        if not isinstance(raw, dict):
+            continue
+        decimals = _first_number(raw, "stakeDecimals", "stake_decimals", "tokenDecimals", "token_decimals", "decimals")
+        if decimals is None:
+            continue
+        decimals_int = int(decimals)
+        if decimals_int in {6, 8, 18}:
+            return float(10**decimals_int), f"endpoint decimals={decimals_int}"
+
+    candidates = (100_000_000.0, 1_000_000_000_000_000_000.0)
+    plausible: list[tuple[float, float]] = []
+    for scale in candidates:
+        scaled_total = total_stake / scale
+        if 1_000 <= scaled_total <= 1_000_000_000:
+            plausible.append((scale, scaled_total))
+    if plausible:
+        scale, _scaled_total = sorted(plausible, key=lambda item: abs(item[1] - 100_000_000))[0]
+        return scale, "inferred plausible HYPE supply scale"
+    return None, "raw"
+
+
+def _chain_operating_health_score(
+    *,
+    positive_validator_count: int,
+    jailed_top24: int,
+    inactive_top24: int,
+    all_mids_ok: bool | None,
+    exchange_status_read: str,
+) -> int:
+    score = 100
+    if positive_validator_count < ACTIVE_SET_TARGET:
+        score -= 30
+    score -= min(60, jailed_top24 * 25)
+    score -= min(30, inactive_top24 * 12)
+    if all_mids_ok is False:
+        score -= 15
+    status = str(exchange_status_read).lower()
+    if any(token in status for token in ("halt", "offline", "outage", "down")):
+        score -= 35
+    elif any(token in status for token in ("degraded", "maintenance", "partial", "delayed")):
+        score -= 15
+    return max(0, min(100, score))
+
+
+def _decentralization_score(metrics: dict[str, Any]) -> int:
+    score = 100
+    top1 = metrics.get("top1_pct")
+    top3 = metrics.get("top3_pct")
+    top5 = metrics.get("top5_pct")
+    one_third = metrics.get("validators_to_exceed_one_third")
+    two_thirds = metrics.get("validators_to_exceed_two_thirds")
+    if top1 is not None:
+        score -= 25 if top1 > 25 else 10 if top1 > 15 else 0
+    if top3 is not None and top3 > 33:
+        score -= 15
+    if top5 is not None:
+        score -= 25 if top5 > 66 else 15 if top5 > 50 else 0
+    if one_third is not None and one_third < 4:
+        score -= 10
+    if two_thirds is not None and two_thirds < 8:
+        score -= 10
+    return max(0, min(100, int(score)))
+
+
+def _data_confidence_score(
+    *,
+    has_summaries: bool,
+    has_stats: bool,
+    has_l1_votes: bool,
+    all_mids_ok: bool | None,
+    exchange_status: Any,
+) -> int:
+    score = 100
+    if not has_summaries:
+        score -= 70
+    if not has_stats:
+        score -= 20
+    if not has_l1_votes:
+        score -= 10
+    if all_mids_ok is False:
+        score -= 15
+    elif all_mids_ok is None:
+        score -= 5
+    if exchange_status is None:
+        score -= 10
+    return max(0, min(100, int(score)))
+
+
+def _concentration_status(metrics: dict[str, Any]) -> str:
+    top1 = metrics.get("top1_pct")
+    top3 = metrics.get("top3_pct")
+    top5 = metrics.get("top5_pct")
+    if (top1 is not None and top1 > 25) or (top5 is not None and top5 > 66):
+        return "Bad"
+    if (
+        (top1 is not None and top1 > 15)
+        or (top3 is not None and top3 > 33)
+        or (top5 is not None and top5 > 50)
+        or (metrics.get("validators_to_exceed_one_third") is not None and metrics.get("validators_to_exceed_one_third") < 4)
+        or (metrics.get("validators_to_exceed_two_thirds") is not None and metrics.get("validators_to_exceed_two_thirds") < 8)
+    ):
+        return "Warning"
+    return "OK"
+
+
+def _validator_set_status(metrics: dict[str, Any]) -> str:
+    if metrics.get("top24_active_approximation", 0) < ACTIVE_SET_TARGET or metrics.get("jailed_top24", 0) or metrics.get("inactive_top24", 0):
+        return "Bad"
+    if metrics.get("validators_with_positive_stake", 0) < ACTIVE_SET_TARGET + 3:
+        return "Warning"
+    return "OK"
+
+
+def _jailed_status(metrics: dict[str, Any]) -> str:
+    if metrics.get("jailed_top24", 0):
+        return "Bad"
+    if metrics.get("jailed_total", 0):
+        return "Warning"
+    return "OK"
+
+
+def _data_confidence_status(metrics: dict[str, Any]) -> str:
+    score = metrics.get("data_confidence_score")
+    if score is None or score < 50:
+        return "Bad"
+    if score < 85:
+        return "Warning"
+    return "OK"
+
+
+def _market_evidence_status(market: HyperliquidMarketImpactRead) -> str:
+    if market.evidence_quality == "STRONG":
+        return "Strong"
+    if market.evidence_quality == "MEDIUM":
+        return "Medium"
+    return "Weak"
+
+
+def _plain_english_read(assessment: HyperliquidChainHealthAssessment, market: HyperliquidMarketImpactRead) -> str:
+    metrics = assessment.key_metrics
+    if assessment.temperature == "UNKNOWN":
+        return "There is not enough validator data to make a real chain-health call."
+    if metrics.get("jailed_top24", 0):
+        return "The chain may still be running, but a main-squad validator appears benched. That is an infrastructure risk flag."
+    if _concentration_status(metrics) in {"Warning", "Bad"}:
+        return (
+            "The chain does not look broken. The main active validator set appears intact, and jailed validators are outside "
+            "the main squad. The main concern is concentration: a few validators control a lot of stake."
+        )
+    if market.trading_posture == "NORMAL":
+        return "The chain looks normal from the available validator summary and API sanity checks."
+    return assessment.headline
+
+
+def _human_bottom_line(assessment: HyperliquidChainHealthAssessment, market: HyperliquidMarketImpactRead) -> str:
+    if market.trading_posture == "NO_READ":
+        return "No-read: not enough validator data to judge chain infrastructure risk."
+    if market.trading_posture == "NORMAL":
+        return "Normal: infrastructure risk looks low from the available data."
+    if market.trading_posture == "DEFENSIVE":
+        return "Defensive: infrastructure risk is elevated; avoid assuming perfect execution or liquidity."
+    return (
+        f"{assessment.temperature} does not mean panic. It means chain is probably operating, but do not ignore "
+        "infrastructure risk before using size or leverage."
+    )
+
+
+def _vibe_word(temperature: str, posture: str) -> str:
+    if posture == "NO_READ" or temperature == "UNKNOWN":
+        return "No-read"
+    if posture == "DEFENSIVE":
+        return "Defensive"
+    if posture == "CAUTIOUS":
+        return "Caution"
+    return "Normal"
+
+
+def _title_label(value: str) -> str:
+    return value.replace("_", " ").title()
+
+
+def _format_score(value: Any) -> str:
+    if value is None:
+        return "--"
+    try:
+        return f"{int(value)}/100"
+    except (TypeError, ValueError):
+        return "--"
+
+
+def _format_stake_display(value: Any, unit_label: Any) -> str:
+    if value is None:
+        return "--"
+    unit = str(unit_label or "raw stake units")
+    try:
+        return f"{float(value):,.2f} {unit}"
+    except (TypeError, ValueError):
+        return f"-- {unit}"
+
+
+def _historical_evidence_paragraph() -> str:
+    count = chain_health_history_count()
+    return (
+        "Historical proof: not available yet. This cockpit has not collected enough chain-health snapshots to prove whether "
+        f"this exact validator setup predicts HYPE price moves. Current saved observations: {count}/{HISTORICAL_EVIDENCE_MIN_OBSERVATIONS}. "
+        "For now, this is a risk hypothesis, not a backtested signal."
+    )
+
+
+def _missing_endpoints(snapshot: HyperliquidValidatorHealthSnapshot) -> list[str]:
+    missing: list[str] = []
+    if not snapshot.validator_summaries:
+        missing.append("validatorSummaries")
+    if snapshot.validator_stats is None:
+        missing.append("validatorStats")
+    if snapshot.validator_l1_votes is None:
+        missing.append("validatorL1Votes")
+    if snapshot.exchange_status is None:
+        missing.append("exchangeStatus")
+    if snapshot.all_mids_ok is not True:
+        missing.append("allMids")
+    return missing
+
+
+def _hype_mid(all_mids: dict[str, Any] | None) -> float | None:
+    if not isinstance(all_mids, dict):
+        return None
+    for key in ("HYPE", "HYPE/USDC", "@107"):
+        value = _to_float(all_mids.get(key))
+        if value is not None and value > 0:
+            return value
+    upper = {str(key).upper(): value for key, value in all_mids.items()}
+    for key in ("HYPE", "HYPE/USDC", "@107"):
+        value = _to_float(upper.get(key))
+        if value is not None and value > 0:
+            return value
+    return None
 
 
 def _validator_rows(validators: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -277,28 +824,28 @@ def _apply_concentration_flags(metrics: dict[str, Any], warnings: list[str], cri
 
     if top1 is not None and top1 > 25.0:
         criticals.append(f"Largest validator controls {top1:.1f}% of active-set stake approximation.")
-        penalty += 25
+        penalty += 18
     elif top1 is not None and top1 > 15.0:
         _append_unique(warnings, f"Largest validator controls {top1:.1f}% of active-set stake approximation.")
-        penalty += 8
+        penalty += 6
 
     if top3 is not None and top3 > 33.0:
         _append_unique(warnings, f"Top 3 validators control {top3:.1f}% of active-set stake approximation.")
-        penalty += 8
+        penalty += 5
 
     if top5 is not None and top5 > 66.0:
         criticals.append(f"Top 5 validators control {top5:.1f}% of active-set stake approximation.")
-        penalty += 20
+        penalty += 16
     elif top5 is not None and top5 > 50.0:
         _append_unique(warnings, f"Top 5 validators control {top5:.1f}% of active-set stake approximation.")
-        penalty += 8
+        penalty += 5
 
     if one_third is not None and one_third < 4:
         _append_unique(warnings, f"Only {one_third} validator(s) are needed to exceed one-third of active-set stake.")
-        penalty += 8
+        penalty += 5
     if two_thirds is not None and two_thirds < 8:
         _append_unique(warnings, f"Only {two_thirds} validator(s) are needed to exceed two-thirds of active-set stake.")
-        penalty += 8
+        penalty += 4
     return penalty
 
 
@@ -509,7 +1056,7 @@ def _counterfactuals(
         remaining_stake = sum(row["stake"] for row in remaining)
         remaining_top5 = _stake_share([row["stake"] for row in remaining[:5]], remaining_stake)
         lines.append(
-            f"If the largest validator ({largest['name']}) went offline or was jailed, remaining active-set stake would be {_format_number(remaining_stake)} HYPE and top-5 share would be {_format_percent(remaining_top5)}."
+            f"If the largest validator ({largest['name']}) went offline or was jailed, the main squad would lose its biggest member and remaining top-5 share would be {_format_percent(remaining_top5)}."
         )
     if len(top_rows) >= 3 and active_stake > ZERO_EPSILON:
         top3_stake = sum(row["stake"] for row in top_rows[:3])
@@ -543,9 +1090,18 @@ def _empty_metrics(snapshot: HyperliquidValidatorHealthSnapshot) -> dict[str, An
         "top24_active_approximation": 0,
         "total_stake": 0.0,
         "active_stake": 0.0,
+        "total_stake_display": 0.0,
+        "active_stake_display": 0.0,
+        "stake_unit_label": "HYPE",
+        "stake_scale": None,
+        "stake_scale_source": "none",
         "jailed_total": 0,
         "jailed_top24": 0,
+        "outside_jailed": 0,
         "inactive_top24": 0,
+        "chain_operating_health_score": 0,
+        "decentralization_score": 0,
+        "data_confidence_score": 0,
         "top1_pct": None,
         "top3_pct": None,
         "top5_pct": None,

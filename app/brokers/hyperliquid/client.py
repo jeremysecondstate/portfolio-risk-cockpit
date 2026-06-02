@@ -295,6 +295,7 @@ class HyperliquidInfoClient:
             validator_l1_votes=validator_l1_votes,
             exchange_status=exchange_status,
             all_mids_ok=all_mids_ok,
+            all_mids=all_mids if isinstance(all_mids, dict) else None,
             errors=errors,
             warnings=warnings,
             raw_validator_summaries=validator_summaries_raw,
