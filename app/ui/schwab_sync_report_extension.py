@@ -124,6 +124,10 @@ def _force_schwab_reauthorization(self: tk.Tk, session, exc: Exception):
         clear_cached_authorization()
     self.schwab_session = None
     self.schwab_status_var.set("Schwab session: saved authorization rejected; login required")
+    interactive = bool(getattr(self, "_schwab_auth_interactive", True))
+    if not interactive:
+        return None
+
     self._set_preview_text(_schwab_reauthorization_required_report(exc))
 
     retry_session = self._authorize_schwab_session()
@@ -175,11 +179,11 @@ def _should_force_schwab_reauthorization(exc: Exception) -> bool:
     text = str(exc).lower()
     auth_markers = (
         "invalid_grant",
+        "invalid_token",
         "invalid token",
         "unauthorized",
         "forbidden",
         "token expired",
-        "refresh token",
     )
     return any(marker in text for marker in auth_markers)
 

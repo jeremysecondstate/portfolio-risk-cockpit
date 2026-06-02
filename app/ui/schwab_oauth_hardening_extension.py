@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 import requests
 
 from app.brokers.schwab.session import SchwabSession, TOKEN_URL
-from app.brokers.schwab.token_store import save_token_payload
+from app.brokers.schwab.token_store import cached_access_token_expires_at, save_token_payload
 
 
 def install_schwab_oauth_hardening_extension() -> None:
@@ -52,9 +52,11 @@ def _exchange_authorization_code_hardened(self: SchwabSession, authorization_cod
     )
     _raise_for_schwab_token_error(response, "Schwab authorization code exchange failed")
     payload: dict[str, Any] = response.json()
+    previous_refresh_token = self.refresh_token
     self.access_token = payload["access_token"]
-    self.refresh_token = payload.get("refresh_token")
-    save_token_payload(payload, previous_refresh_token=self.refresh_token)
+    self.refresh_token = payload.get("refresh_token") or previous_refresh_token
+    cached_payload = save_token_payload(payload, previous_refresh_token=previous_refresh_token)
+    self.access_token_expires_at = cached_access_token_expires_at(cached_payload)
 
 
 def _raise_for_schwab_token_error(response: requests.Response, label: str) -> None:

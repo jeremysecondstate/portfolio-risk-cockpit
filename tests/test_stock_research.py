@@ -393,14 +393,14 @@ class SchwabResearchWorkspaceHelperTests(unittest.TestCase):
         self.assertTrue(any("shares" in line for line in lines))
         self.assertFalse(any("$0.00 notional" in line for line in lines))
 
-    def test_schwab_http_500_forces_reauthorization_instead_of_token_loop(self) -> None:
+    def test_schwab_http_500_keeps_saved_authorization(self) -> None:
         exc = RuntimeError("Schwab account fetch returned HTTP 500: unexpected error")
 
-        self.assertTrue(_should_force_schwab_reauthorization(exc))
-        self.assertFalse(_is_temporary_schwab_provider_error(exc))
-        report = _schwab_reauthorization_required_report(exc)
-        self.assertIn("Cleared the in-memory Schwab session", report)
-        self.assertIn("Opened the Schwab authorization page", report)
+        self.assertFalse(_should_force_schwab_reauthorization(exc))
+        self.assertTrue(_is_temporary_schwab_provider_error(exc))
+        report = _schwab_account_refresh_failure_report(exc)
+        self.assertIn("Kept the saved Schwab authorization", report)
+        self.assertIn("Did not submit", report)
 
     def test_schwab_temporary_outage_report_keeps_portfolio_safe(self) -> None:
         exc = RuntimeError("Schwab account endpoint temporarily unavailable")

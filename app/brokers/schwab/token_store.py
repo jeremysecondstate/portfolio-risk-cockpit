@@ -30,7 +30,7 @@ def save_token_payload(
     *,
     previous_refresh_token: str | None = None,
     path: str | Path = TOKEN_CACHE_PATH,
-) -> None:
+) -> dict[str, Any]:
     """Persist the token fields needed for silent Schwab re-authorization.
 
     Schwab may return a refresh token on the initial code exchange and may or may
@@ -61,6 +61,8 @@ def save_token_payload(
     with token_path.open("w", encoding="utf-8") as handle:
         json.dump(cached_payload, handle, indent=2)
 
+    return cached_payload
+
 
 def clear_token_payload(path: str | Path = TOKEN_CACHE_PATH) -> None:
     """Remove cached Schwab OAuth tokens."""
@@ -81,6 +83,12 @@ def access_token_is_fresh(payload: dict[str, Any] | None) -> bool:
         return False
 
     return expires_at > datetime.now(timezone.utc)
+
+
+def cached_access_token_expires_at(payload: dict[str, Any] | None) -> datetime | None:
+    if not payload:
+        return None
+    return _parse_datetime(payload.get("access_token_expires_at"))
 
 
 def refresh_token_is_available(payload: dict[str, Any] | None) -> bool:

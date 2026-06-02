@@ -14,7 +14,7 @@ from app.brokers.hyperliquid.client import (
 )
 from app.brokers.paper import PaperBroker
 from app.brokers.schwab.account_adapter import portfolio_from_schwab_account
-from app.brokers.schwab.session import SchwabSession
+from app.brokers.schwab.session import SchwabSession, schwab_auth_error_requires_reauthorization
 from app.brokers.schwab.token_store import clear_token_payload
 from app.core.order_models import SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, OrderSide, OrderType, TimeInForce
 from app.core.portfolio import Portfolio, Position
@@ -165,14 +165,25 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
 
         return Portfolio(cash=round(non_hyperliquid_cash + hyperliquid_portfolio.cash, 2), positions=positions)
 
-    def _authorize_schwab_session(self) -> SchwabSession | None:
+    def _authorize_schwab_session(self, *, interactive: bool = True) -> SchwabSession | None:
         if self.schwab_session:
             try:
                 self.schwab_session.ensure_access_token()
                 self.schwab_status_var.set("Schwab: connected")
                 return self.schwab_session
-            except Exception:
-                self.schwab_session = None
+            except Exception as exc:
+                has_saved_authorization = self.schwab_session.has_cached_authorization()
+                if schwab_auth_error_requires_reauthorization(exc):
+                    self.schwab_session.clear_cached_authorization()
+                    self.schwab_session = None
+                    self.schwab_status_var.set("Schwab: login required")
+                    if not interactive:
+                        raise RuntimeError("Schwab saved authorization was rejected; manual login is required.") from exc
+                elif has_saved_authorization:
+                    self.schwab_status_var.set("Schwab: token refresh failed; saved authorization kept")
+                    raise
+                else:
+                    self.schwab_session = None
 
         session = SchwabSession()
         if session.has_cached_authorization():
@@ -181,9 +192,19 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
                 self.schwab_session = session
                 self.schwab_status_var.set("Schwab: connected")
                 return session
-            except Exception:
-                session.clear_cached_authorization()
-                self.schwab_status_var.set("Schwab: login required")
+            except Exception as exc:
+                if schwab_auth_error_requires_reauthorization(exc):
+                    session.clear_cached_authorization()
+                    self.schwab_status_var.set("Schwab: login required")
+                    if not interactive:
+                        raise RuntimeError("Schwab saved authorization was rejected; manual login is required.") from exc
+                else:
+                    self.schwab_status_var.set("Schwab: token refresh failed; saved authorization kept")
+                    raise
+
+        if not interactive:
+            self.schwab_status_var.set("Schwab: login required")
+            raise RuntimeError("Schwab saved authorization is unavailable; manual login is required.")
 
         auth_url, _state = session.build_authorization_url()
         self.schwab_status_var.set("Schwab: authorization required")

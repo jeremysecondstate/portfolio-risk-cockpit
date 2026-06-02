@@ -254,7 +254,7 @@ def _refresh_connected_portfolio(self: tk.Tk, automated: bool = False) -> None:
     hyperliquid_preview: str | None = None
 
     try:
-        schwab_source_message = _sync_schwab_account_silent(self)
+        schwab_source_message = _sync_schwab_account_silent(self, automated=automated)
         results.append(f"- {schwab_source_message}")
     except Exception as exc:
         schwab_error = exc
@@ -298,14 +298,19 @@ def _refresh_connected_portfolio(self: tk.Tk, automated: bool = False) -> None:
     _schedule_refresh_due_status(self)
 
 
-def _sync_schwab_account_silent(self: tk.Tk) -> str:
-    session = self._authorize_schwab_session()
-    if session is None:
-        raise RuntimeError("Schwab refresh canceled; no authorization was provided.")
+def _sync_schwab_account_silent(self: tk.Tk, *, automated: bool = False) -> str:
+    previous_interactive = getattr(self, "_schwab_auth_interactive", True)
+    self._schwab_auth_interactive = not automated
+    try:
+        session = self._authorize_schwab_session(interactive=not automated)
+        if session is None:
+            raise RuntimeError("Schwab refresh canceled; no authorization was provided.")
 
-    source_message = self._sync_schwab_account_snapshot(session)
-    self.schwab_status_var.set("Schwab session: connected")
-    return source_message
+        source_message = self._sync_schwab_account_snapshot(session)
+        self.schwab_status_var.set("Schwab session: connected")
+        return source_message
+    finally:
+        self._schwab_auth_interactive = previous_interactive
 
 
 def _hyperliquid_address_from_env() -> str:
