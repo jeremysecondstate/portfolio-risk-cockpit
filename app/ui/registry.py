@@ -32,6 +32,7 @@ from app.ui.schwab_mechanical_submit_extension import install_schwab_mechanical_
 from app.ui.schwab_oauth_hardening_extension import install_schwab_oauth_hardening_extension
 from app.ui.schwab_option_chain_extension import install_schwab_option_chain_extension
 from app.ui.schwab_option_chain_visible_fix import install_schwab_option_chain_visible_fix
+from app.ui.schwab_option_contract_inspector_extension import install_schwab_option_contract_inspector_extension
 from app.ui.schwab_option_order_payload_extension import install_schwab_option_order_payload_extension
 from app.ui.schwab_options_what_if_scenario_extension import install_schwab_options_what_if_scenario_extension
 from app.ui.schwab_output_popout_extension import install_schwab_output_popout_extension
@@ -79,6 +80,7 @@ def install_ui_extensions(app_cls: Type[tk.Tk]) -> None:
     install_hyperliquid_cockpit_spot_mid_extension(app_cls)
     install_schwab_option_chain_extension(app_cls)
     install_schwab_option_chain_visible_fix(app_cls)
+    install_schwab_option_contract_inspector_extension(app_cls)
     install_thesis_option_ticket_extension(app_cls)
     install_schwab_output_popout_extension(app_cls)
     install_schwab_live_status_extension(app_cls)
