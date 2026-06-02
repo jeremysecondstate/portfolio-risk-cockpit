@@ -86,7 +86,7 @@ def _inject_ipo_pipeline_buttons(self: tk.Tk) -> None:
     if actions is not None and not getattr(actions, "_ipo_pipeline_button_installed", False):
         for column in range(3):
             actions.columnconfigure(column, weight=1, uniform="schwab_actions")
-        _add_grid_button(actions, row=5, column=0, text="IPO Pipeline", command=self.show_ipo_pipeline, style="Accent.TButton")
+        _add_grid_button(actions, row=3, column=1, text="IPO Pipeline", command=self.show_ipo_pipeline, style="Accent.TButton")
         setattr(actions, "_ipo_pipeline_button_installed", True)
 
     planner = _find_labelframe(self, "Trade Planner")
