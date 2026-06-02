@@ -244,6 +244,62 @@ class HyperliquidInfoClient:
             history_warnings=history_warnings,
         )
 
+    def fetch_validator_health_snapshot(self) -> "HyperliquidValidatorHealthSnapshot":
+        """Fetch global read-only validator/chain health data when supported."""
+
+        from app.analytics.hyperliquid_chain_health import (
+            HyperliquidValidatorHealthSnapshot,
+            normalize_validator_summaries_payload,
+        )
+
+        missing = object()
+        errors: list[str] = []
+        warnings: list[str] = []
+
+        validator_summaries_raw = self._safe_post_info({"type": "validatorSummaries"}, default=missing)
+        if validator_summaries_raw is missing:
+            validator_summaries_raw = None
+            errors.append("validatorSummaries unavailable; score excludes core validator-set metrics.")
+        validator_summaries = normalize_validator_summaries_payload(validator_summaries_raw)
+        if validator_summaries_raw is not None and not validator_summaries:
+            warnings.append("validatorSummaries returned an unexpected shape; no validator objects were normalized.")
+
+        validator_stats = self._safe_post_info({"type": "validatorStats"}, default=missing)
+        if validator_stats is missing:
+            validator_stats = None
+            warnings.append("validatorStats unavailable; score excludes per-validator performance metrics.")
+
+        validator_l1_votes = self._safe_post_info({"type": "validatorL1Votes"}, default=missing)
+        if validator_l1_votes is missing:
+            validator_l1_votes = None
+            warnings.append("validatorL1Votes unavailable; score excludes L1 vote participation metrics.")
+
+        exchange_status = self._safe_post_info({"type": "exchangeStatus"}, default=missing)
+        if exchange_status is missing:
+            exchange_status = None
+            warnings.append("exchangeStatus unavailable or unsupported; exchange-level sanity signal is missing.")
+
+        all_mids = self._safe_post_info({"type": "allMids"}, default=missing)
+        if all_mids is missing:
+            all_mids_ok: bool | None = False
+            warnings.append("allMids sanity check failed or endpoint was unavailable.")
+        else:
+            all_mids_ok = isinstance(all_mids, dict) and bool(all_mids)
+            if not all_mids_ok:
+                warnings.append("allMids sanity check returned an unexpected or empty shape.")
+
+        return HyperliquidValidatorHealthSnapshot(
+            fetched_at=datetime.now(),
+            validator_summaries=validator_summaries,
+            validator_stats=validator_stats,
+            validator_l1_votes=validator_l1_votes,
+            exchange_status=exchange_status,
+            all_mids_ok=all_mids_ok,
+            errors=errors,
+            warnings=warnings,
+            raw_validator_summaries=validator_summaries_raw,
+        )
+
     def _safe_post_info(self, payload: dict[str, Any], default: Any) -> Any:
         """Optional read-only enrichment call; sync should still work without it."""
         try:

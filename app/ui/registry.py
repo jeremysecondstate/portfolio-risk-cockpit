@@ -8,6 +8,7 @@ from app.ui.account_sources_fix import install_account_sources_fix
 from app.ui.advanced_actions_extension import install_advanced_actions_extension
 from app.ui.cash_positions_extension import install_cash_positions_extension
 from app.ui.company_reports_extension import install_company_reports_extension
+from app.ui.hyperliquid_chain_health_extension import install_hyperliquid_chain_health_extension
 from app.ui.hyperliquid_assessment_extension import install_hyperliquid_assessment_extension
 from app.ui.hyperliquid_cockpit_spot_mid_extension import install_hyperliquid_cockpit_spot_mid_extension
 from app.ui.hyperliquid_existing_perp_what_if_extension import install_hyperliquid_existing_perp_what_if_extension
@@ -62,6 +63,7 @@ def install_ui_extensions(app_cls: Type[tk.Tk]) -> None:
     install_unified_refresh_extension(app_cls)
     install_hyperliquid_notifications_fix(app_cls)
     install_options_lab_extension(app_cls)
+    install_hyperliquid_chain_health_extension(app_cls)
     install_options_what_if_enhancement_extension(app_cls)
     install_hyperliquid_perp_ticket_use_mid_fix(app_cls)
     install_hyperliquid_existing_perp_what_if_extension(app_cls)
