@@ -11,7 +11,11 @@ from app.brokers.schwab.account_adapter import (
 )
 
 
-_REAUTH_STATUS_CODES = {401, 403, 500}
+# Only true authorization failures should clear cached Schwab tokens.
+# Provider/account-service 5xx responses are transient sync failures, not proof
+# that the saved OAuth grant is invalid.
+_REAUTH_STATUS_CODES = {401, 403}
+_TEMPORARY_PROVIDER_STATUS_CODES = {500, 502, 503, 504}
 
 
 def install_schwab_sync_report_extension(app_cls: Type[tk.Tk]) -> None:
@@ -97,7 +101,7 @@ def _wrap_schwab_snapshot_sync(previous_sync_snapshot: Callable[[tk.Tk, object],
 
 
 def _sync_schwab_account_report_with_reauth_fallback(self: tk.Tk, session) -> str | None:
-    """Sync once, but force a fresh browser authorization if Schwab rejects cached auth."""
+    """Sync once, but force a fresh browser authorization only for auth failures."""
 
     try:
         return _sync_schwab_account_report(self, session)
@@ -113,10 +117,8 @@ def _sync_schwab_account_report_with_reauth_fallback(self: tk.Tk, session) -> st
 
 
 def _force_schwab_reauthorization(self: tk.Tk, session, exc: Exception):
-    # The old happy path was: Sync Schwab silently uses cached auth until Schwab
-    # requires a fresh grant, then the same click opens Schwab's authorization URL.
-    # Clear both the in-memory session and saved token cache before retrying so we
-    # do not loop on a stale refresh/access token.
+    # Clear cached auth only when Schwab explicitly rejects authorization. Do not
+    # clear tokens for provider-side 5xx/account-sync outages.
     clear_cached_authorization = getattr(session, "clear_cached_authorization", None)
     if callable(clear_cached_authorization):
         clear_cached_authorization()
@@ -158,7 +160,7 @@ def _mark_schwab_sync_status(self: tk.Tk, status: str) -> None:
     var = getattr(self, "schwab_sync_status_var", None)
     if var is not None:
         try:
-            var.set("\u2713 Synced" if status == "success" else "\u2715 Sync failed")
+            var.set("✓ Synced" if status == "success" else "✕ Sync failed")
         except Exception:
             pass
 
@@ -167,6 +169,8 @@ def _should_force_schwab_reauthorization(exc: Exception) -> bool:
     status_code = _extract_http_status_code(exc)
     if status_code in _REAUTH_STATUS_CODES:
         return True
+    if status_code in _TEMPORARY_PROVIDER_STATUS_CODES:
+        return False
 
     text = str(exc).lower()
     auth_markers = (
@@ -176,7 +180,6 @@ def _should_force_schwab_reauthorization(exc: Exception) -> bool:
         "forbidden",
         "token expired",
         "refresh token",
-        "authorization required",
     )
     return any(marker in text for marker in auth_markers)
 
@@ -192,10 +195,11 @@ def _extract_http_status_code(exc: Exception) -> int | None:
 
 
 def _is_temporary_schwab_provider_error(exc: Exception) -> bool:
-    """Return true only after auth has already been retried or was not implicated."""
-
+    status_code = _extract_http_status_code(exc)
+    if status_code in _TEMPORARY_PROVIDER_STATUS_CODES:
+        return True
     text = str(exc).lower()
-    return "temporarily unavailable" in text
+    return "temporarily unavailable" in text or "server error" in text
 
 
 def _schwab_reauthorization_required_report(exc: Exception) -> str:
@@ -214,13 +218,13 @@ def _schwab_reauthorization_required_report(exc: Exception) -> str:
 
 def _schwab_account_refresh_failure_report(exc: Exception) -> str:
     return (
-        "SCHWAB ACCOUNT SYNC STILL FAILED AFTER AUTH CHECK\n"
-        "===============================================\n\n"
-        "The app checked the authorization path. If Schwab asked you to log in again, the app retried with the new saved authorization.\n\n"
+        "SCHWAB ACCOUNT SYNC TEMPORARILY FAILED\n"
+        "=====================================\n\n"
+        "The saved Schwab authorization was kept because this looks like a provider/account-sync failure, not a rejected OAuth token.\n\n"
         f"Provider response: {exc}\n\n"
         "What the app did:\n"
         "- Kept the current local/cached portfolio visible.\n"
-        "- Did not submit, preview, replace, or cancel any order.\n"
-        "- Avoided silently looping forever on the same stale Schwab token.\n\n"
-        "Next step: click Sync Schwab again after completing the browser authorization, or use Reset Session if Schwab did not show the login page."
+        "- Kept the saved Schwab authorization instead of forcing a browser login.\n"
+        "- Did not submit, preview, replace, or cancel any order.\n\n"
+        "Next step: click Sync Schwab again in a moment, or use Reset Session only if Schwab explicitly rejects authorization."
     )
