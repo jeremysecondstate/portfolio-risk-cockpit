@@ -38,6 +38,7 @@ from app.ui.schwab_options_what_if_scenario_extension import install_schwab_opti
 from app.ui.schwab_output_popout_extension import install_schwab_output_popout_extension
 from app.ui.schwab_research_workspace_extension import install_schwab_research_workspace_extension
 from app.ui.schwab_sync_report_extension import install_schwab_sync_report_extension
+from app.ui.schwab_trade_memory_extension import install_schwab_trade_memory_extension
 from app.ui.schwab_workspace_sync_extension import install_schwab_workspace_sync_extension
 from app.ui.thesis_option_ticket_extension import install_thesis_option_ticket_extension
 from app.ui.trade_setup_extension import install_trade_setup_extension
@@ -95,6 +96,7 @@ def install_ui_extensions(app_cls: Type[tk.Tk]) -> None:
     install_options_candidate_actionability_extension(app_cls)
     install_schwab_option_order_payload_extension(app_cls)
     install_schwab_mechanical_submit_extension(app_cls)
+    install_schwab_trade_memory_extension(app_cls)
     install_hyperliquid_spot_symbol_display_extension(app_cls)
     install_hyperliquid_quote_asset_extension(app_cls)
     install_uncovered_options_risk_lane_extension(app_cls)

@@ -193,13 +193,14 @@ def _show_option_contract_inspector(self: tk.Tk, model: OptionContractInspectorM
 
     footer = ttk.Frame(window, style="Panel.TFrame", padding=(14, 10, 14, 14))
     footer.grid(row=2, column=0, sticky="ew")
-    for column in range(5):
+    for column in range(6):
         footer.columnconfigure(column, weight=1, uniform="inspector_buttons")
     ttk.Button(footer, text="Load Into Ticket", command=lambda: _load_model_into_ticket(self, model), style="Accent.TButton").grid(row=0, column=0, sticky="ew", padx=(0, 8))
     ttk.Button(footer, text="Load Option Chain", command=lambda: _load_option_chain_for_model(self, model)).grid(row=0, column=1, sticky="ew", padx=(0, 8))
     ttk.Button(footer, text="Run Risk Preview", command=lambda: _run_risk_preview_for_model(self, model)).grid(row=0, column=2, sticky="ew", padx=(0, 8))
     ttk.Button(footer, text="Copy Summary", command=lambda: _copy_summary(self, model)).grid(row=0, column=3, sticky="ew", padx=(0, 8))
-    ttk.Button(footer, text="Close", command=window.destroy).grid(row=0, column=4, sticky="ew")
+    ttk.Button(footer, text=_trade_memory_button_text(self, model), command=lambda: _open_trade_memory_for_model(self, model)).grid(row=0, column=4, sticky="ew", padx=(0, 8))
+    ttk.Button(footer, text="Close", command=window.destroy).grid(row=0, column=5, sticky="ew")
 
     window.focus_set()
 
@@ -447,6 +448,26 @@ def _copy_summary(self: tk.Tk, model: OptionContractInspectorModel) -> None:
     ]
     self.clipboard_clear()
     self.clipboard_append("\n".join(lines))
+
+
+def _trade_memory_button_text(self: tk.Tk, model: OptionContractInspectorModel) -> str:
+    checker = getattr(self, "trade_memory_has_snapshot_for_symbol", None)
+    symbol = model.raw_symbol or model.underlying
+    if callable(checker) and symbol:
+        try:
+            if checker(symbol):
+                return "Open Original Thesis"
+        except Exception:
+            pass
+    return "Find Trade Memory"
+
+
+def _open_trade_memory_for_model(self: tk.Tk, model: OptionContractInspectorModel) -> None:
+    opener = getattr(self, "open_trade_memory_for_symbol", None)
+    if not callable(opener):
+        messagebox.showinfo("Trade Memory unavailable", "The Schwab Trade Memory extension is not installed.")
+        return
+    opener(model.raw_symbol or model.underlying)
 
 
 def _set_preview_text_if_available(self: tk.Tk, content: str) -> None:
