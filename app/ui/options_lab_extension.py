@@ -105,9 +105,11 @@ def _ensure_execution_workspace_vars(self: tk.Tk) -> None:
         self.hyperliquid_sync_status_var = tk.StringVar(value="\u2715 Not synced")
     if not hasattr(self, "hyperliquid_sync_status_state"):
         self.hyperliquid_sync_status_state = "failure"
+    _ensure_string_var(self, "hyperliquid_quote_asset_var", "USDC")
 
     _ensure_string_var(self, "hyperliquid_spot_symbol_var", getattr(self, "symbol_var", tk.StringVar(value="")).get())
     _ensure_string_var(self, "hyperliquid_spot_coin_var", getattr(self, "hyperliquid_coin_var", tk.StringVar(value="")).get())
+    _ensure_string_var(self, "hyperliquid_spot_quote_asset_var", getattr(self, "hyperliquid_quote_asset_var", tk.StringVar(value="USDC")).get())
     _ensure_string_var(self, "hyperliquid_spot_side_var", getattr(self, "side_var", tk.StringVar(value=OrderSide.BUY.value)).get())
     _ensure_string_var(self, "hyperliquid_spot_order_type_var", getattr(self, "order_type_var", tk.StringVar(value=OrderType.LIMIT.value)).get())
     _ensure_string_var(self, "hyperliquid_spot_quantity_var", getattr(self, "quantity_var", tk.StringVar(value="1")).get())
@@ -976,8 +978,9 @@ def _sync_hyperliquid_ticket_to_shared(self: tk.Tk, ticket_kind: str) -> None:
     _ensure_execution_workspace_vars(self)
     self.hyperliquid_workspace_active_ticket_var.set(ticket_kind)
     if ticket_kind == "spot":
-        self.symbol_var.set(self.hyperliquid_spot_symbol_var.get())
+        self.symbol_var.set(_hyperliquid_workspace_spot_market_with_quote(self))
         self.hyperliquid_coin_var.set(self.hyperliquid_spot_coin_var.get())
+        self.hyperliquid_quote_asset_var.set(_selected_hyperliquid_workspace_spot_quote(self))
         self.side_var.set(self.hyperliquid_spot_side_var.get())
         self.order_type_var.set(self.hyperliquid_spot_order_type_var.get())
         self.quantity_var.set(self.hyperliquid_spot_quantity_var.get())
@@ -1013,6 +1016,7 @@ def _sync_hyperliquid_ticket_from_shared(self: tk.Tk, ticket_kind: str) -> None:
     if ticket_kind == "spot":
         self.hyperliquid_spot_symbol_var.set(self.symbol_var.get())
         self.hyperliquid_spot_coin_var.set(self.hyperliquid_coin_var.get())
+        self.hyperliquid_spot_quote_asset_var.set(_selected_hyperliquid_workspace_spot_quote(self))
         self.hyperliquid_spot_side_var.set(self.side_var.get())
         self.hyperliquid_spot_order_type_var.set(self.order_type_var.get())
         self.hyperliquid_spot_quantity_var.set(self.quantity_var.get())
@@ -1135,7 +1139,8 @@ def _apply_hyperliquid_workspace_spot_percent(self: tk.Tk, percent: float | None
 
 def _hyperliquid_workspace_spot_size_unit_values(self: tk.Tk) -> list[str]:
     base = _hyperliquid_workspace_spot_base(self)
-    return ["USDC", base] if base and base != "USDC" else ["USDC"]
+    quote = _selected_hyperliquid_workspace_spot_quote(self)
+    return [quote, base] if base and base != quote else [quote]
 
 
 def _refresh_hyperliquid_workspace_spot_size_unit_combo(self: tk.Tk, combo: ttk.Combobox) -> None:
@@ -1149,6 +1154,38 @@ def _sync_hyperliquid_workspace_spot_size_unit(self: tk.Tk) -> None:
     current = self.hyperliquid_spot_size_unit_var.get().strip().upper()
     if current not in {value.upper() for value in values}:
         self.hyperliquid_spot_size_unit_var.set(values[0])
+
+
+def _selected_hyperliquid_workspace_spot_quote(self: tk.Tk) -> str:
+    quote = self.hyperliquid_spot_quote_asset_var.get().strip().upper() if hasattr(self, "hyperliquid_spot_quote_asset_var") else ""
+    if quote not in {"USDC", "USDT"}:
+        quote = "USDC"
+        if hasattr(self, "hyperliquid_spot_quote_asset_var"):
+            self.hyperliquid_spot_quote_asset_var.set(quote)
+    if hasattr(self, "hyperliquid_quote_asset_var"):
+        self.hyperliquid_quote_asset_var.set(quote)
+    return quote
+
+
+def _on_hyperliquid_spot_quote_changed(self: tk.Tk) -> None:
+    quote = _selected_hyperliquid_workspace_spot_quote(self)
+    raw_market = self.hyperliquid_spot_symbol_var.get().strip()
+    if raw_market and not raw_market.startswith("@"):
+        base = raw_market.split("/", 1)[0].strip()
+        if base:
+            self.hyperliquid_spot_symbol_var.set(f"{base}/{quote}")
+    if self.hyperliquid_spot_coin_var.get().strip().startswith("@"):
+        self.hyperliquid_spot_coin_var.set("")
+    _sync_hyperliquid_workspace_spot_size_unit(self)
+
+
+def _hyperliquid_workspace_spot_market_with_quote(self: tk.Tk) -> str:
+    market = self.hyperliquid_spot_symbol_var.get().strip()
+    if not market or market.startswith("@"):
+        return market
+    quote = _selected_hyperliquid_workspace_spot_quote(self)
+    base = market.split("/", 1)[0].strip()
+    return f"{base}/{quote}" if base else market
 
 
 def _hyperliquid_workspace_spot_base(self: tk.Tk) -> str:
@@ -1461,7 +1498,22 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     perp_ticket.columnconfigure(1, weight=1)
     perp_ticket.columnconfigure(3, weight=1)
 
-    self._grid_row(spot_ticket, 0, "Market", ttk.Entry(spot_ticket, textvariable=self.hyperliquid_spot_symbol_var), "HL Coin", ttk.Entry(spot_ticket, textvariable=self.hyperliquid_spot_coin_var))
+    quote_combo = ttk.Combobox(
+        spot_ticket,
+        textvariable=self.hyperliquid_spot_quote_asset_var,
+        values=["USDC", "USDT"],
+        state="readonly",
+        width=8,
+    )
+    quote_combo.bind("<<ComboboxSelected>>", lambda _event: _on_hyperliquid_spot_quote_changed(self))
+    self._grid_row(
+        spot_ticket,
+        0,
+        "Market",
+        ttk.Entry(spot_ticket, textvariable=self.hyperliquid_spot_symbol_var),
+        "Quote",
+        quote_combo,
+    )
     self._grid_row(
         spot_ticket,
         1,
@@ -1485,8 +1537,8 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
         5,
         "HL TIF",
         ttk.Combobox(spot_ticket, textvariable=self.hyperliquid_spot_tif_var, values=["Alo", "Ioc", "Gtc"], state="readonly"),
-        "",
-        ttk.Frame(spot_ticket, style="Canvas.TFrame"),
+        "HL Coin",
+        ttk.Entry(spot_ticket, textvariable=self.hyperliquid_spot_coin_var),
     )
     ttk.Label(spot_ticket, text="Cancel order ID", style="Subtle.TLabel").grid(row=6, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
     ttk.Entry(spot_ticket, textvariable=self.hyperliquid_spot_cancel_order_id_var).grid(row=6, column=1, columnspan=3, sticky="ew", pady=(8, 0))

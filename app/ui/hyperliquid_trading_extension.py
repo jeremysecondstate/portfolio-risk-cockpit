@@ -108,6 +108,10 @@ def _ensure_hyperliquid_vars(self: tk.Tk) -> None:
         self.hyperliquid_size_unit_var = tk.StringVar(value="")
     if not hasattr(self, "hyperliquid_margin_mode_var"):
         self.hyperliquid_margin_mode_var = tk.StringVar(value="Cross")
+    if not hasattr(self, "hyperliquid_quote_asset_var"):
+        self.hyperliquid_quote_asset_var = tk.StringVar(value="USDC")
+    if not hasattr(self, "hyperliquid_spot_quote_asset_var"):
+        self.hyperliquid_spot_quote_asset_var = tk.StringVar(value=self.hyperliquid_quote_asset_var.get())
 
 
 def _configure_compact_ticket_styles(self: tk.Tk) -> None:
@@ -650,8 +654,10 @@ def _hyperliquid_max_spot_size(self: tk.Tk) -> tuple[float, str]:
     if not _selected_venue_is_hyperliquid(self):
         raise ValueError("switch Venue to Hyperliquid")
 
+    quote = _selected_spot_quote_asset(self)
     market = normalize_hyperliquid_spot_market(
-        self.symbol_var.get().strip() or self.hyperliquid_coin_var.get().strip()
+        self.symbol_var.get().strip() or self.hyperliquid_coin_var.get().strip(),
+        quote_asset=quote,
     )
     base = _display_spot_base(market)
     side = self.side_var.get().strip().lower()
@@ -664,8 +670,8 @@ def _hyperliquid_max_spot_size(self: tk.Tk) -> tuple[float, str]:
         limit_price = _positive_float(self.limit_price_var.get())
         if limit_price is None:
             raise ValueError("enter a positive limit price first")
-        usdc = _hyperliquid_usdc_balance(self)
-        return usdc / limit_price, f"USDC balance at ${limit_price:,.4f}"
+        quote_balance = _hyperliquid_quote_balance(self, quote)
+        return quote_balance / limit_price, f"{quote} balance at ${limit_price:,.4f}"
 
     raise ValueError("choose buy or sell")
 
@@ -680,17 +686,23 @@ def _hyperliquid_spot_balance(self: tk.Tk, base: str) -> float:
     return 0.0
 
 
-def _hyperliquid_usdc_balance(self: tk.Tk) -> float:
+def _hyperliquid_quote_balance(self: tk.Tk, quote: str) -> float:
+    normalized_quote = quote.strip().upper() or "USDC"
     portfolio = self.broker.get_portfolio()
     for cash in portfolio.cash_positions.values():
-        if cash.symbol.strip().upper() == "USDC" and "HYPERLIQUID" in cash.source.strip().upper():
+        if cash.symbol.strip().upper() == normalized_quote and "HYPERLIQUID" in cash.source.strip().upper():
             return max(float(cash.amount), 0.0)
     return 0.0
 
 
+def _hyperliquid_usdc_balance(self: tk.Tk) -> float:
+    return _hyperliquid_quote_balance(self, "USDC")
+
+
 def _hyperliquid_size_unit_values(self: tk.Tk) -> list[str]:
     base = _current_hyperliquid_base_symbol(self)
-    return [base, "USDC"] if base else ["Coin", "USDC"]
+    quote = _selected_spot_quote_asset(self)
+    return [base, quote] if base else ["Coin", quote]
 
 
 def _refresh_hyperliquid_size_unit_combo(self: tk.Tk, combo: ttk.Combobox) -> None:
@@ -715,7 +727,7 @@ def _selected_size_unit(self: tk.Tk) -> str:
 
 def _display_size_for_selected_unit(self: tk.Tk, coin_size: float) -> tuple[float, str]:
     unit = _selected_size_unit(self)
-    if unit == "USDC":
+    if unit == _selected_spot_quote_asset(self):
         limit_price = _positive_float(self.limit_price_var.get()) or 0.0
         return coin_size * limit_price, unit
     return coin_size, unit
@@ -723,10 +735,10 @@ def _display_size_for_selected_unit(self: tk.Tk, coin_size: float) -> tuple[floa
 
 def _spot_size_from_quantity_input(self: tk.Tk, raw_quantity: float, limit_price: float) -> float:
     unit = _selected_size_unit(self)
-    if unit != "USDC":
+    if unit != _selected_spot_quote_asset(self):
         return raw_quantity
     if limit_price <= 0:
-        raise ValueError("A positive limit price is required when Quantity is in USDC.")
+        raise ValueError(f"A positive limit price is required when Quantity is in {_selected_spot_quote_asset(self)}.")
     return normalize_hyperliquid_size(raw_quantity / limit_price)
 
 
@@ -739,9 +751,17 @@ def _current_hyperliquid_base_symbol(self: tk.Tk) -> str:
     if not symbol_source:
         return ""
     try:
-        return _display_spot_base(normalize_hyperliquid_spot_market(symbol_source))
+        return _display_spot_base(normalize_hyperliquid_spot_market(symbol_source, quote_asset=_selected_spot_quote_asset(self)))
     except Exception:
         return _display_spot_base(symbol_source)
+
+
+def _selected_spot_quote_asset(self: tk.Tk) -> str:
+    for attr in ("hyperliquid_spot_quote_asset_var", "hyperliquid_quote_asset_var"):
+        quote = str(getattr(getattr(self, attr, None), "get", lambda: "")()).strip().upper()
+        if quote in {"USDC", "USDT"}:
+            return quote
+    return "USDC"
 
 
 def _display_spot_base(symbol: str) -> str:
@@ -2421,7 +2441,7 @@ def _parse_hyperliquid_spot_ticket(self: tk.Tk) -> HyperliquidOrderTicket:
     # Fall back to HL Coin for quick typing like "zec".
     raw_hl_coin = self.hyperliquid_coin_var.get().strip()
     coin_source = raw_hl_coin if raw_hl_coin.startswith("@") else self.symbol_var.get().strip() or raw_hl_coin
-    coin = normalize_hyperliquid_spot_market(coin_source)
+    coin = normalize_hyperliquid_spot_market(coin_source, quote_asset=_selected_spot_quote_asset(self))
 
     side = self.side_var.get().strip().lower()
     if side not in {"buy", "sell"}:

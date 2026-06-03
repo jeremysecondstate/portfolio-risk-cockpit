@@ -13,6 +13,7 @@ SPOT_EXECUTION_ALIASES = {
     "ZEC": "UZEC/USDC",
     "UZEC": "UZEC/USDC",
 }
+SUPPORTED_SPOT_QUOTES = ("USDC", "USDT")
 HYPERLIQUID_MAX_PRICE_SIGNIFICANT_FIGURES = 5
 HYPERLIQUID_MAX_SIZE_DECIMALS = 8
 
@@ -694,12 +695,13 @@ def _hyperliquid_price_tick(price: Decimal) -> Decimal:
 def resolve_hyperliquid_spot_market(
     symbol: str,
     *,
+    default_quote: str = "USDC",
     all_mids: dict[str, Any] | None = None,
     spot_meta: Any = None,
     spot_meta_and_asset_ctxs: Any = None,
 ) -> HyperliquidSpotMarketResolution:
     requested_symbol = symbol.strip()
-    normalized_market = normalize_hyperliquid_spot_display_market(requested_symbol)
+    normalized_market = normalize_hyperliquid_spot_display_market(requested_symbol, quote_asset=default_quote)
     requested_index = _spot_market_index(normalized_market)
     base, quote = _split_normalized_spot_market(normalized_market)
     requested_base_aliases = _spot_symbol_aliases(base)
@@ -800,19 +802,19 @@ def format_hyperliquid_spot_lookup_error(resolution: HyperliquidSpotMarketResolu
     )
 
 
-def normalize_hyperliquid_spot_display_market(symbol: str) -> str:
+def normalize_hyperliquid_spot_display_market(symbol: str, quote_asset: str = "USDC") -> str:
     market = _clean_hyperliquid_spot_symbol(symbol)
     if not market:
         raise ValueError("Enter a Hyperliquid spot symbol, for example XAUT, BTC, or XAUT/USDC.")
     if market.startswith("@"):
         return market
-    base, quote = _split_normalized_spot_market(market)
-    if quote != "USDC":
-        raise ValueError("Hyperliquid spot orders currently expect USDC-quoted spot markets.")
-    return f"{_display_spot_base_from_alias(base)}/USDC"
+    base, quote = _split_normalized_spot_market(market, default_quote=quote_asset)
+    if quote not in SUPPORTED_SPOT_QUOTES:
+        raise ValueError("Hyperliquid spot orders currently expect USDC- or USDT-quoted spot markets.")
+    return f"{_display_spot_base_from_alias(base)}/{quote}"
 
 
-def normalize_hyperliquid_spot_market(symbol: str) -> str:
+def normalize_hyperliquid_spot_market(symbol: str, quote_asset: str = "USDC") -> str:
     market = _clean_hyperliquid_spot_symbol(symbol)
 
     if market.startswith("@"):
@@ -820,11 +822,18 @@ def normalize_hyperliquid_spot_market(symbol: str) -> str:
 
     if "/" in market:
         base, quote = market.split("/", 1)
-        if quote != "USDC":
-            raise ValueError("Hyperliquid Cockpit spot orders currently expect USDC-quoted spot markets.")
-        return SPOT_EXECUTION_ALIASES.get(base, f"{base}/USDC")
+        if quote not in SUPPORTED_SPOT_QUOTES:
+            raise ValueError("Hyperliquid spot orders currently expect USDC- or USDT-quoted spot markets.")
+        alias_market = SPOT_EXECUTION_ALIASES.get(base)
+        if alias_market and alias_market.endswith(f"/{quote}"):
+            return alias_market
+        return f"{base}/{quote}"
 
-    return SPOT_EXECUTION_ALIASES.get(market, f"{market}/USDC")
+    quote = _normalize_spot_quote_asset(quote_asset)
+    alias_market = SPOT_EXECUTION_ALIASES.get(market)
+    if alias_market and alias_market.endswith(f"/{quote}"):
+        return alias_market
+    return f"{market}/{quote}"
 
 
 def _spot_resolution(
@@ -871,14 +880,21 @@ def _clean_hyperliquid_spot_symbol(symbol: str) -> str:
     return market
 
 
-def _split_normalized_spot_market(market: str) -> tuple[str, str]:
+def _split_normalized_spot_market(market: str, *, default_quote: str = "USDC") -> tuple[str, str]:
     clean = market.strip().upper()
     if clean.startswith("@"):
-        return clean, "USDC"
+        return clean, _normalize_spot_quote_asset(default_quote)
     if "/" in clean:
         base, quote = clean.split("/", 1)
-        return base.strip(), quote.strip() or "USDC"
-    return clean, "USDC"
+        return base.strip(), _normalize_spot_quote_asset(quote or default_quote)
+    return clean, _normalize_spot_quote_asset(default_quote)
+
+
+def _normalize_spot_quote_asset(quote_asset: str) -> str:
+    quote = str(quote_asset or "USDC").strip().upper()
+    if quote not in SUPPORTED_SPOT_QUOTES:
+        raise ValueError("Hyperliquid spot quote must be USDC or USDT.")
+    return quote
 
 
 def _spot_market_index(market: str) -> int | None:
@@ -937,14 +953,17 @@ def _matching_spot_metadata_markets(
             market = _spot_metadata_market(source_name, asset, market_index, token_names_by_index, asset_ctxs)
             match_key = (source_name, market_index, market["asset_index"])
             if requested_index is not None:
-                is_match = requested_index in market["index_aliases"] or f"@{requested_index}" in market["names"]
+                match_priority = _requested_index_match_priority(market, requested_index)
+                is_match = match_priority is not None
             else:
+                match_priority = None
                 quote_matches = requested_quote in market["quote_aliases"]
                 base_matches = bool(set(requested_base_aliases).intersection(market["base_aliases"]))
                 market_matches = bool(set(requested_market_aliases).intersection(market["names"]))
                 is_match = quote_matches and (base_matches or market_matches)
 
             if is_match and match_key not in seen_match_keys:
+                market = {**market, "match_priority": match_priority if match_priority is not None else 10}
                 matches.append(market)
                 seen_match_keys.add(match_key)
                 continue
@@ -1036,13 +1055,33 @@ def _spot_metadata_market(
     }
 
 
-def _spot_metadata_match_sort_key(match: dict[str, Any]) -> tuple[int, int]:
+def _spot_metadata_match_sort_key(match: dict[str, Any]) -> tuple[int, int, int]:
     quote_aliases = set(match["quote_aliases"])
     source = str(match["source"])
     return (
+        int(match.get("match_priority", 10)),
         0 if "USDC" in quote_aliases else 1,
         0 if source == "spotMetaAndAssetCtxs" else 1,
     )
+
+
+def _requested_index_match_priority(market: dict[str, Any], requested_index: int) -> int | None:
+    asset_name = str(market["asset"].get("name") or "").strip().upper()
+    if asset_name == f"@{requested_index}":
+        return 0
+    asset_index = market["asset_index"]
+    if asset_index == requested_index:
+        return 1
+    if asset_index is not None and 10000 + asset_index == requested_index:
+        return 2
+    market_index = int(market["market_index"])
+    if market_index == requested_index:
+        return 3
+    if 10000 + market_index == requested_index:
+        return 4
+    if f"@{requested_index}" in market["names"]:
+        return 5
+    return None
 
 
 def _spot_metadata_market_keys(match: dict[str, Any]) -> tuple[str, ...]:
@@ -1120,6 +1159,8 @@ def _display_spot_base_from_alias(symbol: str) -> str:
         clean = clean.split("/", 1)[0]
     if clean in {"USD", "USDC"}:
         return clean
+    if clean in {"USDT", "USDT0"}:
+        return "USDT"
     if clean.startswith("U") and len(clean) > 1:
         clean = clean[1:]
     if clean.endswith("0") and len(clean) > 1:
@@ -1237,6 +1278,8 @@ def _spot_alias_variants(symbol: str) -> tuple[str, ...]:
     clean = str(symbol or "").strip().upper()
     if not clean:
         return ()
+    if clean in {"USDT", "USDT0"}:
+        return ("USDT0", "USDT") if clean == "USDT0" else ("USDT", "USDT0")
     variants: list[str] = []
     work = [clean]
     if clean not in {"USD", "USDC"}:
