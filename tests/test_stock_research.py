@@ -39,6 +39,7 @@ from app.analytics.technical_analysis import Candle
 from app.core.portfolio import Portfolio, Position
 from app.ui.schwab_research_workspace_extension import (
     _fetch_sec_layers,
+    _use_model_stock_plan,
     _stock_plan_look_lines,
     _normalized_candidate_bar_rows,
     _source_status_text,
@@ -288,6 +289,39 @@ class StockResearchAnalyticsTests(unittest.TestCase):
         self.assertIs(planned_context, context)
         self.assertEqual(stock_plan.quantity, 15)
         self.assertIn("Current held shares", stock_plan.basis)
+
+    def test_use_model_stock_plan_fills_stock_ticket_only(self) -> None:
+        app = SimpleNamespace(
+            schwab_research_last_payload=SimpleNamespace(symbol="TXN"),
+            schwab_research_stock_plan=GeneratedStockPosition(12.8, 100.25, 95.5, 64.0, 1_203.0, 0.02, 4.75, "Generated watchlist stock plan."),
+            last_preview="stale",
+            last_schwab_preview_status="ACCEPTED",
+            called_preview_or_submit=False,
+        )
+
+        def _mark_called() -> None:
+            app.called_preview_or_submit = True
+
+        app.preview_order = _mark_called
+        app.run_schwab_preview = _mark_called
+        app.submit_schwab_order = _mark_called
+
+        with patch("app.ui.schwab_research_workspace_extension.messagebox.showinfo") as showinfo:
+            _use_model_stock_plan(app)
+
+        self.assertEqual(app.symbol_var.get(), "TXN")
+        self.assertEqual(app.side_var.get(), "buy")
+        self.assertEqual(app.order_type_var.get(), "limit")
+        self.assertEqual(app.time_in_force_var.get(), "Day")
+        self.assertEqual(app.quantity_var.get(), "12")
+        self.assertEqual(app.limit_price_var.get(), "100.25")
+        self.assertEqual(app.estimated_price_var.get(), "100.25")
+        self.assertEqual(app.stop_price_var.get(), "95.5")
+        self.assertEqual(app.schwab_preview_status_var.get(), "Last Schwab preview: model stock plan filled only")
+        self.assertIsNone(app.last_preview)
+        self.assertIsNone(app.last_schwab_preview_status)
+        self.assertFalse(app.called_preview_or_submit)
+        self.assertIn("No order was submitted", showinfo.call_args.args[1])
 
     def test_current_model_scenario_rows_show_watchlist_current_zero_and_model_path(self) -> None:
         context = build_portfolio_symbol_context(Portfolio(cash=50_000.0), "LHX", fallback_price=100.0)

@@ -101,6 +101,7 @@ from app.analytics.stock_research import (
     technical_scenario_basis,
     technical_scenario_moves,
 )
+from app.core.order_models import OrderSide, OrderType, TimeInForce
 from app.analytics.technical_analysis import Candle, candles_from_price_history
 from app.analytics.trade_evidence import (
     TradeEvidenceReport,
@@ -1032,6 +1033,7 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     ttk.Label(controls, text="Generated risk $", style="Subtle.TLabel").grid(row=0, column=2, sticky="w")
     ttk.Entry(controls, textvariable=self.schwab_research_max_risk_var, width=13, state="readonly").grid(row=0, column=3, sticky="w", padx=(6, 18))
     ttk.Button(controls, text="Refresh Risk", command=lambda app=self: _recalculate_research_scenarios(app)).grid(row=0, column=4, sticky="w")
+    ttk.Button(controls, text="Use Model Stock Plan", command=lambda app=self: _use_model_stock_plan(app)).grid(row=0, column=5, sticky="w", padx=(8, 0))
     frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.cards.grid(row=1, column=0, sticky="ew", pady=(0, 8))
     planner_box = ttk.LabelFrame(frame, text="Move Planner", style="Card.TLabelframe")
@@ -1171,13 +1173,16 @@ def _options_strategy_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     y_scroll.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=y_scroll.set)
     frame.candidate_tree = tree  # type: ignore[attr-defined]
+    frame.score_breakdown = ttk.LabelFrame(frame, text="Score Breakdown / Why Ranked Here", style="Card.TLabelframe")  # type: ignore[attr-defined]
+    frame.score_breakdown.grid(row=4, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
+    frame.score_breakdown.columnconfigure(0, weight=1)  # type: ignore[attr-defined]
     frame.timeline = ttk.LabelFrame(frame, text="Selected Candidate Timeline", style="Card.TLabelframe")  # type: ignore[attr-defined]
-    frame.timeline.grid(row=4, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
+    frame.timeline.grid(row=5, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
     frame.timeline.columnconfigure(0, weight=1)  # type: ignore[attr-defined]
     frame.timeline_var = tk.StringVar(value="Select a candidate.")  # type: ignore[attr-defined]
     ttk.Label(frame.timeline, textvariable=frame.timeline_var, style="Chip.TLabel").grid(row=0, column=0, sticky="ew", padx=10, pady=8)  # type: ignore[attr-defined]
     scenario_box = ttk.LabelFrame(frame, text="Selected Candidate Combined Scenario", style="Card.TLabelframe")
-    scenario_box.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+    scenario_box.grid(row=6, column=0, sticky="ew", pady=(8, 0))
     scenario_box.columnconfigure(0, weight=1)
     frame.candidate_bars = ScenarioImpactBars(scenario_box, height=104)  # type: ignore[attr-defined]
     frame.candidate_bars.grid(row=0, column=0, sticky="ew", pady=(0, 6))  # type: ignore[attr-defined]
@@ -1202,7 +1207,7 @@ def _options_strategy_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     scenario_tree.configure(yscrollcommand=scenario_scroll.set)
     frame.candidate_scenario_tree = scenario_tree  # type: ignore[attr-defined]
     help_box = ttk.LabelFrame(frame, text="How To Read This", style="Card.TLabelframe")
-    help_box.grid(row=6, column=0, sticky="ew", pady=(8, 0))
+    help_box.grid(row=7, column=0, sticky="ew", pady=(8, 0))
     ttk.Label(
         help_box,
         text="Call: right to benefit from upside. Put: downside insurance/speculation. Premium: upfront option price. Strike: exercise reference price. Intrinsic value: value at expiration from stock versus strike. Expiration-style estimate: simple payoff math, not live option pricing.",
@@ -1210,7 +1215,7 @@ def _options_strategy_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
         wraplength=1120,
         justify=tk.LEFT,
     ).grid(row=0, column=0, sticky="ew", padx=10, pady=8)
-    frame.detail_text = _readout_launcher(frame, title="Options Strategy Explanation", button_text="Open Options Strategy Explanation", row=7)  # type: ignore[attr-defined]
+    frame.detail_text = _readout_launcher(frame, title="Options Strategy Explanation", button_text="Open Options Strategy Explanation", row=8)  # type: ignore[attr-defined]
     return frame
 
 
@@ -2151,7 +2156,15 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
         rows_map = getattr(self, "schwab_option_chain_rows", {}) or {}
         chain_rows = [row for row in rows_map.values() if isinstance(row, dict)]
         if chain_rows:
-            candidates = suggest_option_candidates(chain_rows, payload.indicators, payload.context, macro_label=payload.decision.macro_backdrop.label, earnings_text=payload.earnings_text)
+            candidates = suggest_option_candidates(
+                chain_rows,
+                payload.indicators,
+                payload.context,
+                macro_label=payload.decision.macro_backdrop.label,
+                earnings_text=payload.earnings_text,
+                risk_budget=max_risk,
+                stock_plan=stock_plan,
+            )
             setattr(self, "schwab_research_option_candidates", candidates)
     selected_candidate = _selected_option_candidate(self)
     top_candidate = selected_candidate if selected_candidate is not None and selected_candidate.option_type in {"call", "put"} else next((item for item in candidates if item.option_type in {"call", "put"}), None)
@@ -2297,7 +2310,15 @@ def _render_options_strategy(self: tk.Tk) -> None:
         _set_research_text(frame.detail_text, _basic_popout_text("Options Strategy Explanation", "Load the option chain to generate option candidates.\n\nUse the Load Chain button inside this tab. No order will be submitted."))  # type: ignore[attr-defined]
         metric_grid(frame.cards, [_synthetic_badge("Chain", "Not Loaded", "info", "Load the option chain to generate candidates.")], columns=1)  # type: ignore[attr-defined]
         return
-    candidates = suggest_option_candidates(chain_rows, payload.indicators, payload.context, macro_label=payload.decision.macro_backdrop.label, earnings_text=payload.earnings_text)
+    candidates = suggest_option_candidates(
+        chain_rows,
+        payload.indicators,
+        payload.context,
+        macro_label=payload.decision.macro_backdrop.label,
+        earnings_text=payload.earnings_text,
+        risk_budget=_float_from_var(getattr(self, "schwab_research_max_risk_var", None)),
+        stock_plan=getattr(self, "schwab_research_stock_plan", None),
+    )
     self.schwab_research_option_candidates = candidates
     if not candidates:
         frame.status_var.set("No usable option candidates found in the loaded chain.")  # type: ignore[attr-defined]
@@ -2642,6 +2663,7 @@ def _show_selected_option_candidate(self: tk.Tk) -> None:
     earnings_text = payload.earnings_text if payload is not None else ""
     context = _active_stock_scenario_context(self, payload) if payload is not None else None
     frame.timeline_var.set(option_timeline_text(candidate, earnings_text))  # type: ignore[attr-defined]
+    _render_candidate_score_breakdown(frame, candidate)
     scenario_tree = frame.candidate_scenario_tree  # type: ignore[attr-defined]
     for row_id in scenario_tree.get_children():
         scenario_tree.delete(row_id)
@@ -2661,11 +2683,29 @@ def _show_selected_option_candidate(self: tk.Tk) -> None:
         frame.candidate_bars.set_rows([])  # type: ignore[attr-defined]
         lines = [f"{candidate.group}: {candidate.strategy}", "Run analysis to see combined stock + option scenarios."]
     lines.extend(["", "Use This Option fills the existing options ticket only. It does not submit, preview, or stage an order."])
-    _set_research_text(frame.detail_text, _options_strategy_popout_text(payload, candidate, context, "\n".join(lines)))  # type: ignore[attr-defined]
+    alternatives = getattr(self, "schwab_research_option_candidates", []) or []
+    _set_research_text(frame.detail_text, _options_strategy_popout_text(payload, candidate, context, "\n".join(lines), alternatives=alternatives))  # type: ignore[attr-defined]
     self.schwab_research_selected_contract_symbol = candidate.contract_symbol
     _render_greeks(self, payload)
     if payload is not None:
         _render_scenarios(self, payload)
+
+
+def _render_candidate_score_breakdown(frame: ttk.Frame, candidate: OptionCandidate) -> None:
+    move = _percent(candidate.expected_move_required) if candidate.expected_move_required is not None else "--"
+    rows = {
+        "Technical Fit": f"{candidate.technical_fit_score:.0f}/100",
+        "Liquidity Fit": f"{candidate.liquidity_score:.0f}/100; spread {_percent(candidate.spread_pct) if candidate.spread_pct is not None else '--'}",
+        "Greek Fit": f"{candidate.greek_score:.0f}/100; delta {_number(candidate.delta)}; IV {_percent(candidate.iv) if candidate.iv is not None else '--'}",
+        "Risk-Budget Fit": f"{candidate.risk_budget_score:.0f}/100; max loss {_money(candidate.max_loss)}",
+        "Move To Breakeven": move,
+        "Stock Comparison": candidate.better_than_stock or "No stock-only comparison was available.",
+    }
+    if candidate.avoid_reason:
+        rows["Avoid / Low Rank Reason"] = candidate.avoid_reason
+    breakdown = getattr(frame, "score_breakdown", None)
+    if breakdown is not None:
+        labeled_value_grid(breakdown, rows, columns=3)
 
 
 def _basic_popout_text(title: str, original_text: str) -> str:
@@ -2678,7 +2718,14 @@ def _basic_popout_text(title: str, original_text: str) -> str:
     )
 
 
-def _options_strategy_popout_text(payload: _ResearchPayload | None, candidate: OptionCandidate, context: PortfolioSymbolContext | None, original_text: str) -> str:
+def _options_strategy_popout_text(
+    payload: _ResearchPayload | None,
+    candidate: OptionCandidate,
+    context: PortfolioSymbolContext | None,
+    original_text: str,
+    *,
+    alternatives: list[OptionCandidate] | None = None,
+) -> str:
     symbol = payload.symbol if payload is not None else candidate.underlying
     cost = (candidate.midpoint or 0.0) * 100
     key_points = [
@@ -2689,7 +2736,12 @@ def _options_strategy_popout_text(payload: _ResearchPayload | None, candidate: O
         f"Goes wrong if: {candidate.goes_wrong_if}",
         f"Position interaction: {candidate.relation_to_position}",
         f"Score: {candidate.score:.0f}/100. {candidate.score_reason}",
+        f"Better/worse than stock: {candidate.better_than_stock or 'No stock-only comparison was available.'}",
     ]
+    key_points.extend(candidate.score_breakdown)
+    if candidate.avoid_reason:
+        key_points.append(candidate.avoid_reason)
+    key_points.extend(_candidate_alternative_lines(candidate, alternatives or []))
     if context is not None:
         key_points.append(f"Stock context: {context.quantity:g} shares, weight {context.portfolio_weight:.2%}, quote {_money(context.last_price)}.")
     return _format_beginner_readout(
@@ -2702,6 +2754,17 @@ def _options_strategy_popout_text(payload: _ResearchPayload | None, candidate: O
         why_it_matters="Options can define risk, add leverage, or hedge a stock position, but the premium, expiration, strike, and required move decide whether the trade is worth considering.",
         original_text=original_text,
     )
+
+
+def _candidate_alternative_lines(candidate: OptionCandidate, alternatives: list[OptionCandidate]) -> list[str]:
+    lines: list[str] = []
+    rejected = [item for item in alternatives if item.key != candidate.key][:3]
+    if not rejected:
+        return lines
+    for item in rejected:
+        reason = item.avoid_reason or item.score_reason or item.goes_wrong_if
+        lines.append(f"Alternative ranked lower: {item.group}: {item.strategy} scored {item.score:.0f}/100 because {reason}")
+    return lines
 
 
 def _normalized_candidate_bar_rows(scenario_rows: list[Any]) -> list[tuple[str, float, str]]:
@@ -2754,6 +2817,81 @@ def _use_selected_research_option(self: tk.Tk) -> None:
     payload = getattr(self, "schwab_research_last_payload", None)
     if payload is not None:
         _render_scenarios(self, payload)
+
+
+def _use_model_stock_plan(self: tk.Tk) -> None:
+    payload = getattr(self, "schwab_research_last_payload", None)
+    if payload is None:
+        messagebox.showinfo("Run analysis first", "Run analysis first.")
+        return
+    stock_plan = getattr(self, "schwab_research_stock_plan", None)
+    quantity = math.floor(float(getattr(stock_plan, "quantity", 0.0) or 0.0)) if stock_plan is not None else 0
+    entry = _to_float(getattr(stock_plan, "entry_price", None)) if stock_plan is not None else None
+    if stock_plan is None or quantity <= 0 or entry is None or entry <= 0:
+        messagebox.showinfo("No usable model stock plan", "No usable model stock plan.")
+        return
+
+    _ensure_stock_ticket_vars(self)
+    self.symbol_var.set(payload.symbol)
+    self.side_var.set(OrderSide.BUY.value)
+    self.order_type_var.set(OrderType.LIMIT.value)
+    self.time_in_force_var.set(TimeInForce.DAY.value)
+    self.quantity_var.set(str(quantity))
+    self.limit_price_var.set(_format_number(entry))
+    self.estimated_price_var.set(_format_number(entry))
+    stop = _to_float(getattr(stock_plan, "stop_price", None))
+    self.stop_price_var.set(_format_optional_number(stop))
+    if hasattr(self, "schwab_preview_status_var"):
+        self.schwab_preview_status_var.set("Last Schwab preview: model stock plan filled only")
+    if hasattr(self, "last_schwab_preview_status"):
+        self.last_schwab_preview_status = None
+    if hasattr(self, "last_preview"):
+        self.last_preview = None
+
+    note = _model_stock_plan_fill_note(payload.symbol, quantity, entry, stop, stock_plan)
+    _append_schwab_output_note(self, note)
+    frame = getattr(self, "schwab_research_scenarios_frame", None)
+    if frame is not None and hasattr(frame, "scenario_note_text"):
+        current = frame.scenario_note_text.get("1.0", tk.END).strip() if hasattr(frame.scenario_note_text, "get") else ""  # type: ignore[attr-defined]
+        _set_research_text(frame.scenario_note_text, (current + "\n\n" + note).strip())  # type: ignore[attr-defined]
+    messagebox.showinfo("Model stock plan filled", "Model stock plan filled into ticket fields only. No order was submitted, previewed, or staged.")
+
+
+def _model_stock_plan_fill_note(symbol: str, quantity: int, entry: float, stop: float | None, stock_plan: Any) -> str:
+    return "\n".join(
+        [
+            "MODEL STOCK PLAN FILLED ONLY",
+            "============================",
+            f"Symbol: {symbol}",
+            f"Side: Buy",
+            f"Order type: LIMIT",
+            f"Quantity: {quantity}",
+            f"Limit / estimated price: {_money(entry)}",
+            f"Stop reference: {_money(stop)}",
+            f"Basis: {getattr(stock_plan, 'basis', '')}",
+            "",
+            "No order was submitted, previewed, or staged. Review the ticket manually before using any Schwab preview or live action.",
+        ]
+    )
+
+
+def _append_schwab_output_note(self: tk.Tk, note: str) -> None:
+    widget = getattr(self, "schwab_trading_preview_text", None) or getattr(self, "preview_text", None)
+    if widget is None:
+        return
+    try:
+        widget.configure(state=tk.NORMAL)
+        existing = widget.get("1.0", tk.END).strip()
+        if existing:
+            widget.insert(tk.END, "\n\n")
+        widget.insert(tk.END, note)
+        content = widget.get("1.0", tk.END)
+        _apply_report_tags(widget, content)
+        widget.configure(state=tk.DISABLED)
+    except Exception:
+        setter = getattr(self, "_set_preview_text", None)
+        if callable(setter):
+            setter(note)
 
 
 def _render_option_scenarios_from_top(self: tk.Tk) -> None:
@@ -3625,6 +3763,34 @@ def _ensure_option_ticket_vars(self: tk.Tk) -> None:
     for name, value in defaults.items():
         if not hasattr(self, name):
             setattr(self, name, tk.StringVar(value=value))
+
+
+def _ensure_stock_ticket_vars(self: tk.Tk) -> None:
+    defaults = {
+        "symbol_var": "",
+        "side_var": OrderSide.BUY.value,
+        "order_type_var": OrderType.LIMIT.value,
+        "time_in_force_var": TimeInForce.DAY.value,
+        "quantity_var": "1",
+        "limit_price_var": "",
+        "estimated_price_var": "",
+        "stop_price_var": "",
+        "schwab_preview_status_var": "",
+    }
+    for name, value in defaults.items():
+        if not hasattr(self, name):
+            setattr(self, name, _new_ticket_string_var(self, value))
+
+
+def _new_ticket_string_var(self: tk.Tk, value: str) -> tk.StringVar:
+    master = self if isinstance(self, tk.Misc) else getattr(self, "_ticket_tcl_master", None)
+    if master is None:
+        master = tk.Tcl()
+        try:
+            setattr(self, "_ticket_tcl_master", master)
+        except Exception:
+            pass
+    return tk.StringVar(master=master, value=value)
 
 
 def _now() -> str:

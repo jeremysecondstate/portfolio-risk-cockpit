@@ -257,6 +257,56 @@ class ResearchWorkspaceInsightTests(unittest.TestCase):
         self.assertEqual(candidates[0].strategy, "No-trade / wait")
         self.assertGreaterEqual(next(item for item in candidates if item.option_type == "call").score, 0)
 
+    def test_bad_liquidity_and_risk_budget_can_make_wait_top(self) -> None:
+        chain = [
+            {
+                "underlying": "GOOG",
+                "expiration_label": "Jun 19 2026 (21d)",
+                "dte": 21,
+                "strike": 100.0,
+                "call": {"bid": 1.0, "ask": 9.0, "mark": 5.0, "symbol": "GOOG_CALL_WIDE"},
+            }
+        ]
+        stock_plan = GeneratedStockPosition(10.0, 100.0, 95.0, 50.0, 1_000.0, 0.05, 5.0, "Cleaner starter stock plan.")
+
+        candidates = suggest_option_candidates(chain, _indicators(), _context(), macro_label="Tailwind", risk_budget=100.0, stock_plan=stock_plan)
+        call = next(item for item in candidates if item.option_type == "call")
+
+        self.assertEqual(candidates[0].strategy, "No-trade / wait")
+        self.assertLess(call.liquidity_score, 45)
+        self.assertIn("spread", call.avoid_reason.lower())
+        self.assertIn("stock-only model is cleaner", call.better_than_stock)
+
+    def test_option_score_breakdown_has_action_dimensions(self) -> None:
+        candidate = next(item for item in suggest_option_candidates(_chain(), _indicators(), _context(), macro_label="Tailwind") if item.option_type == "call")
+
+        joined = "\n".join(candidate.score_breakdown)
+        self.assertIn("Technical fit", joined)
+        self.assertIn("Liquidity fit", joined)
+        self.assertIn("Greek fit", joined)
+        self.assertIn("Risk-budget fit", joined)
+        self.assertIsNotNone(candidate.expected_move_required)
+
+    def test_held_context_includes_collar_candidate(self) -> None:
+        candidates = suggest_option_candidates(_chain(), _indicators("sideways", "neutral"), _context(held=True), macro_label="Headwind")
+        collar = next(item for item in candidates if item.group == "Collar Candidate")
+
+        self.assertEqual(collar.option_type, "collar")
+        self.assertEqual(ticket_fields_for_option_candidate(collar), {})
+        self.assertIn("protection", collar.better_than_stock.lower())
+
+    def test_stock_plan_comparison_penalizes_call_when_stock_risk_is_cleaner(self) -> None:
+        stock_plan = GeneratedStockPosition(10.0, 100.0, 95.0, 50.0, 1_000.0, 0.05, 5.0, "Cleaner starter stock plan.")
+
+        call = next(
+            item
+            for item in suggest_option_candidates(_chain(), _indicators(), _context(), macro_label="Tailwind", risk_budget=100.0, stock_plan=stock_plan)
+            if item.option_type == "call"
+        )
+
+        self.assertIn("stock-only model is cleaner", call.better_than_stock)
+        self.assertLess(call.risk_budget_score, 45)
+
     def test_fundamentals_verdict_and_investment_trade_read(self) -> None:
         strong = build_fundamental_verdict("Revenue growth is strong. Net income improved. Operating cash flow and companyfacts 10-Q data are positive.", _indicators(), "Tailwind")
         mixed = build_fundamental_verdict("Revenue mixed. Net income pressure.", _indicators("sideways", "neutral"), "Headwind")
