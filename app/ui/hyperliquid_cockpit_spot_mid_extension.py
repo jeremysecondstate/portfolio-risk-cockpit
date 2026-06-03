@@ -74,6 +74,15 @@ def _market_with_selected_quote(self: tk.Tk, market: str) -> str:
 
 
 def _selected_spot_quote_asset(self: tk.Tk) -> str:
+    for attr in ("symbol_var", "hyperliquid_spot_symbol_var"):
+        market = str(getattr(getattr(self, attr, None), "get", lambda: "")()).strip().upper()
+        if "/" in market:
+            quote = market.split("/", 1)[1].strip()
+            if quote in {"USDC", "USDT"}:
+                return quote
+    unit = str(getattr(getattr(self, "hyperliquid_size_unit_var", None), "get", lambda: "")()).strip().upper()
+    if unit in {"USDC", "USDT"}:
+        return unit
     for attr in ("hyperliquid_spot_quote_asset_var", "hyperliquid_quote_asset_var"):
         quote = str(getattr(getattr(self, attr, None), "get", lambda: "")()).strip().upper()
         if quote in {"USDC", "USDT"}:
@@ -82,6 +91,8 @@ def _selected_spot_quote_asset(self: tk.Tk) -> str:
 
 
 def _set_spot_ticket_mid_fields(self: tk.Tk, resolution: HyperliquidSpotMarketResolution) -> None:
+    self.hyperliquid_spot_resolved_display_market = resolution.display_market
+    self.hyperliquid_spot_resolved_execution_coin = resolution.execution_coin
     for attr, value in (
         ("hyperliquid_spot_symbol_var", resolution.display_market),
         ("hyperliquid_spot_coin_var", resolution.execution_coin),

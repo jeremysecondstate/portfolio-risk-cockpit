@@ -757,6 +757,15 @@ def _current_hyperliquid_base_symbol(self: tk.Tk) -> str:
 
 
 def _selected_spot_quote_asset(self: tk.Tk) -> str:
+    for attr in ("symbol_var", "hyperliquid_spot_symbol_var"):
+        market = str(getattr(getattr(self, attr, None), "get", lambda: "")()).strip().upper()
+        if "/" in market:
+            quote = market.split("/", 1)[1].strip()
+            if quote in {"USDC", "USDT"}:
+                return quote
+    unit = str(getattr(getattr(self, "hyperliquid_size_unit_var", None), "get", lambda: "")()).strip().upper()
+    if unit in {"USDC", "USDT"}:
+        return unit
     for attr in ("hyperliquid_spot_quote_asset_var", "hyperliquid_quote_asset_var"):
         quote = str(getattr(getattr(self, attr, None), "get", lambda: "")()).strip().upper()
         if quote in {"USDC", "USDT"}:
@@ -2440,7 +2449,12 @@ def _parse_hyperliquid_spot_ticket(self: tk.Tk) -> HyperliquidOrderTicket:
     # Prefer Symbol because Cockpit spot UI shows ZEC/USDC there.
     # Fall back to HL Coin for quick typing like "zec".
     raw_hl_coin = self.hyperliquid_coin_var.get().strip()
-    coin_source = raw_hl_coin if raw_hl_coin.startswith("@") else self.symbol_var.get().strip() or raw_hl_coin
+    visible_market = self.symbol_var.get().strip()
+    coin_source = (
+        raw_hl_coin
+        if raw_hl_coin.startswith("@") and _hidden_spot_execution_matches_visible_market(self, visible_market)
+        else visible_market or raw_hl_coin
+    )
     coin = normalize_hyperliquid_spot_market(coin_source, quote_asset=_selected_spot_quote_asset(self))
 
     side = self.side_var.get().strip().lower()
@@ -2471,6 +2485,18 @@ def _parse_hyperliquid_spot_ticket(self: tk.Tk) -> HyperliquidOrderTicket:
         tif=tif,
         reduce_only=False,  # spot should not be reduce-only
     )
+
+
+def _hidden_spot_execution_matches_visible_market(self: tk.Tk, visible_market: str) -> bool:
+    resolved_display = str(getattr(self, "hyperliquid_spot_resolved_display_market", "") or "").strip().upper()
+    if not resolved_display:
+        return False
+    visible = visible_market.strip().upper()
+    if visible == resolved_display:
+        return True
+    if "/" not in visible and "/" in resolved_display:
+        return visible == resolved_display.split("/", 1)[0]
+    return False
 
 
 def _preview_hyperliquid_ticket(self: tk.Tk) -> None:

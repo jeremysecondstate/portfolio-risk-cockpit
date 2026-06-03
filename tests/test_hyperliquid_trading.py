@@ -291,6 +291,50 @@ class HyperliquidTradingTests(unittest.TestCase):
 
         self.assertEqual(ticket.coin, "XAUT/USDT")
 
+    def test_spot_ticket_parse_preserves_current_hidden_execution_index(self) -> None:
+        app = type(
+            "SpotTicketApp",
+            (),
+            {
+                "symbol_var": _Var("XAUT/USDT"),
+                "hyperliquid_coin_var": _Var("@209"),
+                "hyperliquid_spot_quote_asset_var": _Var("USDT"),
+                "hyperliquid_quote_asset_var": _Var("USDT"),
+                "hyperliquid_spot_resolved_display_market": "XAUT/USDT",
+                "side_var": _Var("buy"),
+                "quantity_var": _Var("0.02"),
+                "limit_price_var": _Var("4368.3"),
+                "hyperliquid_size_unit_var": _Var("XAUT"),
+                "hyperliquid_tif_var": _Var("Gtc"),
+            },
+        )()
+
+        ticket = _parse_hyperliquid_spot_ticket(app)  # type: ignore[arg-type]
+
+        self.assertEqual(ticket.coin, "@209")
+
+    def test_spot_ticket_parse_ignores_stale_hidden_execution_index(self) -> None:
+        app = type(
+            "SpotTicketApp",
+            (),
+            {
+                "symbol_var": _Var("XAUT/USDT"),
+                "hyperliquid_coin_var": _Var("@182"),
+                "hyperliquid_spot_quote_asset_var": _Var("USDT"),
+                "hyperliquid_quote_asset_var": _Var("USDT"),
+                "hyperliquid_spot_resolved_display_market": "XAUT/USDC",
+                "side_var": _Var("buy"),
+                "quantity_var": _Var("0.02"),
+                "limit_price_var": _Var("4368.3"),
+                "hyperliquid_size_unit_var": _Var("XAUT"),
+                "hyperliquid_tif_var": _Var("Gtc"),
+            },
+        )()
+
+        ticket = _parse_hyperliquid_spot_ticket(app)  # type: ignore[arg-type]
+
+        self.assertEqual(ticket.coin, "XAUT/USDT")
+
     def test_edit_market_normalizes_spot_and_perp_contexts_separately(self) -> None:
         self.assertEqual(_normalize_edit_market("BTC", "Spot"), "UBTC/USDC")
         self.assertEqual(_normalize_edit_market("BTC", "Perp"), "BTC")
