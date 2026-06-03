@@ -518,32 +518,6 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             messagebox.showerror("Live submit blocked", f"Estimated notional ${estimated_notional:,.2f} exceeds SCHWAB_MAX_LIVE_ORDER_DOLLARS=${max_notional:,.2f}.")
             return
 
-        confirmation = self.confirmation_var.get().strip()
-        if confirmation != "PLACE":
-            self._set_preview_text(
-                "LIVE SCHWAB SUBMIT BLOCKED\n"
-                "==========================\n\n"
-                "Exact confirmation phrase required.\n\n"
-                "Type exactly into the confirmation field:\n\n"
-                "  PLACE\n\n"
-                "No live order was submitted."
-            )
-            return
-
-        ok = messagebox.askyesno(
-            "FINAL LIVE SCHWAB ORDER CONFIRMATION",
-            "This will submit a LIVE Schwab order.\n\n"
-            f"Symbol: {order.symbol.strip().upper()}\n"
-            f"Side: {order.side.value.upper()}\n"
-            f"Type: {order_type}\n"
-            f"Quantity: {order.quantity:g}\n"
-            f"Limit price: {order.limit_price}\n"
-            f"Estimated notional: ${estimated_notional:,.2f}\n\n"
-            "This order can fill. Continue?",
-        )
-        if not ok:
-            return
-
         try:
             session = self._authorize_schwab_session()
             if session is None:

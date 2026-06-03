@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tkinter as tk
+from datetime import datetime, timezone
 from typing import Any, Type
 
 
@@ -19,26 +20,55 @@ def _submit_with_mechanical_checks(self: tk.Tk) -> None:
         payload = self.build_schwab_order_json_from_ui()
         summary = _validate_and_summarize_payload(self, payload)
     except Exception as exc:
-        self._set_preview_text(_blocked_text(str(exc)))
+        _set_submit_output(self, _blocked_text("Ticket validation failed", str(exc)))
         return
 
+    _set_submit_output(
+        self,
+        _started_text(
+            summary=summary,
+            payload=payload,
+        ),
+    )
+
     if os.getenv("SCHWAB_ENABLE_LIVE_ORDERS", "").strip().lower() != "true":
-        self._set_preview_text(_blocked_text("SCHWAB_ENABLE_LIVE_ORDERS=true is required in your local .env."))
+        _set_submit_output(
+            self,
+            _blocked_text(
+                "Environment gate failed",
+                "SCHWAB_ENABLE_LIVE_ORDERS=true is required in your local .env.",
+                summary=summary,
+                payload=payload,
+            ),
+        )
         return
 
     max_dollars = float(os.getenv("SCHWAB_MAX_LIVE_ORDER_DOLLARS", "500"))
     if summary["estimated_dollars"] > max_dollars:
-        self._set_preview_text(
+        _set_submit_output(
+            self,
             _blocked_text(
+                "Max-dollar gate failed",
                 f"Estimated order dollars ${summary['estimated_dollars']:,.2f} exceeds "
-                f"SCHWAB_MAX_LIVE_ORDER_DOLLARS=${max_dollars:,.2f}."
-            )
+                f"SCHWAB_MAX_LIVE_ORDER_DOLLARS=${max_dollars:,.2f}.",
+                summary=summary,
+                payload=payload,
+            ),
         )
         return
 
     try:
         session = self._authorize_schwab_session()
         if session is None:
+            _set_submit_output(
+                self,
+                _blocked_text(
+                    "Schwab authorization did not complete",
+                    "No Schwab session was returned. No order was submitted.",
+                    summary=summary,
+                    payload=payload,
+                ),
+            )
             return
 
         preview_status_code, preview_payload = session.preview_order(payload)
@@ -48,31 +78,47 @@ def _submit_with_mechanical_checks(self: tk.Tk) -> None:
         strategy = (preview_payload or {}).get("orderStrategy", {}) if isinstance(preview_payload, dict) else {}
         schwab_status = str(strategy.get("status") or "UNKNOWN").upper()
         if preview_status_code != 200 or schwab_status != "ACCEPTED":
-            self._set_preview_text(
-                "SCHWAB SUBMIT BLOCKED\n"
-                "=====================\n\n"
-                f"Immediate Schwab preview was not accepted. HTTP {preview_status_code}, Schwab status {schwab_status}.\n\n"
-                "No order was submitted. This is correct: the app will not submit unless Schwab previewOrder accepts first.\n\n"
-                + _format_schwab_preview_response(self, preview_status_code, preview_payload if isinstance(preview_payload, dict) else {})
+            preview_text = _format_schwab_preview_response(
+                self,
+                preview_status_code,
+                preview_payload if isinstance(preview_payload, dict) else {},
+            )
+            if not isinstance(preview_payload, dict):
+                preview_text += "\n\nRaw preview response:\n" + _format_payload(preview_payload)
+            _set_submit_output(
+                self,
+                _blocked_text(
+                    "Immediate Schwab preview was not accepted",
+                    f"HTTP {preview_status_code}, Schwab status {schwab_status}.",
+                    summary=summary,
+                    payload=payload,
+                    extra=preview_text,
+                ),
             )
             return
 
         submit_status_code, submit_payload, location = session.submit_live_order(payload)
         self.schwab_status_var.set("Schwab session: connected for this app run")
-        self._set_preview_text(
-            "SCHWAB ORDER SUBMIT RESULT\n"
-            "==========================\n\n"
-            f"Ticket: {summary['label']}\n"
-            f"Estimated order dollars: ${summary['estimated_dollars']:,.2f}\n"
-            f"HTTP Status: {submit_status_code}\n"
-            f"Location: {location or '(none returned)'}\n"
-            f"Response: {submit_payload if submit_payload is not None else '(empty response body)'}\n\n"
-            "Submitted payload:\n"
-            f"{json.dumps(payload, indent=2)}\n\n"
-            "Use Recent Orders / Open Only to verify status. Use Cancel Order if needed."
+        _set_submit_output(
+            self,
+            _submit_result_text(
+                summary=summary,
+                status_code=submit_status_code,
+                response_payload=submit_payload,
+                location=location,
+                submitted_payload=payload,
+            ),
         )
     except Exception as exc:
-        self._set_preview_text(_blocked_text(f"Schwab submit failed: {exc}"))
+        _set_submit_output(
+            self,
+            _submit_error_text(
+                "Schwab submit failed",
+                exc,
+                summary=summary,
+                payload=payload,
+            ),
+        )
 
 
 def _show_mechanical_submit_review(self: tk.Tk) -> None:
@@ -95,7 +141,7 @@ def _show_mechanical_submit_review(self: tk.Tk) -> None:
             f"{json.dumps(payload, indent=2)}"
         )
     except Exception as exc:
-        self._set_preview_text(_blocked_text(str(exc)))
+        self._set_preview_text(_blocked_text("Mechanical review failed", str(exc)))
 
 
 def _format_schwab_preview_response(self: tk.Tk, status_code: int, payload: dict[str, Any]) -> str:
@@ -243,13 +289,105 @@ def _validate_and_summarize_payload(self: tk.Tk, payload: dict[str, Any]) -> dic
     }
 
 
-def _blocked_text(reason: str) -> str:
+def _set_submit_output(self: tk.Tk, text: str) -> None:
+    self._set_preview_text(text)
+    try:
+        self.update_idletasks()
+    except Exception:
+        pass
+
+
+def _started_text(*, summary: dict[str, Any], payload: dict[str, Any]) -> str:
     return (
+        "SCHWAB LIVE SUBMIT STARTED\n"
+        "==========================\n\n"
+        f"Time UTC: {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
+        f"Ticket: {summary['label']}\n"
+        f"Estimated order dollars: ${summary['estimated_dollars']:,.2f}\n\n"
+        "Status: click received. Building Schwab preview request now.\n\n"
+        "Payload being previewed/submitted if Schwab accepts:\n"
+        f"{json.dumps(payload, indent=2)}"
+    )
+
+
+def _blocked_text(
+    heading: str,
+    reason: str,
+    *,
+    summary: dict[str, Any] | None = None,
+    payload: dict[str, Any] | None = None,
+    extra: str = "",
+) -> str:
+    lines = [
         "SCHWAB SUBMIT BLOCKED\n"
         "=====================\n\n"
-        f"{reason}\n\n"
-        "No order was submitted."
+        f"Reason: {heading}\n"
+        f"Detail: {reason}\n\n"
+        "No order was submitted.",
+    ]
+    if summary is not None:
+        lines.append(f"\nTicket: {summary['label']}")
+        lines.append(f"Estimated order dollars: ${summary['estimated_dollars']:,.2f}")
+    if extra:
+        lines.append("\n" + extra.strip())
+    if payload is not None:
+        lines.append("\nPayload that was not submitted:")
+        lines.append(json.dumps(payload, indent=2))
+    return "\n".join(lines)
+
+
+def _submit_error_text(
+    heading: str,
+    exc: Exception,
+    *,
+    summary: dict[str, Any],
+    payload: dict[str, Any],
+) -> str:
+    return (
+        "SCHWAB SUBMIT ERROR\n"
+        "===================\n\n"
+        f"Reason: {heading}\n"
+        f"Detail: {type(exc).__name__}: {exc}\n\n"
+        "Submit status: UNKNOWN. If the request reached Schwab before the local error, an order may exist.\n"
+        "Use Recent Orders / Open Only immediately to verify Schwab state.\n\n"
+        f"Ticket: {summary['label']}\n"
+        f"Estimated order dollars: ${summary['estimated_dollars']:,.2f}\n\n"
+        "Payload used for the submit attempt:\n"
+        f"{json.dumps(payload, indent=2)}"
     )
+
+
+def _submit_result_text(
+    *,
+    summary: dict[str, Any],
+    status_code: int,
+    response_payload: object,
+    location: str | None,
+    submitted_payload: dict[str, Any],
+) -> str:
+    status_label = "SUBMITTED" if 200 <= status_code < 300 else "SUBMIT RETURNED NON-2XX"
+    return (
+        "SCHWAB ORDER SUBMIT RESULT\n"
+        "==========================\n\n"
+        f"Status: {status_label}\n"
+        f"Ticket: {summary['label']}\n"
+        f"Estimated order dollars: ${summary['estimated_dollars']:,.2f}\n"
+        f"HTTP Status: {status_code}\n"
+        f"Location: {location or '(none returned)'}\n"
+        "Response:\n"
+        f"{_format_payload(response_payload)}\n\n"
+        "Submitted payload:\n"
+        f"{json.dumps(submitted_payload, indent=2)}\n\n"
+        "Use Recent Orders / Open Only to verify status. Use Cancel Order if needed."
+    )
+
+
+def _format_payload(payload: object) -> str:
+    if payload is None:
+        return "(empty response body)"
+    if isinstance(payload, (dict, list)):
+        return json.dumps(payload, indent=2)
+    return str(payload)
 
 
 def _format_money_or_value(value: Any) -> str:
