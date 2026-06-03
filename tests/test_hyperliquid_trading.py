@@ -7,9 +7,11 @@ from app.brokers.hyperliquid.trading import (
     HyperliquidExecutionAdapter,
     HyperliquidOrderEditTicket,
     HyperliquidOrderTicket,
+    HyperliquidSpotMarketLookupError,
     HyperliquidTradingConfig,
     HyperliquidTriggerTicket,
     normalize_hyperliquid_trigger_ticket_for_wire,
+    resolve_hyperliquid_spot_market,
 )
 from app.core.portfolio import CashPosition, Portfolio, Position
 from app.ui.cash_positions_extension import _portfolio_display_pnl_summary, _position_pnl_value
@@ -93,7 +95,120 @@ class _OpenOrdersTable:
         self.inserted.append((iid, values, tags))
 
 
+def _xaut_spot_meta_and_asset_ctxs(asset_ctxs: list[dict[str, object]] | None = None) -> list[object]:
+    return [
+        {
+            "tokens": [
+                {"name": "USDC", "index": 0},
+                {"name": "XAUT0", "fullName": "XAUT0", "index": 297},
+            ],
+            "universe": [
+                {"name": "@182", "index": 182, "tokens": [297, 0]},
+            ],
+        },
+        asset_ctxs if asset_ctxs is not None else [],
+    ]
+
+
+def _new_spot_meta_and_asset_ctxs(asset_ctxs: list[dict[str, object]] | None = None) -> list[object]:
+    return [
+        {
+            "tokens": [
+                {"name": "USDC", "index": 0},
+                {"name": "FOO", "index": 501},
+            ],
+            "universe": [
+                {"name": "@333", "index": 333, "tokens": [501, 0]},
+            ],
+        },
+        asset_ctxs if asset_ctxs is not None else [],
+    ]
+
+
 class HyperliquidTradingTests(unittest.TestCase):
+    def test_spot_resolver_maps_xaut_to_indexed_usdc_market(self) -> None:
+        resolution = resolve_hyperliquid_spot_market(
+            "XAUT",
+            all_mids={"@182": "4446.8"},
+            spot_meta_and_asset_ctxs=_xaut_spot_meta_and_asset_ctxs(),
+        )
+
+        self.assertEqual(resolution.display_market, "XAUT/USDC")
+        self.assertEqual(resolution.execution_coin, "@182")
+        self.assertEqual(resolution.mid_price, 4446.8)
+        self.assertEqual(resolution.mid_basis, "allMids[@182]")
+        self.assertIn("@182", resolution.candidate_keys)
+
+    def test_spot_resolver_maps_xaut_usdc_to_indexed_usdc_market(self) -> None:
+        resolution = resolve_hyperliquid_spot_market(
+            "XAUT/USDC",
+            all_mids={"@182": "4446.8"},
+            spot_meta_and_asset_ctxs=_xaut_spot_meta_and_asset_ctxs(),
+        )
+
+        self.assertEqual(resolution.display_market, "XAUT/USDC")
+        self.assertEqual(resolution.execution_coin, "@182")
+        self.assertEqual(resolution.mid_price, 4446.8)
+
+    def test_spot_resolver_accepts_u_prefixed_xaut_input(self) -> None:
+        resolution = resolve_hyperliquid_spot_market(
+            "UXAUT",
+            all_mids={"@182": "4446.8"},
+            spot_meta_and_asset_ctxs=_xaut_spot_meta_and_asset_ctxs(),
+        )
+
+        self.assertEqual(resolution.display_market, "XAUT/USDC")
+        self.assertEqual(resolution.execution_coin, "@182")
+        self.assertEqual(resolution.mid_price, 4446.8)
+
+    def test_spot_resolver_accepts_explicit_index_lookup(self) -> None:
+        resolution = resolve_hyperliquid_spot_market(
+            "@182",
+            all_mids={"@182": "4446.8"},
+            spot_meta_and_asset_ctxs=_xaut_spot_meta_and_asset_ctxs(),
+        )
+
+        self.assertEqual(resolution.display_market, "XAUT/USDC")
+        self.assertEqual(resolution.execution_coin, "@182")
+        self.assertEqual(resolution.mid_price, 4446.8)
+
+    def test_spot_resolver_uses_asset_ctx_when_all_mids_lacks_key(self) -> None:
+        resolution = resolve_hyperliquid_spot_market(
+            "XAUT",
+            all_mids={},
+            spot_meta_and_asset_ctxs=_xaut_spot_meta_and_asset_ctxs([{"coin": "@182", "midPx": "4446.8"}]),
+        )
+
+        self.assertEqual(resolution.display_market, "XAUT/USDC")
+        self.assertEqual(resolution.execution_coin, "@182")
+        self.assertEqual(resolution.mid_price, 4446.8)
+        self.assertEqual(resolution.mid_basis, "spotMetaAndAssetCtxs ctx 0")
+
+    def test_spot_resolver_handles_new_market_not_in_static_aliases(self) -> None:
+        resolution = resolve_hyperliquid_spot_market(
+            "FOO",
+            all_mids={"@333": "12.34"},
+            spot_meta_and_asset_ctxs=_new_spot_meta_and_asset_ctxs(),
+        )
+
+        self.assertEqual(resolution.display_market, "FOO/USDC")
+        self.assertEqual(resolution.execution_coin, "@333")
+        self.assertEqual(resolution.mid_price, 12.34)
+
+    def test_spot_lookup_error_includes_attempted_keys_and_metadata_state(self) -> None:
+        resolution = resolve_hyperliquid_spot_market(
+            "XAU",
+            all_mids={},
+            spot_meta_and_asset_ctxs=_xaut_spot_meta_and_asset_ctxs(),
+        )
+
+        message = str(HyperliquidSpotMarketLookupError(resolution))
+
+        self.assertIn("Normalized market attempted: XAU/USDC", message)
+        self.assertIn("Candidate keys attempted:", message)
+        self.assertIn("spotMetaAndAssetCtxs loaded: yes", message)
+        self.assertIn("Nearby tokens/markets: @182 tokens XAUT0/USDC", message)
+
     def test_edit_market_normalizes_spot_and_perp_contexts_separately(self) -> None:
         self.assertEqual(_normalize_edit_market("BTC", "Spot"), "UBTC/USDC")
         self.assertEqual(_normalize_edit_market("BTC", "Perp"), "BTC")

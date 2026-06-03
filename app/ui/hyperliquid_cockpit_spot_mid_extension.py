@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import messagebox
-from typing import Any, Type
+from typing import Type
 
 from app.brokers.hyperliquid.client import HyperliquidInfoClient
-from app.brokers.hyperliquid.trading import normalize_hyperliquid_spot_market
+from app.brokers.hyperliquid.trading import (
+    HyperliquidSpotMarketLookupError,
+    HyperliquidSpotMarketResolution,
+    resolve_hyperliquid_spot_market,
+)
 from app.ui import hyperliquid_trading_extension as hyperliquid_ui
 
 
@@ -17,217 +21,87 @@ def install_hyperliquid_cockpit_spot_mid_extension(app_cls: Type[tk.Tk]) -> None
 
 
 def _use_hyperliquid_cockpit_spot_mid_market(self: tk.Tk) -> None:
-    symbol_source = self.symbol_var.get().strip() or self.hyperliquid_coin_var.get().strip()
+    symbol_source = _spot_mid_symbol_source(self)
     if not symbol_source:
-        messagebox.showerror("Hyperliquid spot mid failed", "Enter a Hyperliquid spot symbol first, for example BTC, ZEC, HYPE, or BTC/USDC.")
+        messagebox.showerror("Hyperliquid spot mid failed", "Enter a Hyperliquid spot symbol first, for example XAUT, BTC, ZEC, HYPE, or XAUT/USDC.")
         return
 
     try:
-        market = normalize_hyperliquid_spot_market(symbol_source)
-        mid, basis = _lookup_hyperliquid_spot_mid(market)
+        resolution = _lookup_hyperliquid_spot_market(symbol_source)
+        if resolution.mid_price is None:
+            raise HyperliquidSpotMarketLookupError(resolution)
+        mid = resolution.mid_price
+        basis = resolution.mid_basis
         self.limit_price_var.set(_format_price(mid))
-        self.symbol_var.set(_display_spot_symbol(market))
-        self.hyperliquid_status_var.set(f"Hyperliquid spot: {market} mid ${mid:,.4f}")
+        self.symbol_var.set(resolution.display_market)
+        self.hyperliquid_coin_var.set(resolution.execution_coin)
+        _set_spot_ticket_mid_fields(self, resolution)
+        self.hyperliquid_status_var.set(f"Hyperliquid spot: {resolution.display_market} mid ${mid:,.4f}")
         self._set_preview_text(
             "HYPERLIQUID SPOT MID-MARKET PRICE\n"
             "==================================\n\n"
-            f"Spot market: {market}\n"
+            f"Display market: {resolution.display_market}\n"
+            f"Execution/API coin: {resolution.execution_coin}\n"
             f"Mid-market price: ${mid:,.4f}\n"
             f"Basis: {basis}\n\n"
             "Entry / Limit was updated from Hyperliquid spot market data. No order was submitted.\n\n"
-            "Note: this Cockpit Use Mid path is spot-only. The dedicated Hyperliquid Trading tab still uses perp mids."
+            "Note: this Use Mid path is read-only and only fills the local Entry / Limit price."
         )
     except Exception as exc:
         self.hyperliquid_status_var.set("Hyperliquid spot: mid failed")
         messagebox.showerror("Hyperliquid spot mid failed", str(exc))
 
 
-def _lookup_hyperliquid_spot_mid(market: str) -> tuple[float, str]:
+def _spot_mid_symbol_source(self: tk.Tk) -> str:
+    active_ticket = str(getattr(getattr(self, "hyperliquid_workspace_active_ticket_var", None), "get", lambda: "")()).lower()
+    if active_ticket == "spot":
+        for attr in ("hyperliquid_spot_symbol_var", "hyperliquid_spot_coin_var"):
+            value = str(getattr(getattr(self, attr, None), "get", lambda: "")()).strip()
+            if value:
+                return value
+    for attr in ("symbol_var", "hyperliquid_coin_var", "hyperliquid_spot_symbol_var", "hyperliquid_spot_coin_var"):
+        value = str(getattr(getattr(self, attr, None), "get", lambda: "")()).strip()
+        if value:
+            return value
+    return ""
+
+
+def _set_spot_ticket_mid_fields(self: tk.Tk, resolution: HyperliquidSpotMarketResolution) -> None:
+    for attr, value in (
+        ("hyperliquid_spot_symbol_var", resolution.display_market),
+        ("hyperliquid_spot_coin_var", resolution.execution_coin),
+        ("hyperliquid_spot_limit_price_var", _format_price(resolution.mid_price or 0.0)),
+    ):
+        var = getattr(self, attr, None)
+        if hasattr(var, "set"):
+            var.set(value)
+
+
+def _lookup_hyperliquid_spot_market(market: str) -> HyperliquidSpotMarketResolution:
     client = HyperliquidInfoClient(timeout_seconds=10)
     all_mids = client.post_info({"type": "allMids"})
     spot_meta_and_asset_ctxs = client._safe_post_info({"type": "spotMetaAndAssetCtxs"}, default=None)
+    spot_meta = client._safe_post_info({"type": "spotMeta"}, default=None)
 
     if not isinstance(all_mids, dict):
         raise RuntimeError("Hyperliquid allMids returned an unexpected response.")
 
-    market = market.strip().upper()
-    if market.startswith("@"):
-        direct_price = _all_mids_price(all_mids, market)
-        if direct_price is not None:
-            return direct_price, f"allMids[{market}]"
-
-        meta_price = _spot_meta_mid_price(market, all_mids, spot_meta_and_asset_ctxs)
-        if meta_price is not None:
-            return meta_price
-
-        raise RuntimeError(f"No Hyperliquid spot mid-market price found for {market}.")
-
-    base = market.split("/", 1)[0] if "/" in market else market
-    candidates = [market, market.replace("/", "-"), base]
-
-    for key in candidates:
-        price = _all_mids_price(all_mids, key)
-        if price is not None:
-            return price, f"allMids[{key}]"
-
-    meta_price = _spot_meta_mid_price(market, all_mids, spot_meta_and_asset_ctxs)
-    if meta_price is not None:
-        return meta_price
-
-    raise RuntimeError(f"No Hyperliquid spot mid-market price found for {market}.")
+    resolution = resolve_hyperliquid_spot_market(
+        market,
+        all_mids=all_mids,
+        spot_meta=spot_meta,
+        spot_meta_and_asset_ctxs=spot_meta_and_asset_ctxs,
+    )
+    if resolution.mid_price is None:
+        raise HyperliquidSpotMarketLookupError(resolution)
+    return resolution
 
 
-def _spot_meta_mid_price(market: str, all_mids: dict[str, Any], payload: Any) -> tuple[float, str] | None:
-    if not isinstance(payload, list) or len(payload) < 2:
-        return None
-
-    meta, asset_ctxs = payload[0], payload[1]
-    universe = meta.get("universe") if isinstance(meta, dict) else None
-    tokens = meta.get("tokens") if isinstance(meta, dict) else None
-    if not isinstance(universe, list):
-        return None
-
-    market = market.strip().upper()
-    requested_index = _to_int(market[1:]) if market.startswith("@") else None
-    base = market.split("/", 1)[0] if "/" in market else market
-    token_names_by_index = _token_names_by_index(tokens)
-
-    for market_index, asset in enumerate(universe):
-        if not isinstance(asset, dict):
-            continue
-        asset_index = _to_int(asset.get("index"))
-        if requested_index is not None and requested_index not in {asset_index, market_index, 10000 + market_index}:
-            continue
-        names = _spot_market_names(asset, token_names_by_index)
-        if requested_index is None and market not in names and base not in names:
-            continue
-
-        candidate_keys: list[str] = []
-        for name in sorted(names):
-            candidate_keys.extend([name, name.replace("/", "-")])
-        if asset_index is not None:
-            candidate_keys.extend([f"@{asset_index}", f"@{10000 + asset_index}"])
-        candidate_keys.extend([f"@{market_index}", f"@{10000 + market_index}"])
-
-        for key in _unique(candidate_keys):
-            price = _all_mids_price(all_mids, key)
-            if price is not None:
-                return price, f"spotMetaAndAssetCtxs/allMids[{key}]"
-
-        if isinstance(asset_ctxs, list):
-            for ctx_index in _ctx_indexes(asset, market_index, len(asset_ctxs)):
-                ctx = asset_ctxs[ctx_index] if isinstance(asset_ctxs[ctx_index], dict) else {}
-                price = _first_number(ctx, "midPx", "markPx", "oraclePx", "price", "prevDayPx")
-                if price is not None and price > 0:
-                    return price, f"spotMetaAndAssetCtxs ctx {ctx_index}"
-    return None
-
-
-def _spot_market_names(asset: dict[str, Any], token_names_by_index: dict[int, set[str]]) -> set[str]:
-    names = {
-        str(value).strip().upper()
-        for key in ("name", "coin", "token", "symbol")
-        for value in (asset.get(key),)
-        if value not in (None, "")
-    }
-    token_indices = asset.get("tokens")
-    if isinstance(token_indices, list) and token_indices:
-        base_index = _to_int(token_indices[0])
-        quote_index = _to_int(token_indices[1]) if len(token_indices) > 1 else None
-        base_names = token_names_by_index.get(base_index, set()) if base_index is not None else set()
-        quote_names = token_names_by_index.get(quote_index, set()) if quote_index is not None else {"USDC"}
-        names.update(base_names)
-        for base in base_names:
-            if quote_names:
-                for quote in quote_names:
-                    names.add(f"{base}/{quote}")
-                    names.add(f"{base}-{quote}")
-            else:
-                names.add(f"{base}/USDC")
-                names.add(f"{base}-USDC")
-    return {name for name in names if name}
-
-
-def _token_names_by_index(tokens: Any) -> dict[int, set[str]]:
-    names_by_index: dict[int, set[str]] = {}
-    if not isinstance(tokens, list):
-        return names_by_index
-    for fallback_index, token in enumerate(tokens):
-        if not isinstance(token, dict):
-            continue
-        token_names = {
-            str(value).strip().upper()
-            for key in ("name", "coin", "token", "fullName")
-            for value in (token.get(key),)
-            if value not in (None, "")
-        }
-        if not token_names:
-            continue
-        names_by_index.setdefault(fallback_index, set()).update(token_names)
-        explicit_index = _to_int(token.get("index"))
-        if explicit_index is not None:
-            names_by_index.setdefault(explicit_index, set()).update(token_names)
-    return names_by_index
-
-
-def _ctx_indexes(asset: dict[str, Any], market_index: int, asset_ctxs_length: int) -> list[int]:
-    indexes: list[int] = []
-    asset_index = _to_int(asset.get("index"))
-    if asset_index is not None and 0 <= asset_index < asset_ctxs_length:
-        indexes.append(asset_index)
-    if 0 <= market_index < asset_ctxs_length and market_index not in indexes:
-        indexes.append(market_index)
-    return indexes
-
-
-def _all_mids_price(all_mids: dict[str, Any], key: str) -> float | None:
-    upper_mids = {str(raw_key).upper(): value for raw_key, value in all_mids.items()}
-    return _to_positive_float(upper_mids.get(key.upper()))
-
-
-def _first_number(source: dict[str, Any], *keys: str) -> float | None:
-    for key in keys:
-        value = _to_positive_float(source.get(key))
-        if value is not None:
-            return value
-    return None
-
-
-def _to_positive_float(value: Any) -> float | None:
-    if value in (None, ""):
-        return None
-    try:
-        number = float(str(value).replace(",", ""))
-    except ValueError:
-        return None
-    return number if number > 0 else None
-
-
-def _to_int(value: Any) -> int | None:
-    if value in (None, ""):
-        return None
-    try:
-        return int(str(value).replace(",", ""))
-    except ValueError:
-        return None
-
-
-def _unique(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    output: list[str] = []
-    for value in values:
-        if not value or value in seen:
-            continue
-        seen.add(value)
-        output.append(value)
-    return output
-
-
-def _display_spot_symbol(market: str) -> str:
-    base = market.split("/", 1)[0]
-    if base.startswith("U") and len(base) > 1:
-        return base[1:]
-    return base
+def _lookup_hyperliquid_spot_mid(market: str) -> tuple[float, str]:
+    resolution = _lookup_hyperliquid_spot_market(market)
+    if resolution.mid_price is None:
+        raise HyperliquidSpotMarketLookupError(resolution)
+    return resolution.mid_price, resolution.mid_basis
 
 
 def _format_price(value: float) -> str:

@@ -2419,7 +2419,8 @@ def _parse_hyperliquid_ticket(self: tk.Tk) -> HyperliquidOrderTicket:
 def _parse_hyperliquid_spot_ticket(self: tk.Tk) -> HyperliquidOrderTicket:
     # Prefer Symbol because Cockpit spot UI shows ZEC/USDC there.
     # Fall back to HL Coin for quick typing like "zec".
-    coin_source = self.symbol_var.get().strip() or self.hyperliquid_coin_var.get().strip()
+    raw_hl_coin = self.hyperliquid_coin_var.get().strip()
+    coin_source = raw_hl_coin if raw_hl_coin.startswith("@") else self.symbol_var.get().strip() or raw_hl_coin
     coin = normalize_hyperliquid_spot_market(coin_source)
 
     side = self.side_var.get().strip().lower()
