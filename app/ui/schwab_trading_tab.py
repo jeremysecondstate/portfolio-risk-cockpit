@@ -240,6 +240,11 @@ def _submit_schwab_stock_limit_order(self: tk.Tk) -> None:
         except Exception:
             return bool(messagebox.askokcancel(title, text))
 
+    def money(value: object) -> str:
+        if isinstance(value, (int, float)):
+            return f"${value:,.2f}"
+        return str(value if value not in (None, "") else "--")
+
     try:
         symbol = self.symbol_var.get().strip().upper()
         side = self.side_var.get().strip().lower()
@@ -305,19 +310,28 @@ def _submit_schwab_stock_limit_order(self: tk.Tk) -> None:
         commission = order_balance.get("projectedCommission", "--")
 
         preview_text = (
-            "SCHWAB LIVE SUBMIT PREVIEW RESULT\n"
-            "=================================\n\n"
-            f"HTTP Status: {preview_status_code}\n"
-            f"Schwab Status: {schwab_status}\n\n"
-            f"Order: {instruction} {quantity} {symbol} @ {limit_price:.2f} LIMIT DAY\n"
-            f"Estimated order value: {order_value}\n"
-            f"Projected buying power: {buying_power}\n"
-            f"Projected available funds: {available_funds}\n"
-            f"Projected commission: {commission}\n\n"
-            "Raw preview response:\n"
+            "SCHWAB LIVE ORDER PREVIEW\n"
+            "=========================\n\n"
+            f"Action:        {instruction}\n"
+            f"Symbol:        {symbol}\n"
+            f"Quantity:      {quantity}\n"
+            f"Order type:    LIMIT\n"
+            f"Limit price:   {money(limit_price)}\n"
+            f"Duration:      DAY\n\n"
+            "Schwab preview:\n"
+            f"- HTTP status: {preview_status_code}\n"
+            f"- Schwab status: {schwab_status}\n"
+            f"- Order value: {money(order_value)}\n"
+            f"- Commission: {money(commission)}\n"
+            f"- Buying power after: {money(buying_power)}\n"
+            f"- Available funds after: {money(available_funds)}\n\n"
+            "Ready to submit. Confirm in the popup to place the live order."
+        )
+        terminal(
+            "SCHWAB LIVE SUBMIT PREVIEW RAW RESPONSE\n"
+            "=======================================\n\n"
             f"{json.dumps(preview_payload, indent=2) if isinstance(preview_payload, (dict, list)) else str(preview_payload)}"
         )
-        terminal(preview_text)
         pane(preview_text)
 
         if preview_status_code != 200 or schwab_status != "ACCEPTED":
@@ -343,22 +357,31 @@ def _submit_schwab_stock_limit_order(self: tk.Tk) -> None:
         submit_status_code, submit_payload, location = session.submit_live_order(payload)
 
         result_text = (
-            "SCHWAB LIVE SUBMIT RESULT\n"
-            "=========================\n\n"
-            f"HTTP Status: {submit_status_code}\n"
-            f"Location: {location or '(none returned)'}\n\n"
-            "Submit response body:\n"
-            f"{json.dumps(submit_payload, indent=2) if isinstance(submit_payload, (dict, list)) else str(submit_payload)}\n\n"
-            "Check Recent Orders / thinkorswim for final order status."
+            "SCHWAB LIVE ORDER SUBMITTED\n"
+            "===========================\n\n"
+            f"Action:      {instruction}\n"
+            f"Symbol:      {symbol}\n"
+            f"Quantity:    {quantity}\n"
+            f"Limit price: {money(limit_price)}\n\n"
+            f"HTTP status: {submit_status_code}\n"
+            f"Order URL:   {location or '(none returned)'}\n\n"
+            "Next: use Recent Orders, Open Only, or thinkorswim to verify final order status."
         )
-        terminal(result_text)
+        terminal(
+            "SCHWAB LIVE SUBMIT RAW RESULT\n"
+            "============================\n\n"
+            f"HTTP Status: {submit_status_code}\n"
+            f"Location: {location or '(none returned)'}\n"
+            f"Body: {json.dumps(submit_payload, indent=2) if isinstance(submit_payload, (dict, list)) else str(submit_payload)}"
+        )
         pane(result_text)
 
         if 200 <= submit_status_code < 300:
             show_info(
                 "Schwab order submitted",
-                f"HTTP Status: {submit_status_code}\n\n"
-                f"Order location:\n{location or '(none returned)'}",
+                f"{instruction} {quantity} {symbol} @ {limit_price:.2f}\n\n"
+                f"HTTP Status: {submit_status_code}\n"
+                "Check Recent Orders or thinkorswim for final status.",
             )
         else:
             show_error(
