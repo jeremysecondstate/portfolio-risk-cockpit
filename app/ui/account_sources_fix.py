@@ -15,8 +15,10 @@ from app.ui.options_lab import (
     _parse_scenario,
 )
 from app.ui.options_lab_extension import (
+    _bind_side_combobox_style,
     _build_hyperliquid_trading_tab,
     _build_schwab_trading_tab,
+    _configure_side_combobox_styles,
     _ensure_execution_workspace_vars,
     _first_available_command,
     _run_workspace_action,
@@ -103,6 +105,8 @@ def _rebuild_schwab_ticket_side_by_side(self: tk.Tk, ticket: ttk.LabelFrame) -> 
     if getattr(self, "_schwab_ticket_side_by_side_built", False):
         return
 
+    _configure_side_combobox_styles(self)
+
     for child in list(ticket.winfo_children()):
         child.destroy()
 
@@ -121,13 +125,15 @@ def _rebuild_schwab_ticket_side_by_side(self: tk.Tk, ticket: ttk.LabelFrame) -> 
     stock.columnconfigure(1, weight=1)
     stock.columnconfigure(3, weight=1)
 
+    side_combo = ttk.Combobox(stock, textvariable=self.side_var, values=["buy", "sell"], state="readonly")
+    _bind_side_combobox_style(self.side_var, side_combo)
     self._grid_row(
         stock,
         0,
         "Symbol",
         ttk.Entry(stock, textvariable=self.symbol_var),
         "Side",
-        ttk.Combobox(stock, textvariable=self.side_var, values=["buy", "sell"], state="readonly"),
+        side_combo,
     )
     self._grid_row(
         stock,
