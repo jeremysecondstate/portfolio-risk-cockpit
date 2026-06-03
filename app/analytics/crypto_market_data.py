@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from app.analytics.hyperliquid_market_data import HYPERLIQUID_INTERVALS, fetch_hyperliquid_candles as fetch_hyperliquid_candle_rows
 from app.analytics.technical_analysis import Candle
 
 
@@ -48,7 +49,7 @@ def fetch_crypto_candles(symbol: str, *, days: int = 365, timeout_seconds: int =
     if cached and time.time() - cached.get("cached_at", 0) <= CRYPTO_CANDLE_CACHE_TTL_SECONDS:
         return _result_from_cache(clean, cached, status="fresh/cache", timeframe=timeframe)
 
-    providers: list[Provider] = [fetch_coinbase_candles, fetch_kraken_candles, fetch_coingecko_candles]
+    providers: list[Provider] = [fetch_hyperliquid_candles, fetch_coinbase_candles, fetch_kraken_candles, fetch_coingecko_candles]
     result = fetch_crypto_candles_with_fallback(clean, providers, days=days, timeout_seconds=timeout_seconds, timeframe=timeframe)
     if result.candles:
         save_cached_crypto_candles(clean, result)
@@ -86,7 +87,10 @@ def fetch_coinbase_candles(symbol: str, days: int, timeout_seconds: int, timefra
     clean = normalize_crypto_symbol(symbol)
     product = f"{clean}-USD"
     timeframe = normalize_timeframe(timeframe)
-    granularity = {"15m": 900, "1h": 3_600, "4h": 14_400, "1d": 86_400}[timeframe]
+    granularity_by_timeframe = {"1m": 60, "5m": 300, "15m": 900, "1h": 3_600, "4h": 14_400, "1d": 86_400}
+    if timeframe not in granularity_by_timeframe:
+        raise ValueError(f"Coinbase fallback does not support {timeframe} candles.")
+    granularity = granularity_by_timeframe[timeframe]
     url = f"https://api.exchange.coinbase.com/products/{urllib.parse.quote(product)}/candles?granularity={granularity}"
     payload = _fetch_json(url, timeout_seconds)
     candles = parse_coinbase_candles(payload)
@@ -97,7 +101,10 @@ def fetch_kraken_candles(symbol: str, days: int, timeout_seconds: int, timeframe
     clean = normalize_crypto_symbol(symbol)
     timeframe = normalize_timeframe(timeframe)
     pair = "XBTUSD" if clean == "BTC" else f"{clean}USD"
-    interval = {"15m": 15, "1h": 60, "4h": 240, "1d": 1440}[timeframe]
+    interval_by_timeframe = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440, "1w": 10080}
+    if timeframe not in interval_by_timeframe:
+        raise ValueError(f"Kraken fallback does not support {timeframe} candles.")
+    interval = interval_by_timeframe[timeframe]
     url = f"https://api.kraken.com/0/public/OHLC?pair={urllib.parse.quote(pair)}&interval={interval}"
     payload = _fetch_json(url, timeout_seconds)
     candles = parse_kraken_ohlc(payload)
@@ -115,6 +122,13 @@ def fetch_coingecko_candles(symbol: str, days: int, timeout_seconds: int, timefr
     payload = _fetch_json(url, timeout_seconds)
     candles = parse_coingecko_market_chart(payload)
     return CryptoCandleResult(clean, candles[-days:], "CoinGecko market chart", "fresh", _now(), f"{coin_id} {timeframe} market chart.", timeframe)
+
+
+def fetch_hyperliquid_candles(symbol: str, days: int, timeout_seconds: int, timeframe: str = "1d") -> CryptoCandleResult:
+    clean = normalize_crypto_symbol(symbol)
+    timeframe = normalize_timeframe(timeframe)
+    candles, status = fetch_hyperliquid_candle_rows(clean, days=days, timeout_seconds=timeout_seconds, interval=timeframe)
+    return CryptoCandleResult(clean, candles, "Hyperliquid candleSnapshot", status.status, status.fetched_at, status.message, timeframe)
 
 
 def parse_coinbase_candles(payload: Any) -> list[Candle]:
@@ -194,8 +208,13 @@ def normalize_crypto_symbol(symbol: str) -> str:
 
 
 def normalize_timeframe(timeframe: str) -> str:
-    value = str(timeframe or "1d").strip().lower()
-    return value if value in {"15m", "1h", "4h", "1d"} else "1d"
+    raw = str(timeframe or "1d").strip()
+    if raw == "1M":
+        return "1M"
+    value = raw.lower()
+    aliases = {"1mo": "1M", "1mon": "1M", "1month": "1M", "month": "1M"}
+    value = aliases.get(value, value)
+    return value if value in HYPERLIQUID_INTERVALS else "1d"
 
 
 def _cache_key(symbol: str, timeframe: str) -> str:

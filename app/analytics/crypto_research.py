@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from app.analytics.crypto_sentiment import CryptoSentimentSnapshot
+from app.analytics.hyperliquid_market_data import LiquiditySnapshot, MultiTimeframeCryptoSnapshot, PerpStructureSnapshot
 from app.analytics.crypto_market_data import CryptoCandleResult, normalize_crypto_symbol
 from app.analytics.research_scoring import BadgeReadout, direction_strength_label, risk_heat_label, score_momentum, score_technicals
 from app.analytics.stock_research import AdvancedIndicatorSnapshot, DataSourceStatus, ScenarioRow
@@ -55,15 +57,21 @@ class CryptoDecisionReadout:
     technical_score: float
     risk_score: float
     momentum_score: float
+    composite_score: float
     overall: BadgeReadout
     risk_level: BadgeReadout
     trend: BadgeReadout
+    trend_alignment: BadgeReadout
     momentum: BadgeReadout
     volatility: BadgeReadout
+    liquidity: BadgeReadout
     funding_bias: BadgeReadout
     exposure: BadgeReadout
     sentiment: BadgeReadout
     action_bias: BadgeReadout
+    score_components: dict[str, float]
+    why_bullets: list[str]
+    invalidations: list[str]
     summary: list[str]
     operator_view: dict[str, str]
     top_things: list[str]
@@ -159,7 +167,7 @@ def exposure_label(exposure: CryptoExposure) -> BadgeReadout:
 def build_crypto_scenarios(
     exposure: CryptoExposure,
     current_price: float | None,
-    moves: tuple[float, ...] = (-0.20, -0.10, -0.05, -0.02, 0.02, 0.05, 0.10, 0.20),
+    moves: tuple[float, ...] = (-0.30, -0.20, -0.10, -0.05, 0.05, 0.10, 0.20, 0.30),
 ) -> list[CryptoScenarioRow]:
     price = current_price or exposure.perp_mark or (exposure.spot_value / exposure.spot_quantity if exposure.spot_quantity else 0.0)
     rows: list[CryptoScenarioRow] = []
@@ -204,46 +212,79 @@ def build_crypto_decision(
     exposure: CryptoExposure,
     candle_result: CryptoCandleResult | None,
     funding_rate: float | None = None,
-    sentiment_status: str = "unknown",
+    sentiment_status: str = "not configured",
+    multi_timeframe: MultiTimeframeCryptoSnapshot | None = None,
+    liquidity: LiquiditySnapshot | None = None,
+    perp_structure: PerpStructureSnapshot | None = None,
+    sentiment: CryptoSentimentSnapshot | None = None,
 ) -> CryptoDecisionReadout:
     technical_score = score_technicals(indicators)
     momentum_score = score_momentum(indicators)
     exposure_badge = exposure_label(exposure)
-    risk_score = _crypto_risk_score(indicators, exposure)
-    overall_score = technical_score * 0.45 + momentum_score * 0.25 - (risk_score - 50) * 0.15
-    if exposure_badge.label in {"Net Short", "Stacked Long"}:
-        overall_score *= 0.9
-    overall = _direction_badge("Overall Read", overall_score)
-    risk = _risk_badge("Risk Level", risk_score, _crypto_risk_why(indicators, exposure))
+    funding_value = funding_rate
+    if perp_structure is not None and perp_structure.current_funding is not None:
+        funding_value = perp_structure.current_funding
+    sentiment_snapshot = sentiment
+    risk_score = _crypto_risk_score(indicators, exposure, liquidity=liquidity, perp_structure=perp_structure)
+    score_components = _crypto_score_components(
+        indicators=indicators,
+        exposure=exposure,
+        technical_score=technical_score,
+        momentum_score=momentum_score,
+        risk_score=risk_score,
+        multi_timeframe=multi_timeframe,
+        liquidity=liquidity,
+        perp_structure=perp_structure,
+        sentiment=sentiment_snapshot,
+    )
+    overall_score = _composite_market_score(score_components)
+    overall = _direction_badge("Overall Market Read", overall_score)
+    risk = _risk_badge("Risk Heat", risk_score, _crypto_risk_why(indicators, exposure, liquidity=liquidity, perp_structure=perp_structure))
     trend = _trend_badge(indicators)
+    trend_alignment = _trend_alignment_badge(multi_timeframe, trend)
     momentum = _momentum_badge(momentum_score)
     volatility = _volatility_badge(indicators)
-    funding = _funding_badge(funding_rate)
-    sentiment = _sentiment_badge(sentiment_status)
-    action = _crypto_action_badge(overall_score, risk_score, exposure_badge)
-    top = _crypto_top_things(exposure_badge, risk, indicators, candle_result)
-    summary = _crypto_summary(exposure, overall, risk, exposure_badge, candle_result)
-    operator = _crypto_operator_view(action, exposure_badge, indicators, exposure)
+    liquidity_badge = _liquidity_badge(liquidity)
+    funding = _funding_badge(funding_value, exposure=exposure, perp_structure=perp_structure)
+    sentiment_badge = _sentiment_badge(sentiment_status, sentiment_snapshot)
+    action = _crypto_action_badge(overall_score, risk_score, exposure_badge, liquidity=liquidity, perp_structure=perp_structure)
+    why_bullets = _crypto_why_bullets(score_components, trend_alignment, liquidity_badge, funding, sentiment_badge, exposure_badge)
+    invalidations = _crypto_invalidations(indicators, liquidity, perp_structure, multi_timeframe)
+    top = _crypto_top_things(exposure_badge, risk, indicators, candle_result, trend_alignment=trend_alignment, liquidity=liquidity_badge)
+    summary = _crypto_summary(exposure, overall, risk, exposure_badge, candle_result, why_bullets=why_bullets)
+    operator = _crypto_operator_view(action, exposure_badge, indicators, exposure, liquidity=liquidity, perp_structure=perp_structure)
     return CryptoDecisionReadout(
-        technical_score,
-        risk_score,
-        momentum_score,
-        overall,
-        risk,
-        trend,
-        momentum,
-        volatility,
-        funding,
-        exposure_badge,
-        sentiment,
-        action,
-        summary,
-        operator,
-        top,
+        technical_score=technical_score,
+        risk_score=risk_score,
+        momentum_score=momentum_score,
+        composite_score=overall_score,
+        overall=overall,
+        risk_level=risk,
+        trend=trend,
+        trend_alignment=trend_alignment,
+        momentum=momentum,
+        volatility=volatility,
+        liquidity=liquidity_badge,
+        funding_bias=funding,
+        exposure=exposure_badge,
+        sentiment=sentiment_badge,
+        action_bias=action,
+        score_components=score_components,
+        why_bullets=why_bullets,
+        invalidations=invalidations,
+        summary=summary,
+        operator_view=operator,
+        top_things=top,
     )
 
 
-def _crypto_risk_score(indicators: AdvancedIndicatorSnapshot, exposure: CryptoExposure) -> float:
+def _crypto_risk_score(
+    indicators: AdvancedIndicatorSnapshot,
+    exposure: CryptoExposure,
+    *,
+    liquidity: LiquiditySnapshot | None = None,
+    perp_structure: PerpStructureSnapshot | None = None,
+) -> float:
     score = 25.0
     if indicators.volatility == "elevated":
         score += 30
@@ -259,15 +300,27 @@ def _crypto_risk_score(indicators: AdvancedIndicatorSnapshot, exposure: CryptoEx
         score += 15
     if exposure.open_orders:
         score += min(exposure.open_orders * 3, 12)
+    if liquidity is not None:
+        if liquidity.health == "Dangerous":
+            score += 25
+        elif liquidity.health == "Thin":
+            score += 15
+        elif liquidity.health == "Deep":
+            score -= 5
+    if perp_structure is not None:
+        if perp_structure.oi_cap_status == "At/near cap":
+            score += 15
+        if perp_structure.current_funding is not None and abs(perp_structure.current_funding) >= 0.0005:
+            score += 10
     return max(0.0, min(100.0, score))
 
 
 def _direction_badge(title: str, score: float) -> BadgeReadout:
     if score >= 25:
-        return BadgeReadout(title, "Bullish", "good", score, f"{direction_strength_label(score)} crypto technical read.")
+        return BadgeReadout(title, "Bullish", "good", score, f"{direction_strength_label(score)} crypto market read.")
     if score <= -25:
-        return BadgeReadout(title, "Bearish", "bad", score, f"{direction_strength_label(score)} crypto technical read.")
-    return BadgeReadout(title, "Neutral", "mixed", score, "mixed crypto read.")
+        return BadgeReadout(title, "Bearish", "bad", score, f"{direction_strength_label(score)} crypto market read.")
+    return BadgeReadout(title, "Mixed", "mixed", score, "signals are not aligned enough for a clean read.")
 
 
 def _risk_badge(title: str, score: float, why: str) -> BadgeReadout:
@@ -280,12 +333,19 @@ def _risk_badge(title: str, score: float, why: str) -> BadgeReadout:
 
 def _trend_badge(indicators: AdvancedIndicatorSnapshot) -> BadgeReadout:
     if indicators.trend == "bullish":
-        return BadgeReadout("Trend", "Up", "good", 75, "price is above key moving averages.")
+        return BadgeReadout("Trend", "Up", "good", 75, "selected timeframe is above key moving averages.")
     if indicators.trend == "bearish":
-        return BadgeReadout("Trend", "Down", "bad", -75, "price is below key moving averages.")
+        return BadgeReadout("Trend", "Down", "bad", -75, "selected timeframe is below key moving averages.")
     if indicators.trend == "unknown":
         return BadgeReadout("Trend", "Unknown", "info", 0, "candles are unavailable.")
     return BadgeReadout("Trend", "Sideways", "mixed", 0, "moving averages are mixed.")
+
+
+def _trend_alignment_badge(multi_timeframe: MultiTimeframeCryptoSnapshot | None, fallback: BadgeReadout) -> BadgeReadout:
+    if multi_timeframe is None:
+        return BadgeReadout("Trend Alignment", fallback.label, fallback.status, fallback.score, "multi-timeframe matrix unavailable; using selected timeframe.")
+    alignment = multi_timeframe.alignment
+    return BadgeReadout("Trend Alignment", alignment.label, alignment.status, alignment.trend_score, alignment.why)
 
 
 def _momentum_badge(score: float) -> BadgeReadout:
@@ -306,41 +366,88 @@ def _volatility_badge(indicators: AdvancedIndicatorSnapshot) -> BadgeReadout:
     return BadgeReadout("Volatility", "Unknown", "info", 50, "ATR unavailable.")
 
 
-def _funding_badge(funding_rate: float | None) -> BadgeReadout:
+def _liquidity_badge(liquidity: LiquiditySnapshot | None) -> BadgeReadout:
+    if liquidity is None:
+        return BadgeReadout("Liquidity", "Unavailable", "info", 0, "order book not loaded.")
+    status = "good" if liquidity.health == "Deep" else "mixed" if liquidity.health in {"Normal", "Thin"} else "bad" if liquidity.health == "Dangerous" else "info"
+    score = {"Deep": 80, "Normal": 55, "Thin": 30, "Dangerous": 10}.get(liquidity.health, 0)
+    return BadgeReadout("Liquidity", liquidity.health, status, score, liquidity.reason)
+
+
+def _funding_badge(
+    funding_rate: float | None,
+    *,
+    exposure: CryptoExposure,
+    perp_structure: PerpStructureSnapshot | None = None,
+) -> BadgeReadout:
+    if perp_structure is not None and not perp_structure.is_perp_enabled:
+        return BadgeReadout("Perp Carry", "Spot Only", "info", 0, "Hyperliquid perp metadata was not available for this asset.")
     if funding_rate is None:
-        return BadgeReadout("Funding Bias", "Unknown", "info", 0, "funding data unavailable.")
+        return BadgeReadout("Perp Carry", "Not Configured", "info", 0, "funding/carry endpoint unavailable for this run.")
+    cost = perp_structure.carry_cost_8h if perp_structure is not None else None
+    if cost is not None and exposure.perp_notional > 0:
+        why = f"estimated 8h carry for current {exposure.perp_direction} perp: ${cost:,.2f}."
+    else:
+        why = "funding rate is available; no active perp notional for cost estimate."
     if funding_rate < -0.0001:
-        return BadgeReadout("Funding Bias", "Favorable", "good", 40, "funding appears to credit this side.")
+        return BadgeReadout("Perp Carry", "Shorts Pay", "mixed", 40, why)
     if funding_rate > 0.0001:
-        return BadgeReadout("Funding Bias", "Costly", "bad", 65, "funding may be a carry cost.")
-    return BadgeReadout("Funding Bias", "Neutral", "mixed", 20, "funding is near flat.")
+        return BadgeReadout("Perp Carry", "Longs Pay", "mixed", 55, why)
+    return BadgeReadout("Perp Carry", "Flat", "good", 20, "perp carry is near flat.")
 
 
-def _sentiment_badge(status: str) -> BadgeReadout:
+def _sentiment_badge(status: str, sentiment: CryptoSentimentSnapshot | None = None) -> BadgeReadout:
+    if sentiment is not None:
+        badge_status = "good" if sentiment.label == "Positive" else "bad" if sentiment.label == "Negative" else "mixed" if sentiment.label == "Mixed" else "info"
+        return BadgeReadout("Social / News", sentiment.label, badge_status, sentiment.score, sentiment.message or f"{sentiment.headline_count} headlines scanned.")
     text = status.lower()
     if text == "positive":
-        return BadgeReadout("Sentiment", "Positive", "good", 45, "fresh sentiment source leaned positive.")
+        return BadgeReadout("Social / News", "Positive", "good", 45, "fresh sentiment source leaned positive.")
     if text == "negative":
-        return BadgeReadout("Sentiment", "Negative", "bad", -45, "fresh sentiment source leaned negative.")
+        return BadgeReadout("Social / News", "Negative", "bad", -45, "fresh sentiment source leaned negative.")
     if text == "mixed":
-        return BadgeReadout("Sentiment", "Mixed", "mixed", 0, "sentiment is mixed.")
-    return BadgeReadout("Sentiment", "Unknown", "info", 0, "sentiment provider unavailable.")
+        return BadgeReadout("Social / News", "Mixed", "mixed", 0, "sentiment is mixed.")
+    return BadgeReadout("Social / News", "Not Configured", "info", 0, "optional sentiment/news provider is not configured.")
 
 
-def _crypto_action_badge(overall_score: float, risk_score: float, exposure: BadgeReadout) -> BadgeReadout:
+def _crypto_action_badge(
+    overall_score: float,
+    risk_score: float,
+    exposure: BadgeReadout,
+    *,
+    liquidity: LiquiditySnapshot | None = None,
+    perp_structure: PerpStructureSnapshot | None = None,
+) -> BadgeReadout:
     if risk_score >= 75:
-        return BadgeReadout("Action Bias", "Reduce Risk", "bad", overall_score, "risk heat is high.")
+        return BadgeReadout("Operator Action", "Reduce", "bad", overall_score, "risk heat is high relative to setup.")
+    if liquidity is not None and liquidity.health == "Dangerous":
+        return BadgeReadout("Operator Action", "Wait", "bad", overall_score, "visible liquidity is dangerous.")
+    if perp_structure is not None and perp_structure.carry_cost_8h is not None and perp_structure.carry_cost_8h > 25:
+        return BadgeReadout("Operator Action", "Hedge", "mixed", overall_score, "perp carry is a material cost.")
     if exposure.label == "Net Short" and overall_score > 20:
-        return BadgeReadout("Action Bias", "Add Spot", "good", overall_score, "spot could soften the short-perp imbalance.")
+        return BadgeReadout("Operator Action", "Add Spot", "good", overall_score, "spot could soften the short-perp imbalance.")
     if exposure.label == "Net Long" and overall_score < -20:
-        return BadgeReadout("Action Bias", "Add Hedge", "mixed", overall_score, "a hedge could reduce downside.")
+        return BadgeReadout("Operator Action", "Hedge", "mixed", overall_score, "a hedge could reduce downside.")
     if overall_score <= -35:
-        return BadgeReadout("Action Bias", "Avoid", "bad", overall_score, "technical read is not supportive.")
-    return BadgeReadout("Action Bias", "Watch", "mixed", overall_score, "wait for cleaner confirmation.")
+        return BadgeReadout("Operator Action", "Avoid", "bad", overall_score, "market read is not supportive.")
+    if overall_score >= 45 and risk_score < 55 and exposure.label in {"No Position", "Net Long"}:
+        return BadgeReadout("Operator Action", "Add Spot", "good", overall_score, "trend/liquidity read is supportive without hot risk.")
+    return BadgeReadout("Operator Action", "Watch", "mixed", overall_score, "wait for cleaner confirmation.")
 
 
-def _crypto_risk_why(indicators: AdvancedIndicatorSnapshot, exposure: CryptoExposure) -> str:
-    return f"portfolio share {exposure.portfolio_share:.2%}; volatility {indicators.volatility}; open orders {exposure.open_orders}."
+def _crypto_risk_why(
+    indicators: AdvancedIndicatorSnapshot,
+    exposure: CryptoExposure,
+    *,
+    liquidity: LiquiditySnapshot | None = None,
+    perp_structure: PerpStructureSnapshot | None = None,
+) -> str:
+    parts = [f"portfolio share {exposure.portfolio_share:.2%}", f"volatility {indicators.volatility}", f"open orders {exposure.open_orders}"]
+    if liquidity is not None:
+        parts.append(f"liquidity {liquidity.health.lower()}")
+    if perp_structure is not None and perp_structure.current_funding is not None:
+        parts.append(f"funding {perp_structure.current_funding:+.4%}")
+    return "; ".join(parts) + "."
 
 
 def _crypto_top_things(
@@ -348,9 +455,16 @@ def _crypto_top_things(
     risk: BadgeReadout,
     indicators: AdvancedIndicatorSnapshot,
     candle_result: CryptoCandleResult | None,
+    *,
+    trend_alignment: BadgeReadout | None = None,
+    liquidity: BadgeReadout | None = None,
 ) -> list[str]:
     first = f"Exposure: {exposure.label}"
     second = f"Risk heat: {risk_heat_label(risk.score)}"
+    if trend_alignment is not None:
+        first = f"Trend alignment: {trend_alignment.label}"
+    if liquidity is not None:
+        second = f"Liquidity: {liquidity.label}; risk {risk.label}"
     if candle_result is None or not candle_result.candles:
         third = "Candles unavailable; exposure still works"
     elif indicators.resistance:
@@ -368,11 +482,15 @@ def _crypto_summary(
     risk: BadgeReadout,
     exposure_badge: BadgeReadout,
     candle_result: CryptoCandleResult | None,
+    *,
+    why_bullets: list[str] | None = None,
 ) -> list[str]:
     lines = [
         f"{exposure.coin} is currently {exposure_badge.label.lower()} based on synced spot/perp exposure.",
         f"The overall read is {overall.label.lower()} with {risk.label.lower()} risk heat.",
     ]
+    for bullet in (why_bullets or [])[:3]:
+        lines.append(bullet)
     if candle_result is None or not candle_result.candles:
         lines.append("Price history is unavailable, so the dashboard leans on exposure and synced account data.")
     elif exposure.perp_direction == "short":
@@ -387,6 +505,9 @@ def _crypto_operator_view(
     exposure: BadgeReadout,
     indicators: AdvancedIndicatorSnapshot,
     current: CryptoExposure,
+    *,
+    liquidity: LiquiditySnapshot | None = None,
+    perp_structure: PerpStructureSnapshot | None = None,
 ) -> dict[str, str]:
     key_level = "No clean level loaded"
     if indicators.resistance:
@@ -395,11 +516,122 @@ def _crypto_operator_view(
         key_level = f"Support ${indicators.support:,.4f}"
     return {
         "Current setup": exposure.label,
-        "Bias": action.label,
-        "Good thing": "Spot and perp are close to balanced." if exposure.label == "Hedged" else "There is a clear exposure read.",
-        "Bad thing": "Perp has no spot hedge." if current.perp_notional and not current.spot_value else "Crypto volatility can move fast.",
+        "Operator action": action.label,
+        "Good thing": _operator_good(exposure, liquidity),
+        "Main risk": _operator_risk(current, liquidity, perp_structure),
         "Key level": key_level,
-        "Best next check": "Candles, funding, open orders, and TP/SL.",
+        "Best next check": "Timeframe matrix, order book depth, perp carry, open orders, and stop/TP distance.",
         "If price rises": "Spot gains; short perps lose." if current.perp_direction == "short" else "Long exposure gains.",
         "If price falls": "Short perps help; spot loses." if current.perp_direction == "short" else "Spot/long exposure loses.",
     }
+
+
+def _crypto_score_components(
+    *,
+    indicators: AdvancedIndicatorSnapshot,
+    exposure: CryptoExposure,
+    technical_score: float,
+    momentum_score: float,
+    risk_score: float,
+    multi_timeframe: MultiTimeframeCryptoSnapshot | None,
+    liquidity: LiquiditySnapshot | None,
+    perp_structure: PerpStructureSnapshot | None,
+    sentiment: CryptoSentimentSnapshot | None,
+) -> dict[str, float]:
+    trend_score = multi_timeframe.alignment.trend_score if multi_timeframe is not None else technical_score
+    volatility_score = 100.0 - risk_score
+    liquidity_score = {"Deep": 80.0, "Normal": 55.0, "Thin": 20.0, "Dangerous": -35.0}.get(liquidity.health, 0.0) if liquidity else 0.0
+    carry_score = 0.0
+    if perp_structure is not None:
+        if not perp_structure.is_perp_enabled:
+            carry_score = 10.0
+        elif perp_structure.current_funding is not None:
+            carry_score = -min(70.0, abs(perp_structure.current_funding) * 100_000)
+    sentiment_score = sentiment.score if sentiment is not None and sentiment.status != "not configured" else 0.0
+    exposure_score = -min(80.0, exposure.portfolio_share * 500)
+    if exposure.hedge_ratio is not None and 0.75 <= exposure.hedge_ratio <= 1.25 and exposure.perp_direction == "short":
+        exposure_score += 30
+    source_confidence = multi_timeframe.alignment.source_confidence_score if multi_timeframe is not None else (80.0 if indicators.latest_close is not None else 10.0)
+    return {
+        "Trend": trend_score,
+        "Momentum": momentum_score,
+        "Volatility": volatility_score,
+        "Liquidity": liquidity_score,
+        "Perp crowding / carry": carry_score,
+        "Sentiment": sentiment_score,
+        "Exposure / risk": exposure_score,
+        "Source confidence": source_confidence,
+    }
+
+
+def _composite_market_score(components: dict[str, float]) -> float:
+    weighted = (
+        components.get("Trend", 0.0) * 0.25
+        + components.get("Momentum", 0.0) * 0.16
+        + components.get("Volatility", 0.0) * 0.10
+        + components.get("Liquidity", 0.0) * 0.14
+        + components.get("Perp crowding / carry", 0.0) * 0.12
+        + components.get("Sentiment", 0.0) * 0.08
+        + components.get("Exposure / risk", 0.0) * 0.10
+        + (components.get("Source confidence", 0.0) - 50.0) * 0.05
+    )
+    return max(-100.0, min(100.0, weighted))
+
+
+def _crypto_why_bullets(
+    components: dict[str, float],
+    trend_alignment: BadgeReadout,
+    liquidity: BadgeReadout,
+    carry: BadgeReadout,
+    sentiment: BadgeReadout,
+    exposure: BadgeReadout,
+) -> list[str]:
+    return [
+        f"Trend alignment is {trend_alignment.label.lower()} with score {components.get('Trend', 0):.0f}.",
+        f"Liquidity is {liquidity.label.lower()}: {liquidity.why}",
+        f"Perp carry is {carry.label.lower()}: {carry.why}",
+        f"Exposure is {exposure.label.lower()}; source confidence {components.get('Source confidence', 0):.0f}%.",
+        f"Social/news read is {sentiment.label.lower()}.",
+    ]
+
+
+def _crypto_invalidations(
+    indicators: AdvancedIndicatorSnapshot,
+    liquidity: LiquiditySnapshot | None,
+    perp_structure: PerpStructureSnapshot | None,
+    multi_timeframe: MultiTimeframeCryptoSnapshot | None,
+) -> list[str]:
+    lines: list[str] = []
+    if indicators.resistance:
+        lines.append(f"Break and hold above ${indicators.resistance:,.4f} would improve the long setup.")
+    if indicators.support:
+        lines.append(f"Losing ${indicators.support:,.4f} would weaken the setup.")
+    if liquidity is not None and liquidity.health in {"Thin", "Dangerous"}:
+        lines.append("Liquidity improves if spread tightens and 100 bps depth rebuilds.")
+    if perp_structure is not None and perp_structure.current_funding is not None:
+        lines.append("Carry read changes if funding flips sharply or predicted funding diverges.")
+    if multi_timeframe is not None:
+        lines.append("Market read changes if short-term and swing timeframe groups stop agreeing.")
+    return lines or ["More fresh market data would sharpen invalidation levels."]
+
+
+def _operator_good(exposure: BadgeReadout, liquidity: LiquiditySnapshot | None) -> str:
+    if liquidity is not None and liquidity.health in {"Deep", "Normal"}:
+        return f"Visible book liquidity is {liquidity.health.lower()}."
+    if exposure.label == "Hedged":
+        return "Spot and perp are close to balanced."
+    return "There is a clear exposure read."
+
+
+def _operator_risk(
+    current: CryptoExposure,
+    liquidity: LiquiditySnapshot | None,
+    perp_structure: PerpStructureSnapshot | None,
+) -> str:
+    if liquidity is not None and liquidity.health in {"Thin", "Dangerous"}:
+        return "Thin visible liquidity can turn market orders and stops into slippage."
+    if perp_structure is not None and perp_structure.oi_cap_status == "At/near cap":
+        return "Asset is flagged at/near the Hyperliquid open-interest cap."
+    if current.perp_notional and not current.spot_value:
+        return "Perp has no spot hedge."
+    return "Crypto volatility can move fast."

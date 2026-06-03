@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,15 @@ from app.analytics.crypto_market_data import (
     normalize_crypto_symbol,
     parse_coinbase_candles,
     parse_coingecko_market_chart,
+)
+from app.analytics.crypto_sentiment import build_crypto_sentiment_snapshot
+from app.analytics.hyperliquid_market_data import (
+    MarketDataSourceStatus,
+    analyze_order_book,
+    analyze_perp_structure,
+    build_multi_timeframe_crypto_snapshot,
+    funding_carry_cost,
+    parse_hyperliquid_candles,
 )
 from app.analytics.crypto_research import build_crypto_decision, build_crypto_exposure, build_crypto_scenarios
 from app.analytics.stock_research import calculate_advanced_indicators
@@ -78,6 +88,19 @@ class CryptoMarketDataTests(unittest.TestCase):
         self.assertAlmostEqual(candles[1].close, 101.5)
         self.assertAlmostEqual(candles[1].volume, 2_000_000.0)
 
+    def test_parse_hyperliquid_candle_snapshot(self) -> None:
+        payload = [
+            {"t": 1_700_000_060_000, "o": "101", "h": "104", "l": "100", "c": "103", "v": "7.5"},
+            {"t": 1_700_000_000_000, "o": "100", "h": "102", "l": "99", "c": "101", "v": "5"},
+        ]
+
+        candles = parse_hyperliquid_candles(payload)
+
+        self.assertEqual(len(candles), 2)
+        self.assertLess(candles[0].datetime_ms, candles[1].datetime_ms)
+        self.assertAlmostEqual(candles[-1].close, 103.0)
+        self.assertAlmostEqual(candles[-1].volume, 7.5)
+
     def test_provider_fallback_uses_second_provider(self) -> None:
         def failing_provider(symbol: str, days: int, timeout_seconds: int, timeframe: str) -> CryptoCandleResult:
             raise RuntimeError("offline")
@@ -116,6 +139,7 @@ class CryptoMarketDataTests(unittest.TestCase):
     def test_timeframe_normalization(self) -> None:
         self.assertEqual(normalize_timeframe("15M"), "15m")
         self.assertEqual(normalize_timeframe("4h"), "4h")
+        self.assertEqual(normalize_timeframe("1M"), "1M")
         self.assertEqual(normalize_timeframe("bad"), "1d")
 
     def test_provider_status_rows_include_timeframe_and_active_provider(self) -> None:
@@ -172,6 +196,102 @@ class CryptoResearchAnalyticsTests(unittest.TestCase):
         self.assertAlmostEqual(rows[1].spot_pnl, 750.0)
         self.assertAlmostEqual(rows[1].perp_pnl, -375.0)
         self.assertAlmostEqual(rows[1].net_pnl, 375.0)
+
+    def test_multi_timeframe_aggregation_scores_alignment(self) -> None:
+        status = MarketDataSourceStatus("Hyperliquid", "candleSnapshot", "fresh", "now", "1h", 260, "ok")
+        snapshot = build_multi_timeframe_crypto_snapshot(
+            "BTC",
+            {
+                "5m": (_sample_crypto_candles(), status),
+                "1h": (_sample_crypto_candles(), status),
+                "1d": (_sample_crypto_candles(), status),
+            },
+        )
+
+        self.assertEqual(snapshot.symbol, "BTC")
+        self.assertEqual(len(snapshot.timeframe_reads), 3)
+        self.assertGreater(snapshot.alignment.source_confidence_score, 0)
+        self.assertIn(snapshot.alignment.label, {"Bullish Stack", "Leaning Bullish", "Mixed"})
+
+    def test_liquidity_depth_and_slippage_calculations(self) -> None:
+        payload = {
+            "levels": [
+                [{"px": "99.9", "sz": "10"}, {"px": "99.5", "sz": "20"}],
+                [{"px": "100.1", "sz": "12"}, {"px": "100.5", "sz": "18"}],
+            ]
+        }
+
+        liquidity = analyze_order_book("BTC", payload, order_sizes_usd=(1_000.0,))
+
+        self.assertAlmostEqual(liquidity.mid_price or 0, 100.0)
+        self.assertAlmostEqual(liquidity.spread_bps or 0, 20.0)
+        self.assertEqual(liquidity.depth_buckets[-1].bps, 100)
+        self.assertTrue(liquidity.slippage)
+
+    def test_perp_structure_and_funding_carry(self) -> None:
+        meta_payload = [
+            {"universe": [{"name": "BTC", "maxLeverage": 50}]},
+            [{"markPx": "100", "oraclePx": "99", "midPx": "100.1", "funding": "0.0002", "openInterest": "1000", "dayNtlVlm": "5000000"}],
+        ]
+
+        perp = analyze_perp_structure(
+            "BTC",
+            meta_payload=meta_payload,
+            predicted_payload=["BTC", [["HlPerp", "0.0003"]]],
+            funding_history_payload=[{"fundingRate": "0.0001"}, {"fundingRate": "0.0002"}, {"fundingRate": "0.00025"}],
+            oi_cap_payload=["ETH"],
+            perp_notional=10_000.0,
+            perp_direction="long",
+        )
+
+        self.assertTrue(perp.is_perp_enabled)
+        self.assertAlmostEqual(perp.current_funding or 0, 0.0002)
+        self.assertAlmostEqual(perp.carry_cost_8h or 0, 2.0)
+        self.assertEqual(funding_carry_cost(10_000.0, "short", 0.0002), -2.0)
+
+    def test_sentiment_fallback_is_not_configured(self) -> None:
+        with patch.dict(os.environ, {"CRYPTO_NEWS_HEADLINES": ""}):
+            sentiment = build_crypto_sentiment_snapshot("BTC")
+
+        self.assertEqual(sentiment.label, "Not Configured")
+        self.assertEqual(sentiment.status, "not configured")
+        self.assertTrue(sentiment.narratives)
+
+    def test_decision_uses_crypto_native_labels_and_components(self) -> None:
+        indicators = calculate_advanced_indicators("BTC", _sample_crypto_candles())
+        exposure = build_crypto_exposure(_hyperliquid_portfolio(), "BTC")
+        candle_result = CryptoCandleResult("BTC", _sample_crypto_candles(), "Unit provider", "fresh", "now")
+        status = MarketDataSourceStatus("Hyperliquid", "candleSnapshot", "fresh", "now", "1h", 260, "ok")
+        multi = build_multi_timeframe_crypto_snapshot("BTC", {"1h": (_sample_crypto_candles(), status), "1d": (_sample_crypto_candles(), status)})
+        liquidity = analyze_order_book(
+            "BTC",
+            {"levels": [[{"px": "99.9", "sz": "100"}], [{"px": "100.1", "sz": "100"}]]},
+            order_sizes_usd=(1_000.0,),
+        )
+        perp = analyze_perp_structure(
+            "BTC",
+            meta_payload=[{"universe": [{"name": "BTC", "maxLeverage": 50}]}, [{"funding": "0.00001"}]],
+            perp_notional=exposure.perp_notional,
+            perp_direction=exposure.perp_direction,
+        )
+        sentiment = build_crypto_sentiment_snapshot("BTC", headlines=["Bitcoin adoption headline signals strong inflow"])
+
+        decision = build_crypto_decision(
+            indicators=indicators,
+            exposure=exposure,
+            candle_result=candle_result,
+            multi_timeframe=multi,
+            liquidity=liquidity,
+            perp_structure=perp,
+            sentiment=sentiment,
+        )
+
+        self.assertEqual(decision.funding_bias.title, "Perp Carry")
+        self.assertEqual(decision.action_bias.title, "Operator Action")
+        self.assertEqual(decision.sentiment.title, "Social / News")
+        self.assertEqual(decision.liquidity.title, "Liquidity")
+        self.assertIn("Trend", decision.score_components)
+        self.assertTrue(decision.why_bullets)
 
     def test_decision_handles_missing_candles_without_crashing(self) -> None:
         exposure = build_crypto_exposure(_hyperliquid_portfolio(), "BTC")

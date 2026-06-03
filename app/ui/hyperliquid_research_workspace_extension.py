@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from tkinter import messagebox, ttk
 from typing import Any, Type
 
+from app.analytics.crypto_sentiment import CryptoSentimentSnapshot, build_crypto_sentiment_snapshot
+from app.analytics.crypto_token_health import TokenHealthSnapshot, fetch_token_health_snapshot
 from app.analytics.crypto_market_data import CryptoCandleResult, fetch_crypto_candles, normalize_crypto_symbol, normalize_timeframe
 from app.analytics.crypto_research import (
     CryptoDecisionReadout,
@@ -14,6 +16,17 @@ from app.analytics.crypto_research import (
     build_crypto_decision,
     build_crypto_exposure,
     build_crypto_scenarios,
+)
+from app.analytics.hyperliquid_market_data import (
+    DEFAULT_MATRIX_TIMEFRAMES,
+    HYPERLIQUID_INTERVALS,
+    LiquiditySnapshot,
+    MarketDataSourceStatus,
+    MultiTimeframeCryptoSnapshot,
+    PerpStructureSnapshot,
+    fetch_liquidity_snapshot,
+    fetch_multi_timeframe_crypto_snapshot,
+    fetch_perp_structure_snapshot,
 )
 from app.analytics.research_scoring import direction_strength_label, risk_heat_label
 from app.analytics.stock_research import AdvancedIndicatorSnapshot, DataSourceStatus, calculate_advanced_indicators
@@ -53,7 +66,13 @@ class _CryptoResearchPayload:
     exposure: CryptoExposure
     scenarios: list
     statuses: list[DataSourceStatus]
+    source_statuses: list[MarketDataSourceStatus]
     decision: CryptoDecisionReadout
+    multi_timeframe: MultiTimeframeCryptoSnapshot
+    liquidity: LiquiditySnapshot
+    perp_structure: PerpStructureSnapshot
+    sentiment: CryptoSentimentSnapshot
+    token_health: TokenHealthSnapshot
 
 
 def install_hyperliquid_research_workspace_extension(app_cls: Type[tk.Tk]) -> None:
@@ -73,7 +92,7 @@ def _open_hyperliquid_research_workspace(self: tk.Tk) -> None:
             pass
 
     window = tk.Toplevel(self)
-    window.title("Hyperliquid Crypto Research + Risk Workspace")
+    window.title("Hyperliquid Market + Position Intelligence")
     window.geometry("1360x840")
     window.minsize(1080, 660)
     window.columnconfigure(0, weight=1)
@@ -87,7 +106,7 @@ def _open_hyperliquid_research_workspace(self: tk.Tk) -> None:
     header = ttk.Frame(window, padding=(12, 10), style="Panel.TFrame")
     header.grid(row=0, column=0, sticky="ew")
     header.columnconfigure(0, weight=1)
-    ttk.Label(header, text="Hyperliquid Crypto Research + Risk Workspace", font=("Segoe UI", 14, "bold")).grid(row=0, column=0, sticky="w")
+    ttk.Label(header, text="Hyperliquid Market + Position Intelligence", font=("Segoe UI", 14, "bold")).grid(row=0, column=0, sticky="w")
     ttk.Label(header, textvariable=self.hyperliquid_research_status_var, style="Subtle.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 0))
     ttk.Button(header, text="Refresh Account", command=lambda app=self: _refresh_hyperliquid_research(app)).grid(row=0, column=1, rowspan=2, sticky="e")
 
@@ -133,7 +152,7 @@ def _build_left_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     ttk.Label(selector, text="Coin", style="Subtle.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
     ttk.Entry(selector, textvariable=self.hyperliquid_research_coin_var).grid(row=0, column=1, sticky="ew")
     ttk.Label(selector, text="Timeframe", style="Subtle.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
-    ttk.Combobox(selector, textvariable=self.hyperliquid_research_timeframe_var, values=("15m", "1h", "4h", "1d"), state="readonly", width=8).grid(row=1, column=1, sticky="w", pady=(8, 0))
+    ttk.Combobox(selector, textvariable=self.hyperliquid_research_timeframe_var, values=HYPERLIQUID_INTERVALS, state="readonly", width=8).grid(row=1, column=1, sticky="w", pady=(8, 0))
     ttk.Button(selector, text="Run Analysis", command=lambda app=self: _run_crypto_research(app), style="Accent.TButton").grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
     balances = ttk.LabelFrame(parent, text="Spot + Perp Exposure", style="Card.TLabelframe")
@@ -210,11 +229,12 @@ def _build_right_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     notebook.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
     self.hyperliquid_research_tabs = notebook
     self.hyperliquid_crypto_overview_frame = _summary_tab(notebook, "Overview")
-    self.hyperliquid_crypto_technicals_frame = _technicals_tab(notebook)
+    self.hyperliquid_crypto_timeframe_frame = _timeframe_matrix_tab(notebook)
+    self.hyperliquid_crypto_liquidity_frame = _liquidity_tab(notebook)
+    self.hyperliquid_crypto_perp_frame = _perp_structure_tab(notebook)
     self.hyperliquid_crypto_exposure_frame = _exposure_tab(notebook)
     self.hyperliquid_crypto_scenarios_frame = _scenarios_tab(notebook)
-    self.hyperliquid_crypto_orders_frame = _orders_tab(notebook)
-    self.hyperliquid_crypto_news_frame = _summary_tab(notebook, "News / Sentiment")
+    self.hyperliquid_crypto_news_frame = _summary_tab(notebook, "Sentiment / News")
     self.hyperliquid_crypto_sources_frame = _sources_tab(notebook)
 
 
@@ -241,25 +261,92 @@ def _summary_tab(notebook: ttk.Notebook, title: str) -> ttk.Frame:
     return frame
 
 
-def _technicals_tab(notebook: ttk.Notebook) -> ttk.Frame:
-    frame = _scrollable_tab(notebook, "Technicals")
+def _timeframe_matrix_tab(notebook: ttk.Notebook) -> ttk.Frame:
+    frame = _scrollable_tab(notebook, "Timeframe Matrix")
     frame.columnconfigure(0, weight=1)
     frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.cards.grid(row=0, column=0, sticky="ew")
     tree_box = ttk.Frame(frame, style="Panel.TFrame")
     tree_box.grid(row=1, column=0, sticky="ew", pady=(8, 0))
     tree_box.columnconfigure(0, weight=1)
-    tree = ttk.Treeview(tree_box, columns=("metric", "value", "read"), show="headings", height=9)
-    for column, label, width in (("metric", "Metric", 150), ("value", "Value", 130), ("read", "Read", 360)):
+    columns = ("timeframe", "group", "trend", "rsi", "macd", "atr", "volume", "support", "resistance", "read")
+    tree = ttk.Treeview(tree_box, columns=columns, show="headings", height=12)
+    headings = (
+        ("timeframe", "TF", 70, tk.W),
+        ("group", "Group", 95, tk.W),
+        ("trend", "Trend", 90, tk.W),
+        ("rsi", "RSI", 80, tk.E),
+        ("macd", "MACD", 90, tk.W),
+        ("atr", "ATR%", 80, tk.E),
+        ("volume", "Volume", 100, tk.W),
+        ("support", "Support", 100, tk.E),
+        ("resistance", "Resistance", 110, tk.E),
+        ("read", "Read", 230, tk.W),
+    )
+    for column, label, width, anchor in headings:
         tree.heading(column, text=label)
-        tree.column(column, width=width, anchor=tk.W if column != "value" else tk.E, stretch=True)
+        tree.column(column, width=width, anchor=anchor, stretch=column == "read")
+    tree.tag_configure("good", foreground="#047857")
+    tree.tag_configure("bad", foreground="#b91c1c")
+    tree.tag_configure("mixed", foreground="#92400e")
     tree.grid(row=0, column=0, sticky="ew")
     tree_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
     tree_scroll.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=tree_scroll.set)
+    frame.matrix_tree = tree  # type: ignore[attr-defined]
     frame.detail_text = _detail_text(frame)  # type: ignore[attr-defined]
     frame.detail_text.grid(row=2, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
-    frame.indicator_tree = tree  # type: ignore[attr-defined]
+    return frame
+
+
+def _liquidity_tab(notebook: ttk.Notebook) -> ttk.Frame:
+    frame = _scrollable_tab(notebook, "Liquidity / Order Book")
+    frame.columnconfigure(0, weight=1)
+    frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.cards.grid(row=0, column=0, sticky="ew")
+    depth_box = ttk.Frame(frame, style="Panel.TFrame")
+    depth_box.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+    depth_box.columnconfigure(0, weight=1)
+    depth_tree = ttk.Treeview(depth_box, columns=("bucket", "bid", "ask", "imbalance"), show="headings", height=5)
+    for column, label, width, anchor in (("bucket", "Depth", 120, tk.W), ("bid", "Bid Depth", 140, tk.E), ("ask", "Ask Depth", 140, tk.E), ("imbalance", "Imbalance", 140, tk.E)):
+        depth_tree.heading(column, text=label)
+        depth_tree.column(column, width=width, anchor=anchor, stretch=True)
+    depth_tree.grid(row=0, column=0, sticky="ew")
+    frame.depth_tree = depth_tree  # type: ignore[attr-defined]
+
+    slippage_box = ttk.Frame(frame, style="Panel.TFrame")
+    slippage_box.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+    slippage_box.columnconfigure(0, weight=1)
+    slippage_tree = ttk.Treeview(slippage_box, columns=("size", "buy", "sell", "read"), show="headings", height=5)
+    for column, label, width, anchor in (("size", "Order Size", 120, tk.E), ("buy", "Buy Slip", 120, tk.E), ("sell", "Sell Slip", 120, tk.E), ("read", "Read", 260, tk.W)):
+        slippage_tree.heading(column, text=label)
+        slippage_tree.column(column, width=width, anchor=anchor, stretch=column == "read")
+    slippage_tree.grid(row=0, column=0, sticky="ew")
+    frame.slippage_tree = slippage_tree  # type: ignore[attr-defined]
+    frame.detail_text = _detail_text(frame)  # type: ignore[attr-defined]
+    frame.detail_text.grid(row=3, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
+    return frame
+
+
+def _perp_structure_tab(notebook: ttk.Notebook) -> ttk.Frame:
+    frame = _scrollable_tab(notebook, "Perp Structure")
+    frame.columnconfigure(0, weight=1)
+    frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.cards.grid(row=0, column=0, sticky="ew")
+    tree_box = ttk.Frame(frame, style="Panel.TFrame")
+    tree_box.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+    tree_box.columnconfigure(0, weight=1)
+    tree = ttk.Treeview(tree_box, columns=("metric", "value", "read"), show="headings", height=10)
+    for column, label, width, anchor in (("metric", "Metric", 190, tk.W), ("value", "Value", 170, tk.E), ("read", "Read", 420, tk.W)):
+        tree.heading(column, text=label)
+        tree.column(column, width=width, anchor=anchor, stretch=column == "read")
+    tree.grid(row=0, column=0, sticky="ew")
+    tree_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
+    tree_scroll.grid(row=0, column=1, sticky="ns")
+    tree.configure(yscrollcommand=tree_scroll.set)
+    frame.perp_tree = tree  # type: ignore[attr-defined]
+    frame.detail_text = _detail_text(frame)  # type: ignore[attr-defined]
+    frame.detail_text.grid(row=2, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
     return frame
 
 
@@ -306,28 +393,6 @@ def _scenarios_tab(notebook: ttk.Notebook) -> ttk.Frame:
     tree_scroll.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=tree_scroll.set)
     frame.scenario_tree = tree  # type: ignore[attr-defined]
-    return frame
-
-
-def _orders_tab(notebook: ttk.Notebook) -> ttk.Frame:
-    frame = _scrollable_tab(notebook, "Funding / Orders")
-    frame.columnconfigure(0, weight=1)
-    frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
-    frame.cards.grid(row=0, column=0, sticky="ew")
-    tree_box = ttk.Frame(frame, style="Panel.TFrame")
-    tree_box.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-    tree_box.columnconfigure(0, weight=1)
-    tree = ttk.Treeview(tree_box, columns=("oid", "type", "coin", "direction", "size", "price", "trigger"), show="headings", height=9)
-    for column, label, width in (("oid", "OID", 110), ("type", "Type", 100), ("coin", "Coin", 70), ("direction", "Direction", 110), ("size", "Size", 120), ("price", "Price", 90), ("trigger", "Trigger", 160)):
-        tree.heading(column, text=label)
-        tree.column(column, width=width, anchor=tk.W, stretch=column in {"oid", "trigger"})
-    tree.grid(row=0, column=0, sticky="ew")
-    tree_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
-    tree_scroll.grid(row=0, column=1, sticky="ns")
-    tree.configure(yscrollcommand=tree_scroll.set)
-    frame.orders_tree = tree  # type: ignore[attr-defined]
-    frame.detail_text = _detail_text(frame)  # type: ignore[attr-defined]
-    frame.detail_text.grid(row=2, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
     return frame
 
 
@@ -383,15 +448,64 @@ def _run_crypto_research(self: tk.Tk) -> None:
             candles = fetch_crypto_candles(coin, days=days, timeframe=timeframe)
             indicators = calculate_advanced_indicators(coin, candles.candles)
             exposure = build_crypto_exposure(portfolio, coin, orders)
+            enrichment_timeout = 4
+            matrix_timeframes = tuple(dict.fromkeys((*DEFAULT_MATRIX_TIMEFRAMES, timeframe)))
+            multi_timeframe = fetch_multi_timeframe_crypto_snapshot(coin, timeframes=matrix_timeframes, timeout_seconds=enrichment_timeout)
+            liquidity = fetch_liquidity_snapshot(
+                coin,
+                exposure_notional=abs(exposure.net_exposure) or exposure.perp_notional or exposure.spot_value,
+                order_sizes_usd=_liquidity_order_sizes(exposure),
+                timeout_seconds=enrichment_timeout,
+            )
+            perp_structure = fetch_perp_structure_snapshot(
+                coin,
+                perp_notional=exposure.perp_notional,
+                perp_direction=exposure.perp_direction,
+                timeout_seconds=enrichment_timeout,
+            )
+            sentiment = build_crypto_sentiment_snapshot(coin)
+            token_health = fetch_token_health_snapshot(coin, timeout_seconds=enrichment_timeout)
+            source_statuses = [
+                MarketDataSourceStatus("Crypto fallback chain", candles.source, candles.status, candles.fetched_at, candles.timeframe, len(candles.candles), candles.message),
+                *multi_timeframe.source_statuses,
+            ]
+            if liquidity.source_status is not None:
+                source_statuses.append(liquidity.source_status)
+            source_statuses.extend(perp_structure.source_statuses)
+            source_statuses.extend(token_health.source_statuses)
+            source_statuses.append(MarketDataSourceStatus(sentiment.provider, "sentiment", sentiment.status, sentiment.fetched_at, "", sentiment.headline_count, sentiment.message))
             statuses = [
                 DataSourceStatus(candles.source, candles.status, candles.fetched_at, candles.message),
                 DataSourceStatus("Hyperliquid synced account", "fresh/cache", _now(), "Exposure loaded from current cockpit portfolio."),
-                DataSourceStatus("Hyperliquid funding", "unknown", _now(), "Funding data unavailable from current sync."),
-                DataSourceStatus("Crypto sentiment", "unknown", _now(), "Optional sentiment provider not configured."),
+                *_data_statuses_from_market_statuses(source_statuses[:4]),
+                DataSourceStatus("Crypto sentiment", sentiment.status, sentiment.fetched_at, sentiment.message),
             ]
             scenarios = build_crypto_scenarios(exposure, indicators.latest_close)
-            decision = build_crypto_decision(indicators=indicators, exposure=exposure, candle_result=candles, funding_rate=None, sentiment_status="unknown")
-            payload = _CryptoResearchPayload(coin, candles, indicators, exposure, scenarios, statuses, decision)
+            decision = build_crypto_decision(
+                indicators=indicators,
+                exposure=exposure,
+                candle_result=candles,
+                sentiment_status=sentiment.status,
+                multi_timeframe=multi_timeframe,
+                liquidity=liquidity,
+                perp_structure=perp_structure,
+                sentiment=sentiment,
+            )
+            payload = _CryptoResearchPayload(
+                coin,
+                candles,
+                indicators,
+                exposure,
+                scenarios,
+                statuses,
+                source_statuses,
+                decision,
+                multi_timeframe,
+                liquidity,
+                perp_structure,
+                sentiment,
+                token_health,
+            )
         except Exception as exc:
             self.after(0, lambda error=exc: _show_crypto_error(self, coin, error))
             return
@@ -407,7 +521,22 @@ def _selected_timeframe(self: tk.Tk) -> str:
 
 
 def _days_for_timeframe(timeframe: str) -> int:
-    return {"15m": 10, "1h": 30, "4h": 120, "1d": 365}.get(normalize_timeframe(timeframe), 120)
+    return {
+        "1m": 4,
+        "3m": 7,
+        "5m": 10,
+        "15m": 21,
+        "30m": 45,
+        "1h": 90,
+        "2h": 120,
+        "4h": 180,
+        "8h": 365,
+        "12h": 365,
+        "1d": 730,
+        "3d": 1_200,
+        "1w": 2_000,
+        "1M": 3_000,
+    }.get(normalize_timeframe(timeframe), 180)
 
 
 def _render_crypto_payload(self: tk.Tk, payload: _CryptoResearchPayload) -> None:
@@ -419,7 +548,7 @@ def _render_crypto_payload(self: tk.Tk, payload: _CryptoResearchPayload) -> None
     self.hyperliquid_research_spot_read_var.set(f"Spot {_money(exposure.spot_value)}")
     self.hyperliquid_research_perp_read_var.set(f"Perp {exposure.perp_direction} {_money(exposure.perp_notional)}")
     self.hyperliquid_research_net_var.set(f"Net {_signed_money(exposure.net_exposure)}")
-    self.hyperliquid_research_funding_var.set("Funding unknown")
+    self.hyperliquid_research_funding_var.set(f"Perp carry {decision.funding_bias.label}")
     self.hyperliquid_research_status_var.set(f"{payload.coin} crypto research updated at {_now()}")
 
     metric_grid(
@@ -427,29 +556,29 @@ def _render_crypto_payload(self: tk.Tk, payload: _CryptoResearchPayload) -> None
         [
             decision.overall,
             decision.risk_level,
-            decision.trend,
-            decision.momentum,
-            decision.volatility,
+            decision.trend_alignment,
+            decision.liquidity,
             decision.funding_bias,
             decision.exposure,
             decision.sentiment,
             decision.action_bias,
         ],
-        columns=3,
-        prominent_indexes={0, 8},
+        columns=4,
+        prominent_indexes={0, 7},
     )
     labeled_value_grid(
         self.hyperliquid_research_top_strip,
-        {"Setup": decision.top_things[0], "Risk heat": decision.top_things[1], "Key trigger": decision.top_things[2]},
+        {"Setup": decision.top_things[0], "Risk / liquidity": decision.top_things[1], "Invalidation": (decision.invalidations[0] if decision.invalidations else decision.top_things[2])},
         columns=3,
     )
-    self.hyperliquid_research_bull_meter.set_score(decision.technical_score, mode="direction", label=f"Bullishness: {direction_strength_label(decision.technical_score)} ({decision.technical_score:.0f})")
+    self.hyperliquid_research_bull_meter.set_score(decision.composite_score, mode="direction", label=f"Market Score: {direction_strength_label(decision.composite_score)} ({decision.composite_score:.0f})")
     self.hyperliquid_research_risk_meter.set_score(decision.risk_score, mode="risk", label=f"Risk Heat: {risk_heat_label(decision.risk_score)} ({decision.risk_score:.0f}/100)")
     _render_overview(self, payload)
-    _render_technicals(self, payload)
+    _render_timeframe_matrix(self, payload)
+    _render_liquidity(self, payload)
+    _render_perp_structure(self, payload)
     _render_exposure(self, payload)
     _render_scenarios(self, payload)
-    _render_orders(self, payload)
     _render_news(self, payload)
     _render_sources(self, payload)
 
@@ -457,40 +586,146 @@ def _render_crypto_payload(self: tk.Tk, payload: _CryptoResearchPayload) -> None
 def _render_overview(self: tk.Tk, payload: _CryptoResearchPayload) -> None:
     frame = self.hyperliquid_crypto_overview_frame
     decision = payload.decision
-    metric_grid(frame.cards, [decision.overall, decision.exposure, decision.risk_level, decision.action_bias], columns=4, prominent_indexes={0, 3})  # type: ignore[attr-defined]
+    metric_grid(frame.cards, [decision.overall, decision.risk_level, decision.trend_alignment, decision.liquidity, decision.funding_bias, decision.exposure, decision.sentiment, decision.action_bias], columns=4, prominent_indexes={0, 7})  # type: ignore[attr-defined]
     clear_children(frame.checks)  # type: ignore[attr-defined]
     labeled_value_grid(frame.checks, decision.operator_view, columns=4)  # type: ignore[attr-defined]
     freshness_badges(frame.freshness, payload.statuses)  # type: ignore[attr-defined]
-    _set_text(frame.detail_text, "\n".join(["Plain-English summary:", *[f"- {line}" for line in decision.summary]]))  # type: ignore[attr-defined]
+    _set_text(
+        frame.detail_text,
+        "\n".join(
+            [
+                "Plain-English summary:",
+                *[f"- {line}" for line in decision.summary],
+                "",
+                "Why:",
+                *[f"- {line}" for line in decision.why_bullets],
+                "",
+                "Invalidations:",
+                *[f"- {line}" for line in decision.invalidations],
+                "",
+                "Composite score:",
+                *[f"- {name}: {value:.0f}" for name, value in decision.score_components.items()],
+            ]
+        ),
+    )  # type: ignore[attr-defined]
 
 
-def _render_technicals(self: tk.Tk, payload: _CryptoResearchPayload) -> None:
-    frame = self.hyperliquid_crypto_technicals_frame
-    indicators = payload.indicators
-    decision = payload.decision
-    metric_grid(frame.cards, [decision.trend, decision.momentum, decision.volatility, _rsi_badge(indicators)], columns=4)  # type: ignore[attr-defined]
-    tree = frame.indicator_tree  # type: ignore[attr-defined]
+def _render_timeframe_matrix(self: tk.Tk, payload: _CryptoResearchPayload) -> None:
+    frame = self.hyperliquid_crypto_timeframe_frame
+    alignment = payload.multi_timeframe.alignment
+    group_cards = [
+        _badge("Short-Term", alignment.group_reads.get("short-term", "Unavailable"), _group_status(alignment.group_reads.get("short-term", "")), "1m / 5m / 15m"),
+        _badge("Intraday", alignment.group_reads.get("intraday", "Unavailable"), _group_status(alignment.group_reads.get("intraday", "")), "30m / 1h / 4h"),
+        _badge("Swing", alignment.group_reads.get("swing", "Unavailable"), _group_status(alignment.group_reads.get("swing", "")), "8h / 12h / 1d"),
+        _badge("Macro", alignment.group_reads.get("macro", "Unavailable"), _group_status(alignment.group_reads.get("macro", "")), "3d / 1w / 1M"),
+    ]
+    metric_grid(frame.cards, [payload.decision.trend_alignment, *group_cards], columns=5, prominent_indexes={0})  # type: ignore[attr-defined]
+    tree = frame.matrix_tree  # type: ignore[attr-defined]
     _clear_tree(tree)
-    for metric, value, read in [
-        ("SMA 20", indicators.sma_20, "short trend"),
-        ("SMA 50", indicators.sma_50, "intermediate trend"),
-        ("SMA 100", indicators.sma_100, "intermediate/long trend"),
-        ("SMA 200", indicators.sma_200, "long trend"),
-        ("EMA 12", indicators.ema_12, "fast momentum"),
-        ("EMA 26", indicators.ema_26, "slow momentum"),
-        ("MACD", indicators.macd, "12/26 line"),
-        ("MACD signal", indicators.macd_signal, "signal line"),
-        ("RSI 14", indicators.rsi_14, "momentum oscillator"),
-        ("ATR 14", indicators.atr_14, "volatility"),
-        ("Support", indicators.support, "nearby downside level"),
-        ("Resistance", indicators.resistance, "nearby upside level"),
-        ("52w high", indicators.week_52_high, "range high"),
-        ("52w low", indicators.week_52_low, "range low"),
-    ]:
-        tree.insert("", tk.END, values=(metric, _number(value), read))
-    for label, value in indicators.fibonacci_levels.items():
-        tree.insert("", tk.END, values=(f"Fib {label}", _money(value), "recent swing retracement"))
-    _set_text(frame.detail_text, "\n".join(["Technical takeaways:", f"- Trend: {indicators.trend}.", f"- Momentum: {indicators.momentum}.", f"- Volatility: {indicators.volatility}.", *[f"- {note}" for note in indicators.notes]]))  # type: ignore[attr-defined]
+    for read in payload.multi_timeframe.timeframe_reads:
+        tag = "good" if read.score >= 35 else "bad" if read.score <= -35 else "mixed" if read.candle_count else ""
+        tree.insert(
+            "",
+            tk.END,
+            values=(
+                read.timeframe,
+                read.group,
+                read.trend,
+                _number(read.rsi),
+                read.macd,
+                "--" if read.atr_percent is None else f"{read.atr_percent:.2f}%",
+                read.volume_regime,
+                _money(read.support),
+                _money(read.resistance),
+                read.read,
+            ),
+            tags=(tag,) if tag else (),
+        )
+    _set_text(
+        frame.detail_text,
+        "\n".join(
+            [
+                "Timeframe matrix:",
+                f"- Alignment: {alignment.label}. {alignment.why}",
+                f"- Trend score: {alignment.trend_score:.0f}. Momentum agreement: {alignment.momentum_score:.0f}.",
+                f"- Volatility regime score: {alignment.volatility_score:.0f}. Volume expansion score: {alignment.volume_score:.0f}.",
+                f"- Breakout/breakdown confirmation: {alignment.breakout_score:.0f}.",
+            ]
+        ),
+    )  # type: ignore[attr-defined]
+
+
+def _render_liquidity(self: tk.Tk, payload: _CryptoResearchPayload) -> None:
+    frame = self.hyperliquid_crypto_liquidity_frame
+    liquidity = payload.liquidity
+    spread = _badge("Spread", _bps(liquidity.spread_bps), _spread_status(liquidity.spread_bps), "best bid/ask spread")
+    top_depth = _badge("Top Depth", f"{_money(liquidity.top_bid_depth_usd)} / {_money(liquidity.top_ask_depth_usd)}", "mixed", "top bid / top ask notional")
+    imbalance = _badge("Book Imbalance", _signed_percent(liquidity.imbalance), _imbalance_status(liquidity.imbalance), "positive means bid-heavy visible book")
+    metric_grid(frame.cards, [payload.decision.liquidity, spread, top_depth, imbalance], columns=4, prominent_indexes={0})  # type: ignore[attr-defined]
+    depth_tree = frame.depth_tree  # type: ignore[attr-defined]
+    _clear_tree(depth_tree)
+    for bucket in liquidity.depth_buckets:
+        depth_tree.insert("", tk.END, values=(f"Within {bucket.bps} bps", _money(bucket.bid_depth_usd), _money(bucket.ask_depth_usd), _signed_percent(_depth_imbalance(bucket.bid_depth_usd, bucket.ask_depth_usd))))
+    slippage_tree = frame.slippage_tree  # type: ignore[attr-defined]
+    _clear_tree(slippage_tree)
+    for estimate in liquidity.slippage:
+        slippage_tree.insert("", tk.END, values=(_money(estimate.order_size_usd), _bps(estimate.buy_slippage_bps), _bps(estimate.sell_slippage_bps), estimate.read))
+    _set_text(
+        frame.detail_text,
+        "\n".join(
+            [
+                "Liquidity health:",
+                f"- {liquidity.health}: {liquidity.reason}",
+                f"- Mid: {_money(liquidity.mid_price)}; best bid {_money(liquidity.best_bid)} / best ask {_money(liquidity.best_ask)}.",
+                *[f"- WARNING: {warning}" for warning in liquidity.warnings],
+            ]
+        ),
+    )  # type: ignore[attr-defined]
+
+
+def _render_perp_structure(self: tk.Tk, payload: _CryptoResearchPayload) -> None:
+    frame = self.hyperliquid_crypto_perp_frame
+    perp = payload.perp_structure
+    token = payload.token_health
+    cards = [
+        payload.decision.funding_bias,
+        _badge("Open Interest Cap", perp.oi_cap_status, "bad" if perp.oi_cap_status == "At/near cap" else "good" if perp.is_perp_enabled else "info", "Hyperliquid cap flag"),
+        _badge("Premium", _bps(perp.premium_bps), _premium_status(perp.premium_bps), "mark/oracle premium"),
+        _badge("Token Health", token.label, "good" if token.status == "fresh" else "info", token.message),
+    ]
+    metric_grid(frame.cards, cards, columns=4, prominent_indexes={0})  # type: ignore[attr-defined]
+    tree = frame.perp_tree  # type: ignore[attr-defined]
+    _clear_tree(tree)
+    rows = [
+        ("Perp enabled", "Yes" if perp.is_perp_enabled else "No", perp.status),
+        ("Mark price", _money(perp.mark_price), "Hyperliquid mark"),
+        ("Oracle price", _money(perp.oracle_price), "oracle reference"),
+        ("Mid price", _money(perp.mid_price), "mid/reference price"),
+        ("Premium", _bps(perp.premium_bps), "mark versus oracle"),
+        ("Current funding", _rate(perp.current_funding), "perp carry per funding interval"),
+        ("Predicted funding", _rate(perp.predicted_funding), "predicted carry when available"),
+        ("Funding trend", perp.historical_funding_trend, "last 7d funding history"),
+        ("Open interest", _number(perp.open_interest), "contracts / native size if provided"),
+        ("Day notional volume", _money(perp.day_notional_volume), "24h notional volume"),
+        ("Max leverage", "--" if perp.max_leverage is None else f"{perp.max_leverage:g}x", "metadata max leverage"),
+        ("Carry cost 8h", _signed_money(perp.carry_cost_8h), "estimated cost/credit for synced perp"),
+        ("Carry cost daily", _signed_money(perp.carry_cost_daily), "estimated 3x funding intervals"),
+    ]
+    for row in rows:
+        tree.insert("", tk.END, values=row)
+    for label, value in token.metrics.items():
+        tree.insert("", tk.END, values=(f"Token: {label}", value, "Hyperliquid spot metadata"))
+    _set_text(
+        frame.detail_text,
+        "\n".join(
+            [
+                "Perp structure:",
+                f"- {perp.carry_read}",
+                f"- OI cap: {perp.oi_cap_status}.",
+                f"- Token health: {token.message}",
+            ]
+        ),
+    )  # type: ignore[attr-defined]
 
 
 def _render_exposure(self: tk.Tk, payload: _CryptoResearchPayload) -> None:
@@ -539,53 +774,61 @@ def _render_scenarios(self: tk.Tk, payload: _CryptoResearchPayload) -> None:
         tree.insert("", tk.END, values=(row.scenario, _money(row.price), _money(row.spot_pnl), _money(row.perp_pnl), _money(row.net_pnl), f"{row.portfolio_impact:+.2%}", row.hedge_read), tags=(tag,) if tag else ())
 
 
-def _render_orders(self: tk.Tk, payload: _CryptoResearchPayload) -> None:
-    frame = self.hyperliquid_crypto_orders_frame
-    metric_grid(frame.cards, [payload.decision.funding_bias, _badge("Open Orders", str(payload.exposure.open_orders), "mixed" if payload.exposure.open_orders else "good", "active orders can change risk quickly.")], columns=4)  # type: ignore[attr-defined]
-    tree = frame.orders_tree  # type: ignore[attr-defined]
-    _clear_tree(tree)
-    matched = False
-    for order in _normalized_orders(self):
-        if normalize_crypto_symbol(order.coin) != payload.coin:
-            continue
-        matched = True
-        tree.insert("", tk.END, values=(order.oid, order.order_kind, normalize_crypto_symbol(order.coin), order.direction, order.size_label, order.price_label, order.trigger_condition))
-    if not matched:
-        tree.insert("", tk.END, values=("--", "No open orders", payload.coin, "--", "--", "--", "No open orders for selected coin."))
-    _set_text(frame.detail_text, "\n".join([
-        "Funding / Orders:",
-        "- Funding data is unavailable from the current sync." if payload.decision.funding_bias.label == "Unknown" else f"- Funding read: {payload.decision.funding_bias.label}.",
-        "- No open orders for this selected coin." if not matched else "- Selected-coin open orders are shown above.",
-        "- Use Open Orders in the trading tab to refresh active order details.",
-    ]))  # type: ignore[attr-defined]
-
-
 def _render_news(self: tk.Tk, payload: _CryptoResearchPayload) -> None:
     frame = self.hyperliquid_crypto_news_frame
-    sentiment = _badge("Sentiment", "Not Configured", "info", "optional provider not configured")
-    metric_grid(frame.cards, [sentiment], columns=4)  # type: ignore[attr-defined]
+    sentiment = payload.sentiment
+    metric_grid(
+        frame.cards,
+        [
+            payload.decision.sentiment,
+            _badge("Headlines", str(sentiment.headline_count), "good" if sentiment.headline_count else "info", sentiment.provider),
+            _badge("Provider", sentiment.provider_status.title(), _source_status_style(sentiment.provider_status), sentiment.message),
+            _badge("Freshness", sentiment.source_freshness.title(), _source_status_style(sentiment.source_freshness), sentiment.fetched_at),
+        ],
+        columns=4,
+    )  # type: ignore[attr-defined]
     clear_children(frame.checks)  # type: ignore[attr-defined]
-    Checklist(frame.checks, "Sentiment Notes", ["INFO: optional crypto sentiment/news provider is not configured.", "SOURCE: this is not an error; candles and synced exposure still drive the read.", "WATCH: add CryptoPanic, CoinGecko, or a project-news hook later if desired."]).grid(row=0, column=0, sticky="ew")  # type: ignore[attr-defined]
-    _set_text(frame.detail_text, "Sentiment/news is intentionally marked Not Configured. The workspace remains usable with price candles, spot/perp exposure, open orders, and what-if scenarios.")  # type: ignore[attr-defined]
+    Checklist(frame.checks, "Narrative Notes", sentiment.narratives).grid(row=0, column=0, sticky="ew")  # type: ignore[attr-defined]
+    _set_text(
+        frame.detail_text,
+        "\n".join(
+            [
+                "Sentiment / news:",
+                f"- Label: {sentiment.label}. Score {sentiment.score:.0f}.",
+                f"- Provider: {sentiment.provider}; status {sentiment.provider_status}.",
+                f"- {sentiment.message}",
+                "- Optional paid providers are not required; absent providers are reported as Not Configured.",
+            ]
+        ),
+    )  # type: ignore[attr-defined]
 
 
 def _render_sources(self: tk.Tk, payload: _CryptoResearchPayload) -> None:
     frame = self.hyperliquid_crypto_sources_frame
     candle_status = "good" if payload.candles.status.startswith("fresh") else "mixed" if payload.candles.status == "stale" else "bad"
-    metric_grid(frame.cards, [_badge("Candles", payload.candles.status.title(), candle_status, f"{payload.candles.source}; {payload.candles.timeframe}"), _badge("Exposure", "Synced", "good", "current cockpit portfolio snapshot"), _badge("Sentiment", "Not Configured", "info", "optional provider not configured")], columns=3)  # type: ignore[attr-defined]
+    metric_grid(
+        frame.cards,
+        [
+            _badge("Candles", payload.candles.status.title(), candle_status, f"{payload.candles.source}; {payload.candles.timeframe}"),
+            _badge("Timeframes", payload.multi_timeframe.alignment.label, payload.multi_timeframe.alignment.status, payload.multi_timeframe.alignment.why),
+            payload.decision.liquidity,
+            payload.decision.sentiment,
+        ],
+        columns=4,
+    )  # type: ignore[attr-defined]
     tree = frame.provider_tree  # type: ignore[attr-defined]
     _clear_tree(tree)
-    for row in build_crypto_provider_status_rows(payload.candles):
+    for row in build_crypto_provider_status_rows(payload.candles, payload.source_statuses):
         tree.insert("", tk.END, values=row)
     freshness_badges(frame.freshness, payload.statuses)  # type: ignore[attr-defined]
     frame.refresh_button.configure(command=lambda app=self: _run_crypto_research(app))  # type: ignore[attr-defined]
     _set_text(frame.detail_text, "\n".join([
         "Market data sources:",
         "- Active candle provider is listed first in the table above.",
-        "- Fallback order: Hyperliquid hook, Coinbase, Kraken, KuCoin hook, Binance hook, CoinGecko, optional CoinMarketCap.",
-        "- Missing optional providers are shown as planned/future hooks instead of errors.",
+        "- Fallback order: Hyperliquid candleSnapshot, Coinbase, Kraken, CoinGecko.",
+        "- Optional sentiment/token providers degrade to Not Configured or Unavailable instead of Unknown.",
         "",
-        *[f"- {status.source}: {status.status} at {status.fetched_at}. {status.message}" for status in payload.statuses],
+        *[f"- {status.provider} {status.endpoint}: {status.status} at {status.fetched_at}. {status.message}" for status in payload.source_statuses],
     ]))  # type: ignore[attr-defined]
 
 
@@ -599,22 +842,36 @@ def _refresh_hyperliquid_research(self: tk.Tk) -> None:
     _refresh_left_tables(self)
 
 
-def build_crypto_provider_status_rows(candles: CryptoCandleResult) -> list[tuple[str, str, str, str, str, str]]:
+def build_crypto_provider_status_rows(candles: CryptoCandleResult, extra_statuses: list[MarketDataSourceStatus] | None = None) -> list[tuple[str, str, str, str, str, str]]:
     active = candles.source
     providers = [
-        ("Hyperliquid candles", "Planned hook"),
+        ("Hyperliquid candleSnapshot", "Primary"),
         ("Coinbase public candles", "Fallback"),
         ("Kraken public OHLC", "Fallback"),
-        ("KuCoin public candles", "Planned hook"),
-        ("Binance public klines", "Planned hook"),
         ("CoinGecko market chart", "Fallback"),
-        ("CoinMarketCap", "Optional API key"),
+        ("Hyperliquid l2Book", "Liquidity"),
+        ("Hyperliquid metaAndAssetCtxs", "Perp structure"),
+        ("Local keyword scanner", "Optional sentiment"),
     ]
     rows: list[tuple[str, str, str, str, str, str]] = [
         (active, candles.status.title(), candles.timeframe, candles.fetched_at, str(len(candles.candles)), candles.message)
     ]
-    for provider, note in providers:
+    for status in extra_statuses or []:
+        provider = f"{status.provider} {status.endpoint}".strip()
         if provider == active:
+            continue
+        rows.append(
+            (
+                provider,
+                status.status.title(),
+                status.timeframe or "--",
+                status.fetched_at,
+                "--" if status.candle_count is None else str(status.candle_count),
+                status.message,
+            )
+        )
+    for provider, note in providers:
+        if provider == active or any(row[0] == provider for row in rows):
             continue
         rows.append((provider, note, candles.timeframe, "--", "--", "Not used for this run."))
     return rows
@@ -784,6 +1041,104 @@ def _rsi_badge(indicators: AdvancedIndicatorSnapshot) -> Any:
     if indicators.rsi_14 <= 30:
         return _badge("RSI", "Oversold", "mixed", f"RSI {indicators.rsi_14:.1f}.")
     return _badge("RSI", "Normal", "good", f"RSI {indicators.rsi_14:.1f}.")
+
+
+def _liquidity_order_sizes(exposure: CryptoExposure) -> tuple[float, ...]:
+    base = [1_000.0, 5_000.0, 25_000.0]
+    exposure_size = abs(exposure.net_exposure) or exposure.perp_notional or exposure.spot_value
+    if exposure_size > 0:
+        base.append(max(1_000.0, exposure_size))
+    return tuple(dict.fromkeys(base))
+
+
+def _data_statuses_from_market_statuses(statuses: list[MarketDataSourceStatus]) -> list[DataSourceStatus]:
+    return [DataSourceStatus(f"{status.provider} {status.endpoint}".strip(), status.status, status.fetched_at, status.message) for status in statuses]
+
+
+def _group_status(label: str) -> str:
+    text = label.lower()
+    if "bullish" in text:
+        return "good"
+    if "bearish" in text:
+        return "bad"
+    if "unavailable" in text:
+        return "info"
+    return "mixed"
+
+
+def _source_status_style(status: str) -> str:
+    text = status.lower()
+    if text in {"fresh", "fresh/cache", "configured"}:
+        return "good"
+    if text in {"stale", "cached", "mixed"}:
+        return "mixed"
+    if text in {"error"}:
+        return "bad"
+    return "info"
+
+
+def _spread_status(spread_bps: float | None) -> str:
+    if spread_bps is None:
+        return "info"
+    if spread_bps <= 8:
+        return "good"
+    if spread_bps <= 35:
+        return "mixed"
+    return "bad"
+
+
+def _premium_status(premium_bps: float | None) -> str:
+    if premium_bps is None:
+        return "info"
+    if abs(premium_bps) <= 5:
+        return "good"
+    if abs(premium_bps) <= 25:
+        return "mixed"
+    return "bad"
+
+
+def _imbalance_status(imbalance: float | None) -> str:
+    if imbalance is None:
+        return "info"
+    if abs(imbalance) <= 0.20:
+        return "good"
+    if abs(imbalance) <= 0.45:
+        return "mixed"
+    return "bad"
+
+
+def _depth_imbalance(bid_depth: float, ask_depth: float) -> float | None:
+    total = bid_depth + ask_depth
+    if total <= 0:
+        return None
+    return (bid_depth - ask_depth) / total
+
+
+def _bps(value: Any) -> str:
+    try:
+        if value is None:
+            return "--"
+        return f"{float(value):,.1f} bps"
+    except Exception:
+        return "--"
+
+
+def _rate(value: Any) -> str:
+    try:
+        if value is None:
+            return "--"
+        return f"{float(value):+.4%}"
+    except Exception:
+        return "--"
+
+
+def _signed_percent(value: Any) -> str:
+    try:
+        if value is None:
+            return "--"
+        return f"{float(value):+.1%}"
+    except Exception:
+        return "--"
 
 
 def _money(value: Any) -> str:
