@@ -21,6 +21,10 @@ venv/
 /app/data/sec_cache/*
 !/app/data/sec_cache/.gitkeep
 
+app/data/macro_cache.json
+app/data/schwab_price_history_cache.json
+app/data/*cache*.json
+
 # OS
 .DS_Store
 Thumbs.db
