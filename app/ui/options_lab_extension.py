@@ -326,6 +326,164 @@ def _workspace_holdings_table(parent: ttk.Frame, include_custom_pnl: bool = Fals
     return table
 
 
+def _workspace_schwab_orders_table(parent: ttk.Frame, *, height: int = 7) -> ttk.Treeview:
+    columns = (
+        "order_id",
+        "entered_time",
+        "status",
+        "symbol",
+        "asset_type",
+        "instruction",
+        "quantity",
+        "filled_quantity",
+        "order_type",
+        "limit_price",
+        "stop_price",
+        "duration",
+        "account",
+        "strategy",
+    )
+    table = ttk.Treeview(parent, columns=columns, show="headings", height=height, selectmode="browse")
+    headings = {
+        "order_id": ("Order ID", 92, tk.W),
+        "entered_time": ("Entered", 130, tk.W),
+        "status": ("Status", 112, tk.W),
+        "symbol": ("Symbol", 76, tk.W),
+        "asset_type": ("Asset", 72, tk.W),
+        "instruction": ("Side", 108, tk.W),
+        "quantity": ("Qty", 72, tk.E),
+        "filled_quantity": ("Filled", 72, tk.E),
+        "order_type": ("Type", 82, tk.W),
+        "limit_price": ("Limit", 82, tk.E),
+        "stop_price": ("Stop", 82, tk.E),
+        "duration": ("TIF", 96, tk.W),
+        "account": ("Acct", 90, tk.W),
+        "strategy": ("Strategy", 108, tk.W),
+    }
+    for column, (label, width, anchor) in headings.items():
+        table.heading(column, text=label)
+        table.column(column, width=width, anchor=anchor, stretch=column in {"entered_time", "status", "strategy"})
+    table.pack(fill=tk.BOTH, expand=True)
+    table.tag_configure("active", foreground="#047857")
+    table.tag_configure("pending", foreground="#7c3aed")
+    table.tag_configure("terminal", foreground="#64748b")
+    table.tag_configure("blocked", foreground="#b91c1c")
+    return table
+
+
+def _populate_workspace_schwab_orders_table(table: ttk.Treeview, rows: list[Any]) -> None:
+    from app.brokers.schwab import order_management
+
+    table._schwab_order_rows_by_iid = {}  # type: ignore[attr-defined]
+    for row_id in table.get_children():
+        table.delete(row_id)
+    for index, row in enumerate(rows):
+        iid = f"schwab_order_{index}"
+        status = str(getattr(row, "status", "")).upper()
+        tag = "pending" if status.startswith("PENDING") else "active" if order_management.is_open_order_status(status) else "terminal" if order_management.is_terminal_order_status(status) else "blocked"
+        values = (
+            row.order_id,
+            row.entered_time,
+            row.status,
+            row.symbol,
+            row.asset_type,
+            row.instruction,
+            _format_table_number(row.quantity),
+            _format_table_number(row.filled_quantity),
+            row.order_type,
+            _format_table_price(row.price),
+            _format_table_price(row.stop_price),
+            row.duration,
+            row.masked_account_hash,
+            row.complex_order_strategy_type,
+        )
+        table.insert("", tk.END, iid=iid, values=values, tags=(tag,))
+        table._schwab_order_rows_by_iid[iid] = row  # type: ignore[attr-defined]
+
+
+def _format_table_number(value: object) -> str:
+    if isinstance(value, (int, float)):
+        return f"{value:g}"
+    return "" if value in (None, "") else str(value)
+
+
+def _format_table_price(value: object) -> str:
+    if isinstance(value, (int, float)):
+        return f"{value:.4f}".rstrip("0").rstrip(".")
+    return "" if value in (None, "") else str(value)
+
+
+def _bind_schwab_open_orders_table(self: tk.Tk, table: ttk.Treeview) -> None:
+    table.bind("<<TreeviewSelect>>", lambda _event, app=self: _on_schwab_open_orders_selection(app), add="+")
+    table.bind("<Double-1>", lambda _event, app=self: _open_selected_schwab_order_dialog(app), add="+")
+
+
+def _on_schwab_open_orders_selection(self: tk.Tk) -> None:
+    row = _selected_schwab_order_row(self)
+    state = tk.NORMAL if row is not None else tk.DISABLED
+    for attr in ("schwab_open_orders_edit_button", "schwab_open_orders_cancel_button"):
+        button = getattr(self, attr, None)
+        if button is not None:
+            try:
+                button.configure(state=state)
+            except tk.TclError:
+                pass
+    if row is not None:
+        if hasattr(self, "cancel_order_id_var"):
+            self.cancel_order_id_var.set(row.order_id)
+        output = getattr(self, "schwab_trading_preview_text", None)
+        if output is not None:
+            _set_workspace_text(
+                output,
+                "SCHWAB OPEN ORDER SELECTED\n"
+                "==========================\n\n"
+                f"Order ID: {row.order_id}\n"
+                f"Status: {row.status}\n"
+                f"Symbol: {row.symbol}\n"
+                f"Side / instruction: {row.instruction}\n"
+                f"Quantity: {_format_table_number(row.quantity)}\n"
+                f"Filled quantity: {_format_table_number(row.filled_quantity)}\n"
+                f"Remaining quantity: {_format_table_number(row.remaining_quantity)}\n"
+                f"Order type: {row.order_type}\n"
+                f"Limit price: {_format_table_price(row.price)}\n"
+                f"Stop price: {_format_table_price(row.stop_price)}\n\n"
+                "Double-click opens the guarded edit/replace dialog. Selection alone sends no API request.",
+            )
+
+
+def _selected_schwab_order_row(self: tk.Tk):
+    table = getattr(self, "schwab_open_orders_table", None)
+    if table is None:
+        return None
+    try:
+        selected = table.selection()
+    except tk.TclError:
+        return None
+    if not selected:
+        return None
+    rows_by_iid = getattr(table, "_schwab_order_rows_by_iid", {})
+    return rows_by_iid.get(selected[0]) if isinstance(rows_by_iid, dict) else None
+
+
+def _open_selected_schwab_order_dialog(self: tk.Tk) -> None:
+    row = _selected_schwab_order_row(self)
+    if row is None:
+        return
+    opener = getattr(self, "show_schwab_working_order_dialog", None)
+    if callable(opener):
+        opener(row)
+
+
+def _cancel_selected_schwab_open_order(self: tk.Tk) -> None:
+    row = _selected_schwab_order_row(self)
+    if row is None:
+        messagebox.showinfo("Select an open order", "Select an Open Orders row before canceling.")
+        return
+    opener = getattr(self, "show_schwab_cancel_order_dialog", None)
+    if callable(opener):
+        opener(row)
+
+
 def _workspace_open_orders_table(parent: ttk.Frame) -> ttk.Treeview:
     columns = ("time", "type", "coin", "direction", "size", "price", "edit", "ro", "trigger", "tpsl", "oid")
     table = ttk.Treeview(parent, columns=columns, show="headings", height=7, selectmode="browse")
@@ -1353,10 +1511,54 @@ def _build_schwab_trading_tab(
     output_stack.add(holdings_shell, minsize=150, stretch="never")
     output_stack.add(analysis_shell, minsize=360, stretch="always")
 
-    schwab_holdings_frame = ttk.LabelFrame(holdings_shell, text="Schwab Holdings", style="Card.TLabelframe")
-    schwab_holdings_frame.pack(fill=tk.BOTH, expand=True)
-    self.schwab_workspace_holdings_table = _workspace_holdings_table(schwab_holdings_frame)
+    schwab_orders_notebook = ttk.Notebook(holdings_shell)
+    schwab_orders_notebook.pack(fill=tk.BOTH, expand=True)
+    self.schwab_workspace_orders_notebook = schwab_orders_notebook
+
+    holdings_tab = ttk.Frame(schwab_orders_notebook, style="Panel.TFrame", padding=8)
+    open_orders_tab = ttk.Frame(schwab_orders_notebook, style="Panel.TFrame", padding=8)
+    recent_orders_tab = ttk.Frame(schwab_orders_notebook, style="Panel.TFrame", padding=8)
+    holdings_tab.columnconfigure(0, weight=1)
+    holdings_tab.rowconfigure(0, weight=1)
+    open_orders_tab.columnconfigure(0, weight=1)
+    open_orders_tab.rowconfigure(1, weight=1)
+    recent_orders_tab.columnconfigure(0, weight=1)
+    recent_orders_tab.rowconfigure(1, weight=1)
+    schwab_orders_notebook.add(holdings_tab, text="Holdings")
+    schwab_orders_notebook.add(open_orders_tab, text="Open Orders")
+    schwab_orders_notebook.add(recent_orders_tab, text="Recent Orders")
+    self.schwab_holdings_tab = holdings_tab
+    self.schwab_open_orders_tab = open_orders_tab
+    self.schwab_recent_orders_tab = recent_orders_tab
+
+    self.schwab_workspace_holdings_table = _workspace_holdings_table(holdings_tab)
     _bind_workspace_holdings_click(self, self.schwab_workspace_holdings_table, "Schwab")
+
+    open_toolbar = ttk.Frame(open_orders_tab, style="Panel.TFrame")
+    open_toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    open_toolbar.columnconfigure(0, weight=1)
+    ttk.Label(open_toolbar, text="Working Schwab orders only.", style="Subtle.TLabel").grid(row=0, column=0, sticky="w")
+    ttk.Button(open_toolbar, text="Refresh Open Orders", command=self.load_schwab_open_orders_only).grid(row=0, column=1, sticky="e", padx=(8, 0))
+    self.schwab_open_orders_edit_button = ttk.Button(open_toolbar, text="Edit / Replace", command=lambda app=self: _open_selected_schwab_order_dialog(app), state=tk.DISABLED)
+    self.schwab_open_orders_edit_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
+    self.schwab_open_orders_cancel_button = ttk.Button(open_toolbar, text="Cancel", command=lambda app=self: _cancel_selected_schwab_open_order(app), style="Danger.TButton", state=tk.DISABLED)
+    self.schwab_open_orders_cancel_button.grid(row=0, column=3, sticky="e", padx=(8, 0))
+    open_table_frame = ttk.Frame(open_orders_tab, style="Panel.TFrame")
+    open_table_frame.grid(row=1, column=0, sticky="nsew")
+    self.schwab_open_orders_table = _workspace_schwab_orders_table(open_table_frame)
+    _bind_schwab_open_orders_table(self, self.schwab_open_orders_table)
+
+    recent_toolbar = ttk.Frame(recent_orders_tab, style="Panel.TFrame")
+    recent_toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    recent_toolbar.columnconfigure(0, weight=1)
+    if not hasattr(self, "schwab_recent_order_days_var"):
+        self.schwab_recent_order_days_var = tk.StringVar(value="7")
+    ttk.Label(recent_toolbar, text="Days back", style="Subtle.TLabel").grid(row=0, column=0, sticky="e")
+    ttk.Entry(recent_toolbar, textvariable=self.schwab_recent_order_days_var, width=6).grid(row=0, column=1, sticky="w", padx=(6, 10))
+    ttk.Button(recent_toolbar, text="Refresh Recent Orders", command=self.load_schwab_open_orders).grid(row=0, column=2, sticky="e")
+    recent_table_frame = ttk.Frame(recent_orders_tab, style="Panel.TFrame")
+    recent_table_frame.grid(row=1, column=0, sticky="nsew")
+    self.schwab_recent_orders_table = _workspace_schwab_orders_table(recent_table_frame)
 
     schwab_output_frame = ttk.LabelFrame(analysis_shell, text="Schwab Analysis + Order Output", style="Card.TLabelframe")
     schwab_output_frame.pack(fill=tk.BOTH, expand=True)
