@@ -867,7 +867,7 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
         price = trigger_price
 
     dialog = tk.Toplevel(self)
-    dialog.title("Edit Hyperliquid Order Price")
+    dialog.title("Edit Hyperliquid Order")
     dialog.transient(self)
     dialog.resizable(False, False)
 
@@ -876,6 +876,7 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
     shell.columnconfigure(0, weight=1)
 
     market_var = tk.StringVar(value=market)
+    size_var = tk.StringVar(value=size if size_mode != "Close Position" else "Close Position")
     price_var = tk.StringVar(value=price)
     context_var = tk.StringVar(value=context)
     mid_status_var = tk.StringVar(value="")
@@ -890,9 +891,14 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
     editor = ttk.Frame(shell, style="Panel.TFrame")
     editor.grid(row=2, column=0, sticky="ew")
     editor.columnconfigure(1, weight=1)
-    ttk.Label(editor, text=price_field_label, style="Subtle.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 10))
+    ttk.Label(editor, text="Size", style="Subtle.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 10), pady=(0, 8))
+    size_entry = ttk.Entry(editor, textvariable=size_var)
+    size_entry.grid(row=0, column=1, sticky="ew", pady=(0, 8))
+    if size_mode == "Close Position":
+        size_entry.configure(state="disabled")
+    ttk.Label(editor, text=price_field_label, style="Subtle.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 10))
     price_controls = ttk.Frame(editor, style="Panel.TFrame")
-    price_controls.grid(row=0, column=1, sticky="ew")
+    price_controls.grid(row=1, column=1, sticky="ew")
     price_controls.columnconfigure(0, weight=1)
     ttk.Entry(price_controls, textvariable=price_var).grid(row=0, column=0, sticky="ew", padx=(0, 8))
     ttk.Button(
@@ -905,7 +911,7 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
 
     note = ttk.Label(
         shell,
-        text="Only the selected order price is changed. Size, side, TIF, reduce-only, and valid trigger metadata are carried forward from the selected order.",
+        text="Only the selected order size and price are changed. Side, TIF, reduce-only, and valid trigger metadata are carried forward from the selected order.",
         style="Subtle.TLabel",
         wraplength=400,
     )
@@ -916,12 +922,13 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
     buttons.columnconfigure((0, 1), weight=1)
 
     def submit_edit() -> None:
+        new_size = size_var.get()
         new_price = price_var.get()
         self.edit_hyperliquid_order_guarded(
             raw_order_id,
             market,
             side,
-            size,
+            new_size,
             new_price,
             tif if tif in HYPERLIQUID_TIFS else "Gtc",
             context,
@@ -935,7 +942,7 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
         )
 
     ttk.Button(buttons, text="Cancel", command=dialog.destroy).grid(row=0, column=0, sticky="ew", padx=(0, 8))
-    ttk.Button(buttons, text="Confirm Price Edit", command=submit_edit, style="CompactDanger.TButton").grid(row=0, column=1, sticky="ew")
+    ttk.Button(buttons, text="Confirm Edit", command=submit_edit, style="CompactDanger.TButton").grid(row=0, column=1, sticky="ew")
     dialog.bind("<Return>", lambda _event: submit_edit())
 
 

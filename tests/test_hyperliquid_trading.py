@@ -17,7 +17,7 @@ from app.core.portfolio import CashPosition, Portfolio, Position
 from app.ui.cash_positions_extension import _portfolio_display_pnl_summary, _position_pnl_value
 from app.ui.options_lab_extension import _populate_workspace_open_orders_table, _workspace_holding_rows
 from app.ui.hyperliquid_spot_symbol_display_extension import _display_order_coin_with_spot_symbol, _spot_symbol_for_market_id
-from app.ui.hyperliquid_trading_extension import _market_close_limit_price, _normalize_edit_market, _parse_hyperliquid_spot_ticket, _price_edit_trigger_fields, _reverse_order_size_for_same_opposite_position, _risk_reward, _selected_hyperliquid_order, _set_hyperliquid_perp_mid_price, normalize_hyperliquid_open_order
+from app.ui.hyperliquid_trading_extension import _edit_hyperliquid_order_guarded, _market_close_limit_price, _normalize_edit_market, _parse_hyperliquid_spot_ticket, _price_edit_trigger_fields, _reverse_order_size_for_same_opposite_position, _risk_reward, _selected_hyperliquid_order, _set_hyperliquid_perp_mid_price, normalize_hyperliquid_open_order
 from app.ui.hyperliquid_trading_extension import _current_hyperliquid_perp_position, _perp_position_pnl, _portfolio_coin_exposures
 from app.ui.hyperliquid_existing_perp_what_if_extension import (
     GoldilocksCashBudget,
@@ -457,6 +457,55 @@ class HyperliquidTradingTests(unittest.TestCase):
             },
         ):
             HyperliquidTradingConfig().validate_edit_for_live(ticket)
+
+    def test_guarded_spot_edit_uses_new_size_and_price(self) -> None:
+        app = type(
+            "EditApp",
+            (),
+            {
+                "cancel_order_id_var": _Var("451"),
+                "symbol_var": _Var(""),
+                "hyperliquid_coin_var": _Var(""),
+                "side_var": _Var(""),
+                "quantity_var": _Var(""),
+                "limit_price_var": _Var(""),
+                "hyperliquid_tif_var": _Var("Gtc"),
+                "hyperliquid_status_var": _Var(""),
+                "_set_preview_text": lambda self, value: setattr(self, "preview_text", value),
+            },
+        )()
+
+        with patch.dict(
+            "os.environ",
+            {
+                "HYPE_WALLET_ADDRESS": "0x0000000000000000000000000000000000000000",
+                "HYPE_API_ADDRESS": "0x0000000000000000000000000000000000000001",
+                "HYPE_API_SECRET": "not-a-real-secret",
+                "HYPERLIQUID_ENABLE_LIVE_ORDERS": "true",
+                "HYPERLIQUID_MAX_LIVE_ORDER_DOLLARS": "500",
+            },
+        ), patch("app.ui.hyperliquid_trading_extension.messagebox.askyesno", return_value=True), patch(
+            "app.ui.hyperliquid_trading_extension.HyperliquidExecutionAdapter.modify_order_edit",
+            return_value={"status": "ok"},
+        ) as modify:
+            _edit_hyperliquid_order_guarded(
+                app,  # type: ignore[arg-type]
+                "451",
+                "@182",
+                "buy",
+                "0.03",
+                "4441.2",
+                "Gtc",
+                "Spot",
+            )
+
+        modify.assert_called_once()
+        order_id, ticket = modify.call_args.args
+        self.assertEqual(order_id, 451)
+        self.assertEqual(ticket.coin, "@182")
+        self.assertEqual(ticket.size, 0.03)
+        self.assertEqual(ticket.limit_price, 4441.2)
+        self.assertFalse(ticket.reduce_only)
 
     def test_trigger_condition_falls_back_to_above_or_below(self) -> None:
         above = normalize_hyperliquid_open_order(
