@@ -1,4 +1,5 @@
 from __future__ import annotations
+import traceback
 
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -320,10 +321,61 @@ def _add_action_button(parent: ttk.Frame, *, row: int, column: int, text: str, c
 def _run_schwab_workspace_action(self: tk.Tk, *command_names: str) -> None:
     output = getattr(self, "schwab_trading_preview_text", None)
     command = _first_available_command(self, *command_names)
-    if output is None:
+    command_label = ", ".join(command_names) or "(none)"
+    is_live_submit = "submit_live_schwab_order_guarded" in command_names
+
+    def emit(text: str) -> None:
+        if output is not None:
+            _set_schwab_mode_text(self, text)
+            return
+        setter = getattr(self, "_set_preview_text", None)
+        if callable(setter):
+            setter(text)
+
+    try:
+        _ensure_execution_workspace_vars(self)
+
+        if hasattr(self, "trade_venue_var"):
+            self.trade_venue_var.set("Schwab")
+
+        if hasattr(self, "on_trading_venue_changed"):
+            try:
+                self.on_trading_venue_changed()
+            except Exception:
+                # Venue repaint must not kill the actual Schwab action.
+                pass
+
+        if output is not None:
+            self.preview_text = output
+
+        if is_live_submit:
+            emit(
+                "SCHWAB LIVE SUBMIT CLICK RECEIVED\n"
+                "================================\n\n"
+                "The Schwab Trading tab button click reached Python.\n"
+                "Command: submit_live_schwab_order_guarded\n\n"
+                "Next step: running the guarded Schwab submit handler now.\n"
+                "If this text stays here, the submit handler is hanging or blocking before it writes its own result."
+            )
+            try:
+                self.update_idletasks()
+            except Exception:
+                pass
+
         command()
-        return
-    _run_workspace_action(self, venue="Schwab", preview_widget=output, command=command)
+
+    except Exception as exc:
+        details = traceback.format_exc()
+        message = (
+            "SCHWAB ACTION ERROR\n"
+            "===================\n\n"
+            f"Command(s): {command_label}\n"
+            f"Exception: {type(exc).__name__}: {exc}\n\n"
+            "Traceback:\n"
+            f"{details}"
+        )
+        emit(message)
+        messagebox.showerror("Schwab action failed", f"{type(exc).__name__}: {exc}")
 
 
 def _run_schwab_integrated_options_what_if(self: tk.Tk) -> None:
