@@ -7,7 +7,7 @@ from typing import Type
 from app.ui.schwab_option_chain_extension import _OPTION_CHAIN_COLUMNS, _use_selected_schwab_option
 
 
-def install_schwab_option_chain_visible_fix(app_cls: Type[tk.Tk]) -> None:
+def install_schwab_option_chain_visibility(app_cls: Type[tk.Tk]) -> None:
     """Place the Schwab option-chain table in the visible right-hand output pane."""
 
     original_build_layout = app_cls._build_layout

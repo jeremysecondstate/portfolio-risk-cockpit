@@ -8,7 +8,7 @@ from typing import Any, Type
 import requests
 
 from app.brokers.schwab.session import MARKETDATA_BASE_URL
-from app.ui.account_sources_fix import _find_labelframe, _set_schwab_mode_text
+from app.ui.schwab_trading_tab import _find_labelframe, _set_schwab_mode_text
 
 
 _OPTION_CHAIN_COLUMNS = (

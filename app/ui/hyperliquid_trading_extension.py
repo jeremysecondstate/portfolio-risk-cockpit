@@ -2418,10 +2418,7 @@ def _on_trading_venue_changed(self: tk.Tk) -> None:
 
 
 def _submit_selected_venue(self: tk.Tk) -> None:
-    if self.trade_venue_var.get() == "Hyperliquid":
-        self.show_hyperliquid_live_submit_safety_review()
-    else:
-        self.submit_live_schwab_order_guarded()
+    _submit_cockpit_selected_venue(self)
 
 
 def _parse_hyperliquid_ticket(self: tk.Tk) -> HyperliquidOrderTicket:

@@ -5,7 +5,7 @@ from tkinter import messagebox
 from typing import Any, Callable, Type
 
 from app.core.order_models import TimeInForce, normalize_time_in_force
-from app.ui import account_sources_fix, options_lab
+from app.ui import schwab_trading_tab, options_lab
 
 _installed = False
 _original_analyze_scenario: Callable[..., dict] | None = None
@@ -30,8 +30,8 @@ def install_schwab_options_what_if_scenario_extension(app_cls: Type[tk.Tk]) -> N
     options_lab._analyze_scenario = _analyze_scenario_with_full_portfolio_paths  # type: ignore[method-assign]
     options_lab._format_analysis = _format_analysis_with_full_portfolio_paths  # type: ignore[method-assign]
 
-    account_sources_fix._sync_integrated_options_values = _sync_integrated_options_values  # type: ignore[attr-defined]
-    account_sources_fix._run_schwab_integrated_options_what_if = _run_schwab_integrated_options_what_if  # type: ignore[attr-defined]
+    schwab_trading_tab._sync_integrated_options_values = _sync_integrated_options_values  # type: ignore[attr-defined]
+    schwab_trading_tab._run_schwab_integrated_options_what_if = _run_schwab_integrated_options_what_if  # type: ignore[attr-defined]
     app_cls.run_schwab_integrated_options_what_if = _run_schwab_integrated_options_what_if  # type: ignore[attr-defined]
 
     _installed = True
@@ -47,7 +47,7 @@ def _run_schwab_integrated_options_what_if(self: tk.Tk) -> None:
         _fill_missing_integrated_what_if_defaults(self)
         scenario = options_lab._parse_scenario(self)
         analysis = options_lab._analyze_scenario(scenario, self)
-        account_sources_fix._set_schwab_mode_text(self, options_lab._format_analysis(scenario, analysis))
+        schwab_trading_tab._set_schwab_mode_text(self, options_lab._format_analysis(scenario, analysis))
         if hasattr(self, "schwab_preview_status_var"):
             self.schwab_preview_status_var.set("Last Schwab preview: options what-if only")
     except Exception as exc:

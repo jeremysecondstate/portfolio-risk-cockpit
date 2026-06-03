@@ -27,7 +27,7 @@ from app.ui.options_lab_extension import (
 from app.ui.polished_theme import _make_paned
 
 
-def install_account_sources_fix(app_cls: Type[tk.Tk]) -> None:
+def install_schwab_trading_tab(app_cls: Type[tk.Tk]) -> None:
     """Keep Account Sources state without rendering a large top strip."""
     app_cls._build_layout = _build_layout_without_account_strip  # type: ignore[method-assign]
     app_cls.capture_current_portfolio_source = _capture_current_source_portfolio  # type: ignore[attr-defined]

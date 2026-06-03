@@ -21,7 +21,7 @@ class TpslScenarioReadout:
     valid: bool
 
 
-def install_hyperliquid_perp_ticket_use_mid_fix(app_cls: type[tk.Tk] | None = None) -> None:
+def install_hyperliquid_perp_ticket(app_cls: type[tk.Tk] | None = None) -> None:
     """Make the dedicated Hyperliquid ticket mirror the exchange ticket more closely."""
     _patch_hyperliquid_tab_builder()
     _patch_options_layout_builder()

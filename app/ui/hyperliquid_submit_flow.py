@@ -14,7 +14,7 @@ from app.brokers.hyperliquid.trading import (
 )
 
 
-def install_hyperliquid_submit_no_autosync_fix(app_cls: Type[tk.Tk]) -> None:
+def install_hyperliquid_submit_flow(app_cls: Type[tk.Tk]) -> None:
     """Keep Hyperliquid live-submit responses visible until the user replaces them."""
 
     app_cls.show_hyperliquid_spot_live_submit_safety_review = _show_hyperliquid_spot_live_submit_no_autosync  # type: ignore[attr-defined]

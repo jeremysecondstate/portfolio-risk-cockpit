@@ -4,7 +4,7 @@ from collections.abc import Callable
 from tkinter import messagebox
 
 
-def install_hyperliquid_notifications_fix(app_cls):
+def install_hyperliquid_notifications(app_cls):
     """Quiet Connect Hyperliquid, but keep a useful LIVE Submit result popup."""
     original_sync = app_cls.sync_hyperliquid_account
     original_submit = app_cls.show_hyperliquid_live_submit_safety_review

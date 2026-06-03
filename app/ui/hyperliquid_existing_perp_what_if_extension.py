@@ -5,7 +5,7 @@ import tkinter as tk
 from tkinter import messagebox
 
 from app.core.portfolio import Portfolio, Position
-from app.ui import hyperliquid_perp_ticket_use_mid_fix as base_what_if
+from app.ui import hyperliquid_perp_ticket as base_what_if
 
 GOLDILOCKS_CASH_BUFFER_PCT = 0.10
 GOLDILOCKS_SCAN_STEP_PCT = 5
