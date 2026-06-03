@@ -28488,35 +28488,11 @@
     }
   },
   "GOOG": {
-    "fetched_at_epoch": 1780304227.3075123,
+    "fetched_at_epoch": 1780510521.9857035,
     "payload": {
       "symbol": "GOOG",
       "empty": false,
       "candles": [
-        {
-          "open": 176.81,
-          "high": 178.23,
-          "low": 176.26,
-          "close": 177.4,
-          "volume": 15023847,
-          "datetime": 1716958800000
-        },
-        {
-          "open": 176.69,
-          "high": 176.69,
-          "low": 173.23,
-          "close": 173.56,
-          "volume": 18844036,
-          "datetime": 1717045200000
-        },
-        {
-          "open": 173.4,
-          "high": 174.42,
-          "low": 170.97,
-          "close": 173.96,
-          "volume": 28085151,
-          "datetime": 1717131600000
-        },
         {
           "open": 173.88,
           "high": 175.86,
@@ -32508,6 +32484,22 @@
           "close": 376.43,
           "volume": 48018562,
           "datetime": 1780030800000
+        },
+        {
+          "open": 372.575,
+          "high": 374.6,
+          "low": 369.71,
+          "close": 372.58,
+          "volume": 19091887,
+          "datetime": 1780290000000
+        },
+        {
+          "open": 363.16,
+          "high": 369.7899,
+          "low": 355.0,
+          "close": 358.39,
+          "volume": 34648621,
+          "datetime": 1780376400000
         }
       ]
     }
@@ -73108,7 +73100,7 @@
     }
   },
   "SPY": {
-    "fetched_at_epoch": 1780508817.0815997,
+    "fetched_at_epoch": 1780510522.653682,
     "payload": {
       "symbol": "SPY",
       "empty": false,
@@ -77125,7 +77117,7 @@
     }
   },
   "QQQ": {
-    "fetched_at_epoch": 1780508817.8105705,
+    "fetched_at_epoch": 1780510523.3695927,
     "payload": {
       "symbol": "QQQ",
       "empty": false,
@@ -81142,7 +81134,7 @@
     }
   },
   "IWM": {
-    "fetched_at_epoch": 1780508818.4338877,
+    "fetched_at_epoch": 1780510524.0179389,
     "payload": {
       "symbol": "IWM",
       "empty": false,
