@@ -18,6 +18,11 @@ from app.ui.options_lab import build_options_lab_tab, run_options_what_if
 from app.ui.polished_theme import _make_paned
 
 
+SIDE_BUY_COMBOBOX_STYLE = "BuySide.TCombobox"
+SIDE_SELL_COMBOBOX_STYLE = "SellSide.TCombobox"
+SIDE_NEUTRAL_COMBOBOX_STYLE = "NeutralSide.TCombobox"
+
+
 def install_options_lab_extension(app_cls: Type[tk.Tk]) -> None:
     """Add the Options What-If Lab and Schwab/Hyperliquid cockpit layout."""
 
@@ -151,6 +156,62 @@ def _ensure_double_var(self: tk.Tk, name: str, default: float) -> None:
 def _ensure_bool_var(self: tk.Tk, name: str, default: bool) -> None:
     if not hasattr(self, name):
         setattr(self, name, tk.BooleanVar(value=bool(default)))
+
+
+def _configure_side_combobox_styles(root: tk.Misc) -> None:
+    style = ttk.Style(root)
+    _configure_single_side_combobox_style(style, SIDE_BUY_COMBOBOX_STYLE, "#dcfce7", "#047857")
+    _configure_single_side_combobox_style(style, SIDE_SELL_COMBOBOX_STYLE, "#fee2e2", "#b91c1c")
+    _configure_single_side_combobox_style(style, SIDE_NEUTRAL_COMBOBOX_STYLE, "#ffffff", "#0f172a")
+
+
+def _configure_single_side_combobox_style(style: ttk.Style, style_name: str, background: str, foreground: str) -> None:
+    style.configure(
+        style_name,
+        fieldbackground=background,
+        background=background,
+        foreground=foreground,
+        selectbackground=background,
+        selectforeground=foreground,
+        bordercolor="#cbd5e1",
+        lightcolor="#cbd5e1",
+        darkcolor="#cbd5e1",
+        arrowcolor=foreground,
+        padding=6,
+    )
+    style.map(
+        style_name,
+        fieldbackground=[("readonly", background), ("focus", background), ("disabled", "#f1f5f9")],
+        background=[("readonly", background), ("active", background), ("disabled", "#f1f5f9")],
+        foreground=[("readonly", foreground), ("focus", foreground), ("disabled", "#94a3b8")],
+        selectbackground=[("readonly", background), ("focus", background)],
+        selectforeground=[("readonly", foreground), ("focus", foreground)],
+        arrowcolor=[("readonly", foreground), ("active", foreground), ("disabled", "#94a3b8")],
+    )
+
+
+def _side_combobox_style_name(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {OrderSide.BUY.value, "b", "bid"}:
+        return SIDE_BUY_COMBOBOX_STYLE
+    if normalized in {OrderSide.SELL.value, "s", "a", "ask"}:
+        return SIDE_SELL_COMBOBOX_STYLE
+    return SIDE_NEUTRAL_COMBOBOX_STYLE
+
+
+def _bind_side_combobox_style(var: tk.Variable, combo: ttk.Combobox) -> None:
+    def apply_style(*_args: object) -> None:
+        try:
+            combo.configure(style=_side_combobox_style_name(var.get()))
+        except tk.TclError:
+            return
+
+    apply_style()
+    try:
+        var.trace_add("write", apply_style)
+    except AttributeError:
+        var.trace("w", apply_style)
+    combo.bind("<<ComboboxSelected>>", apply_style, add="+")
 
 
 def _workspace_text(parent: ttk.Frame) -> tk.Text:
@@ -1226,6 +1287,7 @@ def _build_schwab_trading_tab(
     tabs: ttk.Notebook,
     options_tab: ttk.Frame,
 ) -> None:
+    _configure_side_combobox_styles(self)
     parent.columnconfigure(0, weight=1)
     parent.rowconfigure(1, weight=1)
 
@@ -1261,13 +1323,15 @@ def _build_schwab_trading_tab(
     ticket.columnconfigure(1, weight=1)
     ticket.columnconfigure(3, weight=1)
 
+    schwab_side_combo = ttk.Combobox(ticket, textvariable=self.side_var, values=[s.value for s in OrderSide], state="readonly")
+    _bind_side_combobox_style(self.side_var, schwab_side_combo)
     self._grid_row(
         ticket,
         0,
         "Symbol",
         ttk.Entry(ticket, textvariable=self.symbol_var),
         "Side",
-        ttk.Combobox(ticket, textvariable=self.side_var, values=[s.value for s in OrderSide], state="readonly"),
+        schwab_side_combo,
     )
     self._grid_row(
         ticket,
@@ -1335,6 +1399,7 @@ def _build_schwab_trading_tab(
 
 def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     _ensure_execution_workspace_vars(self)
+    _configure_side_combobox_styles(self)
     parent.columnconfigure(0, weight=1)
     parent.rowconfigure(1, weight=1)
 
@@ -1524,11 +1589,13 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
 
     ttk.Label(spot_ticket, text="Market", style="Subtle.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=6)
     ttk.Entry(spot_ticket, textvariable=self.hyperliquid_spot_symbol_var).grid(row=0, column=1, columnspan=3, sticky="ew", pady=6)
+    spot_side_combo = ttk.Combobox(spot_ticket, textvariable=self.hyperliquid_spot_side_var, values=[s.value for s in OrderSide], state="readonly")
+    _bind_side_combobox_style(self.hyperliquid_spot_side_var, spot_side_combo)
     self._grid_row(
         spot_ticket,
         1,
         "Side",
-        ttk.Combobox(spot_ticket, textvariable=self.hyperliquid_spot_side_var, values=[s.value for s in OrderSide], state="readonly"),
+        spot_side_combo,
         "Order type",
         ttk.Combobox(spot_ticket, textvariable=self.hyperliquid_spot_order_type_var, values=[o.value for o in OrderType], state="readonly"),
     )
@@ -1569,11 +1636,13 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     ticket = perp_ticket
     ttk.Label(ticket, text="Coin", style="Subtle.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=6)
     ttk.Entry(ticket, textvariable=self.hyperliquid_perp_coin_var).grid(row=0, column=1, columnspan=3, sticky="ew", pady=6)
+    perp_side_combo = ttk.Combobox(ticket, textvariable=self.hyperliquid_perp_side_var, values=[s.value for s in OrderSide], state="readonly")
+    _bind_side_combobox_style(self.hyperliquid_perp_side_var, perp_side_combo)
     self._grid_row(
         ticket,
         1,
         "Direction",
-        ttk.Combobox(ticket, textvariable=self.hyperliquid_perp_side_var, values=[s.value for s in OrderSide], state="readonly"),
+        perp_side_combo,
         "Order type",
         ttk.Combobox(ticket, textvariable=self.hyperliquid_perp_order_type_var, values=[o.value for o in OrderType], state="readonly"),
     )

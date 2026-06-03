@@ -15,7 +15,7 @@ from app.brokers.hyperliquid.trading import (
 )
 from app.core.portfolio import CashPosition, Portfolio, Position
 from app.ui.cash_positions_extension import _portfolio_display_pnl_summary, _position_pnl_value
-from app.ui.options_lab_extension import _populate_workspace_open_orders_table, _workspace_holding_rows
+from app.ui.options_lab_extension import _populate_workspace_open_orders_table, _side_combobox_style_name, _workspace_holding_rows
 from app.ui.hyperliquid_spot_symbol_display_extension import _display_order_coin_with_spot_symbol, _spot_symbol_for_market_id
 from app.ui.hyperliquid_trading_extension import _edit_hyperliquid_order_guarded, _market_close_limit_price, _normalize_edit_market, _parse_hyperliquid_spot_ticket, _price_edit_trigger_fields, _reverse_order_size_for_same_opposite_position, _risk_reward, _selected_hyperliquid_order, _set_hyperliquid_perp_mid_price, normalize_hyperliquid_open_order
 from app.ui.hyperliquid_trading_extension import _current_hyperliquid_perp_position, _perp_position_pnl, _portfolio_coin_exposures
@@ -334,6 +334,13 @@ class HyperliquidTradingTests(unittest.TestCase):
         ticket = _parse_hyperliquid_spot_ticket(app)  # type: ignore[arg-type]
 
         self.assertEqual(ticket.coin, "XAUT/USDT")
+
+    def test_side_combobox_style_tracks_buy_and_sell_values(self) -> None:
+        self.assertEqual(_side_combobox_style_name("buy"), "BuySide.TCombobox")
+        self.assertEqual(_side_combobox_style_name("B"), "BuySide.TCombobox")
+        self.assertEqual(_side_combobox_style_name("sell"), "SellSide.TCombobox")
+        self.assertEqual(_side_combobox_style_name("A"), "SellSide.TCombobox")
+        self.assertEqual(_side_combobox_style_name(""), "NeutralSide.TCombobox")
 
     def test_edit_market_normalizes_spot_and_perp_contexts_separately(self) -> None:
         self.assertEqual(_normalize_edit_market("BTC", "Spot"), "UBTC/USDC")
