@@ -1,11 +1,13 @@
 from __future__ import annotations
+import json
 import traceback
 
+from datetime import datetime, timedelta, timezone
 import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import Callable, Type
+from typing import Any, Callable, Type
 
-from app.core.order_models import SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, TimeInForce, normalize_time_in_force
+from app.core.order_models import SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, TimeInForce, normalize_time_in_force, schwab_equity_session_duration
 from app.ui.options_lab import (
     OPTION_TYPES,
     ORDER_TYPES,
@@ -19,12 +21,15 @@ from app.ui.options_lab_extension import (
     _bind_side_combobox_style,
     _build_hyperliquid_trading_tab,
     _build_schwab_trading_tab,
+    _bind_workspace_holdings_click,
     _configure_side_combobox_styles,
     _ensure_execution_workspace_vars,
     _first_available_command,
     _run_workspace_action,
+    _workspace_holdings_table,
 )
 from app.ui.polished_theme import _make_paned
+from app.ui.venue_mid_extension import _extract_schwab_quote, _first_number, _format_optional_price, _format_price
 
 
 def install_schwab_trading_tab(app_cls: Type[tk.Tk]) -> None:
@@ -33,6 +38,10 @@ def install_schwab_trading_tab(app_cls: Type[tk.Tk]) -> None:
     app_cls.capture_current_portfolio_source = _capture_current_source_portfolio  # type: ignore[attr-defined]
     app_cls.sync_options_from_active_portfolio = _sync_options_values_from_active_portfolio  # type: ignore[attr-defined]
     app_cls.set_schwab_sync_status = _set_schwab_sync_status  # type: ignore[attr-defined]
+    app_cls.refresh_schwab_open_orders_tab = _refresh_schwab_open_orders_tab  # type: ignore[attr-defined]
+    app_cls.refresh_schwab_recent_orders_tab = _refresh_schwab_recent_orders_tab  # type: ignore[attr-defined]
+    app_cls.open_selected_schwab_order_editor = _open_selected_schwab_order_editor  # type: ignore[attr-defined]
+    app_cls.cancel_selected_schwab_open_order = _cancel_selected_schwab_open_order  # type: ignore[attr-defined]
 
 
 def _build_layout_without_account_strip(self: tk.Tk) -> None:
@@ -81,6 +90,8 @@ def _install_schwab_options_feature(self: tk.Tk, schwab_tab: ttk.Frame) -> None:
     ticket = _find_labelframe(schwab_tab, "Schwab Stock / ETF Ticket")
     if ticket is not None:
         _rebuild_schwab_ticket_side_by_side(self, ticket)
+
+    _install_schwab_account_tabs(self, schwab_tab)
 
     for button in _walk_buttons(schwab_tab):
         label = str(button.cget("text"))
@@ -415,7 +426,7 @@ def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
     _add_action_button(actions, row=0, column=0, text="Connect Schwab", command=schwab_action("connect_schwab", "run_schwab_preview"))
     _add_action_button(actions, row=0, column=1, text="Refresh Account", command=schwab_action("refresh_schwab_account", "refresh_portfolio"))
     _add_action_button(actions, row=0, column=2, text="Tech Analysis", command=schwab_action("show_technical_analysis"))
-    _add_action_button(actions, row=1, column=0, text="Recent Orders", command=schwab_action("load_selected_recent_orders", "load_schwab_open_orders"))
+    _add_action_button(actions, row=1, column=0, text="Recent Orders", command=lambda app=self: _refresh_schwab_recent_orders_tab(app))
 
     show_ipo_pipeline = getattr(self, "show_ipo_pipeline", None)
     if callable(show_ipo_pipeline):
@@ -423,6 +434,685 @@ def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
         setattr(actions, "_ipo_pipeline_button_installed", True)
 
     _add_action_button(actions, row=1, column=2, text="LIVE Submit", command=lambda app=self: _submit_schwab_stock_limit_order(app), style="Danger.TButton")
+
+
+def _install_schwab_account_tabs(self: tk.Tk, schwab_tab: ttk.Frame) -> None:
+    if getattr(self, "_schwab_account_tabs_built", False):
+        return
+
+    account_frame = _find_labelframe(schwab_tab, "Schwab Holdings")
+    if account_frame is None:
+        return
+
+    try:
+        account_frame.configure(text="Schwab Account")
+    except tk.TclError:
+        pass
+
+    for child in list(account_frame.winfo_children()):
+        child.destroy()
+
+    notebook = ttk.Notebook(account_frame)
+    notebook.pack(fill=tk.BOTH, expand=True)
+    self.schwab_account_tabs = notebook
+
+    holdings_tab = ttk.Frame(notebook, style="Panel.TFrame", padding=8)
+    open_orders_tab = ttk.Frame(notebook, style="Panel.TFrame", padding=8)
+    recent_orders_tab = ttk.Frame(notebook, style="Panel.TFrame", padding=8)
+    notebook.add(holdings_tab, text="Holdings")
+    notebook.add(open_orders_tab, text="Open Orders")
+    notebook.add(recent_orders_tab, text="Recent Orders")
+
+    self.schwab_workspace_holdings_table = _workspace_holdings_table(holdings_tab)
+    _bind_workspace_holdings_click(self, self.schwab_workspace_holdings_table, "Schwab")
+
+    self.schwab_open_orders_table = _build_schwab_orders_table(open_orders_tab)
+    _build_schwab_open_orders_controls(self, open_orders_tab)
+
+    self.schwab_recent_orders_table = _build_schwab_orders_table(recent_orders_tab)
+    _build_schwab_recent_orders_controls(self, recent_orders_tab)
+
+    self.schwab_open_orders_by_iid = {}
+    self.schwab_recent_orders_by_iid = {}
+    self._schwab_account_tabs_built = True
+
+
+def _build_schwab_orders_table(parent: ttk.Frame) -> ttk.Treeview:
+    parent.rowconfigure(1, weight=1)
+    parent.columnconfigure(0, weight=1)
+
+    columns = ("time", "order_id", "symbol", "side", "qty", "effect", "type", "limit", "stop", "tif", "session", "status", "account")
+    table = ttk.Treeview(parent, columns=columns, show="headings", height=7, selectmode="browse")
+    headings = {
+        "time": ("Time", 138, tk.W),
+        "order_id": ("Order ID", 118, tk.W),
+        "symbol": ("Symbol", 82, tk.W),
+        "side": ("Side", 86, tk.W),
+        "qty": ("Qty", 72, tk.E),
+        "effect": ("Pos Effect", 92, tk.W),
+        "type": ("Order", 92, tk.W),
+        "limit": ("Limit", 78, tk.E),
+        "stop": ("Stop", 78, tk.E),
+        "tif": ("TIF", 78, tk.W),
+        "session": ("Session", 86, tk.W),
+        "status": ("Status", 108, tk.W),
+        "account": ("Account", 110, tk.W),
+    }
+    for column, (label, width, anchor) in headings.items():
+        table.heading(column, text=label)
+        table.column(column, width=width, anchor=anchor, stretch=column in {"time", "order_id", "symbol", "status"})
+    table.grid(row=1, column=0, sticky="nsew")
+    y_scroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=table.yview)
+    y_scroll.grid(row=1, column=1, sticky="ns")
+    x_scroll = ttk.Scrollbar(parent, orient=tk.HORIZONTAL, command=table.xview)
+    x_scroll.grid(row=2, column=0, sticky="ew")
+    table.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+    table.tag_configure("active", foreground="#047857")
+    table.tag_configure("terminal", foreground="#64748b")
+    table.tag_configure("error", foreground="#b91c1c")
+    return table
+
+
+def _build_schwab_open_orders_controls(self: tk.Tk, parent: ttk.Frame) -> None:
+    controls = ttk.Frame(parent, style="Panel.TFrame")
+    controls.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+    controls.columnconfigure(3, weight=1)
+    ttk.Button(controls, text="Refresh Open Orders", command=lambda app=self: _refresh_schwab_open_orders_tab(app), style="Accent.TButton").grid(row=0, column=0, sticky="w")
+    ttk.Button(controls, text="Edit Selected", command=lambda app=self: _open_selected_schwab_order_editor(app, source="open")).grid(row=0, column=1, sticky="w", padx=(8, 0))
+    ttk.Button(controls, text="Cancel Order", command=lambda app=self: _cancel_selected_schwab_open_order(app), style="Danger.TButton").grid(row=0, column=2, sticky="w", padx=(8, 0))
+    ttk.Label(controls, text="Double-click a working order to edit/replace.", style="Subtle.TLabel").grid(row=0, column=3, sticky="e")
+
+    table = self.schwab_open_orders_table
+    table.bind("<Double-1>", lambda _event, app=self: _open_selected_schwab_order_editor(app, source="open"), add="+")
+    table.bind("<ButtonRelease-1>", lambda _event, app=self: _load_ticket_from_selected_schwab_order(app, source="open"), add="+")
+
+
+def _build_schwab_recent_orders_controls(self: tk.Tk, parent: ttk.Frame) -> None:
+    controls = ttk.Frame(parent, style="Panel.TFrame")
+    controls.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+    controls.columnconfigure(2, weight=1)
+    ttk.Button(controls, text="Refresh Recent Orders", command=lambda app=self: _refresh_schwab_recent_orders_tab(app), style="Accent.TButton").grid(row=0, column=0, sticky="w")
+    ttk.Button(controls, text="Details / Edit", command=lambda app=self: _open_selected_schwab_order_editor(app, source="recent")).grid(row=0, column=1, sticky="w", padx=(8, 0))
+    ttk.Label(controls, text="Double-click working rows to edit; terminal rows open read-only details.", style="Subtle.TLabel").grid(row=0, column=2, sticky="e")
+
+    table = self.schwab_recent_orders_table
+    table.bind("<Double-1>", lambda _event, app=self: _open_selected_schwab_order_editor(app, source="recent"), add="+")
+    table.bind("<ButtonRelease-1>", lambda _event, app=self: _load_ticket_from_selected_schwab_order(app, source="recent"), add="+")
+
+
+def _refresh_schwab_open_orders_tab(self: tk.Tk) -> None:
+    _select_schwab_account_tab(self, "Open Orders")
+    try:
+        status_code, payload = _fetch_schwab_orders(self)
+        active_statuses = _active_order_statuses(self)
+        orders = [order for order in payload if isinstance(order, dict) and str(order.get("status", "")).upper() in active_statuses] if isinstance(payload, list) else []
+        _populate_schwab_orders_table(self.schwab_open_orders_table, orders, cache_attr="schwab_open_orders_by_iid", active_statuses=active_statuses)
+        if status_code == 200:
+            self.open_only_verified_this_session = True
+            updater = getattr(self, "_update_verification_status", None)
+            if callable(updater):
+                updater()
+        _set_schwab_mode_text(
+            self,
+            "SCHWAB OPEN ORDERS\n"
+            "==================\n\n"
+            f"HTTP Status: {status_code}\n"
+            f"Active orders loaded: {len(orders)}\n\n"
+            "Select an open order to populate the ticket. Double-click to edit/replace, or use Cancel Order in the Open Orders tab.",
+        )
+    except Exception as exc:
+        _write_schwab_order_error(self, "Refresh Schwab open orders failed", exc)
+        messagebox.showerror("Refresh open orders failed", str(exc))
+
+
+def _refresh_schwab_recent_orders_tab(self: tk.Tk) -> None:
+    _select_schwab_account_tab(self, "Recent Orders")
+    try:
+        status_code, payload = _fetch_schwab_orders(self)
+        orders = payload if isinstance(payload, list) else []
+        _populate_schwab_orders_table(self.schwab_recent_orders_table, orders, cache_attr="schwab_recent_orders_by_iid", active_statuses=_active_order_statuses(self))
+        _set_schwab_mode_text(
+            self,
+            "SCHWAB RECENT ORDERS\n"
+            "====================\n\n"
+            f"HTTP Status: {status_code}\n"
+            f"Recent orders loaded: {len(orders)}\n\n"
+            "Working/open orders can be edited from this tab. Filled, canceled, rejected, and expired orders open read-only details.",
+        )
+    except Exception as exc:
+        _write_schwab_order_error(self, "Refresh Schwab recent orders failed", exc)
+        messagebox.showerror("Refresh recent orders failed", str(exc))
+
+
+def _fetch_schwab_orders(self: tk.Tk) -> tuple[int, Any]:
+    session = self._authorize_schwab_session()
+    if session is None:
+        raise RuntimeError("Schwab authorization returned no session.")
+    to_time = datetime.now(timezone.utc)
+    from_time = to_time - timedelta(days=7)
+    status_code, payload = session.get_orders(from_entered_time=from_time, to_entered_time=to_time)
+    if hasattr(self, "schwab_status_var"):
+        self.schwab_status_var.set("Schwab: connected")
+    return status_code, payload
+
+
+def _populate_schwab_orders_table(table: ttk.Treeview, orders: list[Any], *, cache_attr: str, active_statuses: set[str]) -> None:
+    for row_id in table.get_children():
+        table.delete(row_id)
+
+    cache: dict[str, dict[str, Any]] = {}
+    for index, raw_order in enumerate(orders):
+        if not isinstance(raw_order, dict):
+            continue
+        parsed = _parse_schwab_order_row(raw_order)
+        iid = f"schwab_order_{index}"
+        cache[iid] = raw_order
+        status = str(parsed["status"]).upper()
+        tag = "active" if status in active_statuses else "error" if status in {"REJECTED", "CANCELED", "EXPIRED"} else "terminal"
+        table.insert(
+            "",
+            tk.END,
+            iid=iid,
+            values=(
+                parsed["time"],
+                parsed["order_id"],
+                parsed["symbol"],
+                parsed["side"],
+                parsed["quantity"],
+                parsed["position_effect"],
+                parsed["order_type"],
+                parsed["limit_price"],
+                parsed["stop_price"],
+                parsed["duration"],
+                parsed["session"],
+                parsed["status"],
+                parsed["account"],
+            ),
+            tags=(tag,),
+        )
+    setattr(table, cache_attr, cache)
+
+
+def _parse_schwab_order_row(order: dict[str, Any]) -> dict[str, str]:
+    legs = order.get("orderLegCollection") or order.get("orderLegs") or []
+    first_leg = legs[0] if legs and isinstance(legs[0], dict) else {}
+    instrument = first_leg.get("instrument") if isinstance(first_leg.get("instrument"), dict) else {}
+    return {
+        "time": _first_text(order, "enteredTime", "enteredDateTime", "closeTime", "cancelTime"),
+        "order_id": _first_text(order, "orderId", "orderID"),
+        "symbol": str(instrument.get("symbol") or first_leg.get("finalSymbol") or order.get("symbol") or "").upper(),
+        "side": _side_from_instruction(str(first_leg.get("instruction") or order.get("instruction") or "")),
+        "quantity": _quantity_text(first_leg.get("quantity", order.get("quantity"))),
+        "position_effect": str(first_leg.get("positionEffect") or first_leg.get("positionEffectType") or "").upper(),
+        "order_type": str(order.get("orderType") or "").upper(),
+        "limit_price": _price_text(order.get("price")),
+        "stop_price": _price_text(order.get("stopPrice")),
+        "duration": str(order.get("duration") or order.get("timeInForce") or "").upper(),
+        "session": str(order.get("session") or "").upper(),
+        "status": str(order.get("status") or "").upper(),
+        "account": _first_text(order, "accountNumber", "accountId", "accountHash"),
+    }
+
+
+def _open_selected_schwab_order_editor(self: tk.Tk, source: str = "open") -> None:
+    selected = _selected_schwab_order(self, source)
+    if selected is None:
+        messagebox.showerror("No Schwab order selected", "Select a Schwab order first.")
+        return
+
+    order, parsed = selected
+    if str(parsed["status"]).upper() not in _active_order_statuses(self):
+        _show_schwab_order_details(self, order, parsed)
+        return
+
+    _load_schwab_order_into_ticket(self, order, parsed)
+    _show_schwab_replace_dialog(self, order, parsed)
+
+
+def _show_schwab_replace_dialog(self: tk.Tk, order: dict[str, Any], parsed: dict[str, str]) -> None:
+    window = tk.Toplevel(self)
+    window.title(f"Edit Schwab Order {parsed['order_id']}")
+    window.geometry("760x640")
+    window.minsize(640, 520)
+    window.columnconfigure(0, weight=1)
+    window.rowconfigure(2, weight=1)
+
+    form = ttk.LabelFrame(window, text="Replacement Ticket", style="Card.TLabelframe", padding=10)
+    form.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
+    for column in (1, 3):
+        form.columnconfigure(column, weight=1)
+
+    order_id_var = tk.StringVar(value=parsed["order_id"])
+    symbol_var = tk.StringVar(value=parsed["symbol"])
+    side_var = tk.StringVar(value="sell" if "SELL" in parsed["side"].upper() else "buy")
+    quantity_var = tk.StringVar(value=parsed["quantity"])
+    effect_var = tk.StringVar(value=parsed["position_effect"] or "AUTO")
+    type_var = tk.StringVar(value=_supported_order_type(parsed["order_type"]))
+    limit_var = tk.StringVar(value=parsed["limit_price"].replace("$", "").replace(",", "") if parsed["limit_price"] != "--" else "")
+    stop_var = tk.StringVar(value=parsed["stop_price"].replace("$", "").replace(",", "") if parsed["stop_price"] != "--" else "")
+    duration_var = tk.StringVar(value=_supported_duration(parsed["duration"]))
+    session_var = tk.StringVar(value=_supported_session(parsed["session"]))
+
+    _grid_pair(form, 0, "Original order ID", ttk.Entry(form, textvariable=order_id_var, state="readonly"), "Symbol", ttk.Entry(form, textvariable=symbol_var))
+    _grid_pair(form, 1, "Side", ttk.Combobox(form, textvariable=side_var, values=["buy", "sell"], state="readonly"), "Quantity", ttk.Entry(form, textvariable=quantity_var))
+    _grid_pair(form, 2, "Position effect", ttk.Combobox(form, textvariable=effect_var, values=["AUTO", "TO_OPEN", "TO_CLOSE"], state="readonly"), "Order type", ttk.Combobox(form, textvariable=type_var, values=["MARKET", "LIMIT", "STOP", "STOP_LIMIT"], state="readonly"))
+    limit_box = ttk.Frame(form, style="Panel.TFrame")
+    limit_box.columnconfigure(0, weight=1)
+    ttk.Entry(limit_box, textvariable=limit_var).grid(row=0, column=0, sticky="ew")
+    ttk.Button(limit_box, text="Use Mid", command=lambda: use_mid_for_replace(), style="Accent.TButton").grid(row=0, column=1, sticky="e", padx=(6, 0))
+    _grid_pair(form, 3, "Limit price", limit_box, "Stop price", ttk.Entry(form, textvariable=stop_var))
+    _grid_pair(form, 4, "Duration", ttk.Combobox(form, textvariable=duration_var, values=SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, state="readonly"), "Session", ttk.Combobox(form, textvariable=session_var, values=["NORMAL", "AM", "PM", "SEAMLESS"], state="readonly"))
+
+    preview_frame = ttk.LabelFrame(window, text="Replacement Payload Preview", style="Card.TLabelframe", padding=10)
+    preview_frame.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 8))
+    preview_frame.rowconfigure(0, weight=1)
+    preview_frame.columnconfigure(0, weight=1)
+    preview = tk.Text(preview_frame, height=14, wrap=tk.WORD, font=("Consolas", 10), padx=8, pady=8)
+    preview.grid(row=0, column=0, sticky="nsew")
+    scrollbar = ttk.Scrollbar(preview_frame, orient=tk.VERTICAL, command=preview.yview)
+    scrollbar.grid(row=0, column=1, sticky="ns")
+    preview.configure(yscrollcommand=scrollbar.set)
+
+    def payload_from_form() -> dict[str, Any]:
+        return _replacement_payload_from_fields(
+            original_order=order,
+            symbol=symbol_var.get(),
+            side=side_var.get(),
+            quantity=quantity_var.get(),
+            order_type=type_var.get(),
+            limit_price=limit_var.get(),
+            stop_price=stop_var.get(),
+            duration=duration_var.get(),
+            session=session_var.get(),
+            position_effect=effect_var.get(),
+        )
+
+    def render_preview() -> dict[str, Any] | None:
+        try:
+            payload = payload_from_form()
+            text = json.dumps(payload, indent=2)
+        except Exception as exc:
+            payload = None
+            text = f"Replacement payload error:\n\n{type(exc).__name__}: {exc}"
+        preview.configure(state=tk.NORMAL)
+        preview.delete("1.0", tk.END)
+        preview.insert(tk.END, text)
+        preview.configure(state=tk.DISABLED)
+        return payload
+
+    def use_mid_for_replace() -> None:
+        symbol = symbol_var.get().strip().upper()
+        if not symbol:
+            messagebox.showerror("Schwab mid-market lookup failed", "Enter a Schwab symbol first.", parent=window)
+            return
+
+        try:
+            session = self._authorize_schwab_session()
+            if session is None:
+                return
+            status_code, payload = session.get_quote(symbol)
+            if status_code != 200:
+                raise RuntimeError(f"Schwab quote returned HTTP {status_code}: {payload}")
+
+            quote, source_key = _extract_schwab_quote(payload, symbol)
+            bid = _first_number(quote, "bidPrice", "bid", "bid_price")
+            ask = _first_number(quote, "askPrice", "ask", "ask_price")
+            mark = _first_number(quote, "mark", "markPrice", "mark_price")
+            last = _first_number(quote, "lastPrice", "last", "last_price", "closePrice", "regularMarketLastPrice")
+
+            if bid is not None and ask is not None and bid > 0 and ask > 0:
+                mid = (bid + ask) / 2.0
+                basis = "bid/ask midpoint"
+            elif mark is not None and mark > 0:
+                mid = mark
+                basis = "mark price"
+            elif last is not None and last > 0:
+                mid = last
+                basis = "last price fallback"
+            else:
+                raise RuntimeError(f"No usable bid/ask, mark, or last price found in Schwab quote for {symbol}.")
+
+            limit_var.set(_format_price(mid))
+            render_preview()
+            _set_schwab_mode_text(
+                self,
+                "SCHWAB REPLACE MID-MARKET PRICE\n"
+                "===============================\n\n"
+                f"Symbol: {symbol}\n"
+                f"Quote key: {source_key}\n"
+                f"Bid: {_format_optional_price(bid)}\n"
+                f"Ask: {_format_optional_price(ask)}\n"
+                f"Mark: {_format_optional_price(mark)}\n"
+                f"Last: {_format_optional_price(last)}\n\n"
+                f"Replacement limit price updated to: ${mid:,.4f}\n"
+                f"Basis: {basis}\n\n"
+                "No order was submitted, replaced, or canceled.",
+            )
+        except Exception as exc:
+            _write_schwab_order_error(self, "Schwab replace mid-market lookup failed", exc)
+            messagebox.showerror("Schwab mid-market lookup failed", str(exc), parent=window)
+
+    def confirm_replace() -> None:
+        payload = render_preview()
+        if payload is None:
+            return
+        try:
+            session = self._authorize_schwab_session()
+            if session is None:
+                return
+            status_code, response_payload, location = session.replace_order(parsed["order_id"], payload)
+            receipt = (
+                "SCHWAB REPLACE ORDER RESULT\n"
+                "===========================\n\n"
+                f"Original order ID: {parsed['order_id']}\n"
+                f"HTTP Status: {status_code}\n"
+                f"Location: {location or '(none returned)'}\n\n"
+                "Replacement payload:\n"
+                f"{json.dumps(payload, indent=2)}\n\n"
+                "Response:\n"
+                f"{json.dumps(response_payload, indent=2) if isinstance(response_payload, (dict, list)) else response_payload if response_payload is not None else '(empty response body)'}"
+            )
+            _set_schwab_mode_text(self, receipt)
+            print(receipt, flush=True)
+            _refresh_schwab_open_orders_tab(self)
+            _refresh_schwab_recent_orders_tab(self)
+            if 200 <= status_code < 300:
+                messagebox.showinfo("Schwab replace sent", f"Order {parsed['order_id']} replace returned HTTP {status_code}.", parent=window)
+                window.destroy()
+            else:
+                messagebox.showerror("Schwab replace returned non-2xx", f"HTTP Status: {status_code}\n\nCheck the Schwab output pane.", parent=window)
+        except Exception as exc:
+            _write_schwab_order_error(self, "Schwab replace order failed", exc)
+            messagebox.showerror("Schwab replace failed", str(exc), parent=window)
+
+    buttons = ttk.Frame(window, style="Panel.TFrame", padding=(12, 0, 12, 12))
+    buttons.grid(row=3, column=0, sticky="ew")
+    buttons.columnconfigure(0, weight=1)
+    ttk.Button(buttons, text="Preview Replace", command=render_preview, style="Accent.TButton").grid(row=0, column=0, sticky="w")
+    ttk.Button(buttons, text="Confirm Replace", command=confirm_replace, style="Danger.TButton").grid(row=0, column=1, sticky="e", padx=(8, 0))
+    ttk.Button(buttons, text="Cancel Order", command=lambda app=self, win=window: _cancel_selected_schwab_open_order(app, parent=win)).grid(row=0, column=2, sticky="e", padx=(8, 0))
+    ttk.Button(buttons, text="Close", command=window.destroy).grid(row=0, column=3, sticky="e", padx=(8, 0))
+
+    for variable in (symbol_var, side_var, quantity_var, effect_var, type_var, limit_var, stop_var, duration_var, session_var):
+        variable.trace_add("write", lambda *_args: render_preview())
+    render_preview()
+
+
+def _replacement_payload_from_fields(
+    *,
+    original_order: dict[str, Any],
+    symbol: str,
+    side: str,
+    quantity: str,
+    order_type: str,
+    limit_price: str,
+    stop_price: str,
+    duration: str,
+    session: str,
+    position_effect: str,
+) -> dict[str, Any]:
+    clean_symbol = symbol.strip().upper()
+    if not clean_symbol:
+        raise ValueError("Symbol is required.")
+    qty = float(quantity.strip().replace(",", ""))
+    if qty <= 0:
+        raise ValueError("Quantity must be positive.")
+
+    clean_type = _supported_order_type(order_type)
+    clean_duration_choice = _supported_duration(duration)
+    derived_session, clean_duration = schwab_equity_session_duration(clean_duration_choice)
+    clean_session = _supported_session(session or derived_session)
+    instruction = "BUY" if side.strip().lower() == "buy" else "SELL"
+    asset_type = _asset_type_from_order(original_order)
+
+    payload: dict[str, Any] = {
+        "orderType": clean_type,
+        "session": clean_session,
+        "duration": clean_duration,
+        "orderStrategyType": str(original_order.get("orderStrategyType") or "SINGLE").upper(),
+        "orderLegCollection": [
+            {
+                "instruction": instruction,
+                "quantity": qty,
+                "instrument": {
+                    "symbol": clean_symbol,
+                    "assetType": asset_type,
+                },
+            }
+        ],
+    }
+    if position_effect.strip().upper() in {"TO_OPEN", "TO_CLOSE"}:
+        payload["orderLegCollection"][0]["positionEffect"] = position_effect.strip().upper()
+
+    if clean_type in {"LIMIT", "STOP_LIMIT"}:
+        payload["price"] = _decimal_text(limit_price, field="Limit price")
+    if clean_type in {"STOP", "STOP_LIMIT"}:
+        payload["stopPrice"] = _decimal_text(stop_price, field="Stop price")
+
+    return payload
+
+
+def _cancel_selected_schwab_open_order(self: tk.Tk, parent: tk.Widget | None = None) -> None:
+    selected = _selected_schwab_order(self, "open") or _selected_schwab_order(self, "recent")
+    if selected is None:
+        messagebox.showerror("No Schwab order selected", "Select an open Schwab order first.", parent=parent)
+        return
+
+    order, parsed = selected
+    order_id = parsed["order_id"]
+    if not order_id:
+        messagebox.showerror("Cancel blocked", "Selected order has no Schwab order ID.", parent=parent)
+        return
+    if str(parsed["status"]).upper() not in _active_order_statuses(self):
+        messagebox.showerror("Cancel blocked", f"Order {order_id} is {parsed['status']}, not open/working.", parent=parent)
+        return
+
+    try:
+        session = self._authorize_schwab_session()
+        if session is None:
+            return
+        status_code, payload = session.cancel_order(order_id)
+        if 200 <= status_code < 300:
+            self.cancel_verified_this_session = True
+            updater = getattr(self, "_update_verification_status", None)
+            if callable(updater):
+                updater()
+        receipt = (
+            "SCHWAB CANCEL ORDER RESULT\n"
+            "==========================\n\n"
+            f"HTTP Status: {status_code}\n"
+            f"Order ID: {order_id}\n"
+            f"Symbol: {parsed['symbol']}\n"
+            f"Status before cancel: {parsed['status']}\n\n"
+            f"Response: {payload if payload is not None else '(empty response body)'}\n\n"
+            "Open Orders and Recent Orders were refreshed after the cancel attempt."
+        )
+        _set_schwab_mode_text(self, receipt)
+        print(receipt, flush=True)
+        _refresh_schwab_open_orders_tab(self)
+        _refresh_schwab_recent_orders_tab(self)
+        if 200 <= status_code < 300:
+            messagebox.showinfo("Schwab cancel sent", f"Order {order_id} cancel returned HTTP {status_code}.", parent=parent)
+        else:
+            messagebox.showerror("Schwab cancel returned non-2xx", f"HTTP Status: {status_code}\n\nCheck the Schwab output pane.", parent=parent)
+    except Exception as exc:
+        _write_schwab_order_error(self, "Schwab cancel order failed", exc)
+        messagebox.showerror("Schwab cancel failed", str(exc), parent=parent)
+
+
+def _selected_schwab_order(self: tk.Tk, source: str) -> tuple[dict[str, Any], dict[str, str]] | None:
+    table = getattr(self, "schwab_open_orders_table" if source == "open" else "schwab_recent_orders_table", None)
+    if table is None:
+        return None
+    selection = table.selection()
+    if not selection:
+        return None
+    iid = str(selection[0])
+    cache = getattr(table, "schwab_open_orders_by_iid" if source == "open" else "schwab_recent_orders_by_iid", {}) or {}
+    order = cache.get(iid) if isinstance(cache, dict) else None
+    if not isinstance(order, dict):
+        return None
+    return order, _parse_schwab_order_row(order)
+
+
+def _load_ticket_from_selected_schwab_order(self: tk.Tk, source: str) -> None:
+    selected = _selected_schwab_order(self, source)
+    if selected is None:
+        return
+    order, parsed = selected
+    _load_schwab_order_into_ticket(self, order, parsed)
+
+
+def _load_schwab_order_into_ticket(self: tk.Tk, order: dict[str, Any], parsed: dict[str, str]) -> None:
+    if parsed["symbol"] and hasattr(self, "symbol_var"):
+        self.symbol_var.set(parsed["symbol"])
+    if parsed["side"] and hasattr(self, "side_var"):
+        self.side_var.set("sell" if "SELL" in parsed["side"].upper() else "buy")
+    if parsed["quantity"] and hasattr(self, "quantity_var"):
+        self.quantity_var.set(parsed["quantity"])
+    if parsed["limit_price"] != "--" and hasattr(self, "limit_price_var"):
+        self.limit_price_var.set(parsed["limit_price"].replace("$", "").replace(",", ""))
+    if parsed["stop_price"] != "--" and hasattr(self, "stop_price_var"):
+        self.stop_price_var.set(parsed["stop_price"].replace("$", "").replace(",", ""))
+    if parsed["duration"] and hasattr(self, "time_in_force_var"):
+        self.time_in_force_var.set(_supported_duration(parsed["duration"]))
+    if parsed["order_type"] and hasattr(self, "order_type_var"):
+        self.order_type_var.set(_supported_order_type(parsed["order_type"]).lower())
+    if parsed["order_id"] and hasattr(self, "cancel_order_id_var"):
+        self.cancel_order_id_var.set(parsed["order_id"])
+
+
+def _show_schwab_order_details(self: tk.Tk, order: dict[str, Any], parsed: dict[str, str]) -> None:
+    text = (
+        "SCHWAB ORDER DETAILS\n"
+        "====================\n\n"
+        f"Order ID: {parsed['order_id']}\n"
+        f"Status: {parsed['status']}\n"
+        f"Symbol: {parsed['symbol']}\n"
+        f"Side: {parsed['side']}\n"
+        f"Quantity: {parsed['quantity']}\n\n"
+        "This order is not open/working, so replace and cancel actions are disabled.\n\n"
+        "Raw order:\n"
+        f"{json.dumps(order, indent=2)}"
+    )
+    _set_schwab_mode_text(self, text)
+
+
+def _select_schwab_account_tab(self: tk.Tk, label: str) -> None:
+    notebook = getattr(self, "schwab_account_tabs", None)
+    if notebook is None:
+        return
+    try:
+        for tab_id in notebook.tabs():
+            if notebook.tab(tab_id, "text") == label:
+                notebook.select(tab_id)
+                return
+    except tk.TclError:
+        return
+
+
+def _active_order_statuses(self: tk.Tk) -> set[str]:
+    getter = getattr(self, "schwab_active_order_statuses", None)
+    if callable(getter):
+        try:
+            return {str(status).upper() for status in getter()}
+        except Exception:
+            pass
+    return {"WORKING", "QUEUED", "PENDING_ACTIVATION", "ACCEPTED", "AWAITING_PARENT_ORDER", "PENDING_REPLACE", "PENDING_CANCEL"}
+
+
+def _write_schwab_order_error(self: tk.Tk, title: str, exc: Exception) -> None:
+    text = (
+        f"{title.upper()}\n"
+        f"{'=' * len(title)}\n\n"
+        f"{type(exc).__name__}: {exc}\n\n"
+        "Traceback:\n"
+        f"{traceback.format_exc()}"
+    )
+    print(text, flush=True)
+    _set_schwab_mode_text(self, text)
+
+
+def _first_text(mapping: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = mapping.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return ""
+
+
+def _side_from_instruction(value: str) -> str:
+    clean = value.strip().upper()
+    if clean.startswith("BUY"):
+        return "BUY"
+    if clean.startswith("SELL"):
+        return "SELL"
+    return clean
+
+
+def _quantity_text(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    try:
+        number = float(str(value).replace(",", ""))
+        return f"{number:g}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _price_text(value: Any) -> str:
+    if value in (None, ""):
+        return "--"
+    try:
+        return f"${float(str(value).replace(',', '')):,.2f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _decimal_text(value: str, *, field: str) -> str:
+    try:
+        number = float(value.strip().replace("$", "").replace(",", ""))
+    except ValueError as exc:
+        raise ValueError(f"{field} must be a positive number.") from exc
+    if number <= 0:
+        raise ValueError(f"{field} must be positive.")
+    return f"{number:.2f}"
+
+
+def _supported_order_type(value: str) -> str:
+    clean = str(value or "LIMIT").strip().upper().replace(" ", "_")
+    return clean if clean in {"MARKET", "LIMIT", "STOP", "STOP_LIMIT"} else "LIMIT"
+
+
+def _supported_duration(value: str) -> str:
+    raw = str(value or "").strip()
+    if raw in SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES:
+        return raw
+    aliases = {
+        "DAY": "Day",
+        "GTC": "GTC",
+        "GOOD_TILL_CANCEL": "GTC",
+        "EXT": "Day (EXT 13h)",
+        "DAY_EXT": "Day (EXT 13h)",
+        "GTC_EXT": "GTC (EXT 13h)",
+        "AM": "Day (EXT AM)",
+        "DAY_EXT_AM": "Day (EXT AM)",
+        "PM": "Day (EXT PM)",
+        "DAY_EXT_PM": "Day (EXT PM)",
+    }
+    return aliases.get(raw.upper().replace(" ", "_"), "Day")
+
+
+def _supported_session(value: str) -> str:
+    clean = str(value or "NORMAL").strip().upper().replace(" ", "_")
+    return clean if clean in {"NORMAL", "AM", "PM", "SEAMLESS"} else "NORMAL"
+
+
+def _asset_type_from_order(order: dict[str, Any]) -> str:
+    legs = order.get("orderLegCollection") or order.get("orderLegs") or []
+    first_leg = legs[0] if legs and isinstance(legs[0], dict) else {}
+    instrument = first_leg.get("instrument") if isinstance(first_leg.get("instrument"), dict) else {}
+    return str(instrument.get("assetType") or "EQUITY").upper()
 
 
 def _install_schwab_sync_status_badge(self: tk.Tk, sync_button: ttk.Button) -> None:

@@ -359,6 +359,38 @@ class SchwabSession:
 
         return response.status_code, payload
 
+    def replace_order(self, order_id: str, order_payload: dict[str, Any]) -> tuple[int, object, str | None]:
+        """Replace a Schwab order by ID.
+
+        Schwab may return an empty body on success and put the replacement
+        order URL/ID in the Location header.
+        """
+        cleaned_order_id = str(order_id).strip()
+        if not cleaned_order_id:
+            raise ValueError("Order ID is required for replace.")
+
+        account_hash = self.get_account_hash()
+
+        response = self._request(
+            "PUT",
+            f"{TRADER_BASE_URL}/accounts/{account_hash}/orders/{cleaned_order_id}",
+            headers={**self._headers(), "Content-Type": "application/json"},
+            json=order_payload,
+            timeout=30,
+        )
+
+        location = response.headers.get("Location")
+
+        if not response.text:
+            payload = None
+        else:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = response.text
+
+        return response.status_code, payload, location
+
     def submit_live_order(self, order_payload: dict[str, Any]) -> tuple[int, object, str | None]:
         """Submit a live Schwab order.
 
