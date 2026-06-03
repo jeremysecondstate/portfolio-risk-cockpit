@@ -40,7 +40,7 @@ def install_schwab_trade_memory_extension(app_cls: Type[tk.Tk]) -> None:
     _ORIGINAL_FORMAT_OPEN_ORDERS_ONLY = getattr(app_cls, "format_schwab_open_orders_only_response", None)
 
     app_cls.run_schwab_preview = _run_schwab_preview_with_trade_memory  # type: ignore[method-assign]
-    app_cls.submit_live_schwab_order_guarded = _submit_live_schwab_with_trade_memory  # type: ignore[method-assign]
+    # app_cls.submit_live_schwab_order_guarded = _submit_live_schwab_with_trade_memory  # type: ignore[method-assign]
     app_cls.format_schwab_open_orders_response = _format_recent_orders_with_trade_memory  # type: ignore[method-assign]
     app_cls.format_schwab_open_orders_only_response = _format_open_orders_only_with_trade_memory  # type: ignore[method-assign]
     app_cls.show_schwab_trade_memory = _show_schwab_trade_memory  # type: ignore[attr-defined]

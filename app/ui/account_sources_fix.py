@@ -191,6 +191,28 @@ def _rebuild_schwab_ticket_side_by_side(self: tk.Tk, ticket: ttk.LabelFrame) -> 
     self._schwab_options_fields_integrated = True
 
 
+def _submit_live_schwab_from_workspace(self: tk.Tk) -> None:
+    output = getattr(self, "schwab_trading_preview_text", None)
+    if output is not None:
+        self.preview_text = output
+
+    if hasattr(self, "trade_venue_var"):
+        try:
+            self.trade_venue_var.set("Schwab")
+        except tk.TclError:
+            pass
+
+    command = getattr(self, "submit_live_schwab_order_guarded", None)
+    if not callable(command):
+        messagebox.showerror(
+            "Schwab live submit unavailable",
+            "submit_live_schwab_order_guarded is not installed. Restart the app after pulling the latest changes.",
+        )
+        return
+
+    command()
+
+
 def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
     actions = ttk.LabelFrame(ticket, text="Schwab Actions", style="Card.TLabelframe")
     actions.grid(row=1, column=0, sticky="ew", pady=(12, 0))
@@ -210,7 +232,8 @@ def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
     _add_action_button(actions, row=2, column=1, text="Open Only", command=schwab_action("load_selected_open_orders_only", "load_schwab_open_orders_only"))
     _add_action_button(actions, row=2, column=2, text="Options Strategy", command=schwab_action("show_technical_analysis"))
     _add_action_button(actions, row=3, column=0, text="Recent Orders", command=schwab_action("load_selected_recent_orders", "load_schwab_open_orders"))
-    _add_action_button(actions, row=3, column=2, text="LIVE Submit", command=lambda app=self: _run_schwab_workspace_action(app, "submit_live_schwab_order_guarded"), style="Danger.TButton")
+    _add_action_button(actions, row=3, column=2, text="LIVE Submit",
+                       command=lambda app=self: _submit_live_schwab_from_workspace(app), style="Danger.TButton")
     _add_action_button(actions, row=4, column=0, text="Cancel Order", command=schwab_action("cancel_selected_order", "show_cancel_order_placeholder"), style="Danger.TButton")
 
 
