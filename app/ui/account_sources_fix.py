@@ -214,6 +214,415 @@ def _submit_live_schwab_from_workspace(self: tk.Tk) -> None:
     command()
 
 
+def _schwab_live_submit_click_debug(self: tk.Tk) -> None:
+    import json
+    import sys
+    import traceback
+    from datetime import datetime, timezone
+
+    def terminal(text: str) -> None:
+        print("\n" + "=" * 80, file=sys.stderr, flush=True)
+        print(text, file=sys.stderr, flush=True)
+        print("=" * 80 + "\n", file=sys.stderr, flush=True)
+
+    def popup(title: str, text: str) -> None:
+        try:
+            self.bell()
+        except Exception:
+            pass
+        try:
+            messagebox.showinfo(title, text, parent=self)
+        except Exception:
+            try:
+                messagebox.showinfo(title, text)
+            except Exception:
+                terminal(f"{title}\n\n{text}")
+
+    def pane(text: str) -> None:
+        output = getattr(self, "schwab_trading_preview_text", None)
+        if output is not None:
+            try:
+                _set_schwab_mode_text(self, text)
+                return
+            except Exception:
+                pass
+
+        setter = getattr(self, "_set_preview_text", None)
+        if callable(setter):
+            try:
+                setter(text)
+                return
+            except Exception:
+                pass
+
+        terminal(text)
+
+    # This must happen first. If you do not see this popup, the button is not running this code.
+    first_message = (
+        "LIVE SUBMIT BUTTON CLICK RECEIVED BY PYTHON\n\n"
+        f"UTC: {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n\n"
+        "This popup appears before Schwab auth, before previewOrder, before submit, before any safety logic.\n\n"
+        "If this popup appears, the Tk button is wired.\n"
+        "If this popup does NOT appear, the app is running old code or the button is bound somewhere else."
+    )
+    terminal(first_message)
+    pane(first_message)
+    popup("LIVE Submit click received", first_message)
+
+    try:
+        # Keep this as preview-only while debugging. This does NOT place a live order.
+        symbol = self.symbol_var.get().strip().upper()
+        side = self.side_var.get().strip().lower()
+        quantity_raw = self.quantity_var.get().strip()
+        limit_raw = self.limit_price_var.get().strip()
+
+        if not symbol:
+            raise ValueError("Symbol is blank.")
+        if side not in {"buy", "sell"}:
+            raise ValueError(f"Side must be buy or sell. Got: {side!r}")
+        if not quantity_raw:
+            raise ValueError("Quantity is blank.")
+        if not limit_raw:
+            raise ValueError("Entry / Limit is blank.")
+
+        quantity = int(float(quantity_raw))
+        limit_price = float(limit_raw)
+
+        if quantity <= 0:
+            raise ValueError("Quantity must be positive.")
+        if limit_price <= 0:
+            raise ValueError("Limit price must be positive.")
+
+        instruction = "BUY" if side == "buy" else "SELL"
+
+        payload = {
+            "orderType": "LIMIT",
+            "session": "NORMAL",
+            "duration": "DAY",
+            "orderStrategyType": "SINGLE",
+            "price": f"{limit_price:.2f}",
+            "orderLegCollection": [
+                {
+                    "instruction": instruction,
+                    "quantity": quantity,
+                    "instrument": {
+                        "symbol": symbol,
+                        "assetType": "EQUITY",
+                    },
+                }
+            ],
+        }
+
+        started = (
+            "DIRECT SCHWAB PREVIEWORDER PROBE STARTED\n"
+            "=========================================\n\n"
+            "This is previewOrder only. No live order is being placed.\n\n"
+            f"Payload:\n{json.dumps(payload, indent=2)}\n\n"
+            "Now authorizing Schwab session..."
+        )
+        terminal(started)
+        pane(started)
+        popup("Schwab probe started", "Click reached Python. Now calling Schwab previewOrder only.")
+
+        try:
+            self.update_idletasks()
+        except Exception:
+            pass
+
+        session = self._authorize_schwab_session()
+        if session is None:
+            raise RuntimeError("Schwab authorization returned no session.")
+
+        calling = (
+            "SCHWAB SESSION ACQUIRED\n"
+            "=======================\n\n"
+            "Calling session.preview_order(payload) now.\n"
+            "If the app freezes here, the hang is inside Schwab previewOrder/network/auth code."
+        )
+        terminal(calling)
+        pane(calling)
+
+        status_code, response_payload = session.preview_order(payload)
+
+        result = (
+            "DIRECT SCHWAB PREVIEWORDER RESULT\n"
+            "=================================\n\n"
+            f"HTTP Status: {status_code}\n\n"
+            "Response:\n"
+            f"{json.dumps(response_payload, indent=2) if isinstance(response_payload, (dict, list)) else str(response_payload)}\n\n"
+            "No live order was placed. This was previewOrder only."
+        )
+        terminal(result)
+        pane(result)
+        popup(
+            "Schwab previewOrder returned",
+            (
+                f"HTTP Status: {status_code}\n\n"
+                "Check the Schwab output pane and PowerShell terminal for the full response body."
+            ),
+        )
+
+    except Exception as exc:
+        error_text = (
+            "DIRECT SCHWAB DEBUG ERROR\n"
+            "=========================\n\n"
+            f"{type(exc).__name__}: {exc}\n\n"
+            "Traceback:\n"
+            f"{traceback.format_exc()}"
+        )
+        terminal(error_text)
+        pane(error_text)
+        try:
+            messagebox.showerror("Schwab LIVE Submit debug error", f"{type(exc).__name__}: {exc}", parent=self)
+        except Exception:
+            messagebox.showerror("Schwab LIVE Submit debug error", f"{type(exc).__name__}: {exc}")
+
+
+def _direct_schwab_stock_api_probe(self: tk.Tk) -> None:
+    """Direct Schwab API smoke test: build one simple stock/ETF LIMIT order and call previewOrder only."""
+    import json
+    import traceback
+    from datetime import datetime, timezone
+
+    def emit(text: str) -> None:
+        output = getattr(self, "schwab_trading_preview_text", None)
+        if output is not None:
+            _set_schwab_mode_text(self, text)
+            return
+        setter = getattr(self, "_set_preview_text", None)
+        if callable(setter):
+            setter(text)
+
+    try:
+        symbol = self.symbol_var.get().strip().upper()
+        side = self.side_var.get().strip().lower()
+        quantity = int(float(self.quantity_var.get().strip()))
+        limit_price = float(self.limit_price_var.get().strip())
+
+        if not symbol:
+            raise ValueError("Symbol is blank.")
+        if side not in {"buy", "sell"}:
+            raise ValueError(f"Side must be buy or sell, got: {side!r}")
+        if quantity <= 0:
+            raise ValueError("Quantity must be positive.")
+        if limit_price <= 0:
+            raise ValueError("Limit price must be positive.")
+
+        instruction = "BUY" if side == "buy" else "SELL"
+
+        payload = {
+            "orderType": "LIMIT",
+            "session": "NORMAL",
+            "duration": "DAY",
+            "orderStrategyType": "SINGLE",
+            "price": f"{limit_price:.2f}",
+            "orderLegCollection": [
+                {
+                    "instruction": instruction,
+                    "quantity": quantity,
+                    "instrument": {
+                        "symbol": symbol,
+                        "assetType": "EQUITY",
+                    },
+                }
+            ],
+        }
+
+        emit(
+            "DIRECT SCHWAB API PROBE STARTED\n"
+            "===============================\n\n"
+            f"Time UTC: {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
+            "Endpoint: Schwab previewOrder only\n"
+            "Live order submit: NO\n\n"
+            "Payload:\n"
+            f"{json.dumps(payload, indent=2)}\n\n"
+            "Authorizing Schwab session and calling previewOrder now..."
+        )
+
+        try:
+            self.update_idletasks()
+        except Exception:
+            pass
+
+        session = self._authorize_schwab_session()
+        if session is None:
+            raise RuntimeError("Schwab authorization returned no session.")
+
+        status_code, response_payload = session.preview_order(payload)
+
+        emit(
+            "DIRECT SCHWAB API PROBE RESULT\n"
+            "==============================\n\n"
+            f"HTTP Status: {status_code}\n\n"
+            "Request payload:\n"
+            f"{json.dumps(payload, indent=2)}\n\n"
+            "Schwab previewOrder response:\n"
+            f"{json.dumps(response_payload, indent=2) if isinstance(response_payload, (dict, list)) else str(response_payload)}\n\n"
+            "No live order was placed. This was previewOrder only."
+        )
+
+    except Exception as exc:
+        emit(
+            "DIRECT SCHWAB API PROBE ERROR\n"
+            "=============================\n\n"
+            f"{type(exc).__name__}: {exc}\n\n"
+            "Traceback:\n"
+            f"{traceback.format_exc()}"
+        )
+        messagebox.showerror("Direct Schwab API probe failed", f"{type(exc).__name__}: {exc}")
+
+
+def _direct_schwab_stock_live_submit_debug(self: tk.Tk) -> None:
+    import json
+    import sys
+    import traceback
+    from datetime import datetime, timezone
+
+    def terminal(text: str) -> None:
+        print("\n" + "=" * 80, file=sys.stderr, flush=True)
+        print(text, file=sys.stderr, flush=True)
+        print("=" * 80 + "\n", file=sys.stderr, flush=True)
+
+    def pane(text: str) -> None:
+        output = getattr(self, "schwab_trading_preview_text", None)
+        if output is not None:
+            try:
+                _set_schwab_mode_text(self, text)
+                return
+            except Exception:
+                pass
+        setter = getattr(self, "_set_preview_text", None)
+        if callable(setter):
+            try:
+                setter(text)
+                return
+            except Exception:
+                pass
+        terminal(text)
+
+    def popup(title: str, text: str) -> None:
+        try:
+            self.bell()
+        except Exception:
+            pass
+        try:
+            messagebox.showinfo(title, text, parent=self)
+        except Exception:
+            messagebox.showinfo(title, text)
+
+    try:
+        symbol = self.symbol_var.get().strip().upper()
+        side = self.side_var.get().strip().lower()
+        quantity = int(float(self.quantity_var.get().strip()))
+        limit_price = float(self.limit_price_var.get().strip())
+
+        if not symbol:
+            raise ValueError("Symbol is blank.")
+        if side not in {"buy", "sell"}:
+            raise ValueError(f"Side must be buy or sell. Got: {side!r}")
+        if quantity <= 0:
+            raise ValueError("Quantity must be positive.")
+        if limit_price <= 0:
+            raise ValueError("Limit price must be positive.")
+
+        instruction = "BUY" if side == "buy" else "SELL"
+
+        payload = {
+            "orderType": "LIMIT",
+            "session": "NORMAL",
+            "duration": "DAY",
+            "orderStrategyType": "SINGLE",
+            "price": f"{limit_price:.2f}",
+            "orderLegCollection": [
+                {
+                    "instruction": instruction,
+                    "quantity": quantity,
+                    "instrument": {
+                        "symbol": symbol,
+                        "assetType": "EQUITY",
+                    },
+                }
+            ],
+        }
+
+        start_text = (
+            "DIRECT SCHWAB LIVE SUBMIT DEBUG STARTED\n"
+            "======================================\n\n"
+            f"UTC: {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n\n"
+            "This will call Schwab previewOrder first.\n"
+            "If preview returns ACCEPTED, it will call Schwab submit_live_order.\n\n"
+            "Payload:\n"
+            f"{json.dumps(payload, indent=2)}"
+        )
+        terminal(start_text)
+        pane(start_text)
+        popup("Direct Schwab live submit debug", "Click received. Preview first, then submit only if Schwab returns ACCEPTED.")
+
+        try:
+            self.update_idletasks()
+        except Exception:
+            pass
+
+        session = self._authorize_schwab_session()
+        if session is None:
+            raise RuntimeError("Schwab authorization returned no session.")
+
+        preview_status_code, preview_payload = session.preview_order(payload)
+        strategy = preview_payload.get("orderStrategy", {}) if isinstance(preview_payload, dict) else {}
+        schwab_status = str(strategy.get("status") or "UNKNOWN").upper()
+
+        preview_text = (
+            "DIRECT SCHWAB LIVE SUBMIT PREVIEW RESULT\n"
+            "========================================\n\n"
+            f"HTTP Status: {preview_status_code}\n"
+            f"Schwab Status: {schwab_status}\n\n"
+            "Preview response:\n"
+            f"{json.dumps(preview_payload, indent=2) if isinstance(preview_payload, (dict, list)) else str(preview_payload)}"
+        )
+        terminal(preview_text)
+        pane(preview_text)
+
+        if preview_status_code != 200 or schwab_status != "ACCEPTED":
+            popup("Schwab preview blocked submit", f"Preview HTTP {preview_status_code}, Schwab status {schwab_status}. No order submitted.")
+            return
+
+        popup(
+            "Preview ACCEPTED",
+            "Schwab preview returned ACCEPTED.\n\n"
+            "The app will now call submit_live_order(payload)."
+        )
+
+        submit_status_code, submit_payload, location = session.submit_live_order(payload)
+
+        result_text = (
+            "DIRECT SCHWAB LIVE SUBMIT RESULT\n"
+            "================================\n\n"
+            f"HTTP Status: {submit_status_code}\n"
+            f"Location: {location or '(none returned)'}\n\n"
+            "Submit response body:\n"
+            f"{json.dumps(submit_payload, indent=2) if isinstance(submit_payload, (dict, list)) else str(submit_payload)}\n\n"
+            "Now check Recent Orders / thinkorswim."
+        )
+        terminal(result_text)
+        pane(result_text)
+        popup("Schwab submit_live_order returned", f"HTTP Status: {submit_status_code}\nLocation: {location or '(none returned)'}")
+
+    except Exception as exc:
+        error_text = (
+            "DIRECT SCHWAB LIVE SUBMIT DEBUG ERROR\n"
+            "=====================================\n\n"
+            f"{type(exc).__name__}: {exc}\n\n"
+            "Traceback:\n"
+            f"{traceback.format_exc()}"
+        )
+        terminal(error_text)
+        pane(error_text)
+        try:
+            messagebox.showerror("Direct Schwab live submit error", f"{type(exc).__name__}: {exc}", parent=self)
+        except Exception:
+            messagebox.showerror("Direct Schwab live submit error", f"{type(exc).__name__}: {exc}")
+
+
 def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
     actions = ttk.LabelFrame(ticket, text="Schwab Actions", style="Card.TLabelframe")
     actions.grid(row=1, column=0, sticky="ew", pady=(12, 0))
@@ -233,7 +642,8 @@ def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
     _add_action_button(actions, row=2, column=1, text="Open Only", command=schwab_action("load_selected_open_orders_only", "load_schwab_open_orders_only"))
     _add_action_button(actions, row=2, column=2, text="Options Strategy", command=schwab_action("show_technical_analysis"))
     _add_action_button(actions, row=3, column=0, text="Recent Orders", command=schwab_action("load_selected_recent_orders", "load_schwab_open_orders"))
-    _add_action_button(actions, row=3, column=2, text="LIVE Submit", command=lambda app=self: _run_schwab_workspace_action(app, "submit_live_schwab_order_guarded"),                       style="Danger.TButton")
+    # _add_action_button(actions, row=3, column=2, text="LIVE Submit", command=lambda app=self: _run_schwab_workspace_action(app, "submit_live_schwab_order_guarded"),                       style="Danger.TButton")
+    _add_action_button(actions, row=3, column=2, text="LIVE Submit", command=lambda app=self: _direct_schwab_stock_live_submit_debug(app), style="Danger.TButton")
     _add_action_button(actions, row=4, column=0, text="Cancel Order", command=schwab_action("cancel_selected_order", "show_cancel_order_placeholder"), style="Danger.TButton")
 
 
