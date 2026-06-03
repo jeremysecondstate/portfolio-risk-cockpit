@@ -192,7 +192,7 @@ def _rebuild_schwab_ticket_side_by_side(self: tk.Tk, ticket: ttk.LabelFrame) -> 
     self._schwab_options_fields_integrated = True
 
 
-def _direct_schwab_stock_live_submit_(self: tk.Tk) -> None:
+def _submit_schwab_stock_limit_order(self: tk.Tk) -> None:
     import json
     import sys
     import traceback
@@ -211,6 +211,7 @@ def _direct_schwab_stock_live_submit_(self: tk.Tk) -> None:
                 return
             except Exception:
                 pass
+
         setter = getattr(self, "_set_preview_text", None)
         if callable(setter):
             try:
@@ -218,17 +219,26 @@ def _direct_schwab_stock_live_submit_(self: tk.Tk) -> None:
                 return
             except Exception:
                 pass
+
         terminal(text)
 
-    def popup(title: str, text: str) -> None:
+    def show_error(title: str, text: str) -> None:
         try:
-            self.bell()
+            messagebox.showerror(title, text, parent=self)
         except Exception:
-            pass
+            messagebox.showerror(title, text)
+
+    def show_info(title: str, text: str) -> None:
         try:
             messagebox.showinfo(title, text, parent=self)
         except Exception:
             messagebox.showinfo(title, text)
+
+    def ask_submit(title: str, text: str) -> bool:
+        try:
+            return bool(messagebox.askokcancel(title, text, parent=self))
+        except Exception:
+            return bool(messagebox.askokcancel(title, text))
 
     try:
         symbol = self.symbol_var.get().strip().upper()
@@ -266,17 +276,14 @@ def _direct_schwab_stock_live_submit_(self: tk.Tk) -> None:
         }
 
         start_text = (
-            "DIRECT SCHWAB LIVE SUBMIT DEBUG STARTED\n"
-            "======================================\n\n"
-            f"UTC: {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n\n"
-            "This will call Schwab previewOrder first.\n"
-            "If preview returns ACCEPTED, it will call Schwab submit_live_order.\n\n"
-            "Payload:\n"
-            f"{json.dumps(payload, indent=2)}"
+            "SCHWAB LIVE SUBMIT PREVIEW\n"
+            "==========================\n\n"
+            f"UTC: {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
+            f"Order: {instruction} {quantity} {symbol} @ {limit_price:.2f} LIMIT DAY\n\n"
+            "Calling Schwab previewOrder..."
         )
         terminal(start_text)
         pane(start_text)
-        popup("Direct Schwab live submit debug", "Click received. Preview first, then submit only if Schwab returns ACCEPTED.")
 
         try:
             self.update_idletasks()
@@ -291,56 +298,85 @@ def _direct_schwab_stock_live_submit_(self: tk.Tk) -> None:
         strategy = preview_payload.get("orderStrategy", {}) if isinstance(preview_payload, dict) else {}
         schwab_status = str(strategy.get("status") or "UNKNOWN").upper()
 
+        order_balance = strategy.get("orderBalance", {}) if isinstance(strategy, dict) else {}
+        order_value = order_balance.get("orderValue", quantity * limit_price)
+        buying_power = order_balance.get("projectedBuyingPower", "--")
+        available_funds = order_balance.get("projectedAvailableFund", "--")
+        commission = order_balance.get("projectedCommission", "--")
+
         preview_text = (
-            "DIRECT SCHWAB LIVE SUBMIT PREVIEW RESULT\n"
-            "========================================\n\n"
+            "SCHWAB LIVE SUBMIT PREVIEW RESULT\n"
+            "=================================\n\n"
             f"HTTP Status: {preview_status_code}\n"
             f"Schwab Status: {schwab_status}\n\n"
-            "Preview response:\n"
+            f"Order: {instruction} {quantity} {symbol} @ {limit_price:.2f} LIMIT DAY\n"
+            f"Estimated order value: {order_value}\n"
+            f"Projected buying power: {buying_power}\n"
+            f"Projected available funds: {available_funds}\n"
+            f"Projected commission: {commission}\n\n"
+            "Raw preview response:\n"
             f"{json.dumps(preview_payload, indent=2) if isinstance(preview_payload, (dict, list)) else str(preview_payload)}"
         )
         terminal(preview_text)
         pane(preview_text)
 
         if preview_status_code != 200 or schwab_status != "ACCEPTED":
-            popup("Schwab preview blocked submit", f"Preview HTTP {preview_status_code}, Schwab status {schwab_status}. No order submitted.")
+            show_error(
+                "Schwab preview blocked submit",
+                f"Preview HTTP {preview_status_code}, Schwab status {schwab_status}.\n\nNo order was submitted.",
+            )
             return
 
-        popup(
-            "Preview ACCEPTED",
-            "Schwab preview returned ACCEPTED.\n\n"
-            "The app will now call submit_live_order(payload)."
+        confirm_text = (
+            f"{instruction} {quantity} {symbol}\n"
+            f"Limit: {limit_price:.2f}\n"
+            f"Duration: DAY\n"
+            f"Estimated value: {order_value}\n\n"
+            "Submit this order?"
         )
+
+        if not ask_submit("Submit Schwab order?", confirm_text):
+            pane(preview_text + "\n\nSubmit canceled by user. No live order was placed.")
+            terminal("Submit canceled by user. No live order was placed.")
+            return
 
         submit_status_code, submit_payload, location = session.submit_live_order(payload)
 
         result_text = (
-            "DIRECT SCHWAB LIVE SUBMIT RESULT\n"
-            "================================\n\n"
+            "SCHWAB LIVE SUBMIT RESULT\n"
+            "=========================\n\n"
             f"HTTP Status: {submit_status_code}\n"
             f"Location: {location or '(none returned)'}\n\n"
             "Submit response body:\n"
             f"{json.dumps(submit_payload, indent=2) if isinstance(submit_payload, (dict, list)) else str(submit_payload)}\n\n"
-            "Now check Recent Orders / thinkorswim."
+            "Check Recent Orders / thinkorswim for final order status."
         )
         terminal(result_text)
         pane(result_text)
-        popup("Schwab submit_live_order returned", f"HTTP Status: {submit_status_code}\nLocation: {location or '(none returned)'}")
+
+        if 200 <= submit_status_code < 300:
+            show_info(
+                "Schwab order submitted",
+                f"HTTP Status: {submit_status_code}\n\n"
+                f"Order location:\n{location or '(none returned)'}",
+            )
+        else:
+            show_error(
+                "Schwab submit returned non-2xx",
+                f"HTTP Status: {submit_status_code}\n\nCheck the Schwab output pane.",
+            )
 
     except Exception as exc:
         error_text = (
-            "DIRECT SCHWAB LIVE SUBMIT DEBUG ERROR\n"
-            "=====================================\n\n"
+            "SCHWAB LIVE SUBMIT ERROR\n"
+            "========================\n\n"
             f"{type(exc).__name__}: {exc}\n\n"
             "Traceback:\n"
             f"{traceback.format_exc()}"
         )
         terminal(error_text)
         pane(error_text)
-        try:
-            messagebox.showerror("Direct Schwab live submit error", f"{type(exc).__name__}: {exc}", parent=self)
-        except Exception:
-            messagebox.showerror("Direct Schwab live submit error", f"{type(exc).__name__}: {exc}")
+        show_error("Schwab live submit error", f"{type(exc).__name__}: {exc}")
 
 
 def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
@@ -362,8 +398,7 @@ def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
     _add_action_button(actions, row=2, column=1, text="Open Only", command=schwab_action("load_selected_open_orders_only", "load_schwab_open_orders_only"))
     _add_action_button(actions, row=2, column=2, text="Options Strategy", command=schwab_action("show_technical_analysis"))
     _add_action_button(actions, row=3, column=0, text="Recent Orders", command=schwab_action("load_selected_recent_orders", "load_schwab_open_orders"))
-    # _add_action_button(actions, row=3, column=2, text="LIVE Submit", command=lambda app=self: _run_schwab_workspace_action(app, "submit_live_schwab_order_guarded"),                       style="Danger.TButton")
-    _add_action_button(actions, row=3, column=2, text="LIVE Submit", command=lambda app=self: _direct_schwab_stock_live_submit_(app), style="Danger.TButton")
+    _add_action_button(actions, row=3, column=2, text="LIVE Submit", command=lambda app=self: _submit_schwab_stock_limit_order(app), style="Danger.TButton")
     _add_action_button(actions, row=4, column=0, text="Cancel Order", command=schwab_action("cancel_selected_order", "show_cancel_order_placeholder"), style="Danger.TButton")
 
 
