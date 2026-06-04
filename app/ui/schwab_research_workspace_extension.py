@@ -3381,6 +3381,8 @@ def _render_macro(self: tk.Tk, payload: _ResearchPayload) -> None:
             for readout in readouts
         ],
         columns=3,
+        card_height=118,
+        prominent_height=118,
     )
     clear_children(frame.why)  # type: ignore[attr-defined]
     why_text = macro_why_it_matters(payload.symbol, None, decision.macro_backdrop.label)
