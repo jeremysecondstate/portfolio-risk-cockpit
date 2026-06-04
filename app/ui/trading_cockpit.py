@@ -538,7 +538,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             self._set_preview_text(
                 "SCHWAB CANCEL ORDER RESULT\n"
                 "==========================\n\n"
-                f"HTTP Status: {status_code}\n"
+                f"Vibe: {status_code}\n"
                 f"Order ID: {order_id}\n\n"
                 f"Response: {payload if payload is not None else '(empty response body)'}\n\n"
                 "Next step: click Open Only to verify the order is no longer active.\n\n"
@@ -601,7 +601,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             self._set_preview_text(
                 "LIVE SCHWAB ORDER SUBMIT RESULT\n"
                 "===============================\n\n"
-                f"HTTP Status: {submit_status_code}\n"
+                f"Vibe: {submit_status_code}\n"
                 f"Location: {location or '(none returned)'}\n"
                 f"Response: {submit_payload if submit_payload is not None else '(empty response body)'}\n\n"
                 "Next step: use Cancel Order if this is a test order you want to cancel."

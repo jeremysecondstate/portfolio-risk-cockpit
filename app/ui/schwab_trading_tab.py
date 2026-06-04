@@ -533,7 +533,7 @@ def _submit_schwab_stock_limit_order(self: tk.Tk) -> None:
         terminal(
             "SCHWAB LIVE SUBMIT RAW RESULT\n"
             "============================\n\n"
-            f"HTTP Status: {submit_status_code}\n"
+            f"Vibe: {submit_status_code}\n"
             f"Location: {location or '(none returned)'}\n"
             f"Body: {json.dumps(submit_payload, indent=2) if isinstance(submit_payload, (dict, list)) else str(submit_payload)}"
         )
@@ -543,13 +543,13 @@ def _submit_schwab_stock_limit_order(self: tk.Tk) -> None:
             show_info(
                 "Schwab order submitted",
                 f"{_format_stock_order_summary(payload)}\n\n"
-                f"HTTP Status: {submit_status_code}\n"
+                f"Vibe: {submit_status_code}\n"
                 "Check Recent Orders or thinkorswim for final status.",
             )
         else:
             show_error(
                 "Schwab submit returned non-2xx",
-                f"HTTP Status: {submit_status_code}\n\nCheck the Schwab output pane.",
+                f"Vibe: {submit_status_code}\n\nCheck the Schwab output pane.",
             )
 
     except Exception as exc:
@@ -708,7 +708,7 @@ def _refresh_schwab_open_orders_tab(self: tk.Tk) -> None:
             self,
             "SCHWAB OPEN ORDERS\n"
             "==================\n\n"
-            f"HTTP Status: {status_code}\n"
+            f"Vibe: {status_code}\n"
             f"Active orders loaded: {len(orders)}\n\n"
             "Select an open order to populate the ticket. Double-click to edit/replace, or use Cancel Order in the Open Orders tab.",
         )
@@ -727,7 +727,7 @@ def _refresh_schwab_recent_orders_tab(self: tk.Tk) -> None:
             self,
             "SCHWAB RECENT ORDERS\n"
             "====================\n\n"
-            f"HTTP Status: {status_code}\n"
+            f"Vibe: {status_code}\n"
             f"Recent orders loaded: {len(orders)}\n\n"
             "Working/open orders can be edited from this tab. Filled, canceled, rejected, and expired orders open read-only details.",
         )
@@ -957,7 +957,7 @@ def _show_schwab_replace_dialog(self: tk.Tk, order: dict[str, Any], parsed: dict
                 "SCHWAB REPLACE ORDER RESULT\n"
                 "===========================\n\n"
                 f"Original order ID: {parsed['order_id']}\n"
-                f"HTTP Status: {status_code}\n"
+                f"Vibe: {status_code}\n"
                 f"Location: {location or '(none returned)'}\n\n"
                 "Replacement payload:\n"
                 f"{json.dumps(payload, indent=2)}\n\n"
@@ -972,7 +972,7 @@ def _show_schwab_replace_dialog(self: tk.Tk, order: dict[str, Any], parsed: dict
                 messagebox.showinfo("Schwab replace sent", f"Order {parsed['order_id']} replace returned HTTP {status_code}.", parent=window)
                 window.destroy()
             else:
-                messagebox.showerror("Schwab replace returned non-2xx", f"HTTP Status: {status_code}\n\nCheck the Schwab output pane.", parent=window)
+                messagebox.showerror("Schwab replace returned non-2xx", f"Vibe: {status_code}\n\nCheck the Schwab output pane.", parent=window)
         except Exception as exc:
             _write_schwab_order_error(self, "Schwab replace order failed", exc)
             messagebox.showerror("Schwab replace failed", str(exc), parent=window)
@@ -1073,7 +1073,7 @@ def _cancel_selected_schwab_open_order(self: tk.Tk, parent: tk.Widget | None = N
         receipt = (
             "SCHWAB CANCEL ORDER RESULT\n"
             "==========================\n\n"
-            f"HTTP Status: {status_code}\n"
+            f"Vibe: {status_code}\n"
             f"Order ID: {order_id}\n"
             f"Symbol: {parsed['symbol']}\n"
             f"Status before cancel: {parsed['status']}\n\n"
@@ -1087,7 +1087,7 @@ def _cancel_selected_schwab_open_order(self: tk.Tk, parent: tk.Widget | None = N
         if 200 <= status_code < 300:
             messagebox.showinfo("Schwab cancel sent", f"Order {order_id} cancel returned HTTP {status_code}.", parent=parent)
         else:
-            messagebox.showerror("Schwab cancel returned non-2xx", f"HTTP Status: {status_code}\n\nCheck the Schwab output pane.", parent=parent)
+            messagebox.showerror("Schwab cancel returned non-2xx", f"Vibe: {status_code}\n\nCheck the Schwab output pane.", parent=parent)
     except Exception as exc:
         _write_schwab_order_error(self, "Schwab cancel order failed", exc)
         messagebox.showerror("Schwab cancel failed", str(exc), parent=parent)
