@@ -1,1 +1,4 @@
-Do not tell me what to put in my README.
+Context before you start:
+This repo recently had Schwab LIVE Submit break because 
+the button path got routed through stale wrappers/generic submit handlers. 
+**Do not undo the current working Schwab live-submit (order execution logic) flow.**

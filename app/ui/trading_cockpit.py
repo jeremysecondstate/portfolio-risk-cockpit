@@ -6,7 +6,14 @@ import webbrowser
 from datetime import datetime, timedelta, timezone
 from tkinter import messagebox, simpledialog, ttk
 
-from app.analytics.technical_analysis import analyze_candles, candles_from_price_history, compare_timeframes
+from app.analytics.technical_analysis import (
+    DEFAULT_COMMAND_CENTER_TIMEFRAMES,
+    TechnicalTicket,
+    build_technical_command_center_report,
+    candles_from_price_history,
+    format_technical_command_center_report,
+    parse_quote_snapshot,
+)
 from app.brokers.hyperliquid.client import (
     HyperliquidInfoClient,
     format_hyperliquid_snapshot,
@@ -299,22 +306,74 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             if session is None:
                 return
 
-            intraday_status_code, intraday_payload = session.get_price_history(symbol, period_type="day", period=10, frequency_type="minute", frequency=5, need_extended_hours_data=False)
-            if intraday_status_code != 200:
-                raise RuntimeError(f"Schwab intraday price history returned HTTP {intraday_status_code}: {intraday_payload}")
-            daily_status_code, daily_payload = session.get_price_history(symbol, period_type="year", period=1, frequency_type="daily", frequency=1, need_extended_hours_data=False)
-            if daily_status_code != 200:
-                raise RuntimeError(f"Schwab daily price history returned HTTP {daily_status_code}: {daily_payload}")
+            timeframe_candles = {}
+            warnings = []
+            for spec in DEFAULT_COMMAND_CENTER_TIMEFRAMES:
+                try:
+                    status_code, payload = session.get_price_history(
+                        symbol,
+                        period_type=spec.period_type,
+                        period=spec.period,
+                        frequency_type=spec.frequency_type,
+                        frequency=spec.frequency,
+                        need_extended_hours_data=False,
+                    )
+                    if status_code != 200:
+                        warnings.append(f"{spec.label} fetch returned HTTP {status_code}: {payload}")
+                        timeframe_candles[spec.key] = []
+                        continue
+                    timeframe_candles[spec.key] = candles_from_price_history(payload)
+                except Exception as exc:
+                    warnings.append(f"{spec.label} fetch failed: {exc}")
+                    timeframe_candles[spec.key] = []
 
-            intraday_report = analyze_candles(symbol, candles_from_price_history(intraday_payload))
-            daily_report = analyze_candles(symbol, candles_from_price_history(daily_payload))
-            report = compare_timeframes(symbol, intraday_report, daily_report)
+            benchmark_candles = {}
+            for benchmark in ("SPY", "QQQ", "IWM"):
+                if benchmark == symbol:
+                    benchmark_candles[benchmark] = timeframe_candles.get("daily_1y", [])
+                    continue
+                try:
+                    status_code, payload = session.get_price_history(
+                        benchmark,
+                        period_type="year",
+                        period=1,
+                        frequency_type="daily",
+                        frequency=1,
+                        need_extended_hours_data=False,
+                    )
+                    if status_code == 200:
+                        benchmark_candles[benchmark] = candles_from_price_history(payload)
+                    else:
+                        warnings.append(f"{benchmark} benchmark fetch returned HTTP {status_code}: {payload}")
+                except Exception as exc:
+                    warnings.append(f"{benchmark} benchmark fetch failed: {exc}")
+
+            quote_snapshot = None
+            try:
+                status_code, payload = session.get_quote(symbol)
+                if status_code == 200:
+                    quote_snapshot = parse_quote_snapshot(symbol, payload)
+                else:
+                    warnings.append(f"{symbol} quote fetch returned HTTP {status_code}: {payload}")
+            except Exception as exc:
+                warnings.append(f"{symbol} quote fetch failed: {exc}")
+
+            report = build_technical_command_center_report(
+                symbol,
+                timeframe_candles,
+                benchmark_candles=benchmark_candles,
+                quote_snapshot=quote_snapshot,
+                ticket=_technical_ticket_from_ui(self),
+                warnings=warnings,
+            )
             self.schwab_status_var.set("Schwab: connected")
             self._set_preview_text(self.format_technical_analysis_report(report))
         except Exception as exc:
             messagebox.showerror("Technical analysis failed", str(exc))
 
     def format_technical_analysis_report(self, report) -> str:
+        if hasattr(report, "snapshots") and hasattr(report, "overall_score"):
+            return format_technical_command_center_report(report)
         lines = [
             f"MULTI-TIMEFRAME TECHNICAL ANALYSIS — {report.symbol}",
             "=" * (39 + len(report.symbol)),
@@ -553,3 +612,42 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
 
 def _format_optional_number(value: float | None) -> str:
     return "--" if value is None else f"{value:,.3f}"
+
+
+def _technical_ticket_from_ui(app: tk.Tk) -> TechnicalTicket:
+    return TechnicalTicket(
+        side=_string_var_value(app, "side_var", "buy"),
+        quantity=_optional_float(_string_var_value(app, "quantity_var", "")),
+        entry_price=_optional_float(_string_var_value(app, "limit_price_var", "")) or _optional_float(_string_var_value(app, "estimated_price_var", "")),
+        stop_price=_optional_float(_string_var_value(app, "stop_price_var", "")),
+        portfolio_value=_portfolio_value(app),
+    )
+
+
+def _string_var_value(app: tk.Tk, name: str, default: str) -> str:
+    var = getattr(app, name, None)
+    try:
+        return str(var.get()).strip()
+    except Exception:
+        return default
+
+
+def _optional_float(value: str) -> float | None:
+    try:
+        cleaned = str(value or "").replace("$", "").replace(",", "").strip()
+        if not cleaned:
+            return None
+        parsed = float(cleaned)
+        return parsed if parsed > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _portfolio_value(app: tk.Tk) -> float | None:
+    try:
+        broker = getattr(app, "broker", None)
+        portfolio = broker.get_portfolio() if broker is not None else None
+        value = float(getattr(portfolio, "total_value", 0.0) or 0.0)
+        return value if value > 0 else None
+    except Exception:
+        return None

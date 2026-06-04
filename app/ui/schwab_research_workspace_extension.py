@@ -103,7 +103,15 @@ from app.analytics.stock_research import (
     technical_scenario_moves,
 )
 from app.core.order_models import OrderSide, OrderType, TimeInForce
-from app.analytics.technical_analysis import Candle, candles_from_price_history
+from app.analytics.technical_analysis import (
+    DEFAULT_COMMAND_CENTER_TIMEFRAMES,
+    Candle,
+    TechnicalCommandCenterReport,
+    TechnicalTicket,
+    build_technical_command_center_report,
+    candles_from_price_history,
+    format_technical_command_center_report,
+)
 from app.analytics.trade_evidence import (
     TradeEvidenceReport,
     append_trade_evidence_snapshot,
@@ -158,6 +166,7 @@ class _ResearchPayload:
     market_indicators: dict[str, AdvancedIndicatorSnapshot] | None = None
     market_candles: dict[str, list[Candle]] | None = None
     trade_evidence_report: TradeEvidenceReport | None = None
+    command_center_report: TechnicalCommandCenterReport | None = None
 
 
 def install_schwab_research_workspace_extension(app_cls: Type[tk.Tk]) -> None:
@@ -1306,12 +1315,13 @@ def _run_research_analysis(self: tk.Tk) -> None:
         return
 
     portfolio = self.broker.get_portfolio()
+    ticket = _technical_ticket_from_research_ui(self, portfolio)
     _set_research_text(self.schwab_research_overview_text, f"Running Schwab research for {symbol}...\n\nFetching quote/history, SEC filings, fundamentals, earnings layer, and macro context.")
     self.schwab_research_status_var.set(f"Running analysis for {symbol}...")
 
     def worker() -> None:
         try:
-            payload = _build_research_payload(session, portfolio, symbol)
+            payload = _build_research_payload(session, portfolio, symbol, ticket=ticket)
         except Exception as exc:
             self.after(0, lambda error=exc: _show_research_error(self, symbol, error))
             return
@@ -1320,7 +1330,7 @@ def _run_research_analysis(self: tk.Tk) -> None:
     threading.Thread(target=worker, daemon=True).start()
 
 
-def _build_research_payload(session: Any, portfolio, symbol: str) -> _ResearchPayload:
+def _build_research_payload(session: Any, portfolio, symbol: str, *, ticket: TechnicalTicket | None = None) -> _ResearchPayload:
     statuses: list[DataSourceStatus] = []
     quote: dict[str, Any] | None = None
     daily_payload: dict[str, Any] | None = None
@@ -1332,8 +1342,17 @@ def _build_research_payload(session: Any, portfolio, symbol: str) -> _ResearchPa
     statuses.append(history_status)
     candles = candles_from_price_history(daily_payload) if daily_payload else []
     indicators = calculate_advanced_indicators(symbol, candles)
+    command_timeframes, command_warnings, command_statuses = _fetch_command_center_timeframes(session, symbol, candles)
+    statuses.extend(command_statuses)
     market_indicators, market_candles, market_statuses = _fetch_market_evidence_context(session, symbol, candles)
     statuses.extend(market_statuses)
+    command_center_report = build_technical_command_center_report(
+        symbol,
+        command_timeframes,
+        benchmark_candles=market_candles,
+        ticket=ticket,
+        warnings=command_warnings,
+    )
 
     fallback_price = _last_price_from_quote(quote) or indicators.latest_close
     context = build_portfolio_symbol_context(portfolio, symbol, fallback_price)
@@ -1420,6 +1439,7 @@ def _build_research_payload(session: Any, portfolio, symbol: str) -> _ResearchPa
         market_indicators,
         market_candles,
         trade_evidence_report,
+        command_center_report,
     )
 
 
@@ -1457,6 +1477,46 @@ def _fetch_daily_history(session: Any, symbol: str) -> tuple[dict[str, Any] | No
         if cached:
             return cached, DataSourceStatus("Schwab price history", "cached", _now(), f"{exc}; using cached candles.")
         return None, DataSourceStatus("Schwab price history", "error", _now(), str(exc))
+
+
+def _fetch_command_center_timeframes(
+    session: Any,
+    symbol: str,
+    daily_candles: list[Candle],
+) -> tuple[dict[str, list[Candle]], list[str], list[DataSourceStatus]]:
+    timeframe_candles: dict[str, list[Candle]] = {}
+    warnings: list[str] = []
+    statuses: list[DataSourceStatus] = []
+
+    for spec in DEFAULT_COMMAND_CENTER_TIMEFRAMES:
+        if spec.frequency_type == "daily" and daily_candles:
+            timeframe_candles[spec.key] = daily_candles[-260:]
+            statuses.append(DataSourceStatus(f"Command Center {spec.label}", "fresh/cache", _now(), "Using already loaded daily Schwab candles."))
+            continue
+        try:
+            status_code, payload = session.get_price_history(
+                symbol,
+                period_type=spec.period_type,
+                period=spec.period,
+                frequency_type=spec.frequency_type,
+                frequency=spec.frequency,
+                need_extended_hours_data=False,
+            )
+            if status_code != 200:
+                message = f"{spec.label} returned HTTP {status_code}: {payload}"
+                warnings.append(message)
+                statuses.append(DataSourceStatus(f"Command Center {spec.label}", "error", _now(), message))
+                timeframe_candles[spec.key] = []
+                continue
+            timeframe_candles[spec.key] = candles_from_price_history(payload)
+            statuses.append(DataSourceStatus(f"Command Center {spec.label}", "fresh", _now(), "Schwab price-history candles loaded."))
+        except Exception as exc:
+            message = f"{spec.label} fetch failed: {exc}"
+            warnings.append(message)
+            statuses.append(DataSourceStatus(f"Command Center {spec.label}", "error", _now(), str(exc)))
+            timeframe_candles[spec.key] = []
+
+    return timeframe_candles, warnings, statuses
 
 
 def _fetch_market_evidence_context(
@@ -2100,8 +2160,19 @@ def _render_technicals(self: tk.Tk, payload: _ResearchPayload) -> None:
         tree.insert("", tk.END, values=(metric, _number(value), read))
     for label, value in indicators.fibonacci_levels.items():
         tree.insert("", tk.END, values=(f"Fib {label}", _money(value), TERM_HELPERS["Fibonacci retracement"]))
+    if payload.command_center_report is not None:
+        for name, component in payload.command_center_report.scores.items():
+            tree.insert("", tk.END, values=(f"Command {name}", f"{component.score:.0f}/100", component.reason))
+        tree.insert("", tk.END, values=("Command action", payload.command_center_report.best_action, "Best action is derived from transparent scores and ticket quality."))
+    command_text = (
+        format_technical_command_center_report(payload.command_center_report)
+        if payload.command_center_report is not None
+        else "Technical Command Center unavailable."
+    )
     notes = "\n".join(
         [
+            command_text,
+            "",
             "What the chart is saying:",
             *[f"- {label}: {text}" for label, text in narrative.rows.items()],
             "",
@@ -3808,6 +3879,28 @@ def _ensure_stock_ticket_vars(self: tk.Tk) -> None:
     for name, value in defaults.items():
         if not hasattr(self, name):
             setattr(self, name, _new_ticket_string_var(self, value))
+
+
+def _technical_ticket_from_research_ui(self: tk.Tk, portfolio: Any) -> TechnicalTicket:
+    side = "buy"
+    try:
+        side = str(self.side_var.get()).strip().lower() or "buy"
+    except Exception:
+        pass
+    entry = _float_from_var(getattr(self, "limit_price_var", None)) or _float_from_var(getattr(self, "estimated_price_var", None))
+    portfolio_value = None
+    try:
+        value = float(getattr(portfolio, "total_value", 0.0) or 0.0)
+        portfolio_value = value if value > 0 else None
+    except Exception:
+        portfolio_value = None
+    return TechnicalTicket(
+        side=side,
+        quantity=_float_from_var(getattr(self, "quantity_var", None)),
+        entry_price=entry,
+        stop_price=_float_from_var(getattr(self, "stop_price_var", None)),
+        portfolio_value=portfolio_value,
+    )
 
 
 def _new_ticket_string_var(self: tk.Tk, value: str) -> tk.StringVar:
