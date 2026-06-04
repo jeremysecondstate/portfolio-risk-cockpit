@@ -35,6 +35,7 @@ from app.ui.venue_mid_extension import _extract_schwab_quote, _first_number, _fo
 def install_schwab_trading_tab(app_cls: Type[tk.Tk]) -> None:
     """Keep Account Sources state without rendering a large top strip."""
     app_cls._build_layout = _build_layout_without_account_strip  # type: ignore[method-assign]
+    app_cls.build_schwab_order_json_from_ui = _build_schwab_stock_order_json_from_ui  # type: ignore[method-assign]
     app_cls.capture_current_portfolio_source = _capture_current_source_portfolio  # type: ignore[attr-defined]
     app_cls.sync_options_from_active_portfolio = _sync_options_values_from_active_portfolio  # type: ignore[attr-defined]
     app_cls.set_schwab_sync_status = _set_schwab_sync_status  # type: ignore[attr-defined]
@@ -118,6 +119,7 @@ def _rebuild_schwab_ticket_side_by_side(self: tk.Tk, ticket: ttk.LabelFrame) -> 
         return
 
     _configure_side_combobox_styles(self)
+    _ensure_schwab_stock_ticket_vars(self)
 
     for child in list(ticket.winfo_children()):
         child.destroy()
@@ -152,13 +154,21 @@ def _rebuild_schwab_ticket_side_by_side(self: tk.Tk, ticket: ttk.LabelFrame) -> 
         1,
         "Order type",
         ttk.Combobox(stock, textvariable=self.order_type_var, values=["market", "limit", "stop", "stop_limit"], state="readonly"),
-        "Time",
+        "Duration",
         ttk.Combobox(stock, textvariable=self.time_in_force_var, values=SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, state="readonly"),
     )
-    self._grid_row(stock, 2, "Quantity", ttk.Entry(stock, textvariable=self.quantity_var), "Entry / Limit", ttk.Entry(stock, textvariable=self.limit_price_var))
     self._grid_row(
         stock,
-        3,
+        2,
+        "Position effect",
+        ttk.Combobox(stock, textvariable=self.schwab_stock_position_effect_var, values=["AUTO", "OPENING", "CLOSING"], state="readonly"),
+        "Session",
+        ttk.Combobox(stock, textvariable=self.schwab_stock_session_var, values=["NORMAL", "AM", "PM", "SEAMLESS"], state="readonly"),
+    )
+    self._grid_row(stock, 3, "Quantity", ttk.Entry(stock, textvariable=self.quantity_var), "Entry / Limit", ttk.Entry(stock, textvariable=self.limit_price_var))
+    self._grid_row(
+        stock,
+        4,
         "Stop price",
         ttk.Entry(stock, textvariable=self.stop_price_var),
         "Use Mid",
@@ -169,8 +179,8 @@ def _rebuild_schwab_ticket_side_by_side(self: tk.Tk, ticket: ttk.LabelFrame) -> 
             style="Accent.TButton",
         ),
     )
-    ttk.Label(stock, text="Cancel order ID", style="Subtle.TLabel").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=5)
-    ttk.Entry(stock, textvariable=self.cancel_order_id_var).grid(row=4, column=1, columnspan=3, sticky="ew", pady=5)
+    ttk.Label(stock, text="Cancel order ID", style="Subtle.TLabel").grid(row=5, column=0, sticky="w", padx=(0, 8), pady=5)
+    ttk.Entry(stock, textvariable=self.cancel_order_id_var).grid(row=5, column=1, columnspan=3, sticky="ew", pady=5)
 
     options = ttk.LabelFrame(ticket_fields, text="Options Ticket Fields", style="Card.TLabelframe")
     options.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
@@ -201,6 +211,174 @@ def _rebuild_schwab_ticket_side_by_side(self: tk.Tk, ticket: ttk.LabelFrame) -> 
     _build_schwab_action_grid(self, ticket)
     self._schwab_ticket_side_by_side_built = True
     self._schwab_options_fields_integrated = True
+
+
+def _ensure_schwab_stock_ticket_vars(self: tk.Tk) -> None:
+    if not hasattr(self, "schwab_stock_position_effect_var"):
+        self.schwab_stock_position_effect_var = tk.StringVar(value="AUTO")
+    if not hasattr(self, "schwab_stock_session_var"):
+        self.schwab_stock_session_var = tk.StringVar(value="NORMAL")
+
+
+def _build_schwab_stock_order_json_from_ui(self: tk.Tk) -> dict[str, Any]:
+    _ensure_schwab_stock_ticket_vars(self)
+
+    symbol = _required_text_var(self, "symbol_var", "Symbol").upper()
+    side = _required_text_var(self, "side_var", "Side").lower()
+    if side not in {"buy", "sell"}:
+        raise ValueError(f"Side must be buy or sell. Got: {side!r}")
+
+    quantity = _required_positive_float(_get_string_var(self, "quantity_var"), "Quantity")
+    order_type = _supported_stock_order_type(_get_string_var(self, "order_type_var"))
+    limit_price = _optional_positive_float(_get_string_var(self, "limit_price_var"), "Entry / Limit")
+    stop_price = _optional_positive_float(_get_string_var(self, "stop_price_var"), "Stop price")
+
+    duration_choice = _supported_duration(_get_string_var(self, "time_in_force_var"))
+    derived_session, duration = schwab_equity_session_duration(duration_choice)
+    session_input = _get_string_var(self, "schwab_stock_session_var")
+    if derived_session != "NORMAL" and session_input in {"", "NORMAL"}:
+        session = derived_session
+    else:
+        session = _supported_session(session_input or derived_session)
+    position_effect = _normalized_stock_position_effect(_get_string_var(self, "schwab_stock_position_effect_var"))
+
+    if order_type in {"LIMIT", "STOP_LIMIT"} and limit_price is None:
+        raise ValueError("Entry / Limit is required for LIMIT and STOP_LIMIT stock orders.")
+    if order_type in {"STOP", "STOP_LIMIT"} and stop_price is None:
+        raise ValueError("Stop price is required for STOP and STOP_LIMIT stock orders.")
+
+    leg: dict[str, Any] = {
+        "instruction": "BUY" if side == "buy" else "SELL",
+        "quantity": quantity,
+        "instrument": {
+            "symbol": symbol,
+            "assetType": "EQUITY",
+        },
+    }
+    if position_effect:
+        leg["positionEffect"] = position_effect
+
+    payload: dict[str, Any] = {
+        "orderType": order_type,
+        "session": session,
+        "duration": duration,
+        "orderStrategyType": "SINGLE",
+        "orderLegCollection": [leg],
+    }
+    if limit_price is not None and order_type in {"LIMIT", "STOP_LIMIT"}:
+        payload["price"] = f"{limit_price:.2f}"
+    if stop_price is not None and order_type in {"STOP", "STOP_LIMIT"}:
+        payload["stopPrice"] = f"{stop_price:.2f}"
+
+    return payload
+
+
+def _get_string_var(self: tk.Tk, name: str) -> str:
+    var = getattr(self, name, None)
+    try:
+        return str(var.get()).strip()
+    except Exception:
+        return ""
+
+
+def _required_text_var(self: tk.Tk, name: str, label: str) -> str:
+    value = _get_string_var(self, name)
+    if not value:
+        raise ValueError(f"{label} is required.")
+    return value
+
+
+def _required_positive_float(value: str, label: str) -> float:
+    parsed = _optional_positive_float(value, label)
+    if parsed is None:
+        raise ValueError(f"{label} is required.")
+    return parsed
+
+
+def _optional_positive_float(value: str, label: str) -> float | None:
+    clean = str(value or "").strip().replace("$", "").replace(",", "")
+    if not clean:
+        return None
+    try:
+        parsed = float(clean)
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a number.") from exc
+    if parsed <= 0:
+        raise ValueError(f"{label} must be positive.")
+    return parsed
+
+
+def _supported_stock_order_type(value: str) -> str:
+    clean = str(value or "limit").strip().upper().replace(" ", "_")
+    if clean in {"MARKET", "LIMIT", "STOP", "STOP_LIMIT"}:
+        return clean
+    raise ValueError(f"Unsupported Schwab stock order type: {value!r}")
+
+
+def _normalized_stock_position_effect(value: str) -> str:
+    clean = str(value or "AUTO").strip().upper().replace(" ", "_")
+    aliases = {
+        "AUTO": "",
+        "AUTOMATIC": "",
+        "NONE": "",
+        "": "",
+        "OPEN": "OPENING",
+        "TO_OPEN": "OPENING",
+        "OPENING": "OPENING",
+        "CLOSE": "CLOSING",
+        "TO_CLOSE": "CLOSING",
+        "CLOSING": "CLOSING",
+    }
+    if clean not in aliases:
+        raise ValueError(f"Unsupported Schwab position effect: {value!r}")
+    return aliases[clean]
+
+
+def _display_stock_position_effect(value: str) -> str:
+    normalized = _normalized_stock_position_effect(value)
+    return normalized or "AUTO"
+
+
+def _stock_payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    legs = payload.get("orderLegCollection") or []
+    first_leg = legs[0] if legs and isinstance(legs[0], dict) else {}
+    instrument = first_leg.get("instrument") if isinstance(first_leg.get("instrument"), dict) else {}
+    return {
+        "symbol": str(instrument.get("symbol") or ""),
+        "instruction": str(first_leg.get("instruction") or ""),
+        "quantity": first_leg.get("quantity") or 0,
+        "position_effect": str(first_leg.get("positionEffect") or ""),
+    }
+
+
+def _format_stock_order_summary(payload: dict[str, Any]) -> str:
+    summary = _stock_payload_summary(payload)
+    pieces = [
+        str(summary["instruction"]),
+        f"{float(summary['quantity']):g}",
+        str(summary["symbol"]),
+        str(payload.get("orderType") or ""),
+    ]
+    if payload.get("price") is not None:
+        pieces.append(f"limit {payload['price']}")
+    if payload.get("stopPrice") is not None:
+        pieces.append(f"stop {payload['stopPrice']}")
+    pieces.append(str(payload.get("duration") or ""))
+    pieces.append(str(payload.get("session") or ""))
+    return " ".join(piece for piece in pieces if piece)
+
+
+def _estimated_stock_order_value(payload: dict[str, Any]) -> float | str:
+    summary = _stock_payload_summary(payload)
+    quantity = float(summary.get("quantity") or 0.0)
+    for key in ("price", "stopPrice"):
+        try:
+            value = float(str(payload.get(key) or "").replace(",", ""))
+        except ValueError:
+            continue
+        if value > 0:
+            return quantity * value
+    return "--"
 
 
 def _submit_schwab_stock_limit_order(self: tk.Tk) -> None:
@@ -257,45 +435,17 @@ def _submit_schwab_stock_limit_order(self: tk.Tk) -> None:
         return str(value if value not in (None, "") else "--")
 
     try:
-        symbol = self.symbol_var.get().strip().upper()
-        side = self.side_var.get().strip().lower()
-        quantity = int(float(self.quantity_var.get().strip()))
-        limit_price = float(self.limit_price_var.get().strip())
-
-        if not symbol:
-            raise ValueError("Symbol is blank.")
-        if side not in {"buy", "sell"}:
-            raise ValueError(f"Side must be buy or sell. Got: {side!r}")
-        if quantity <= 0:
-            raise ValueError("Quantity must be positive.")
-        if limit_price <= 0:
-            raise ValueError("Limit price must be positive.")
-
-        instruction = "BUY" if side == "buy" else "SELL"
-
-        payload = {
-            "orderType": "LIMIT",
-            "session": "NORMAL",
-            "duration": "DAY",
-            "orderStrategyType": "SINGLE",
-            "price": f"{limit_price:.2f}",
-            "orderLegCollection": [
-                {
-                    "instruction": instruction,
-                    "quantity": quantity,
-                    "instrument": {
-                        "symbol": symbol,
-                        "assetType": "EQUITY",
-                    },
-                }
-            ],
-        }
+        payload = _build_schwab_stock_order_json_from_ui(self)
+        order_summary = _stock_payload_summary(payload)
+        symbol = order_summary["symbol"]
+        instruction = order_summary["instruction"]
+        quantity = float(order_summary["quantity"])
 
         start_text = (
             "SCHWAB LIVE SUBMIT PREVIEW\n"
             "==========================\n\n"
             f"UTC: {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
-            f"Order: {instruction} {quantity} {symbol} @ {limit_price:.2f} LIMIT DAY\n\n"
+            f"Order: {_format_stock_order_summary(payload)}\n\n"
             "Calling Schwab previewOrder..."
         )
         terminal(start_text)
@@ -315,7 +465,7 @@ def _submit_schwab_stock_limit_order(self: tk.Tk) -> None:
         schwab_status = str(strategy.get("status") or "UNKNOWN").upper()
 
         order_balance = strategy.get("orderBalance", {}) if isinstance(strategy, dict) else {}
-        order_value = order_balance.get("orderValue", quantity * limit_price)
+        order_value = order_balance.get("orderValue", _estimated_stock_order_value(payload))
         buying_power = order_balance.get("projectedBuyingPower", "--")
         available_funds = order_balance.get("projectedAvailableFund", "--")
         commission = order_balance.get("projectedCommission", "--")
@@ -325,10 +475,13 @@ def _submit_schwab_stock_limit_order(self: tk.Tk) -> None:
             "=========================\n\n"
             f"Action:        {instruction}\n"
             f"Symbol:        {symbol}\n"
-            f"Quantity:      {quantity}\n"
-            f"Order type:    LIMIT\n"
-            f"Limit price:   {money(limit_price)}\n"
-            f"Duration:      DAY\n\n"
+            f"Quantity:      {quantity:g}\n"
+            f"Order type:    {payload.get('orderType', '--')}\n"
+            f"Limit price:   {money(payload.get('price'))}\n"
+            f"Stop price:    {money(payload.get('stopPrice'))}\n"
+            f"Duration:      {payload.get('duration', '--')}\n"
+            f"Session:       {payload.get('session', '--')}\n"
+            f"Position eff.: {order_summary.get('position_effect') or 'AUTO'}\n\n"
             "Schwab preview:\n"
             f"- HTTP status: {preview_status_code}\n"
             f"- Schwab status: {schwab_status}\n"
@@ -353,9 +506,8 @@ def _submit_schwab_stock_limit_order(self: tk.Tk) -> None:
             return
 
         confirm_text = (
-            f"{instruction} {quantity} {symbol}\n"
-            f"Limit: {limit_price:.2f}\n"
-            f"Duration: DAY\n"
+            f"{_format_stock_order_summary(payload)}\n"
+            f"Position effect: {order_summary.get('position_effect') or 'AUTO'}\n"
             f"Estimated value: {order_value}\n\n"
             "Submit this order?"
         )
@@ -372,8 +524,8 @@ def _submit_schwab_stock_limit_order(self: tk.Tk) -> None:
             "===========================\n\n"
             f"Action:      {instruction}\n"
             f"Symbol:      {symbol}\n"
-            f"Quantity:    {quantity}\n"
-            f"Limit price: {money(limit_price)}\n\n"
+            f"Quantity:    {quantity:g}\n"
+            f"Order:       {_format_stock_order_summary(payload)}\n\n"
             f"HTTP status: {submit_status_code}\n"
             f"Order URL:   {location or '(none returned)'}\n\n"
             "Next: use Recent Orders, Open Only, or thinkorswim to verify final order status."
@@ -390,7 +542,7 @@ def _submit_schwab_stock_limit_order(self: tk.Tk) -> None:
         if 200 <= submit_status_code < 300:
             show_info(
                 "Schwab order submitted",
-                f"{instruction} {quantity} {symbol} @ {limit_price:.2f}\n\n"
+                f"{_format_stock_order_summary(payload)}\n\n"
                 f"HTTP Status: {submit_status_code}\n"
                 "Check Recent Orders or thinkorswim for final status.",
             )
@@ -686,7 +838,7 @@ def _show_schwab_replace_dialog(self: tk.Tk, order: dict[str, Any], parsed: dict
     symbol_var = tk.StringVar(value=parsed["symbol"])
     side_var = tk.StringVar(value="sell" if "SELL" in parsed["side"].upper() else "buy")
     quantity_var = tk.StringVar(value=parsed["quantity"])
-    effect_var = tk.StringVar(value=parsed["position_effect"] or "AUTO")
+    effect_var = tk.StringVar(value=_display_stock_position_effect(parsed["position_effect"]))
     type_var = tk.StringVar(value=_supported_order_type(parsed["order_type"]))
     limit_var = tk.StringVar(value=parsed["limit_price"].replace("$", "").replace(",", "") if parsed["limit_price"] != "--" else "")
     stop_var = tk.StringVar(value=parsed["stop_price"].replace("$", "").replace(",", "") if parsed["stop_price"] != "--" else "")
@@ -695,7 +847,7 @@ def _show_schwab_replace_dialog(self: tk.Tk, order: dict[str, Any], parsed: dict
 
     _grid_pair(form, 0, "Original order ID", ttk.Entry(form, textvariable=order_id_var, state="readonly"), "Symbol", ttk.Entry(form, textvariable=symbol_var))
     _grid_pair(form, 1, "Side", ttk.Combobox(form, textvariable=side_var, values=["buy", "sell"], state="readonly"), "Quantity", ttk.Entry(form, textvariable=quantity_var))
-    _grid_pair(form, 2, "Position effect", ttk.Combobox(form, textvariable=effect_var, values=["AUTO", "TO_OPEN", "TO_CLOSE"], state="readonly"), "Order type", ttk.Combobox(form, textvariable=type_var, values=["MARKET", "LIMIT", "STOP", "STOP_LIMIT"], state="readonly"))
+    _grid_pair(form, 2, "Position effect", ttk.Combobox(form, textvariable=effect_var, values=["AUTO", "OPENING", "CLOSING"], state="readonly"), "Order type", ttk.Combobox(form, textvariable=type_var, values=["MARKET", "LIMIT", "STOP", "STOP_LIMIT"], state="readonly"))
     limit_box = ttk.Frame(form, style="Panel.TFrame")
     limit_box.columnconfigure(0, weight=1)
     ttk.Entry(limit_box, textvariable=limit_var).grid(row=0, column=0, sticky="ew")
@@ -881,8 +1033,9 @@ def _replacement_payload_from_fields(
             }
         ],
     }
-    if position_effect.strip().upper() in {"TO_OPEN", "TO_CLOSE"}:
-        payload["orderLegCollection"][0]["positionEffect"] = position_effect.strip().upper()
+    normalized_effect = _normalized_stock_position_effect(position_effect)
+    if normalized_effect:
+        payload["orderLegCollection"][0]["positionEffect"] = normalized_effect
 
     if clean_type in {"LIMIT", "STOP_LIMIT"}:
         payload["price"] = _decimal_text(limit_price, field="Limit price")
@@ -976,6 +1129,10 @@ def _load_schwab_order_into_ticket(self: tk.Tk, order: dict[str, Any], parsed: d
         self.stop_price_var.set(parsed["stop_price"].replace("$", "").replace(",", ""))
     if parsed["duration"] and hasattr(self, "time_in_force_var"):
         self.time_in_force_var.set(_supported_duration(parsed["duration"]))
+    if parsed["session"] and hasattr(self, "schwab_stock_session_var"):
+        self.schwab_stock_session_var.set(_supported_session(parsed["session"]))
+    if parsed["position_effect"] and hasattr(self, "schwab_stock_position_effect_var"):
+        self.schwab_stock_position_effect_var.set(_display_stock_position_effect(parsed["position_effect"]))
     if parsed["order_type"] and hasattr(self, "order_type_var"):
         self.order_type_var.set(_supported_order_type(parsed["order_type"]).lower())
     if parsed["order_id"] and hasattr(self, "cancel_order_id_var"):

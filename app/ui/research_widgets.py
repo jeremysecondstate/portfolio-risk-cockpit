@@ -184,6 +184,7 @@ class ScenarioImpactBars(tk.Canvas):
         row_height = 18
         start_y = 12
         self.create_line(center, 6, center, start_y + len(self._rows) * row_height + 4, fill="#94a3b8")
+        self.create_text(center + 4, 6, text="0", anchor="nw", fill=MUTED, font=("Segoe UI", 8))
         for index, (label, value, display) in enumerate(self._rows):
             y = start_y + index * row_height
             bar = (value / max_abs) * (width * 0.38)

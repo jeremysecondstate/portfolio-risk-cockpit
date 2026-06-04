@@ -77,6 +77,7 @@ from app.analytics.research_workspace_insights import (
     build_technical_narrative,
     combined_current_model_option_scenarios,
     combined_option_scenarios,
+    covered_contract_capacity,
     inflation_read_from_metrics,
     macro_why_it_matters,
     option_timeline_text,
@@ -1181,15 +1182,23 @@ def _options_strategy_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     frame.timeline.columnconfigure(0, weight=1)  # type: ignore[attr-defined]
     frame.timeline_var = tk.StringVar(value="Select a candidate.")  # type: ignore[attr-defined]
     ttk.Label(frame.timeline, textvariable=frame.timeline_var, style="Chip.TLabel").grid(row=0, column=0, sticky="ew", padx=10, pady=8)  # type: ignore[attr-defined]
-    scenario_box = ttk.LabelFrame(frame, text="Selected Candidate Combined Scenario", style="Card.TLabelframe")
+    scenario_box = ttk.LabelFrame(frame, text="Expiration-Style Combined Stock + Option Scenario", style="Card.TLabelframe")
     scenario_box.grid(row=6, column=0, sticky="ew", pady=(8, 0))
     scenario_box.columnconfigure(0, weight=1)
+    ttk.Label(
+        scenario_box,
+        text="This is not a live option price forecast. It combines current stock P&L with estimated option payoff at expiration.",
+        style="Subtle.TLabel",
+        wraplength=1120,
+        justify=tk.LEFT,
+    ).grid(row=0, column=0, sticky="ew", pady=(0, 6))
     frame.candidate_bars = ScenarioImpactBars(scenario_box, height=104)  # type: ignore[attr-defined]
-    frame.candidate_bars.grid(row=0, column=0, sticky="ew", pady=(0, 6))  # type: ignore[attr-defined]
-    scenario_tree = ttk.Treeview(scenario_box, columns=("move", "price", "stock", "value", "option", "combined", "impact", "read"), show="headings", height=7)
+    frame.candidate_bars.grid(row=1, column=0, sticky="ew", pady=(0, 6))  # type: ignore[attr-defined]
+    scenario_tree = ttk.Treeview(scenario_box, columns=("move", "price", "contracts", "stock", "value", "option", "combined", "impact", "read"), show="headings", height=7)
     for column, label, width in (
         ("move", "Move", 75),
         ("price", "Stock Price", 105),
+        ("contracts", "Contracts", 85),
         ("stock", "Stock P&L", 105),
         ("value", "Option Value", 110),
         ("option", "Option P&L", 105),
@@ -1201,9 +1210,9 @@ def _options_strategy_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
         scenario_tree.column(column, width=width, anchor=tk.E if column not in {"move", "read"} else tk.W, stretch=column == "read")
     scenario_tree.tag_configure("positive", foreground="#047857")
     scenario_tree.tag_configure("negative", foreground="#b91c1c")
-    scenario_tree.grid(row=1, column=0, sticky="ew")
+    scenario_tree.grid(row=2, column=0, sticky="ew")
     scenario_scroll = ttk.Scrollbar(scenario_box, orient=tk.VERTICAL, command=scenario_tree.yview)
-    scenario_scroll.grid(row=1, column=1, sticky="ns")
+    scenario_scroll.grid(row=2, column=1, sticky="ns")
     scenario_tree.configure(yscrollcommand=scenario_scroll.set)
     frame.candidate_scenario_tree = scenario_tree  # type: ignore[attr-defined]
     help_box = ttk.LabelFrame(frame, text="How To Read This", style="Card.TLabelframe")
@@ -2325,14 +2334,19 @@ def _render_options_strategy(self: tk.Tk) -> None:
         _set_research_text(frame.detail_text, _basic_popout_text("Options Strategy Explanation", "The loaded chain did not include usable bid/ask/mark data for calls or puts."))  # type: ignore[attr-defined]
         return
     top = candidates[0]
+    top_contracts = max(top.contract_count, 0) if top.option_type in {"call", "put"} else 0
+    strategy_badges = [
+        _synthetic_badge("Top Suggestion", top.strategy, _candidate_status(top.confidence), top.why),
+        _synthetic_badge("Entry", _money(top.midpoint), "info", "Estimated entry uses bid/ask midpoint when available."),
+        _synthetic_badge("Contracts", str(top_contracts), "info", f"Option multiplier: {top_contracts * 100} shares equivalent."),
+        _synthetic_badge("Risk Read", top.confidence, _candidate_status(top.confidence), top.goes_wrong_if),
+    ]
+    partial_warning = _partial_covered_call_warning(payload.context)
+    if partial_warning:
+        strategy_badges.append(_synthetic_badge("Coverage", "Not fully covered", "bad", partial_warning))
     metric_grid(
         frame.cards,  # type: ignore[attr-defined]
-        [
-            _synthetic_badge("Top Suggestion", top.strategy, _candidate_status(top.confidence), top.why),
-            _synthetic_badge("Entry", _money(top.midpoint), "info", "Estimated entry uses bid/ask midpoint when available."),
-            _synthetic_badge("Breakeven", _money(top.breakeven), "info", "Expiration-style breakeven for a simple long option."),
-            _synthetic_badge("Risk Read", top.confidence, _candidate_status(top.confidence), top.goes_wrong_if),
-        ],
+        strategy_badges,
         columns=4,
         prominent_indexes={0},
     )
@@ -2675,7 +2689,7 @@ def _show_selected_option_candidate(self: tk.Tk) -> None:
             scenario_tree.insert(
                 "",
                 tk.END,
-                values=(row.move_label, _money(row.underlying_price), _money(row.stock_pnl), _money(row.option_value), _money(row.option_pnl), _money(row.combined_pnl), f"{row.portfolio_impact:+.2%}", row.read),
+                values=(row.move_label, _money(row.underlying_price), candidate.contract_count, _money(row.stock_pnl), _money(row.option_value), _money(row.option_pnl), _money(row.combined_pnl), f"{row.portfolio_impact:+.2%}", row.read),
                 tags=(tag,) if tag else (),
             )
         lines = selected_candidate_detail(candidate, context, earnings_text)
@@ -2727,11 +2741,14 @@ def _options_strategy_popout_text(
     alternatives: list[OptionCandidate] | None = None,
 ) -> str:
     symbol = payload.symbol if payload is not None else candidate.underlying
-    cost = (candidate.midpoint or 0.0) * 100
+    contracts = max(candidate.contract_count, 0)
+    multiplier = contracts * 100
+    cost = (candidate.midpoint or 0.0) * multiplier
     key_points = [
         f"Candidate: {candidate.group}: {candidate.strategy}",
         f"Contract: {candidate.option_type.upper()} expiring {candidate.expiration}; strike {_money(candidate.strike)}; DTE {candidate.dte if candidate.dte is not None else '--'}.",
-        f"Bid/ask/mid: {_money(candidate.bid)} / {_money(candidate.ask)} / {_money(candidate.midpoint)}; one-contract estimate {_money(cost)}.",
+        f"Bid/ask/mid: {_money(candidate.bid)} / {_money(candidate.ask)} / {_money(candidate.midpoint)}; {contracts} contract estimate {_money(cost)}.",
+        f"Option multiplier: {multiplier} shares equivalent.",
         f"Works if: {candidate.works_if}",
         f"Goes wrong if: {candidate.goes_wrong_if}",
         f"Position interaction: {candidate.relation_to_position}",
@@ -2741,6 +2758,8 @@ def _options_strategy_popout_text(
     key_points.extend(candidate.score_breakdown)
     if candidate.avoid_reason:
         key_points.append(candidate.avoid_reason)
+    if candidate.coverage_note:
+        key_points.append(candidate.coverage_note)
     key_points.extend(_candidate_alternative_lines(candidate, alternatives or []))
     if context is not None:
         key_points.append(f"Stock context: {context.quantity:g} shares, weight {context.portfolio_weight:.2%}, quote {_money(context.last_price)}.")
@@ -2765,6 +2784,15 @@ def _candidate_alternative_lines(candidate: OptionCandidate, alternatives: list[
         reason = item.avoid_reason or item.score_reason or item.goes_wrong_if
         lines.append(f"Alternative ranked lower: {item.group}: {item.strategy} scored {item.score:.0f}/100 because {reason}")
     return lines
+
+
+def _partial_covered_call_warning(context: PortfolioSymbolContext) -> str:
+    if not context.is_held:
+        return ""
+    capacity = covered_contract_capacity(context)
+    if capacity > 0:
+        return ""
+    return f"You hold {context.quantity:g} shares; one call contract controls 100 shares, so a covered call would not be fully covered."
 
 
 def _normalized_candidate_bar_rows(scenario_rows: list[Any]) -> list[tuple[str, float, str]]:

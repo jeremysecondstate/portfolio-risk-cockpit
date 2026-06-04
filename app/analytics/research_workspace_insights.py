@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -75,6 +76,9 @@ class OptionCandidate:
     score_breakdown: tuple[str, ...] = ()
     avoid_reason: str = ""
     better_than_stock: str = ""
+    contract_count: int = 1
+    controlled_shares: int = 100
+    coverage_note: str = ""
 
 
 @dataclass(frozen=True)
@@ -322,6 +326,7 @@ def suggest_option_candidates(
     if underlying is None or underlying <= 0:
         return []
 
+    covered_capacity = covered_contract_capacity(context)
     agreement, _status, _why = indicator_agreement_classification(indicators, macro_label)
     earnings_soon = "soon" in earnings_text.lower() or "8-k" in earnings_text.lower()
     high_vol = indicators.volatility == "elevated"
@@ -349,7 +354,7 @@ def suggest_option_candidates(
 
         call_candidate: OptionCandidate | None = None
         if isinstance(row.get("call"), dict):
-            if context.is_held and 0.01 <= moneyness <= 0.18:
+            if context.is_held and covered_capacity >= 1 and 0.01 <= moneyness <= 0.18:
                 call_candidate = _candidate_from_row(row, "call", "Covered Call", "Income / covered-call candidate", context, underlying, credit=True)
             elif not context.is_held and agreement == "Bullish" and -0.03 <= moneyness <= 0.12:
                 call_candidate = _candidate_from_row(row, "call", "Starter Long Call", "Starter long call", context, underlying)
@@ -436,11 +441,31 @@ def option_midpoint(bid: float | None, ask: float | None, mark: float | None = N
     return None
 
 
-def option_expiration_payoff(candidate: OptionCandidate, underlying_price: float, *, contracts: int = 1) -> float:
+def covered_contract_capacity(context: PortfolioSymbolContext) -> int:
+    return max(0, math.floor(max(float(context.quantity or 0.0), 0.0) / 100.0))
+
+
+def is_fully_covered_call(candidate: OptionCandidate, context: PortfolioSymbolContext, contracts: int | None = None) -> bool:
+    if not _is_covered_call(candidate):
+        return False
+    contract_count = _scenario_contract_count(candidate, contracts)
+    return contract_count > 0 and covered_contract_capacity(context) >= contract_count
+
+
+def _scenario_contract_count(candidate: OptionCandidate, contracts: int | None = None) -> int:
+    if contracts is not None:
+        return max(int(contracts), 0)
+    return max(int(candidate.contract_count or 0), 0)
+
+
+def option_expiration_payoff(candidate: OptionCandidate, underlying_price: float, *, contracts: int | None = None) -> float:
     if candidate.strike is None or candidate.midpoint is None or candidate.option_type not in {"call", "put"}:
         return 0.0
-    multiplier = max(contracts, 1) * 100
-    is_short_call = "covered" in candidate.strategy.lower() or candidate.group == "Income"
+    contract_count = _scenario_contract_count(candidate, contracts)
+    if contract_count <= 0:
+        return 0.0
+    multiplier = contract_count * 100
+    is_short_call = _is_covered_call(candidate)
     if candidate.option_type == "call":
         intrinsic = max(underlying_price - candidate.strike, 0.0)
     else:
@@ -450,15 +475,18 @@ def option_expiration_payoff(candidate: OptionCandidate, underlying_price: float
     return (intrinsic - candidate.midpoint) * multiplier
 
 
-def option_expiration_value(candidate: OptionCandidate, underlying_price: float, *, contracts: int = 1) -> float:
+def option_expiration_value(candidate: OptionCandidate, underlying_price: float, *, contracts: int | None = None) -> float:
     if candidate.strike is None or candidate.option_type not in {"call", "put"}:
         return 0.0
-    multiplier = max(contracts, 1) * 100
+    contract_count = _scenario_contract_count(candidate, contracts)
+    if contract_count <= 0:
+        return 0.0
+    multiplier = contract_count * 100
     if candidate.option_type == "call":
         intrinsic = max(underlying_price - candidate.strike, 0.0)
     else:
         intrinsic = max(candidate.strike - underlying_price, 0.0)
-    if "covered" in candidate.strategy.lower() or candidate.group == "Income":
+    if _is_covered_call(candidate):
         return -intrinsic * multiplier
     return intrinsic * multiplier
 
@@ -479,7 +507,13 @@ def combined_option_scenarios(
         option_value = option_expiration_value(candidate, price)
         option_pnl = option_expiration_payoff(candidate, price)
         combined = stock_pnl + option_pnl
-        if candidate.option_type == "put" and stock_pnl < 0 and combined > stock_pnl:
+        if _is_covered_call(candidate) and move < 0 and combined > 0 and option_pnl > abs(stock_pnl):
+            read = "Positive because retained option premium exceeds stock loss"
+        elif _is_covered_call(candidate) and price > (candidate.strike or price):
+            read = "Covered call income, but upside is capped above strike"
+        elif _is_covered_call(candidate):
+            read = "Covered-call premium cushions the stock path"
+        elif candidate.option_type == "put" and stock_pnl < 0 and combined > stock_pnl:
             read = f"Hedges; protection benefit {_money(combined - stock_pnl)}"
         elif candidate.option_type == "call" and combined > stock_pnl:
             read = "Amplifies upside; premium is at risk if move is too small"
@@ -557,6 +591,8 @@ def _current_model_option_read(
         return "No current shares; model columns show the generated starter path"
     if candidate.option_type == "put" and model_stock_pnl < 0 and model_combined > model_stock_pnl:
         return f"Model hedge benefit {_money(model_combined - model_stock_pnl)}"
+    if _is_covered_call(candidate) and model_stock_pnl is not None and model_stock_pnl < 0 and model_combined > 0:
+        return "Positive because retained option premium exceeds stock loss"
     if candidate.option_type == "call" and model_combined > current_combined:
         return "Model path shows added upside leverage"
     if model_combined > 0:
@@ -592,7 +628,9 @@ def option_timeline_text(candidate: OptionCandidate, earnings_text: str = "") ->
 
 
 def selected_candidate_detail(candidate: OptionCandidate, context: PortfolioSymbolContext, earnings_text: str = "") -> list[str]:
-    cost = (candidate.midpoint or 0.0) * 100
+    contracts = _scenario_contract_count(candidate)
+    multiplier = contracts * 100
+    cost = (candidate.midpoint or 0.0) * multiplier
     rows = combined_option_scenarios(candidate, context)
     best = max(rows, key=lambda row: row.combined_pnl, default=None)
     worst = min(rows, key=lambda row: row.combined_pnl, default=None)
@@ -602,7 +640,9 @@ def selected_candidate_detail(candidate: OptionCandidate, context: PortfolioSymb
         "Contract basics:",
         f"- Type: {candidate.option_type.upper()}  Expiration: {candidate.expiration}  DTE: {candidate.dte if candidate.dte is not None else '--'}",
         f"- Strike: {_money(candidate.strike)}  Bid/Ask/Mid: {_money(candidate.bid)} / {_money(candidate.ask)} / {_money(candidate.midpoint)}",
-        f"- Contract cost/credit estimate for 1 contract: {_money(cost)}.",
+        f"- Contracts: {contracts}; option multiplier: {multiplier} shares equivalent.",
+        f"- Contract cost/credit estimate: {_money(cost)}.",
+        *([f"- {candidate.coverage_note}"] if candidate.coverage_note else []),
         f"- Max loss: {'unlimited/stock assignment style' if candidate.max_loss is None else _money(candidate.max_loss)}.",
         f"- Max gain: {'not capped for simple long option' if candidate.max_gain is None else _money(candidate.max_gain)}.",
         f"- {option_breakeven_explanation(candidate)}",
@@ -650,7 +690,7 @@ def ticket_fields_for_option_candidate(candidate: OptionCandidate) -> dict[str, 
         "option_type": "Put" if candidate.option_type == "put" else "Call",
         "order_type": "LIMIT",
         "time_in_force": "Day",
-        "contracts": "1",
+        "contracts": str(max(candidate.contract_count, 1)),
         "strike": "" if candidate.strike is None else _format_plain_number(candidate.strike),
         "short_strike": "" if candidate.strike is None else _format_plain_number(candidate.strike),
         "bid": "" if candidate.bid is None else _format_plain_number(candidate.bid),
@@ -963,11 +1003,21 @@ def _candidate_from_row(row: dict[str, Any] | None, option_type: str, group: str
     midpoint = option_midpoint(bid, ask, mark)
     strike = _to_float(row.get("strike"))
     debit = midpoint or 0.0
-    max_loss = debit * 100 if not credit else None
+    contract_count = covered_contract_capacity(context) if credit and option_type == "call" else 1
+    controlled_shares = contract_count * 100
+    coverage_note = ""
+    if credit and option_type == "call":
+        if contract_count <= 0:
+            return None
+        coverage_note = f"Fully covered: {context.quantity:g} shares can cover {contract_count} call contract{'s' if contract_count != 1 else ''} ({controlled_shares} controlled shares)."
+    max_loss = debit * 100 * max(contract_count, 1) if not credit else None
     max_gain = None
     breakeven = None
     if strike is not None and midpoint is not None:
-        breakeven = strike + midpoint if option_type == "call" else strike - midpoint
+        if credit and option_type == "call":
+            breakeven = underlying - midpoint
+        else:
+            breakeven = strike + midpoint if option_type == "call" else strike - midpoint
     open_interest = _first_number(contract, "openInterest", "open_interest", "openInterestLong")
     volume = _first_number(contract, "totalVolume", "volume")
     delta = _first_number(contract, "delta")
@@ -1005,6 +1055,9 @@ def _candidate_from_row(row: dict[str, Any] | None, option_type: str, group: str
         theta=theta,
         iv=iv,
         dte_bucket=_dte_bucket(dte),
+        contract_count=contract_count,
+        controlled_shares=controlled_shares,
+        coverage_note=coverage_note,
     )
 
 
@@ -1610,7 +1663,9 @@ def _fit_from_score(score: float) -> str:
 
 
 def _primary_option_risk(candidate: OptionCandidate, earnings_soon: bool, high_vol: bool) -> str:
-    if candidate.option_type == "call":
+    if _is_covered_call(candidate):
+        base = "Covered-call risk is capped upside above the strike plus assignment risk; it requires 100 shares per contract."
+    elif candidate.option_type == "call":
         base = "This call needs the stock to rise above breakeven before expiration; otherwise premium decays."
     elif candidate.option_type == "put":
         base = "This put can lose premium if the stock stays above the strike/breakeven."
@@ -1624,6 +1679,8 @@ def _primary_option_risk(candidate: OptionCandidate, earnings_soon: bool, high_v
 
 
 def _primary_payoff_path(candidate: OptionCandidate) -> str:
+    if _is_covered_call(candidate):
+        return f"Best path is stock staying below the call strike while premium is retained; upside is capped above {_money(candidate.strike)}."
     if candidate.option_type == "call":
         return f"Best path is a move above {_money(candidate.breakeven)} by expiration."
     if candidate.option_type == "put":
