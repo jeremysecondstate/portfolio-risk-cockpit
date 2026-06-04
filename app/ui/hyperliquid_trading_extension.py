@@ -79,6 +79,7 @@ def install_hyperliquid_trading_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls.preview_hyperliquid_spot_ticket = _preview_hyperliquid_spot_ticket  # type: ignore[attr-defined]
     app_cls.run_hyperliquid_spot_what_if = _run_hyperliquid_spot_what_if  # type: ignore[attr-defined]
     app_cls.show_hyperliquid_live_submit_safety_review = _show_hyperliquid_live_submit_safety_review  # type: ignore[attr-defined]
+    app_cls.show_hyperliquid_perp_live_submit_safety_review = _show_hyperliquid_live_submit_safety_review  # type: ignore[attr-defined]
     app_cls.parse_hyperliquid_ticket = _parse_hyperliquid_ticket  # type: ignore[attr-defined]
     app_cls.on_trading_venue_changed = _on_trading_venue_changed  # type: ignore[attr-defined]
     app_cls.apply_hyperliquid_quantity_percent = _apply_hyperliquid_quantity_percent  # type: ignore[attr-defined]
@@ -617,13 +618,19 @@ def _show_hyperliquid_spot_live_submit_safety_review(self: tk.Tk) -> None:
 
 def _submit_cockpit_selected_venue(self: tk.Tk) -> None:
     if _selected_venue_is_hyperliquid(self):
+        active_ticket_var = getattr(self, "hyperliquid_workspace_active_ticket_var", None)
+        active_ticket = active_ticket_var.get() if active_ticket_var is not None else "spot"
+        if active_ticket == "perp":
+            self.show_hyperliquid_perp_live_submit_safety_review()
+            return
         self.show_hyperliquid_spot_live_submit_safety_review()
         return
     self.submit_live_schwab_order_guarded()
 
 
 def _selected_venue_is_hyperliquid(self: tk.Tk) -> bool:
-    return getattr(self, "trade_venue_var", tk.StringVar(value="Schwab")).get() == "Hyperliquid"
+    venue_var = getattr(self, "trade_venue_var", None)
+    return venue_var is not None and venue_var.get() == "Hyperliquid"
 
 
 def _apply_hyperliquid_quantity_percent(self: tk.Tk, percent: float | None = None) -> None:

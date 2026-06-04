@@ -1693,7 +1693,7 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     _add_workspace_button(actions, row=2, column=0, text="Open Orders", command=hyperliquid_action("perp", "load_selected_open_orders_only", "load_hyperliquid_open_orders"))
     _add_workspace_button(actions, row=2, column=1, text="Edit Order", command=hyperliquid_action("perp", "show_hyperliquid_order_edit_dialog"))
     _add_workspace_button(actions, row=2, column=2, text="Cancel Order", command=hyperliquid_action("perp", "cancel_selected_order", "cancel_hyperliquid_order_guarded"), style="Danger.TButton")
-    _add_workspace_button(actions, row=3, column=0, text="LIVE Submit", command=hyperliquid_action("perp", "submit_selected_venue"), style="Danger.TButton", columnspan=3)
+    _add_workspace_button(actions, row=3, column=0, text="LIVE Submit", command=hyperliquid_action("perp", "show_hyperliquid_perp_live_submit_safety_review"), style="Danger.TButton", columnspan=3)
 
     _set_workspace_text(
         self.hyperliquid_trading_preview_text,
