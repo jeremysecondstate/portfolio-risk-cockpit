@@ -6,6 +6,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from app.analytics.capital_structure_pressure import (
+    CapitalStructurePressureReport,
+    capital_structure_technical_modifier,
+    format_capital_structure_pressure_section,
+)
+
 
 class SignalBias(str, Enum):
     BULLISH = "bullish"
@@ -250,6 +256,7 @@ class TechnicalCommandCenterReport:
     warnings: list[str]
     plain_english_plan: list[str]
     prc_indexes: dict[str, PrcIndexPrice] = field(default_factory=dict)
+    capital_structure_pressure: CapitalStructurePressureReport | None = None
 
 
 DEFAULT_COMMAND_CENTER_TIMEFRAMES: tuple[TimeframeSpec, ...] = (
@@ -415,6 +422,7 @@ def build_technical_command_center_report(
     quote_snapshot: QuoteSnapshot | None = None,
     ticket: TechnicalTicket | None = None,
     warnings: list[str] | None = None,
+    capital_structure_pressure: CapitalStructurePressureReport | None = None,
 ) -> TechnicalCommandCenterReport:
     clean_symbol = symbol.strip().upper()
     snapshots: dict[str, TimeframeTechnicalSnapshot] = {}
@@ -483,6 +491,7 @@ def build_technical_command_center_report(
         warnings=_dedupe(report_warnings),
         plain_english_plan=plain_english_plan,
         prc_indexes=prc_indexes,
+        capital_structure_pressure=capital_structure_pressure,
     )
 
 
@@ -1306,6 +1315,13 @@ def format_technical_command_center_report(report: TechnicalCommandCenterReport)
         "- This is analysis, not a trade recommendation.",
     ]
     lines.extend(_format_prc_report_section(report, daily, setup, timing))
+    if report.capital_structure_pressure is not None:
+        lines.extend(
+            format_capital_structure_pressure_section(
+                report.capital_structure_pressure,
+                technical_read=report.overall_read,
+            )
+        )
     lines.extend(["", "SCORE BREAKDOWN"])
     for name, component in report.scores.items():
         lines.append(f"- {name}: {component.score:.0f}/100 because {component.reason}.")
@@ -1354,6 +1370,10 @@ def format_technical_command_center_report(report: TechnicalCommandCenterReport)
     lines.append(f"- Verdict: {report.ticket_check.verdict}.")
 
     lines.extend(["", "PLAIN-ENGLISH PLAN"])
+    if report.capital_structure_pressure is not None:
+        lines.append(
+            f"- {capital_structure_technical_modifier(report.overall_read, report.capital_structure_pressure)}"
+        )
     lines.extend(f"- {line}" for line in report.plain_english_plan)
     if report.warnings:
         lines.extend(["", "DATA WARNINGS"])

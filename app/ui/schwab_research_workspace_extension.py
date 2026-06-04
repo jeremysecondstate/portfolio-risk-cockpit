@@ -102,6 +102,10 @@ from app.analytics.stock_research import (
     technical_scenario_basis,
     technical_scenario_moves,
 )
+from app.analytics.capital_structure_pressure import (
+    analyze_capital_structure_pressure,
+    unknown_capital_structure_report,
+)
 from app.core.order_models import OrderSide, OrderType, TimeInForce
 from app.analytics.technical_analysis import (
     DEFAULT_COMMAND_CENTER_TIMEFRAMES,
@@ -1346,12 +1350,27 @@ def _build_research_payload(session: Any, portfolio, symbol: str, *, ticket: Tec
     statuses.extend(command_statuses)
     market_indicators, market_candles, market_statuses = _fetch_market_evidence_context(session, symbol, candles)
     statuses.extend(market_statuses)
+    try:
+        capital_structure_pressure = analyze_capital_structure_pressure(symbol)
+    except Exception as exc:
+        capital_structure_pressure = unknown_capital_structure_report(
+            symbol,
+            warnings=[f"Capital structure overlay unavailable: {exc}"],
+        )
+    capital_status = "fresh/cache" if capital_structure_pressure.read != "Unknown" else "limited"
+    capital_message = (
+        f"{capital_structure_pressure.read} pressure; score {capital_structure_pressure.supply_overhang_score}/100."
+        if capital_structure_pressure.read != "Unknown"
+        else "; ".join(capital_structure_pressure.warnings[:2]) or "Capital structure overlay unavailable."
+    )
+    statuses.append(DataSourceStatus("SEC capital structure pressure", capital_status, _now(), capital_message))
     command_center_report = build_technical_command_center_report(
         symbol,
         command_timeframes,
         benchmark_candles=market_candles,
         ticket=ticket,
         warnings=command_warnings,
+        capital_structure_pressure=capital_structure_pressure,
     )
 
     fallback_price = _last_price_from_quote(quote) or indicators.latest_close

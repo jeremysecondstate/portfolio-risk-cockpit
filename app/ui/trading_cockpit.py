@@ -14,6 +14,10 @@ from app.analytics.technical_analysis import (
     format_technical_command_center_report,
     parse_quote_snapshot,
 )
+from app.analytics.capital_structure_pressure import (
+    analyze_capital_structure_pressure,
+    unknown_capital_structure_report,
+)
 from app.brokers.hyperliquid.client import (
     HyperliquidInfoClient,
     format_hyperliquid_snapshot,
@@ -358,6 +362,14 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             except Exception as exc:
                 warnings.append(f"{symbol} quote fetch failed: {exc}")
 
+            try:
+                capital_structure_pressure = analyze_capital_structure_pressure(symbol)
+            except Exception as exc:
+                capital_structure_pressure = unknown_capital_structure_report(
+                    symbol,
+                    warnings=[f"Capital structure overlay unavailable: {exc}"],
+                )
+
             report = build_technical_command_center_report(
                 symbol,
                 timeframe_candles,
@@ -365,6 +377,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
                 quote_snapshot=quote_snapshot,
                 ticket=_technical_ticket_from_ui(self),
                 warnings=warnings,
+                capital_structure_pressure=capital_structure_pressure,
             )
             self.schwab_status_var.set("Schwab: connected")
             self._set_preview_text(self.format_technical_analysis_report(report))
