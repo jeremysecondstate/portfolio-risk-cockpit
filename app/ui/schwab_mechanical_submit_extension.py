@@ -165,7 +165,7 @@ def _format_schwab_preview_response(self: tk.Tk, status_code: int, payload: dict
         "SCHWAB PREVIEW RESULT",
         "=====================",
         "",
-        f"HTTP Status: {status_code}",
+        f"Vibe: {status_code}",
         f"Schwab Status: {status}",
         f"Order type: {order_type}",
         f"Complex/strategy type: {complex_type}",
@@ -372,7 +372,7 @@ def _submit_result_text(
         f"Status: {status_label}\n"
         f"Ticket: {summary['label']}\n"
         f"Estimated order dollars: ${summary['estimated_dollars']:,.2f}\n"
-        f"HTTP Status: {status_code}\n"
+        f"Vibe: {status_code}\n"
         f"Location: {location or '(none returned)'}\n"
         "Response:\n"
         f"{_format_payload(response_payload)}\n\n"

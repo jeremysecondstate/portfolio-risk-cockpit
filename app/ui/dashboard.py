@@ -392,7 +392,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
             "SCHWAB PREVIEW RESULT",
             "=====================",
             "",
-            f"HTTP Status: {status_code}",
+            f"Vibe: {status_code}",
             f"Schwab Status: {status}",
             "",
             "Order:",
@@ -638,7 +638,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
             "",
             "Showing currently open/active Schwab orders from the selected date window.",
             "",
-            f"HTTP Status: {status_code}",
+            f"Vibe: {status_code}",
             "",
         ]
 
@@ -710,7 +710,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
             "====================",
             "",
             "Showing recent Schwab orders for the selected date window.",
-            f"HTTP Status: {status_code}",
+            f"Vibe: {status_code}",
             "",
         ]
 
