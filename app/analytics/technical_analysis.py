@@ -3,14 +3,25 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass, field
+from datetime import datetime, time, timedelta, timezone
 from enum import Enum
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.analytics.capital_structure_pressure import (
     CapitalStructurePressureReport,
     capital_structure_technical_modifier,
     format_capital_structure_pressure_section,
 )
+
+
+try:
+    MARKET_TZ = ZoneInfo("America/New_York")
+except Exception:
+    MARKET_TZ = None
+
+REGULAR_SESSION_START = time(9, 30)
+REGULAR_SESSION_END = time(16, 0)
 
 
 class SignalBias(str, Enum):
@@ -239,6 +250,15 @@ class TimeframeTechnicalSnapshot:
     opening_range_low: float | None
     lines: list[str]
     scores: dict[str, ScoreComponent] = field(default_factory=dict)
+    session_vwap: float | None = None
+    rolling_vwap_20: float | None = None
+    multi_day_vwap: float | None = None
+    realized_move_10_pct: float | None = None
+    realized_move_20_pct: float | None = None
+    realized_move_60_pct: float | None = None
+    annualized_realized_vol_20: float | None = None
+    intraday_range_percent: float | None = None
+    vol_regime_percentile: float | None = None
 
 
 @dataclass(frozen=True)
@@ -307,7 +327,7 @@ def parse_quote_snapshot(symbol: str, payload: Any) -> QuoteSnapshot:
 
     bid = _first_nested_number(raw_quote, ("bidPrice", "bid", "bid_price"))
     ask = _first_nested_number(raw_quote, ("askPrice", "ask", "ask_price"))
-    last = _first_nested_number(raw_quote, ("lastPrice", "last", "last_price"))
+    last = _first_nested_number(raw_quote, ("lastPrice", "regularMarketLastPrice", "closePrice", "last", "last_price"))
     mark = _first_nested_number(raw_quote, ("mark", "markPrice", "mark_price"))
     total_volume = _first_nested_number(raw_quote, ("totalVolume", "total_volume", "volume"))
 
@@ -557,9 +577,13 @@ def build_timeframe_technical_snapshot(
     macd_histogram_change = None if histogram is None or previous_histogram is None else histogram - previous_histogram
     atr_14 = average_true_range(clean_candles, 14)
     atr_percent = _percent(atr_14, latest_close)
-    realized_vol_10 = realized_volatility(closes, 10)
-    realized_vol_20 = realized_volatility(closes, 20)
-    realized_vol_60 = realized_volatility(closes, 60)
+    realized_move_10_pct = realized_move_window_pct(closes, 10)
+    realized_move_20_pct = realized_move_window_pct(closes, 20)
+    realized_move_60_pct = realized_move_window_pct(closes, 60)
+    realized_vol_10 = realized_move_10_pct
+    realized_vol_20 = realized_move_20_pct
+    realized_vol_60 = realized_move_60_pct
+    annualized_realized_vol_20 = annualized_realized_volatility(closes, 20, bars_per_year=_bars_per_year(spec))
     roc_5 = rate_of_change(closes, 5)
     roc_20 = rate_of_change(closes, 20)
     recent = clean_candles[-60:] if len(clean_candles) >= 60 else clean_candles
@@ -570,8 +594,14 @@ def build_timeframe_technical_snapshot(
     range_state = range_compression_read(clean_candles, atr_14)
     close_location = close_location_value(clean_candles[-1])
     volume_read = volume_participation_read(clean_candles)
-    vwap_value = vwap(clean_candles) if spec.frequency_type == "minute" else None
+    session_candles = latest_regular_session_candles(clean_candles) if spec.frequency_type == "minute" else []
+    session_vwap_value = vwap(session_candles) if session_candles else None
+    rolling_vwap_20_value = _last(rolling_vwap(clean_candles, 20)) if spec.frequency_type == "minute" and len(clean_candles) >= 20 else None
+    multi_day_vwap_value = vwap(clean_candles) if spec.frequency_type == "minute" else None
+    vwap_value = session_vwap_value if session_vwap_value is not None else rolling_vwap_20_value
     vwap_distance_percent = _percent(latest_close - vwap_value, vwap_value) if vwap_value else None
+    intraday_range_percent = _intraday_range_percent(session_candles) if spec.frequency_type == "minute" else None
+    vol_regime_percentile = volatility_regime_percentile(clean_candles)
     gap_read, opening_range_high, opening_range_low = gap_and_opening_range_read(clean_candles, is_intraday=spec.frequency_type == "minute")
     scores = {
         "Trend": score_trend(latest_close, ema_21, ema_50, sma_50, trend_structure),
@@ -596,6 +626,11 @@ def build_timeframe_technical_snapshot(
         volume_read=volume_read,
         vwap_value=vwap_value,
         vwap_distance_percent=vwap_distance_percent,
+        session_vwap=session_vwap_value,
+        rolling_vwap_20=rolling_vwap_20_value,
+        multi_day_vwap=multi_day_vwap_value,
+        realized_move_20_pct=realized_move_20_pct,
+        annualized_realized_vol_20=annualized_realized_vol_20,
     )
 
     return TimeframeTechnicalSnapshot(
@@ -636,6 +671,15 @@ def build_timeframe_technical_snapshot(
         opening_range_low=opening_range_low,
         lines=lines,
         scores=scores,
+        session_vwap=session_vwap_value,
+        rolling_vwap_20=rolling_vwap_20_value,
+        multi_day_vwap=multi_day_vwap_value,
+        realized_move_10_pct=realized_move_10_pct,
+        realized_move_20_pct=realized_move_20_pct,
+        realized_move_60_pct=realized_move_60_pct,
+        annualized_realized_vol_20=annualized_realized_vol_20,
+        intraday_range_percent=intraday_range_percent,
+        vol_regime_percentile=vol_regime_percentile,
     )
 
 
@@ -653,6 +697,10 @@ def average_true_range(candles: list[Candle], period: int = 14) -> float | None:
 
 
 def realized_volatility(values: list[float], period: int) -> float | None:
+    return realized_move_window_pct(values, period)
+
+
+def realized_move_window_pct(values: list[float], period: int) -> float | None:
     if len(values) <= period:
         return None
     returns: list[float] = []
@@ -665,6 +713,29 @@ def realized_volatility(values: list[float], period: int) -> float | None:
     if len(returns) < 2:
         return None
     return statistics.stdev(returns) * math.sqrt(len(returns)) * 100
+
+
+def annualized_realized_volatility(values: list[float], period: int, *, bars_per_year: float) -> float | None:
+    if len(values) <= period or bars_per_year <= 0:
+        return None
+    returns: list[float] = []
+    for index in range(len(values) - period, len(values)):
+        previous = values[index - 1]
+        current = values[index]
+        if previous <= 0 or current <= 0:
+            continue
+        returns.append(math.log(current / previous))
+    if len(returns) < 2:
+        return None
+    return statistics.stdev(returns) * math.sqrt(bars_per_year) * 100
+
+
+def _bars_per_year(spec: TimeframeSpec) -> float:
+    if spec.frequency_type == "daily":
+        return 252.0
+    if spec.frequency_type == "minute" and spec.frequency > 0:
+        return (390 / spec.frequency) * 252
+    return 252.0
 
 
 def rate_of_change(values: list[float], period: int) -> float | None:
@@ -713,6 +784,42 @@ def rolling_vwap(candles: list[Candle], period: int) -> list[float | None]:
             continue
         result.append(vwap(candles[index + 1 - period:index + 1]))
     return result
+
+
+def latest_regular_session_candles(candles: list[Candle]) -> list[Candle]:
+    groups = _regular_session_groups(candles)
+    if not groups:
+        return []
+    latest_date = max(groups)
+    return groups[latest_date]
+
+
+def volatility_regime_percentile(candles: list[Candle], lookback: int = 60) -> float | None:
+    if len(candles) < 3:
+        return None
+    clean = sorted(candles, key=lambda candle: candle.datetime_ms)
+    ranges: list[float] = []
+    for index, candle in enumerate(clean):
+        if index == 0:
+            ranges.append(candle.high - candle.low)
+            continue
+        previous_close = clean[index - 1].close
+        ranges.append(max(candle.high - candle.low, abs(candle.high - previous_close), abs(candle.low - previous_close)))
+    recent = ranges[-lookback:]
+    if len(recent) < 3:
+        return None
+    latest = recent[-1]
+    below_or_equal = sum(1 for value in recent if value <= latest)
+    return (below_or_equal / len(recent)) * 100
+
+
+def _intraday_range_percent(candles: list[Candle]) -> float | None:
+    if not candles:
+        return None
+    high = max(candle.high for candle in candles)
+    low = min(candle.low for candle in candles)
+    latest_close = candles[-1].close
+    return _percent(high - low, latest_close)
 
 
 def relative_volume(candles: list[Candle], lookback: int = 20) -> float | None:
@@ -854,21 +961,115 @@ def volume_participation_read(candles: list[Candle]) -> VolumeRead:
 def gap_and_opening_range_read(candles: list[Candle], *, is_intraday: bool) -> tuple[str, float | None, float | None]:
     if len(candles) < 2:
         return "Not enough candles for gap read.", None, None
-    current_open = candles[0].open if is_intraday else candles[-1].open
-    prior_close = candles[-2].close if not is_intraday else candles[0].open
-    if not is_intraday:
-        prior_close = candles[-2].close
+
+    clean_candles = sorted(candles, key=lambda candle: candle.datetime_ms)
+    if is_intraday:
+        groups = _regular_session_groups(clean_candles)
+        if not groups:
+            return "No regular-session candles available for gap read.", None, None
+
+        latest_session_date = max(groups)
+        current_session = groups[latest_session_date]
+        previous_session_dates = [session_date for session_date in groups if session_date < latest_session_date]
+        opening_range = _opening_range_candles(current_session)
+        opening_high = max(candle.high for candle in opening_range) if opening_range else None
+        opening_low = min(candle.low for candle in opening_range) if opening_range else None
+        if not previous_session_dates:
+            return "Prior regular-session close unavailable for gap read.", opening_high, opening_low
+
+        prior_session = groups[max(previous_session_dates)]
+        current_open = current_session[0].open
+        prior_close = prior_session[-1].close
+        gap_percent = _percent(current_open - prior_close, prior_close)
+        latest = current_session[-1].close
+        extended_read = _extended_hours_gap_read(clean_candles, latest_session_date, prior_close)
+        if gap_percent is None or abs(gap_percent) < 0.5:
+            line = "No material regular-session gap detected."
+        else:
+            direction = "up" if gap_percent > 0 else "down"
+            filled = latest <= prior_close if gap_percent > 0 else latest >= prior_close
+            status = "filled" if filled else "not filled"
+            line = f"Regular-session gap {direction} {gap_percent:+.2f}%; {status}."
+        if extended_read:
+            line = f"{line} {extended_read}"
+        return line, opening_high, opening_low
+
+    current_open = clean_candles[-1].open
+    prior_close = clean_candles[-2].close
     gap_percent = _percent(current_open - prior_close, prior_close)
-    opening_range = candles[:6] if is_intraday else [candles[-1]]
+    opening_range = [clean_candles[-1]]
     opening_high = max(candle.high for candle in opening_range)
     opening_low = min(candle.low for candle in opening_range)
-    latest = candles[-1].close
+    latest = clean_candles[-1].close
     if gap_percent is None or abs(gap_percent) < 0.5:
         return "No material gap detected.", opening_high, opening_low
     direction = "up" if gap_percent > 0 else "down"
     filled = (latest <= prior_close if gap_percent > 0 else latest >= prior_close)
     status = "filled" if filled else "not filled"
     return f"Gap {direction} {gap_percent:+.2f}%; {status}.", opening_high, opening_low
+
+
+def _regular_session_groups(candles: list[Candle]) -> dict[Any, list[Candle]]:
+    groups: dict[Any, list[Candle]] = {}
+    for candle in sorted(candles, key=lambda row: row.datetime_ms):
+        market_dt = _market_datetime(candle)
+        if not _is_regular_session_time(market_dt.time()):
+            continue
+        groups.setdefault(market_dt.date(), []).append(candle)
+    return groups
+
+
+def _opening_range_candles(session_candles: list[Candle]) -> list[Candle]:
+    if not session_candles:
+        return []
+    first_dt = _market_datetime(session_candles[0])
+    cutoff = first_dt + timedelta(minutes=30)
+    opening = [candle for candle in session_candles if _market_datetime(candle) < cutoff]
+    return opening or session_candles[:1]
+
+
+def _extended_hours_gap_read(candles: list[Candle], session_date: Any, prior_close: float) -> str:
+    extended = [
+        candle
+        for candle in candles
+        if _market_datetime(candle).date() == session_date
+        and not _is_regular_session_time(_market_datetime(candle).time())
+    ]
+    if not extended:
+        return ""
+    latest_extended = extended[-1]
+    extended_percent = _percent(latest_extended.close - prior_close, prior_close)
+    if extended_percent is None:
+        return ""
+    market_time = _market_datetime(latest_extended).time()
+    label = "Premarket" if market_time < REGULAR_SESSION_START else "After-hours"
+    return f"{label} read: latest extended close {_money(latest_extended.close)} is {_fmt_percent(extended_percent)} versus prior regular close."
+
+
+def _is_regular_session_time(value: time) -> bool:
+    return REGULAR_SESSION_START <= value <= REGULAR_SESSION_END
+
+
+def _market_datetime(candle: Candle) -> datetime:
+    utc_dt = datetime.fromtimestamp(candle.datetime_ms / 1000, tz=timezone.utc)
+    if MARKET_TZ is not None:
+        return utc_dt.astimezone(MARKET_TZ)
+    return utc_dt.astimezone(_fallback_us_eastern_tz(utc_dt))
+
+
+def _fallback_us_eastern_tz(utc_dt: datetime) -> timezone:
+    year = utc_dt.year
+    dst_start = datetime(year, 3, _nth_weekday_of_month(year, 3, 6, 2), 7, tzinfo=timezone.utc)
+    dst_end = datetime(year, 11, _nth_weekday_of_month(year, 11, 6, 1), 6, tzinfo=timezone.utc)
+    offset_hours = -4 if dst_start <= utc_dt < dst_end else -5
+    label = "EDT" if offset_hours == -4 else "EST"
+    return timezone(timedelta(hours=offset_hours), label)
+
+
+def _nth_weekday_of_month(year: int, month: int, weekday: int, occurrence: int) -> int:
+    first = datetime(year, month, 1)
+    days_until_weekday = (weekday - first.weekday()) % 7
+    return 1 + days_until_weekday + ((occurrence - 1) * 7)
 
 
 def build_relative_strength_reads(
@@ -982,8 +1183,8 @@ def build_prc_index_price(
             confidence="Low",
             read="Unavailable",
             components=None,
-            warnings=["No candles were available for PRC Index Price."],
-            explanation_lines=["PRC Index Price requires at least candle data."],
+            warnings=["No candles were available for PRC Pressure Line."],
+            explanation_lines=["PRC Pressure Line requires at least candle data."],
             series=None,
         )
 
@@ -1235,7 +1436,7 @@ def score_volatility(atr_percent: float | None, range_state: str, realized_vol_2
         reasons.append("range is expanding, so chase/slippage risk is higher")
     if realized_vol_20 is not None and realized_vol_20 >= 8:
         score -= 6
-        reasons.append(f"20-candle realized volatility is high at {realized_vol_20:.1f}%")
+        reasons.append(f"20-candle realized move intensity is high at {realized_vol_20:.1f}%")
     return ScoreComponent("Volatility/Risk", _clamp_score(score), _reason(reasons, "Volatility evidence is limited."))
 
 
@@ -1342,7 +1543,7 @@ def format_technical_command_center_report(report: TechnicalCommandCenterReport)
         lines.append(f"- Breakout trigger: {_money(resistance.center if resistance else None)}.")
         lines.append(f"- Breakdown / invalidation: {_money(support.center if support else None)}.")
         lines.append(f"- ATR(14): {_money(level_snapshot.atr_14)} / ATR%: {_fmt_percent(level_snapshot.atr_percent)}.")
-        lines.append(f"- VWAP: {_money(level_snapshot.vwap)} / price vs VWAP: {_fmt_percent(level_snapshot.vwap_distance_percent)}.")
+        lines.append(f"- {_vwap_summary(level_snapshot)}")
 
     lines.extend(["", "VOLUME / PARTICIPATION"])
     volume_snapshot = timing or daily
@@ -1390,10 +1591,10 @@ def _format_prc_report_section(
     if not report.prc_indexes:
         return [
             "",
-            "PRC INDEX PRICE",
-            "---------------",
-            "- PRC Index Price unavailable.",
-            "- PRC Index Price is a synthetic internal indicator, not an official exchange price.",
+        "PRC PRESSURE LINE",
+        "---------------",
+        "- PRC Pressure Line unavailable.",
+        "- PRC Pressure Line is a synthetic internal indicator, not an official exchange price or target price.",
         ]
 
     primary_snapshot = timing or setup or daily
@@ -1401,22 +1602,22 @@ def _format_prc_report_section(
     if primary is None:
         return [
             "",
-            "PRC INDEX PRICE",
+            "PRC PRESSURE LINE",
             "---------------",
-            "- PRC Index Price unavailable.",
-            "- PRC Index Price is a synthetic internal indicator, not an official exchange price.",
+            "- PRC Pressure Line unavailable.",
+            "- PRC Pressure Line is a synthetic internal indicator, not an official exchange price or target price.",
         ]
 
     lines = [
         "",
-        "PRC INDEX PRICE",
+        "PRC PRESSURE LINE",
         "---------------",
-        "- PRC Index Price is a synthetic internal indicator, not an official exchange price.",
+        "- PRC Pressure Line is a synthetic internal indicator, not an official exchange price or target price.",
         f"- Timeframe: {primary.timeframe_name}.",
         f"- Latest price: {_money(primary.latest_price)}.",
-        f"- PRC Index Price: {_money(primary.index_price)}.",
-        f"- Price vs PRC: {_fmt_percent(primary.index_distance_percent)}.",
-        f"- PRC slope: {_prc_slope_label(primary.index_slope)}.",
+        f"- PRC Pressure Line: {_money(primary.index_price)}.",
+        f"- Price vs PRC Pressure Line: {_fmt_percent(primary.index_distance_percent)}.",
+        f"- PRC Pressure Line slope: {_prc_slope_label(primary.index_slope)}.",
         f"- PRC read: {primary.read}.",
         f"- Confidence: {primary.confidence}.",
     ]
@@ -1446,7 +1647,7 @@ def _format_prc_report_section(
 
     comparison = _prc_timeframe_comparison(report.prc_indexes)
     if comparison:
-        lines.extend(["", "PRC TIMEFRAME READ"])
+        lines.extend(["", "PRC PRESSURE-LINE TIMEFRAME READ"])
         lines.extend(f"- {line}" for line in comparison)
 
     lines.extend(
@@ -1454,10 +1655,10 @@ def _format_prc_report_section(
             "",
             "PLAIN-ENGLISH USE",
             "-----------------",
-            "- Above PRC with rising PRC = constructive momentum.",
-            "- Far above PRC = possible chase risk.",
-            "- Below rising PRC = pullback/reclaim setup.",
-            "- Below falling PRC = weak tape.",
+            "- Above a rising PRC Pressure Line = constructive momentum.",
+            "- Far above the PRC Pressure Line = possible chase risk.",
+            "- Below a rising PRC Pressure Line = pullback/reclaim setup.",
+            "- Below a falling PRC Pressure Line = weak tape.",
             "- This internal synthetic indicator is for confirmation/non-confirmation only.",
         ]
     )
@@ -1489,15 +1690,15 @@ def _prc_timeframe_comparison(prc_indexes: dict[str, PrcIndexPrice]) -> list[str
     daily_distance = daily.index_distance_percent or 0.0
     lines: list[str] = []
     if daily_slope > 0.10 and timing_distance < -0.50:
-        lines.append("Daily PRC is rising while intraday trades below PRC: constructive pullback; wait for reclaim.")
+        lines.append("Daily PRC Pressure Line is rising while intraday trades below its pressure line: constructive pullback; wait for reclaim.")
     elif daily_slope < -0.10 and timing_distance > 0.50:
-        lines.append("Daily PRC is falling while intraday is above PRC: short-term bounce against weak regime.")
+        lines.append("Daily PRC Pressure Line is falling while intraday is above its pressure line: short-term bounce against weak regime.")
     elif daily_slope > 0.10 and (timing.index_slope or 0.0) > 0.10 and daily_distance >= -0.25 and timing_distance >= -0.25:
-        lines.append("Daily and intraday PRCs are rising with price reclaiming both: confirmed technical pressure.")
+        lines.append("Daily and intraday PRC Pressure Lines are rising with price reclaiming both: confirmed technical pressure.")
     elif daily_distance > 2.0 and timing_distance > 2.0:
-        lines.append("Price is far above both PRCs: strength is present, but chase risk is elevated.")
+        lines.append("Price is far above both PRC Pressure Lines: strength is present, but chase risk is elevated.")
     else:
-        lines.append("Daily and intraday PRCs are mixed; use price reclaim/loss of PRC as confirmation.")
+        lines.append("Daily and intraday PRC Pressure Lines are mixed; use reclaim/loss of the pressure line as confirmation.")
     return lines
 
 
@@ -1524,7 +1725,7 @@ def _calculate_prc_index_core(
     vwap_anchor = latest_vwap if latest_vwap is not None else latest_close
     latest_typical = typical_price(latest)
 
-    # PRC is intentionally transparent: a close/VWAP/typical-price anchor plus
+    # The PRC Pressure Line is intentionally transparent: a close/VWAP/typical-price anchor plus
     # bounded pressure adjustments. It is an internal technical reference only.
     close_component = 0.55 * latest_close
     vwap_component = 0.35 * vwap_anchor
@@ -1658,9 +1859,9 @@ def _prc_explanation_lines(
     read: str,
 ) -> list[str]:
     lines = [
-        "PRC Index Price is a synthetic internal indicator, not an official exchange price.",
+        "PRC Pressure Line is a synthetic internal indicator, not an official exchange price or target price.",
         "Formula: 55% close anchor, 35% VWAP anchor, 10% typical price, then bounded pressure adjustments.",
-        f"Price is {_fmt_percent(index_distance_percent)} versus PRC; PRC slope is {_prc_slope_label(index_slope)}.",
+        f"Price is {_fmt_percent(index_distance_percent)} versus the PRC Pressure Line; slope is {_prc_slope_label(index_slope)}.",
         f"Volume pressure score is {volume_pressure:+.2f}; read is {read}.",
     ]
     if spread is None:
@@ -1688,21 +1889,21 @@ def _prc_ticket_lines(
     if entry is not None:
         entry_vs_prc = _percent(entry - index_price, index_price)
         if entry_vs_prc is not None and entry_vs_prc < -0.75 and slope >= 0:
-            lines.append("Entry is below PRC: favorable pullback entry if trend confirms.")
+            lines.append("Entry is below the PRC Pressure Line: favorable pullback entry if trend confirms.")
         elif entry_vs_prc is not None and abs(entry_vs_prc) <= 0.75:
-            lines.append("Entry is near PRC: balanced versus the synthetic pressure line.")
+            lines.append("Entry is near the PRC Pressure Line: balanced versus the synthetic pressure anchor.")
         elif entry_vs_prc is not None and entry_vs_prc > 1.50:
-            lines.append("Entry is far above PRC: chase risk is elevated.")
+            lines.append("Entry is far above the PRC Pressure Line: chase risk is elevated.")
         elif entry_vs_prc is not None and entry_vs_prc < -0.75 and slope < 0:
-            lines.append("Entry is below falling PRC: discount may be weakness, not opportunity.")
+            lines.append("Entry is below a falling PRC Pressure Line: discount may be weakness, not opportunity.")
         else:
-            lines.append(f"Entry is {_fmt_percent(entry_vs_prc)} from PRC.")
+            lines.append(f"Entry is {_fmt_percent(entry_vs_prc)} from the PRC Pressure Line.")
     if stop is not None:
         stop_gap = abs(latest_price - stop)
         if atr_14 is not None and atr_14 > 0 and stop_gap < atr_14 * 0.70:
-            lines.append("Stop is inside normal PRC/ATR noise.")
+            lines.append("Stop is inside normal PRC Pressure Line/ATR noise.")
         elif stop < index_price:
-            lines.append("Stop is below the current PRC reference line.")
+            lines.append("Stop is below the current PRC Pressure Line.")
         elif atr_14 is not None and atr_14 > 0 and stop_gap > atr_14 * 3:
             lines.append("Stop is wide relative to current technical risk.")
     return lines
@@ -1852,6 +2053,11 @@ def _snapshot_lines(
     volume_read: VolumeRead,
     vwap_value: float | None,
     vwap_distance_percent: float | None,
+    session_vwap: float | None,
+    rolling_vwap_20: float | None,
+    multi_day_vwap: float | None,
+    realized_move_20_pct: float | None,
+    annualized_realized_vol_20: float | None,
 ) -> list[str]:
     support = _nearest_level(support_zones)
     resistance = _nearest_level(resistance_zones)
@@ -1859,11 +2065,20 @@ def _snapshot_lines(
         f"{label}: latest close {_money(latest_close)}.",
         f"Trend: {trend_structure}; EMA21 {_money(ema_21)}, EMA50 {_money(ema_50)}.",
         f"Momentum: RSI {_format_optional(rsi_14)}, MACD histogram {_format_optional(histogram)}, histogram change {_format_optional(macd_histogram_change)}.",
-        f"Risk: ATR {_money(atr_14)} ({_fmt_percent(atr_percent)}); range is {range_state}.",
+        f"Risk: ATR {_money(atr_14)} ({_fmt_percent(atr_percent)}); 20-candle realized move {_fmt_percent(realized_move_20_pct)}; annualized realized vol {_fmt_percent(annualized_realized_vol_20)}; range is {range_state}.",
         f"Levels: support {format_level(support)}, resistance {format_level(resistance)}.",
         f"Volume: {volume_read.accumulation_read}; {volume_read.reason}",
     ]
-    if vwap_value is not None:
+    vwap_parts: list[str] = []
+    if session_vwap is not None:
+        vwap_parts.append(f"session {_money(session_vwap)}")
+    if rolling_vwap_20 is not None:
+        vwap_parts.append(f"rolling 20-bar {_money(rolling_vwap_20)}")
+    if multi_day_vwap is not None:
+        vwap_parts.append(f"multi-day {_money(multi_day_vwap)}")
+    if vwap_parts:
+        lines.append(f"VWAP anchors: {', '.join(vwap_parts)}; price is {_fmt_percent(vwap_distance_percent)} from active VWAP.")
+    elif vwap_value is not None:
         lines.append(f"VWAP: {_money(vwap_value)}; price is {_fmt_percent(vwap_distance_percent)} from VWAP.")
     return lines
 
@@ -2114,6 +2329,21 @@ def format_level(level: TechnicalLevel | None) -> str:
     if abs(level.high - level.low) < 0.005:
         return f"{_money(level.center)} ({level.reason})"
     return f"{_money(level.low)}-{_money(level.high)} ({level.reason})"
+
+
+def _vwap_summary(snapshot: TimeframeTechnicalSnapshot) -> str:
+    parts: list[str] = []
+    if snapshot.session_vwap is not None:
+        parts.append(f"session VWAP {_money(snapshot.session_vwap)}")
+    if snapshot.rolling_vwap_20 is not None:
+        parts.append(f"rolling 20-bar VWAP {_money(snapshot.rolling_vwap_20)}")
+    if snapshot.multi_day_vwap is not None:
+        parts.append(f"multi-day VWAP {_money(snapshot.multi_day_vwap)}")
+    if not parts and snapshot.vwap is not None:
+        parts.append(f"VWAP {_money(snapshot.vwap)}")
+    if not parts:
+        return "VWAP anchors unavailable."
+    return f"{'; '.join(parts)} / price vs active VWAP: {_fmt_percent(snapshot.vwap_distance_percent)}."
 
 
 def _format_optional(value: float | None, *, suffix: str = "") -> str:

@@ -115,6 +115,7 @@ from app.analytics.technical_analysis import (
     build_technical_command_center_report,
     candles_from_price_history,
     format_technical_command_center_report,
+    parse_quote_snapshot,
 )
 from app.analytics.trade_evidence import (
     TradeEvidenceReport,
@@ -1341,6 +1342,7 @@ def _build_research_payload(session: Any, portfolio, symbol: str, *, ticket: Tec
 
     quote, quote_status = _fetch_quote(session, symbol)
     statuses.append(quote_status)
+    quote_snapshot = parse_quote_snapshot(symbol, quote) if quote else None
 
     daily_payload, history_status = _fetch_daily_history(session, symbol)
     statuses.append(history_status)
@@ -1368,6 +1370,7 @@ def _build_research_payload(session: Any, portfolio, symbol: str, *, ticket: Tec
         symbol,
         command_timeframes,
         benchmark_candles=market_candles,
+        quote_snapshot=quote_snapshot,
         ticket=ticket,
         warnings=command_warnings,
         capital_structure_pressure=capital_structure_pressure,
@@ -1430,35 +1433,36 @@ def _build_research_payload(session: Any, portfolio, symbol: str, *, ticket: Tec
         quote=quote,
         option_chain_rows=option_chain_rows,
         symbol_candles=candles,
+        command_center_snapshots=command_center_report.snapshots,
         market_indicators=market_indicators,
         market_candles=market_candles,
     )
 
     return _ResearchPayload(
-        symbol,
-        quote,
-        indicators,
-        context,
-        scenario_rows,
-        earnings_text,
-        fundamentals_text,
-        filings_lines,
-        macro_text,
-        statuses,
-        decision,
-        macro_snapshot,
-        option_chain_rows,
-        greek_underlying_price,
-        greek_summary,
-        security_kind,
-        reporting_profile,
-        etf_snapshot,
-        foreign_issuer_snapshot,
-        candles,
-        market_indicators,
-        market_candles,
-        trade_evidence_report,
-        command_center_report,
+        symbol=symbol,
+        quote=quote,
+        indicators=indicators,
+        context=context,
+        scenario_rows=scenario_rows,
+        earnings_text=earnings_text,
+        fundamentals_text=fundamentals_text,
+        filings_lines=filings_lines,
+        macro_text=macro_text,
+        statuses=statuses,
+        decision=decision,
+        macro_snapshot=macro_snapshot,
+        option_chain_rows=option_chain_rows,
+        option_chain_underlying_price=greek_underlying_price,
+        greek_summary=greek_summary,
+        security_kind=security_kind,
+        reporting_profile=reporting_profile,
+        etf_snapshot=etf_snapshot,
+        foreign_issuer_snapshot=foreign_issuer_snapshot,
+        daily_candles=candles,
+        market_indicators=market_indicators,
+        market_candles=market_candles,
+        trade_evidence_report=trade_evidence_report,
+        command_center_report=command_center_report,
     )
 
 
@@ -2079,6 +2083,7 @@ def _trade_evidence_report(payload: _ResearchPayload) -> TradeEvidenceReport:
         quote=payload.quote,
         option_chain_rows=payload.option_chain_rows or [],
         symbol_candles=payload.daily_candles or [],
+        command_center_snapshots=payload.command_center_report.snapshots if payload.command_center_report else None,
         market_indicators=payload.market_indicators or {},
         market_candles=payload.market_candles or {},
     )
@@ -2507,6 +2512,7 @@ def _refresh_payload_option_chain_evidence(self: tk.Tk) -> None:
         quote=payload.quote,
         option_chain_rows=chain_rows,
         symbol_candles=payload.daily_candles or [],
+        command_center_snapshots=payload.command_center_report.snapshots if payload.command_center_report else None,
         market_indicators=payload.market_indicators or {},
         market_candles=payload.market_candles or {},
     )
@@ -3142,6 +3148,7 @@ def _refresh_earnings_sources(self: tk.Tk) -> None:
                 quote=payload.quote,
                 option_chain_rows=payload.option_chain_rows or [],
                 symbol_candles=payload.daily_candles or [],
+                command_center_snapshots=payload.command_center_report.snapshots if payload.command_center_report else None,
                 market_indicators=payload.market_indicators or {},
                 market_candles=payload.market_candles or {},
             )
@@ -3198,6 +3205,7 @@ def _recalculate_research_scenarios(self: tk.Tk) -> None:
         quote=payload.quote,
         option_chain_rows=payload.option_chain_rows or [],
         symbol_candles=payload.daily_candles or [],
+        command_center_snapshots=payload.command_center_report.snapshots if payload.command_center_report else None,
         market_indicators=payload.market_indicators or {},
         market_candles=payload.market_candles or {},
     )

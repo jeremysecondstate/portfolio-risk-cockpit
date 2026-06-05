@@ -18,7 +18,7 @@ from app.analytics.stock_research import (
     generated_risk_budget,
     technical_scenario_moves,
 )
-from app.analytics.technical_analysis import Candle, simple_moving_average
+from app.analytics.technical_analysis import Candle, TimeframeTechnicalSnapshot, simple_moving_average
 
 TRADE_EVIDENCE_SNAPSHOT_PATH = Path(__file__).resolve().parents[1] / "data" / "trade_evidence_snapshots.jsonl"
 BENCHMARK_SYMBOLS = ("SPY", "QQQ", "IWM")
@@ -78,6 +78,7 @@ def build_trade_evidence_report(
     quote: dict[str, Any] | None = None,
     option_chain_rows: list[dict[str, Any]] | None = None,
     symbol_candles: list[Candle] | None = None,
+    command_center_snapshots: dict[str, TimeframeTechnicalSnapshot] | None = None,
     market_indicators: dict[str, AdvancedIndicatorSnapshot] | None = None,
     market_candles: dict[str, list[Candle]] | None = None,
 ) -> TradeEvidenceReport:
@@ -90,7 +91,7 @@ def build_trade_evidence_report(
     setup_type = classify_setup_type(indicators, symbol_candles)
     market_layer = market_regime_layer(decision, market_indicators, statuses)
     relative_layer = relative_strength_layer(clean_symbol, symbol_candles, market_candles)
-    timeframe_layer = multi_timeframe_layer(indicators, symbol_candles)
+    timeframe_layer = multi_timeframe_layer(indicators, symbol_candles, command_center_snapshots=command_center_snapshots)
     levels_layer = volatility_levels_layer(indicators, context)
     options_layer = options_iv_layer(clean_symbol, context, option_chain_rows)
     execution_layer = liquidity_execution_layer(quote, indicators, context, option_chain_rows)
@@ -286,9 +287,14 @@ def relative_strength_layer(
     return EvidenceLayer(label, _status_from_score(score), score, lines[:8], missing)
 
 
-def multi_timeframe_layer(indicators: AdvancedIndicatorSnapshot, candles: list[Candle]) -> EvidenceLayer:
+def multi_timeframe_layer(
+    indicators: AdvancedIndicatorSnapshot,
+    candles: list[Candle],
+    *,
+    command_center_snapshots: dict[str, TimeframeTechnicalSnapshot] | None = None,
+) -> EvidenceLayer:
     lines = [f"Daily/swing: trend {indicators.trend}, momentum {indicators.momentum}, volatility {indicators.volatility}."]
-    missing = ["Intraday 5m/15m technical context is not fetched in this Schwab research workspace v1."]
+    missing: list[str] = []
     scores: list[float] = []
     if indicators.trend == "bullish":
         scores.append(75)
@@ -298,6 +304,15 @@ def multi_timeframe_layer(indicators: AdvancedIndicatorSnapshot, candles: list[C
         scores.append(50)
     else:
         missing.append("Daily trend is unavailable.")
+
+    intraday_snapshot = _preferred_intraday_snapshot(command_center_snapshots or {})
+    if intraday_snapshot is None:
+        missing.append("Intraday 5m/15m technical context is unavailable for this evidence layer.")
+    else:
+        lines.append(_intraday_snapshot_line(intraday_snapshot))
+        intraday_score = _snapshot_alignment_score(indicators, intraday_snapshot)
+        if intraday_score is not None:
+            scores.append(intraday_score)
 
     weekly_score, weekly_line = _weekly_trend_score(candles)
     if weekly_score is None:
@@ -316,6 +331,54 @@ def multi_timeframe_layer(indicators: AdvancedIndicatorSnapshot, candles: list[C
     score = sum(scores) / len(scores) if scores else None
     label = _layer_label(score, good="Timeframes aligned enough", mixed="Timeframes mixed", bad="Timeframes fighting the setup", none="Multi-timeframe no-read")
     return EvidenceLayer(label, _status_from_score(score), score, lines, missing)
+
+
+def _preferred_intraday_snapshot(snapshots: dict[str, TimeframeTechnicalSnapshot]) -> TimeframeTechnicalSnapshot | None:
+    candidates = [
+        snapshot
+        for snapshot in snapshots.values()
+        if snapshot.candle_count > 0 and (snapshot.role in {"timing", "setup"} or "m" in snapshot.label.lower())
+    ]
+    if not candidates:
+        return None
+    key_order = {"timing_5m": 0, "timing_1m": 1, "setup_30m": 2}
+    return sorted(candidates, key=lambda snapshot: (key_order.get(snapshot.key, 99), -snapshot.candle_count))[0]
+
+
+def _intraday_snapshot_line(snapshot: TimeframeTechnicalSnapshot) -> str:
+    vwap_note = ""
+    if snapshot.session_vwap is not None:
+        vwap_note = f", price vs session VWAP {_pct_points(snapshot.vwap_distance_percent)}"
+    elif snapshot.rolling_vwap_20 is not None:
+        vwap_note = f", price vs rolling 20-bar VWAP {_pct_points(snapshot.vwap_distance_percent)}"
+    return (
+        f"Intraday timing ({snapshot.label}): trend {snapshot.trend_structure}, "
+        f"RSI {_number(snapshot.rsi_14)}, latest {_money(snapshot.latest_close)}{vwap_note}."
+    )
+
+
+def _snapshot_alignment_score(indicators: AdvancedIndicatorSnapshot, snapshot: TimeframeTechnicalSnapshot) -> float | None:
+    components = [
+        component.score
+        for name, component in snapshot.scores.items()
+        if name in {"Trend", "Momentum", "Volatility/Risk"}
+    ]
+    if not components:
+        return None
+    score = sum(components) / len(components)
+    trend_score = snapshot.scores.get("Trend")
+    if trend_score is not None:
+        if indicators.trend == "bullish" and trend_score.score >= 60:
+            score += 5
+        elif indicators.trend == "bearish" and trend_score.score <= 40:
+            score += 5
+        elif indicators.trend in {"bullish", "bearish"} and 45 <= trend_score.score <= 55:
+            score -= 5
+        elif indicators.trend == "bullish" and trend_score.score <= 40:
+            score -= 10
+        elif indicators.trend == "bearish" and trend_score.score >= 60:
+            score -= 10
+    return _clamp(score, 0, 100)
 
 
 def volatility_levels_layer(indicators: AdvancedIndicatorSnapshot, context: PortfolioSymbolContext) -> EvidenceLayer:
@@ -1041,6 +1104,14 @@ def _money(value: float | None) -> str:
         return "--"
     prefix = "-$" if value < 0 else "$"
     return f"{prefix}{abs(value):,.2f}"
+
+
+def _number(value: float | None) -> str:
+    return "--" if value is None else f"{value:.1f}"
+
+
+def _pct_points(value: float | None) -> str:
+    return "--" if value is None else f"{value:+.1f}%"
 
 
 def _percent(value: float | None) -> str:

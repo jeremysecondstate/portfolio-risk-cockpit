@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from app.analytics.technical_analysis import (
     Candle,
@@ -13,6 +14,7 @@ from app.analytics.technical_analysis import (
     build_technical_command_center_report,
     build_timeframe_technical_snapshot,
     close_location_value,
+    format_technical_command_center_report,
     parse_quote_snapshot,
     rolling_vwap,
     spread_percent,
@@ -20,6 +22,11 @@ from app.analytics.technical_analysis import (
     volume_pressure_score,
     vwap,
 )
+
+
+def _market_ms(year: int, month: int, day: int, hour: int, minute: int) -> int:
+    eastern = timezone(timedelta(hours=-4), "EDT")
+    return int(datetime(year, month, day, hour, minute, tzinfo=eastern).timestamp() * 1000)
 
 
 def _candles(
@@ -50,6 +57,38 @@ def _candles(
     return rows
 
 
+def _session_candles(
+    year: int,
+    month: int,
+    day: int,
+    *,
+    count: int,
+    start: float,
+    step: float,
+    volume: float = 1_000.0,
+) -> list[Candle]:
+    rows: list[Candle] = []
+    price = start
+    for index in range(count):
+        minute_offset = index * 5
+        hour = 9 + (30 + minute_offset) // 60
+        minute = (30 + minute_offset) % 60
+        open_price = price
+        close = price + step
+        rows.append(
+            Candle(
+                datetime_ms=_market_ms(year, month, day, hour, minute),
+                open=open_price,
+                high=max(open_price, close) + 0.25,
+                low=min(open_price, close) - 0.25,
+                close=close,
+                volume=volume + index * 10,
+            )
+        )
+        price = close
+    return rows
+
+
 class TechnicalCommandCenterTests(unittest.TestCase):
     def test_atr_uses_true_range(self) -> None:
         rows = _candles(20, start=10.0, step=0.50)
@@ -72,6 +111,42 @@ class TechnicalCommandCenterTests(unittest.TestCase):
         expected = (((12.0 + 9.0 + 11.0) / 3) * 100 + ((14.0 + 10.0 + 13.0) / 3) * 300) / 400
         self.assertIsNone(values[0])
         self.assertAlmostEqual(values[1], expected)
+
+    def test_intraday_gap_uses_latest_regular_session(self) -> None:
+        prior_session = _session_candles(2026, 6, 3, count=78, start=95.0, step=5.0 / 78)
+        prior_session[-1] = Candle(
+            prior_session[-1].datetime_ms,
+            prior_session[-1].open,
+            prior_session[-1].high,
+            prior_session[-1].low,
+            100.0,
+            prior_session[-1].volume,
+        )
+        current_session = _session_candles(2026, 6, 4, count=12, start=105.0, step=0.10)
+        spec = TimeframeSpec("timing_5m", "10d 5m", "day", 10, "minute", 5, "timing")
+
+        snapshot = build_timeframe_technical_snapshot("RDW", spec, [*prior_session, *current_session])
+
+        self.assertIn("Regular-session gap up +5.00%", snapshot.gap_read)
+        opening = current_session[:6]
+        self.assertAlmostEqual(snapshot.opening_range_high or 0, max(candle.high for candle in opening))
+        self.assertAlmostEqual(snapshot.opening_range_low or 0, min(candle.low for candle in opening))
+
+    def test_minute_snapshot_exposes_session_rolling_and_multi_day_vwap(self) -> None:
+        old_session = _session_candles(2026, 6, 3, count=20, start=10.0, step=0.01, volume=10_000)
+        current_session = _session_candles(2026, 6, 4, count=30, start=50.0, step=0.05, volume=1_000)
+        spec = TimeframeSpec("timing_5m", "10d 5m", "day", 10, "minute", 5, "timing")
+
+        snapshot = build_timeframe_technical_snapshot("RDW", spec, [*old_session, *current_session])
+
+        self.assertIsNotNone(snapshot.session_vwap)
+        self.assertIsNotNone(snapshot.rolling_vwap_20)
+        self.assertIsNotNone(snapshot.multi_day_vwap)
+        self.assertEqual(snapshot.vwap, snapshot.session_vwap)
+        assert snapshot.session_vwap is not None
+        assert snapshot.multi_day_vwap is not None
+        self.assertGreater(snapshot.session_vwap, snapshot.multi_day_vwap)
+        self.assertTrue(any("session" in line and "multi-day" in line for line in snapshot.lines))
 
     def test_close_location_value_is_centered_between_negative_and_positive_one(self) -> None:
         self.assertAlmostEqual(close_location_value(Candle(1, 9.0, 12.0, 8.0, 12.0, 100.0)), 1.0)
@@ -152,6 +227,16 @@ class TechnicalCommandCenterTests(unittest.TestCase):
         self.assertGreater(prc.components.relative_strength_adjustment, 0)
         self.assertEqual(prc.confidence, "High")
 
+    def test_command_center_passed_quote_avoids_missing_quote_prc_warning(self) -> None:
+        rows = _candles(80, start=20.0, step=0.12)
+        quote = QuoteSnapshot("RDW", bid=29.55, ask=29.60, last=29.58, mark=29.57, total_volume=100_000)
+
+        report = build_technical_command_center_report("RDW", {"daily_1y": rows}, quote_snapshot=quote)
+        warnings = " ".join(warning for prc in report.prc_indexes.values() for warning in prc.warnings)
+
+        self.assertNotIn("Quote data unavailable", warnings)
+        self.assertNotIn("Quote bid/ask unavailable", warnings)
+
     def test_prc_clamps_extreme_output(self) -> None:
         rows = [Candle(1, 100.0, 1000.0, 900.0, 100.0, 1_000.0)]
         prc = build_prc_index_price("RDW", "single", rows)
@@ -201,6 +286,26 @@ class TechnicalCommandCenterTests(unittest.TestCase):
         self.assertIn("daily_1y", report.prc_indexes)
         self.assertIsNotNone(report.prc_indexes["daily_1y"].index_price)
         self.assertTrue(any("Benchmark relative-strength data unavailable" in warning for warning in report.warnings))
+
+    def test_report_labels_pressure_line_and_vwap_anchors(self) -> None:
+        daily = _candles(80, start=20.0, step=0.12)
+        intraday = [
+            *_session_candles(2026, 6, 3, count=20, start=10.0, step=0.01, volume=10_000),
+            *_session_candles(2026, 6, 4, count=30, start=50.0, step=0.05, volume=1_000),
+        ]
+        quote = QuoteSnapshot("RDW", bid=29.55, ask=29.60, last=29.58, mark=29.57)
+
+        report = build_technical_command_center_report(
+            "RDW",
+            {"daily_1y": daily, "timing_5m": intraday},
+            quote_snapshot=quote,
+        )
+        text = format_technical_command_center_report(report)
+
+        self.assertIn("PRC PRESSURE LINE", text)
+        self.assertNotIn("PRC INDEX PRICE", text)
+        self.assertIn("session VWAP", text)
+        self.assertIn("multi-day VWAP", text)
 
 
 if __name__ == "__main__":
