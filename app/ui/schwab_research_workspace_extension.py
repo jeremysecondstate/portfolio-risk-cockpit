@@ -70,11 +70,14 @@ from app.analytics.research_scoring import (
 from app.analytics.research_workspace_insights import (
     TERM_HELPERS,
     OptionCandidate,
+    build_cross_read_conflict_badge,
     build_earnings_workspace_summary,
     build_fundamental_verdict,
+    build_fundamental_metric_cards,
     build_macro_metric_cards,
     build_risk_plan,
     build_technical_narrative,
+    build_technical_at_glance_read,
     combined_current_model_option_scenarios,
     combined_option_scenarios,
     inflation_read_from_metrics,
@@ -468,11 +471,11 @@ def _earnings_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     frame.checks = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.checks.grid(row=1, column=0, sticky="ew", pady=(8, 0))
     frame.checks.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
-    source_box = ttk.LabelFrame(frame, text="Source Links", style="Card.TLabelframe")
+    source_box = ttk.LabelFrame(frame, text="Confirmed Sources / Search Helpers", style="Card.TLabelframe")
     source_box.grid(row=2, column=0, sticky="ew", pady=(8, 0))
     source_box.columnconfigure(0, weight=1)
-    tree = ttk.Treeview(source_box, columns=("source", "date", "url"), show="headings", height=5)
-    for column, label, width in (("source", "Source", 250), ("date", "Date", 110), ("url", "URL", 520)):
+    tree = ttk.Treeview(source_box, columns=("source", "date", "url"), show="headings", height=6)
+    for column, label, width in (("source", "Source / Helper", 290), ("date", "Date", 110), ("url", "URL", 520)):
         tree.heading(column, text=label)
         tree.column(column, width=width, anchor=tk.W, stretch=column == "url")
     tree.grid(row=0, column=0, sticky="ew")
@@ -1982,16 +1985,23 @@ def _bullet_line(text: str) -> str:
 
 def _render_at_glance(self: tk.Tk, payload: _ResearchPayload) -> None:
     decision = payload.decision
+    technical_read = build_technical_at_glance_read(decision, payload.command_center_report)
+    fundamental_verdict = build_fundamental_verdict(payload.fundamentals_text, payload.indicators, decision.macro_backdrop.label)
+    conflict_read = build_cross_read_conflict_badge(fundamental_verdict.verdict, decision.macro_backdrop.label, technical_read)
     metric_grid(
         self.schwab_research_glance_cards,
         [
             decision.overall,
+            technical_read,
             decision.risk_level,
+            conflict_read,
             decision.macro_backdrop,
             decision.action_bias,
         ],
-        columns=4,
-        prominent_indexes={0, 3},
+        columns=3,
+        card_height=116,
+        prominent_height=124,
+        prominent_indexes={0, 1, 5},
     )
     labeled_value_grid(
         self.schwab_research_top_strip,
@@ -2002,7 +2012,7 @@ def _render_at_glance(self: tk.Tk, payload: _ResearchPayload) -> None:
         },
         columns=3,
     )
-    self.schwab_research_bull_bear_meter.set_score(decision.technical_score, mode="direction", label=f"Bullishness: {direction_strength_label(decision.technical_score)} ({decision.technical_score:.0f})")
+    self.schwab_research_bull_bear_meter.set_score(technical_read.score, mode="direction", label=f"Technical: {technical_read.label} ({technical_read.score:.0f})")
     self.schwab_research_risk_meter.set_score(decision.risk_score, mode="risk", label=f"Risk Heat: {risk_heat_label(decision.risk_score)} ({decision.risk_score:.0f}/100)")
 
 
@@ -3377,7 +3387,10 @@ def _render_earnings_news(self: tk.Tk, payload: _ResearchPayload) -> None:
             _synthetic_badge("Revenue Trend", summary.revenue_trend, _trend_status(summary.revenue_trend), "Interpreted from standardized companyfacts where available."),
             _synthetic_badge("Profitability", summary.profitability_trend, _trend_status(summary.profitability_trend), "Net income/EPS/margin read from loaded facts and snippets."),
         ],
-        columns=6,
+        columns=3,
+        card_height=136,
+        prominent_height=146,
+        prominent_indexes={0, 1},
     )
     clear_children(frame.checks)  # type: ignore[attr-defined]
     Checklist(frame.checks, "Plain-English Interpretation", summary.interpretation).grid(row=0, column=0, sticky="ew", padx=(0, 8))  # type: ignore[attr-defined]
@@ -3398,8 +3411,8 @@ def _render_etf_documents(self: tk.Tk, payload: _ResearchPayload) -> None:
         frame.cards,  # type: ignore[attr-defined]
         [_badge_from_etf_card(card) for card in readout.document_cards],
         columns=3,
-        card_height=104,
-        prominent_height=112,
+        card_height=124,
+        prominent_height=132,
         prominent_indexes={0},
     )
     clear_children(frame.checks)  # type: ignore[attr-defined]
@@ -3422,9 +3435,9 @@ def _render_foreign_issuer_documents(self: tk.Tk, payload: _ResearchPayload) -> 
     metric_grid(
         frame.cards,  # type: ignore[attr-defined]
         [_badge_from_foreign_card(card) for card in foreign_issuer_earnings_cards(snapshot)],
-        columns=4,
-        card_height=104,
-        prominent_height=112,
+        columns=2,
+        card_height=128,
+        prominent_height=136,
         prominent_indexes={0, 1},
     )
     clear_children(frame.checks)  # type: ignore[attr-defined]
@@ -3450,6 +3463,8 @@ def _render_fundamentals(self: tk.Tk, payload: _ResearchPayload) -> None:
     frame = self.schwab_research_fundamentals_frame
     decision = payload.decision
     verdict = build_fundamental_verdict(payload.fundamentals_text, payload.indicators, decision.macro_backdrop.label)
+    structured_metric_cards = build_fundamental_metric_cards(payload.fundamentals_text)
+    factor_cards = structured_metric_cards or [decision.growth, decision.profitability, decision.balance_sheet, decision.cash_flow]
     metric_grid(
         frame.cards,  # type: ignore[attr-defined]
         [
@@ -3457,12 +3472,11 @@ def _render_fundamentals(self: tk.Tk, payload: _ResearchPayload) -> None:
             _synthetic_badge("Action Bias", verdict.action_bias, _fundamental_status(verdict.verdict), "Fundamentals translated into portfolio action bias."),
             _synthetic_badge("Confidence", verdict.confidence, "good" if verdict.confidence == "High" else "mixed" if verdict.confidence == "Medium" else "info", "Based on data quantity, consistency, and recency language."),
             decision.valuation,
-            decision.growth,
-            decision.profitability,
-            decision.balance_sheet,
-            decision.cash_flow,
+            *factor_cards,
         ],
-        columns=4,
+        columns=3,
+        card_height=142,
+        prominent_height=154,
         prominent_indexes={0, 1},
     )
     clear_children(frame.checks)  # type: ignore[attr-defined]
@@ -3492,9 +3506,9 @@ def _render_foreign_issuer_fundamentals(self: tk.Tk, payload: _ResearchPayload) 
     metric_grid(
         frame.cards,  # type: ignore[attr-defined]
         [_badge_from_foreign_card(card) for card in foreign_issuer_fundamental_cards(snapshot)],
-        columns=4,
-        card_height=104,
-        prominent_height=112,
+        columns=2,
+        card_height=128,
+        prominent_height=136,
         prominent_indexes={0, 1},
     )
     clear_children(frame.checks)  # type: ignore[attr-defined]
@@ -3515,9 +3529,9 @@ def _render_etf_fundamentals(self: tk.Tk, payload: _ResearchPayload) -> None:
     metric_grid(
         frame.cards,  # type: ignore[attr-defined]
         [_badge_from_etf_card(card) for card in readout.structure_cards],
-        columns=4,
-        card_height=104,
-        prominent_height=112,
+        columns=3,
+        card_height=124,
+        prominent_height=132,
         prominent_indexes={0, 7},
     )
     clear_children(frame.checks)  # type: ignore[attr-defined]

@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from app.analytics.research_scoring import BadgeReadout, direction_strength_label
 from app.analytics.stock_research import AdvancedIndicatorSnapshot, GeneratedStockPosition, PortfolioSymbolContext
 from app.macro.models import MacroRelease, MacroSnapshot
 
@@ -127,6 +128,20 @@ class FundamentalVerdict:
     trade_read: str
     combined_read: str
     what_changes: list[str]
+
+
+@dataclass(frozen=True)
+class FundamentalTrendMetrics:
+    revenue_yoy: float | None = None
+    net_income_yoy: float | None = None
+    operating_income_yoy: float | None = None
+    diluted_eps_yoy: float | None = None
+    operating_cash_flow_yoy: float | None = None
+    cash_to_liabilities: float | None = None
+    liabilities_to_assets: float | None = None
+    data_points: int = 0
+    companyfacts_source: bool = False
+    risk_flags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -884,9 +899,10 @@ def build_earnings_workspace_summary(
     for line in filings_lines[:8]:
         label, url = _split_source_line(line)
         source_links.append((label, _filing_date_from_line(line), url))
-    if "companyfacts" in fundamentals_text.lower() or fundamentals_text.strip():
+    fundamentals_lower = fundamentals_text.lower()
+    if "companyfacts" in fundamentals_lower and "unavailable" not in fundamentals_lower and "error" not in fundamentals_lower:
         source_links.append(("SEC companyfacts / XBRL", "latest loaded", "https://data.sec.gov/api/xbrl/companyfacts/"))
-    source_links = _dedupe_source_links(source_links)
+    source_links = _dedupe_source_links(_labeled_source_links(source_links))
     revenue = _trend_from_text(fundamentals_text, "revenue")
     profitability = _trend_from_text(fundamentals_text, "net income", "operating income", "eps", "margin")
     guidance = _guidance_tone(earnings_text)
@@ -950,27 +966,41 @@ def build_fundamental_verdict(
             what_changes=["SEC companyfacts becomes available.", "Fresh 10-Q/10-K data loads.", "Price confirms above resistance."],
         )
 
+    structured = _structured_fundamental_metrics(fundamentals_text)
+    if structured.companyfacts_source and structured.data_points:
+        score = _structured_fundamental_score(structured)
+        material_risk = bool(
+            structured.risk_flags
+            or (structured.net_income_yoy is not None and structured.net_income_yoy < 0)
+            or (structured.operating_income_yoy is not None and structured.operating_income_yoy < 0)
+        )
+        if material_risk:
+            score = min(score, 44.0)
+        verdict, action, investment = _fundamental_verdict_from_score(score, material_risk=material_risk, structured=structured)
+        confidence = "High" if structured.data_points >= 4 else "Medium" if structured.data_points >= 2 else "Low"
+        trade = _trade_read(indicators, macro_label)
+        combined = _combined_fundamental_trade_read(verdict, trade, macro_label)
+        if material_risk and verdict in {"Strong", "Good", "Mixed"}:
+            combined = "Conflict: standardized fundamentals include pressure signals, so do not treat the headline verdict as a clean green light. " + combined
+        return FundamentalVerdict(
+            verdict=verdict,
+            action_bias=action,
+            confidence=confidence,
+            investment_read=investment,
+            trade_read=trade,
+            combined_read=combined,
+            what_changes=_fundamental_change_triggers(indicators, macro_label, structured),
+        )
+
     positive_terms = ("revenue growth", "revenue is strong", "net income improved", "operating income expanded", "cash flow", "free cash flow", "positive", "strong")
     negative_terms = ("decline", "decreased", "weak", "loss", "cash used", "negative", "debt", "pressure")
     positive = sum(1 for term in positive_terms if term in lower)
     negative = sum(1 for term in negative_terms if term in lower)
     data_points = sum(1 for term in ("revenue", "net income", "operating income", "cash", "liabilities", "companyfacts", "10-q", "10-k") if term in lower)
     score = positive * 18 - negative * 16 + min(data_points, 8) * 5
-    if score >= 80:
-        verdict, action = "Strong", "Supports owning"
-        investment = "Investment read: favorable. Fundamentals look strong enough to support owning this."
-    elif score >= 45:
-        verdict, action = "Good", "Supports adding on pullbacks"
-        investment = "Investment read: favorable, but add only when price and risk confirm."
-    elif score >= -15:
-        verdict, action = "Mixed", "Supports watch only"
-        investment = "Investment read: mixed. The data does not justify aggressive new risk by itself."
-    elif score <= -35:
-        verdict, action = "Avoid", "Avoid until fundamentals improve"
-        investment = "Investment read: unfavorable. Fundamentals do not justify new risk right now."
-    else:
-        verdict, action = "Weak", "Supports trimming"
-        investment = "Investment read: weak. Own only with a specific risk plan."
+    if "margin pressure" in lower or "operating income compressed" in lower:
+        score = min(score, 44.0)
+    verdict, action, investment = _fundamental_verdict_from_score(score, material_risk="pressure" in lower, structured=None)
     confidence = "High" if data_points >= 6 and abs(score) >= 45 else "Medium" if data_points >= 4 else "Low"
     trade = _trade_read(indicators, macro_label)
     combined = _combined_fundamental_trade_read(verdict, trade, macro_label)
@@ -990,6 +1020,74 @@ def build_fundamental_verdict(
             f"Macro/rates move from {macro_label.lower()} to a clearer tailwind or headwind.",
         ],
     )
+
+
+def build_fundamental_metric_cards(fundamentals_text: str) -> list[BadgeReadout]:
+    metrics = _structured_fundamental_metrics(fundamentals_text)
+    if not metrics.companyfacts_source or metrics.data_points == 0:
+        return []
+    cards = [
+        _fundamental_change_badge("Revenue Trend", metrics.revenue_yoy, "latest comparable-period revenue change"),
+        _fundamental_change_badge("Net Income Trend", metrics.net_income_yoy, "latest comparable-period net-income change"),
+        _fundamental_change_badge("Operating Profit", metrics.operating_income_yoy, "latest comparable-period operating-income change"),
+    ]
+    if metrics.operating_cash_flow_yoy is not None:
+        cards.append(_fundamental_change_badge("Operating Cash Flow", metrics.operating_cash_flow_yoy, "annual operating-cash-flow companyfacts trend"))
+    elif metrics.diluted_eps_yoy is not None:
+        cards.append(_fundamental_change_badge("Diluted EPS", metrics.diluted_eps_yoy, "latest comparable-period diluted EPS change"))
+    cards.append(_balance_sheet_badge(metrics))
+    return cards
+
+
+def build_technical_at_glance_read(decision: Any, command_center_report: Any | None = None) -> BadgeReadout:
+    legacy_score = float(getattr(decision, "technical_score", 0.0) or 0.0)
+    if command_center_report is None:
+        return BadgeReadout(
+            "Technical Read",
+            direction_strength_label(legacy_score),
+            _direction_status(legacy_score),
+            legacy_score,
+            f"Legacy technical score {legacy_score:.0f}; Technical Command Center unavailable.",
+        )
+
+    command_score_0_100 = float(getattr(command_center_report, "overall_score", 50.0) or 50.0)
+    command_direction_score = max(-100.0, min(100.0, (command_score_0_100 - 50.0) * 2.0))
+    command_read = str(getattr(command_center_report, "overall_read", "") or direction_strength_label(command_direction_score))
+    confidence = str(getattr(command_center_report, "confidence", "") or "Unknown")
+    best_action = str(getattr(command_center_report, "best_action", "") or "No action read")
+    delta = abs(command_direction_score - legacy_score)
+    why = (
+        f"Command Center {command_read} {command_score_0_100:.0f}/100, confidence {confidence}; best action: {best_action}. "
+        f"Legacy score {legacy_score:.0f}."
+    )
+    if delta >= 30:
+        why = "Conflict: " + why
+    return BadgeReadout("Technical Read", command_read, _command_read_status(command_read, command_direction_score), command_direction_score, why)
+
+
+def build_cross_read_conflict_badge(
+    fundamental_verdict: str,
+    macro_label: str,
+    technical_read: BadgeReadout,
+) -> BadgeReadout:
+    reads = {
+        "fundamental": _fundamental_direction(fundamental_verdict),
+        "macro": _macro_direction(macro_label),
+        "technical": _technical_direction(technical_read),
+    }
+    positive = [name for name, direction in reads.items() if direction > 0]
+    negative = [name for name, direction in reads.items() if direction < 0]
+    if positive and negative:
+        why = (
+            f"Conflict: fundamentals are {fundamental_verdict}, macro is {macro_label}, "
+            f"and technicals are {technical_read.label}. Keep sizing tied to confirmation."
+        )
+        return BadgeReadout("Read Conflict", "Explicit Conflict", "mixed", 0, why)
+    if len(positive) >= 2:
+        return BadgeReadout("Read Conflict", "Aligned Support", "good", 60, f"Fundamental, macro, and technical reads do not show a major contradiction: {fundamental_verdict}, {macro_label}, {technical_read.label}.")
+    if len(negative) >= 2:
+        return BadgeReadout("Read Conflict", "Aligned Caution", "bad", -60, f"Multiple layers lean cautious: {fundamental_verdict}, {macro_label}, {technical_read.label}.")
+    return BadgeReadout("Read Conflict", "Mixed / No Clear Clash", "info", 0, f"Reads are not strongly opposed: {fundamental_verdict}, {macro_label}, {technical_read.label}.")
 
 
 def build_risk_plan(
@@ -1864,6 +1962,247 @@ def _primary_payoff_path(candidate: OptionCandidate) -> str:
     return "Best path is waiting for confirmation before paying option premium."
 
 
+_FUNDAMENTAL_SECTION_KEYS = {
+    "revenue": "revenue_yoy",
+    "net income": "net_income_yoy",
+    "operating income": "operating_income_yoy",
+    "diluted eps": "diluted_eps_yoy",
+    "operating cash flow": "operating_cash_flow_yoy",
+}
+
+
+def _structured_fundamental_metrics(text: str) -> FundamentalTrendMetrics:
+    lower = text.lower()
+    companyfacts_source = "companyfacts" in lower or "quarterly trend table" in lower or "latest reported fundamentals" in lower
+    values: dict[str, float | None] = {
+        "revenue_yoy": None,
+        "net_income_yoy": None,
+        "operating_income_yoy": None,
+        "diluted_eps_yoy": None,
+        "operating_cash_flow_yoy": None,
+    }
+    current_key = ""
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        header = line.rstrip(":").lower()
+        if header in _FUNDAMENTAL_SECTION_KEYS:
+            current_key = _FUNDAMENTAL_SECTION_KEYS[header]
+            continue
+        if current_key and "latest comparable-period change:" in line.lower():
+            values[current_key] = _parse_percent_value(line)
+            continue
+        snapshot_match = re.match(r"-\s*(?P<label>Revenue|Net income|Operating income|Diluted EPS|Operating cash flow):.*?\bYoY\s+(?P<value>[+-]?\d+(?:\.\d+)?)%", line, flags=re.IGNORECASE)
+        if snapshot_match:
+            key = _FUNDAMENTAL_SECTION_KEYS.get(snapshot_match.group("label").lower())
+            if key and values.get(key) is None:
+                values[key] = _parse_percent_value(snapshot_match.group("value"))
+
+    cash_to_liabilities = _parse_ratio_line(lower, r"cash equals roughly\s+([+-]?\d+(?:\.\d+)?)%\s+of reported liabilities")
+    liabilities_to_assets = _parse_ratio_line(lower, r"liabilities are roughly\s+([+-]?\d+(?:\.\d+)?)%\s+of reported assets")
+    risk_flags = _fundamental_risk_flags(lower, values, cash_to_liabilities, liabilities_to_assets)
+    data_points = sum(1 for value in [*values.values(), cash_to_liabilities, liabilities_to_assets] if value is not None)
+    return FundamentalTrendMetrics(
+        revenue_yoy=values["revenue_yoy"],
+        net_income_yoy=values["net_income_yoy"],
+        operating_income_yoy=values["operating_income_yoy"],
+        diluted_eps_yoy=values["diluted_eps_yoy"],
+        operating_cash_flow_yoy=values["operating_cash_flow_yoy"],
+        cash_to_liabilities=cash_to_liabilities,
+        liabilities_to_assets=liabilities_to_assets,
+        data_points=data_points,
+        companyfacts_source=companyfacts_source,
+        risk_flags=tuple(risk_flags),
+    )
+
+
+def _parse_percent_value(text: str) -> float | None:
+    match = re.search(r"([+-]?\d+(?:,\d{3})*(?:\.\d+)?)\s*%", text)
+    if not match:
+        match = re.search(r"^[+-]?\d+(?:,\d{3})*(?:\.\d+)?$", text.strip())
+    value = match.group(1) if match and match.groups() else match.group(0) if match else ""
+    try:
+        return float(value.replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _parse_ratio_line(text: str, pattern: str) -> float | None:
+    match = re.search(pattern, text, flags=re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _fundamental_risk_flags(
+    lower: str,
+    values: dict[str, float | None],
+    cash_to_liabilities: float | None,
+    liabilities_to_assets: float | None,
+) -> list[str]:
+    flags: list[str] = []
+    if "margin pressure" in lower:
+        flags.append("margin pressure")
+    if "net income weakened" in lower or (values.get("net_income_yoy") is not None and (values["net_income_yoy"] or 0) < 0):
+        flags.append("net income pressure")
+    if "operating income compressed" in lower or (values.get("operating_income_yoy") is not None and (values["operating_income_yoy"] or 0) < 0):
+        flags.append("operating margin pressure")
+    if any(term in lower for term in ("negative free cash", "cash used", "going concern")):
+        flags.append("cash-flow/liquidity pressure")
+    if cash_to_liabilities is not None and cash_to_liabilities < 10:
+        flags.append("thin cash coverage")
+    if liabilities_to_assets is not None and liabilities_to_assets > 75:
+        flags.append("high liability load")
+    return list(dict.fromkeys(flags))
+
+
+def _structured_fundamental_score(metrics: FundamentalTrendMetrics) -> float:
+    score = 0.0
+    score += _metric_change_score(metrics.revenue_yoy, strong=25, moderate=15, weak=-22, very_weak=-32)
+    score += _metric_change_score(metrics.net_income_yoy, strong=24, moderate=13, weak=-24, very_weak=-34)
+    score += _metric_change_score(metrics.operating_income_yoy, strong=20, moderate=10, weak=-24, very_weak=-34)
+    score += _metric_change_score(metrics.diluted_eps_yoy, strong=12, moderate=7, weak=-12, very_weak=-20)
+    score += _metric_change_score(metrics.operating_cash_flow_yoy, strong=12, moderate=7, weak=-12, very_weak=-20)
+    if metrics.cash_to_liabilities is not None:
+        score += 8 if metrics.cash_to_liabilities >= 25 else -10 if metrics.cash_to_liabilities < 10 else 0
+    if metrics.liabilities_to_assets is not None:
+        score += 8 if metrics.liabilities_to_assets <= 50 else -12 if metrics.liabilities_to_assets >= 75 else 0
+    score += min(metrics.data_points, 6) * 4
+    score -= len(metrics.risk_flags) * 8
+    return score
+
+
+def _metric_change_score(
+    value: float | None,
+    *,
+    strong: float,
+    moderate: float,
+    weak: float,
+    very_weak: float,
+) -> float:
+    if value is None:
+        return 0.0
+    if value >= 10:
+        return strong
+    if value > 0:
+        return moderate
+    if value <= -10:
+        return very_weak
+    return weak
+
+
+def _fundamental_verdict_from_score(
+    score: float,
+    *,
+    material_risk: bool,
+    structured: FundamentalTrendMetrics | None,
+) -> tuple[str, str, str]:
+    risk_suffix = ""
+    if structured is not None and structured.risk_flags:
+        risk_suffix = " Offsetting risk flags: " + ", ".join(structured.risk_flags[:3]) + "."
+    if score >= 70 and not material_risk:
+        return "Strong", "Supports owning", "Investment read: favorable from standardized companyfacts trends. Fundamentals look strong enough to support owning this."
+    if score >= 45 and not material_risk:
+        return "Good", "Supports adding on pullbacks", "Investment read: favorable from standardized companyfacts trends, but add only when price and risk confirm."
+    if score >= -15:
+        return "Mixed", "Supports watch only", "Investment read: mixed. Structured data has offsets and does not justify aggressive new risk by itself." + risk_suffix
+    if score <= -35:
+        return "Avoid", "Avoid until fundamentals improve", "Investment read: unfavorable. Standardized fundamentals do not justify new risk right now." + risk_suffix
+    return "Weak", "Supports trimming", "Investment read: weak. Own only with a specific risk plan." + risk_suffix
+
+
+def _fundamental_change_triggers(
+    indicators: AdvancedIndicatorSnapshot,
+    macro_label: str,
+    metrics: FundamentalTrendMetrics | None = None,
+) -> list[str]:
+    triggers = [
+        "Revenue trend deteriorates or improves in the next filing.",
+        "Cash flow weakens or strengthens versus the latest period.",
+        "Debt/liabilities worsen relative to assets.",
+        risk_line_text(indicators),
+        "Earnings/guidance disappoints or confirms the trend.",
+        f"Macro/rates move from {macro_label.lower()} to a clearer tailwind or headwind.",
+    ]
+    if metrics is not None and metrics.risk_flags:
+        triggers.insert(0, "Pressure flags clear or worsen: " + ", ".join(metrics.risk_flags[:3]) + ".")
+    return triggers
+
+
+def _fundamental_change_badge(title: str, value: float | None, detail: str) -> BadgeReadout:
+    if value is None:
+        return BadgeReadout(title, "Unavailable", "info", 0, f"No {detail} was parsed from companyfacts text.")
+    status = "good" if value > 0 else "bad" if value < 0 else "mixed"
+    label = _format_signed_pct(value)
+    score = max(-100.0, min(100.0, value * 2.0))
+    return BadgeReadout(title, label, status, score, f"Structured companyfacts metric: {detail}.")
+
+
+def _balance_sheet_badge(metrics: FundamentalTrendMetrics) -> BadgeReadout:
+    if metrics.cash_to_liabilities is not None:
+        value = metrics.cash_to_liabilities
+        status = "good" if value >= 25 else "bad" if value < 10 else "mixed"
+        return BadgeReadout("Balance Sheet", f"Cash {value:.1f}% of liabilities", status, value, "Structured companyfacts balance-sheet ratio from cockpit interpretation.")
+    if metrics.liabilities_to_assets is not None:
+        value = metrics.liabilities_to_assets
+        status = "good" if value <= 50 else "bad" if value >= 75 else "mixed"
+        return BadgeReadout("Balance Sheet", f"Liabilities {value:.1f}% of assets", status, 100 - value, "Structured companyfacts balance-sheet ratio from cockpit interpretation.")
+    return BadgeReadout("Balance Sheet", "Limited", "info", 0, "No structured cash/liability ratio was parsed from companyfacts text.")
+
+
+def _format_signed_pct(value: float) -> str:
+    return f"{value:+.1f}%"
+
+
+def _direction_status(score: float) -> str:
+    if score >= 25:
+        return "good"
+    if score <= -25:
+        return "bad"
+    return "mixed"
+
+
+def _command_read_status(label: str, score: float) -> str:
+    lower = label.lower()
+    if "bull" in lower or score >= 25:
+        return "good"
+    if "bear" in lower or "avoid" in lower or score <= -25:
+        return "bad"
+    if "watch" in lower:
+        return "mixed"
+    return _direction_status(score)
+
+
+def _fundamental_direction(verdict: str) -> int:
+    if verdict in {"Strong", "Good"}:
+        return 1
+    if verdict in {"Weak", "Avoid"}:
+        return -1
+    return 0
+
+
+def _macro_direction(label: str) -> int:
+    lower = label.lower()
+    if "tailwind" in lower:
+        return 1
+    if "headwind" in lower:
+        return -1
+    return 0
+
+
+def _technical_direction(readout: BadgeReadout) -> int:
+    lower = readout.label.lower()
+    if readout.score >= 25 or "bull" in lower:
+        return 1
+    if readout.score <= -25 or "bear" in lower or "avoid" in lower:
+        return -1
+    return 0
+
+
 def _trade_read(indicators: AdvancedIndicatorSnapshot, macro_label: str) -> str:
     if indicators.trend == "bullish" and indicators.momentum == "improving" and macro_label != "Headwind":
         return f"Trade read: favorable above confirmation. {confirmation_text(indicators)}"
@@ -1876,7 +2215,7 @@ def _combined_fundamental_trade_read(verdict: str, trade: str, macro_label: str)
     if verdict in {"Strong", "Good"} and "favorable" in trade.lower():
         return "Combined read: fundamentals and trade setup support risk, with normal position discipline."
     if verdict in {"Strong", "Good"}:
-        return f"Combined read: fundamentals say yes, but trade timing is not clean because macro is {macro_label.lower()} or price has not confirmed."
+        return f"Conflict: fundamentals say yes, but trade timing is not clean because macro is {macro_label.lower()} or price has not confirmed."
     if verdict == "Mixed":
         return "Combined read: watch only until either fundamentals or price action improves."
     return "Combined read: do not add risk until the business trend and chart improve."
@@ -2038,6 +2377,29 @@ def _earnings_card_from_freshness(fields: dict[str, str], latest_8k: str) -> tup
     return "No Fresh Release", "info", verdict
 
 
+def _labeled_source_links(rows: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
+    labeled = []
+    for label, row_date, url in rows:
+        clean_label = str(label or "Source").strip()
+        prefix = "Search helper" if _is_search_helper(clean_label, url) else "Confirmed source"
+        if not clean_label.lower().startswith(("search helper:", "confirmed source:")):
+            clean_label = f"{prefix}: {clean_label}"
+        labeled.append((clean_label, row_date, url))
+    return labeled
+
+
+def _is_search_helper(label: str, url: str) -> bool:
+    lower_label = label.lower()
+    lower_url = (url or "").lower()
+    return (
+        "search" in lower_label
+        or "google.com/search" in lower_url
+        or "bing.com/search" in lower_url
+        or "duckduckgo.com/" in lower_url
+        or "sec.gov/edgar/search" in lower_url
+    )
+
+
 def _source_links_from_earnings_text(earnings_text: str) -> list[tuple[str, str, str]]:
     links: list[tuple[str, str, str]] = []
     for raw_line in earnings_text.splitlines():
@@ -2049,7 +2411,7 @@ def _source_links_from_earnings_text(earnings_text: str) -> list[tuple[str, str,
         if url == "--":
             continue
         links.append((match.group("label").strip(), match.group("date").strip() or "--", url))
-    return links
+    return _labeled_source_links(links)
 
 
 def _dedupe_source_links(rows: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:

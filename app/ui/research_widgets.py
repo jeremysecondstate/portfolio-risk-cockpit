@@ -84,12 +84,14 @@ class MetricCard(tk.Frame):
         title_font = ("Segoe UI", 8, "bold")
         label_font = ("Segoe UI", 16 if prominent else 13, "bold")
         tk.Label(self, text=readout.title.upper(), bg=colors["bg"], fg=MUTED, font=title_font, anchor="w").grid(row=0, column=1, sticky="ew", padx=12, pady=(9, 0))
-        tk.Label(self, text=readout.label, bg=colors["bg"], fg=colors["fg"], font=label_font, anchor="w").grid(row=1, column=1, sticky="ew", padx=12, pady=(2, 0))
+        self._label = tk.Label(self, text=readout.label, bg=colors["bg"], fg=colors["fg"], font=label_font, anchor="w", justify=tk.LEFT, wraplength=width - 28)
+        self._label.grid(row=1, column=1, sticky="ew", padx=12, pady=(2, 0))
         self._why_label = tk.Label(self, text=readout.why, bg=colors["bg"], fg=TEXT, font=("Segoe UI", 8), wraplength=width - 28, justify=tk.LEFT, anchor="nw")
         self._why_label.grid(row=2, column=1, sticky="nsew", padx=12, pady=(4, 10))
         self.bind("<Configure>", self._on_resize, add="+")
 
     def _on_resize(self, event: tk.Event) -> None:
+        self._label.configure(wraplength=max(140, int(event.width) - 34))
         self._why_label.configure(wraplength=max(140, int(event.width) - 34))
 
 
