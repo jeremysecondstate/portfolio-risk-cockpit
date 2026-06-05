@@ -167,6 +167,7 @@ SUMMARY_COLLAPSED_HEIGHT = 158
 SUMMARY_EXPANDED_HEIGHT = 286
 TAB_PANE_MIN = 440
 DETACH_DRAG_PIXELS = 42
+PRC_PRESSURE_LINE_NOTICE = "PRC Pressure Line is a synthetic internal indicator, not an official price target or exchange price."
 
 
 @dataclass(frozen=True)
@@ -1408,11 +1409,125 @@ def _technicals_tab(notebook: ttk.Notebook) -> ttk.Frame:
     frame.momentum_meter.grid(row=0, column=1, sticky="ew", padx=(0, 8))  # type: ignore[attr-defined]
     frame.risk_meter = ScoreMeter(frame.meters)  # type: ignore[attr-defined]
     frame.risk_meter.grid(row=0, column=2, sticky="ew")  # type: ignore[attr-defined]
+
+    timeframe_box = ttk.LabelFrame(frame, text="Timeframe Stack", style="Card.TLabelframe")
+    timeframe_box.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+    timeframe_box.columnconfigure(0, weight=1)
+    timeframe_tree = ttk.Treeview(
+        timeframe_box,
+        columns=("timeframe", "role", "trend", "momentum", "volume", "vwap", "atr", "range", "read"),
+        show="headings",
+        height=6,
+    )
+    _style_research_tree(timeframe_tree)
+    for column, label, width, anchor in (
+        ("timeframe", "Timeframe", 110, tk.W),
+        ("role", "Role", 84, tk.W),
+        ("trend", "Trend", 150, tk.W),
+        ("momentum", "Momentum", 170, tk.W),
+        ("volume", "Volume", 170, tk.W),
+        ("vwap", "VWAP Dist", 84, tk.E),
+        ("atr", "ATR%", 70, tk.E),
+        ("range", "Range", 108, tk.W),
+        ("read", "Key Read", 390, tk.W),
+    ):
+        timeframe_tree.heading(column, text=label)
+        timeframe_tree.column(column, width=width, anchor=anchor, stretch=column in {"trend", "momentum", "volume", "read"})
+    timeframe_tree.grid(row=0, column=0, sticky="ew")
+    timeframe_scroll = ttk.Scrollbar(timeframe_box, orient=tk.VERTICAL, command=timeframe_tree.yview)
+    timeframe_scroll.grid(row=0, column=1, sticky="ns")
+    timeframe_tree.configure(yscrollcommand=timeframe_scroll.set)
+    _add_horizontal_tree_scrollbar(timeframe_box, timeframe_tree, row=1)
+
+    prc_box = ttk.LabelFrame(frame, text="PRC Pressure Line - Synthetic Internal Indicator", style="Card.TLabelframe")
+    prc_box.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+    prc_box.columnconfigure(0, weight=1)
+    ttk.Label(prc_box, text=PRC_PRESSURE_LINE_NOTICE, style="Subtle.TLabel", wraplength=1120, justify=tk.LEFT).grid(row=0, column=0, sticky="ew", pady=(0, 6))
+    prc_tree = ttk.Treeview(
+        prc_box,
+        columns=("timeframe", "price", "line", "distance", "slope", "read", "confidence"),
+        show="headings",
+        height=5,
+    )
+    _style_research_tree(prc_tree)
+    for column, label, width, anchor in (
+        ("timeframe", "Timeframe", 120, tk.W),
+        ("price", "Price", 94, tk.E),
+        ("line", "PRC Line", 104, tk.E),
+        ("distance", "Distance", 92, tk.E),
+        ("slope", "Slope", 82, tk.E),
+        ("read", "Read", 320, tk.W),
+        ("confidence", "Confidence", 95, tk.W),
+    ):
+        prc_tree.heading(column, text=label)
+        prc_tree.column(column, width=width, anchor=anchor, stretch=column == "read")
+    prc_tree.grid(row=1, column=0, sticky="ew")
+    prc_scroll = ttk.Scrollbar(prc_box, orient=tk.VERTICAL, command=prc_tree.yview)
+    prc_scroll.grid(row=1, column=1, sticky="ns")
+    prc_tree.configure(yscrollcommand=prc_scroll.set)
+    _add_horizontal_tree_scrollbar(prc_box, prc_tree, row=2)
+
+    command_grid = ttk.Frame(frame, style="Panel.TFrame")
+    command_grid.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+    command_grid.columnconfigure((0, 1), weight=1)
+
+    score_box = ttk.LabelFrame(command_grid, text="Score Breakdown", style="Card.TLabelframe")
+    score_box.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+    score_box.columnconfigure(0, weight=1)
+    score_tree = ttk.Treeview(score_box, columns=("component", "score", "why"), show="headings", height=8)
+    _style_research_tree(score_tree)
+    for column, label, width, anchor in (
+        ("component", "Component", 150, tk.W),
+        ("score", "Score", 72, tk.E),
+        ("why", "Why", 430, tk.W),
+    ):
+        score_tree.heading(column, text=label)
+        score_tree.column(column, width=width, anchor=anchor, stretch=column == "why")
+    score_tree.grid(row=0, column=0, sticky="ew")
+    score_scroll = ttk.Scrollbar(score_box, orient=tk.VERTICAL, command=score_tree.yview)
+    score_scroll.grid(row=0, column=1, sticky="ns")
+    score_tree.configure(yscrollcommand=score_scroll.set)
+    _add_horizontal_tree_scrollbar(score_box, score_tree, row=1)
+
+    ticket_box = ttk.LabelFrame(command_grid, text="Execution / Ticket Check", style="Card.TLabelframe")
+    ticket_box.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+    ticket_box.columnconfigure(0, weight=1)
+    ticket_tree = ttk.Treeview(ticket_box, columns=("field", "read", "detail"), show="headings", height=8)
+    _style_research_tree(ticket_tree)
+    for column, label, width, anchor in (
+        ("field", "Field", 140, tk.W),
+        ("read", "Read", 180, tk.W),
+        ("detail", "Detail", 430, tk.W),
+    ):
+        ticket_tree.heading(column, text=label)
+        ticket_tree.column(column, width=width, anchor=anchor, stretch=column == "detail")
+    ticket_tree.grid(row=0, column=0, sticky="ew")
+    ticket_scroll = ttk.Scrollbar(ticket_box, orient=tk.VERTICAL, command=ticket_tree.yview)
+    ticket_scroll.grid(row=0, column=1, sticky="ns")
+    ticket_tree.configure(yscrollcommand=ticket_scroll.set)
+    _add_horizontal_tree_scrollbar(ticket_box, ticket_tree, row=1)
+
+    warning_box = ttk.LabelFrame(frame, text="Warnings / Data Quality", style="Card.TLabelframe")
+    warning_box.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+    warning_box.columnconfigure(0, weight=1)
+    warning_tree = ttk.Treeview(warning_box, columns=("source", "warning"), show="headings", height=4)
+    _style_research_tree(warning_tree)
+    for column, label, width in (("source", "Source", 180), ("warning", "Warning", 780)):
+        warning_tree.heading(column, text=label)
+        warning_tree.column(column, width=width, anchor=tk.W, stretch=column == "warning")
+    warning_tree.grid(row=0, column=0, sticky="ew")
+    warning_scroll = ttk.Scrollbar(warning_box, orient=tk.VERTICAL, command=warning_tree.yview)
+    warning_scroll.grid(row=0, column=1, sticky="ns")
+    warning_tree.configure(yscrollcommand=warning_scroll.set)
+    _add_horizontal_tree_scrollbar(warning_box, warning_tree, row=1)
+    warning_box.grid_remove()
+
     frame.chart_readout = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
-    frame.chart_readout.grid(row=2, column=0, sticky="ew", pady=(10, 0))  # type: ignore[attr-defined]
+    frame.chart_readout.grid(row=6, column=0, sticky="ew", pady=(10, 0))  # type: ignore[attr-defined]
     frame.chart_readout.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
-    tree_box = ttk.Frame(frame, style="Panel.TFrame")
-    tree_box.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+
+    tree_box = ttk.LabelFrame(frame, text="Existing Indicator Readout", style="Card.TLabelframe")
+    tree_box.grid(row=7, column=0, sticky="ew", pady=(10, 0))
     tree_box.columnconfigure(0, weight=1)
     tree = ttk.Treeview(tree_box, columns=("metric", "value", "read"), show="headings", height=12)
     _style_research_tree(tree)
@@ -1424,7 +1539,13 @@ def _technicals_tab(notebook: ttk.Notebook) -> ttk.Frame:
     y_scroll.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=y_scroll.set)
     _add_horizontal_tree_scrollbar(tree_box, tree, row=1)
-    text = _readout_launcher(frame, title="Technical Readout", button_text="Open Technical Readout", row=4, pady=(10, 0))
+    text = _readout_launcher(frame, title="Technical Readout", button_text="Open Technical Readout", row=8, pady=(10, 0))
+    frame.timeframe_tree = timeframe_tree  # type: ignore[attr-defined]
+    frame.prc_tree = prc_tree  # type: ignore[attr-defined]
+    frame.score_tree = score_tree  # type: ignore[attr-defined]
+    frame.ticket_tree = ticket_tree  # type: ignore[attr-defined]
+    frame.warning_box = warning_box  # type: ignore[attr-defined]
+    frame.warning_tree = warning_tree  # type: ignore[attr-defined]
     frame.indicator_tree = tree  # type: ignore[attr-defined]
     frame.technical_notes_text = text  # type: ignore[attr-defined]
     frame.detail_text = text  # type: ignore[attr-defined]
@@ -2594,28 +2715,301 @@ def _risk_lines(payload: _ResearchPayload) -> list[str]:
     return lines
 
 
+def _technical_setup_cards(report: TechnicalCommandCenterReport | None) -> list[BadgeReadout]:
+    if report is None:
+        return [
+            _synthetic_badge(
+                "Command Center",
+                "Unavailable",
+                "info",
+                "The command-center report was not built; legacy indicators remain available below.",
+            )
+        ]
+    classification = report.setup_classification
+    reason = classification.main_reason or "Setup classification was built from the command-center timeframe stack."
+    return [
+        _synthetic_badge("Regime", _humanize_command_value(classification.regime), _technical_status(classification.regime), reason),
+        _synthetic_badge("Setup", _humanize_command_value(classification.setup), _technical_status(classification.setup), reason),
+        _synthetic_badge("Timing", _humanize_command_value(classification.timing), _technical_status(classification.timing), reason),
+        _synthetic_badge("Action Quality", _humanize_command_value(classification.action_quality), _technical_status(classification.action_quality), f"Confidence: {classification.confidence}. {reason}"),
+        _synthetic_badge("Confirmation", _money(classification.confirmation_level), "info" if classification.confirmation_level is None else "mixed", "Price level the setup needs to confirm."),
+        _synthetic_badge("Invalidation", _money(classification.invalidation_level), "info" if classification.invalidation_level is None else "bad", "Price level that weakens or invalidates the visible setup."),
+    ]
+
+
+def _technical_timeframe_stack_rows(report: TechnicalCommandCenterReport | None) -> list[tuple[str, str, str, str, str, str, str, str, str]]:
+    if report is None:
+        return [("Unavailable", "--", "--", "--", "--", "--", "--", "--", "Technical Command Center report was not built.")]
+    snapshots = _ordered_timeframe_snapshots(report)
+    if not snapshots:
+        return [("No timeframes", "--", "--", "--", "--", "--", "--", "--", "No command-center snapshots are available.")]
+    rows: list[tuple[str, str, str, str, str, str, str, str, str]] = []
+    for snapshot in snapshots:
+        rows.append(
+            (
+                snapshot.label,
+                _humanize_command_value(snapshot.role),
+                _timeframe_trend_read(snapshot),
+                _timeframe_momentum_read(snapshot),
+                _timeframe_volume_read(snapshot),
+                _format_command_percent(snapshot.vwap_distance_percent),
+                _format_command_percent(snapshot.atr_percent),
+                _humanize_command_value(snapshot.range_state),
+                _timeframe_key_read(snapshot),
+            )
+        )
+    return rows
+
+
+def _technical_prc_rows(report: TechnicalCommandCenterReport | None) -> list[tuple[str, str, str, str, str, str, str]]:
+    if report is None:
+        return [("Unavailable", "--", "--", "--", "--", "Command-center PRC Pressure Line was not built.", "--")]
+    prc_indexes = _ordered_prc_indexes(report)
+    if not prc_indexes:
+        return [("Unavailable", "--", "--", "--", "--", PRC_PRESSURE_LINE_NOTICE, "--")]
+    if not any(prc.latest_price is not None or prc.index_price is not None for prc in prc_indexes):
+        return [("Unavailable", "--", "--", "--", "--", PRC_PRESSURE_LINE_NOTICE, "--")]
+    rows: list[tuple[str, str, str, str, str, str, str]] = []
+    for prc in prc_indexes:
+        read = prc.read or "PRC read unavailable."
+        if prc.warnings:
+            read = f"{read} Data note: {prc.warnings[0]}"
+        rows.append(
+            (
+                prc.timeframe_name,
+                _money(prc.latest_price),
+                _money(prc.index_price),
+                _format_command_percent(prc.index_distance_percent),
+                _format_command_percent(prc.index_slope),
+                read,
+                prc.confidence or "--",
+            )
+        )
+    return rows
+
+
+def _technical_score_breakdown_rows(report: TechnicalCommandCenterReport | None) -> list[tuple[str, str, str]]:
+    if report is None:
+        return [("Command Center", "--", "Technical Command Center report was not built.")]
+    rows = [("Overall", f"{report.overall_score:.0f}/100", f"{report.overall_read}; confidence {report.confidence}; best action: {report.best_action}.")]
+    if not report.scores:
+        rows.append(("Components", "--", "No score components were returned."))
+        return rows
+    for name, component in report.scores.items():
+        rows.append((name, f"{component.score:.0f}/100", component.reason))
+    return rows
+
+
+def _technical_ticket_check_rows(report: TechnicalCommandCenterReport | None) -> list[tuple[str, str, str]]:
+    if report is None:
+        return [("Ticket check", "Unavailable", "Technical Command Center report was not built.")]
+    check = getattr(report, "ticket_check", None)
+    if check is None:
+        return [("Ticket check", "Unavailable", "No execution/ticket check was returned.")]
+    lines = list(getattr(check, "lines", ()) or ())
+    return [
+        ("Entry location", _humanize_command_value(getattr(check, "entry_quality", "")), _first_line_containing(lines, ("Entry location", "Entry:")) or "Entry read unavailable."),
+        ("Stop quality", _humanize_command_value(getattr(check, "stop_quality", "")), _first_line_containing(lines, ("Stop logic", "Stop:")) or "Stop read unavailable."),
+        ("Reward/risk", _humanize_command_value(getattr(check, "risk_reward_read", "")), getattr(check, "risk_reward", "") or "Reward/risk unavailable."),
+        ("Defined risk", getattr(check, "risk_note", "") or "Risk dollars unavailable.", _first_line_containing(lines, ("Estimated defined risk", "Risk dollars")) or "Add entry, quantity, and stop for dollar risk."),
+        ("Target", _money(getattr(check, "target_price", None)), "Nearest visible technical target from the support/resistance map."),
+        ("Verdict", getattr(check, "verdict", "") or "Unavailable", f"Ticket Quality score {getattr(getattr(check, 'score', None), 'score', 0.0):.0f}/100."),
+    ]
+
+
+def _technical_warning_rows(report: TechnicalCommandCenterReport | None) -> list[tuple[str, str]]:
+    if report is None:
+        return []
+    rows: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(source: str, warning: str) -> None:
+        clean = " ".join(str(warning or "").split())
+        if not clean:
+            return
+        key = (source, clean)
+        if key in seen:
+            return
+        seen.add(key)
+        rows.append(key)
+
+    for warning in report.warnings:
+        add("Command Center", warning)
+    for warning in report.setup_classification.warnings:
+        add("Setup Classification", warning)
+    for prc in _ordered_prc_indexes(report):
+        for warning in prc.warnings:
+            add(f"PRC {prc.timeframe_name}", warning)
+    return rows
+
+
+def _legacy_indicator_rows(indicators: AdvancedIndicatorSnapshot) -> list[tuple[str, str, str]]:
+    rows = [
+        ("SMA 20", _number(indicators.sma_20), "Short trend average"),
+        ("SMA 50", _number(indicators.sma_50), "Intermediate trend average"),
+        ("SMA 100", _number(indicators.sma_100), "Intermediate/long trend"),
+        ("SMA 200", _number(indicators.sma_200), "Long trend reference"),
+        ("EMA 12", _number(indicators.ema_12), "Fast momentum average"),
+        ("EMA 26", _number(indicators.ema_26), "Slow momentum average"),
+        ("MACD", _number(indicators.macd), TERM_HELPERS["MACD"]),
+        ("MACD signal", _number(indicators.macd_signal), "9-period MACD signal; compare it with MACD for momentum turns."),
+        ("RSI 14", _number(indicators.rsi_14), TERM_HELPERS["RSI"]),
+        ("Bollinger upper", _number(indicators.bollinger_upper), TERM_HELPERS["Bollinger Bands"]),
+        ("Bollinger middle", _number(indicators.bollinger_middle), "20 SMA band middle."),
+        ("Bollinger lower", _number(indicators.bollinger_lower), TERM_HELPERS["Bollinger Bands"]),
+        ("ATR 14", _number(indicators.atr_14), TERM_HELPERS["ATR"]),
+        ("Volume avg 20", _number(indicators.volume_average_20), "Average daily volume"),
+        ("Swing high", _number(indicators.swing_high), TERM_HELPERS["Swing high / swing low"]),
+        ("Swing low", _number(indicators.swing_low), TERM_HELPERS["Swing high / swing low"]),
+    ]
+    rows.extend((f"Fib {label}", _money(value), TERM_HELPERS["Fibonacci retracement"]) for label, value in indicators.fibonacci_levels.items())
+    return rows
+
+
+def _ordered_timeframe_snapshots(report: TechnicalCommandCenterReport) -> list[Any]:
+    ordered: list[Any] = []
+    seen: set[str] = set()
+    for spec in DEFAULT_COMMAND_CENTER_TIMEFRAMES:
+        snapshot = report.snapshots.get(spec.key)
+        if snapshot is not None:
+            ordered.append(snapshot)
+            seen.add(spec.key)
+    for key, snapshot in report.snapshots.items():
+        if key not in seen:
+            ordered.append(snapshot)
+    return ordered
+
+
+def _ordered_prc_indexes(report: TechnicalCommandCenterReport) -> list[Any]:
+    ordered: list[Any] = []
+    seen: set[str] = set()
+    for spec in DEFAULT_COMMAND_CENTER_TIMEFRAMES:
+        prc = report.prc_indexes.get(spec.key)
+        if prc is not None:
+            ordered.append(prc)
+            seen.add(spec.key)
+    for key, prc in report.prc_indexes.items():
+        if key not in seen:
+            ordered.append(prc)
+    return ordered
+
+
+def _timeframe_trend_read(snapshot: Any) -> str:
+    component = snapshot.scores.get("Trend") if getattr(snapshot, "scores", None) else None
+    score_text = f"{component.score:.0f}/100" if component is not None else "--"
+    return f"{_humanize_command_value(snapshot.trend_structure)}; {score_text}"
+
+
+def _timeframe_momentum_read(snapshot: Any) -> str:
+    parts: list[str] = []
+    if snapshot.rsi_14 is not None:
+        parts.append(f"RSI {snapshot.rsi_14:.1f}")
+    if snapshot.macd_histogram is not None:
+        parts.append(f"MACD hist {snapshot.macd_histogram:+.2f}")
+    if snapshot.macd_histogram_change is not None:
+        parts.append(f"change {snapshot.macd_histogram_change:+.2f}")
+    return "; ".join(parts) if parts else "Momentum unavailable"
+
+
+def _timeframe_volume_read(snapshot: Any) -> str:
+    volume_read = snapshot.volume_read
+    parts: list[str] = []
+    if volume_read.relative_volume is not None:
+        parts.append(f"RVOL {volume_read.relative_volume:.2f}x")
+    if volume_read.up_down_volume_ratio is not None:
+        parts.append(f"Up/down {volume_read.up_down_volume_ratio:.2f}")
+    parts.append(_humanize_command_value(volume_read.accumulation_read))
+    return "; ".join(parts)
+
+
+def _timeframe_key_read(snapshot: Any) -> str:
+    if snapshot.candle_count <= 0:
+        return "No candles available for this timeframe."
+    if snapshot.lines:
+        return snapshot.lines[0]
+    return f"Close {_money(snapshot.latest_close)}; support/resistance map is limited."
+
+
+def _technical_status(value: Any) -> str:
+    text = str(value or "").lower()
+    if any(term in text for term in ("bullish", "breakout", "confirmed", "good_entry", "coherent", "constructive")):
+        return "good"
+    if any(term in text for term in ("bearish", "breakdown", "failed", "protect", "avoid", "no_edge", "weak")):
+        return "bad"
+    if any(term in text for term in ("range", "pullback", "early", "wait", "chop", "extended")):
+        return "mixed"
+    return "info"
+
+
+def _humanize_command_value(value: Any) -> str:
+    text = " ".join(str(value or "--").replace("_", " ").replace("-", " ").split())
+    if text == "--":
+        return text
+    return text[:1].upper() + text[1:]
+
+
+def _format_command_percent(value: float | None) -> str:
+    return "--" if value is None else f"{value:+.2f}%"
+
+
+def _first_line_containing(lines: list[str], needles: tuple[str, ...]) -> str:
+    for line in lines:
+        if any(needle.lower() in line.lower() for needle in needles):
+            return line
+    return ""
+
+
+def _replace_tree_rows(tree: ttk.Treeview, rows: list[tuple[Any, ...]]) -> None:
+    for row_id in tree.get_children():
+        tree.delete(row_id)
+    for row in rows:
+        tree.insert("", tk.END, values=row)
+
+
+def _render_warning_panel(frame: ttk.Frame, rows: list[tuple[str, str]]) -> None:
+    warning_box = frame.warning_box  # type: ignore[attr-defined]
+    warning_tree = frame.warning_tree  # type: ignore[attr-defined]
+    if not rows:
+        _replace_tree_rows(warning_tree, [])
+        warning_box.grid_remove()
+        return
+    warning_box.grid()
+    _replace_tree_rows(warning_tree, rows)
+
+
 def _render_technicals(self: tk.Tk, payload: _ResearchPayload) -> None:
     frame = self.schwab_research_technicals_frame
     indicators = payload.indicators
     decision = payload.decision
+    command_report = payload.command_center_report
     narrative = build_technical_narrative(indicators, payload.context, decision.macro_backdrop.label)
     metric_grid(
         frame.cards,  # type: ignore[attr-defined]
-        [
-            decision.trend,
-            decision.momentum,
-            decision.volatility,
-            _rsi_badge(indicators),
-            _synthetic_badge("Indicator Agreement", narrative.indicator_agreement, narrative.agreement_status, narrative.agreement_explanation),
-        ],
-        columns=4,
-        card_height=142,
+        _technical_setup_cards(command_report),
+        columns=3,
+        card_height=132,
         prominent_height=142,
         adaptive_height=True,
     )
-    frame.bull_meter.set_score(decision.technical_score, mode="direction", label=f"Bullishness: {direction_strength_label(decision.technical_score)} ({decision.technical_score:.0f})")  # type: ignore[attr-defined]
-    frame.momentum_meter.set_score(decision.momentum_score, mode="direction", label=f"Momentum: {direction_strength_label(decision.momentum_score)} ({decision.momentum_score:.0f})")  # type: ignore[attr-defined]
-    frame.risk_meter.set_score(decision.risk_score, mode="risk", label=f"Risk Heat: {risk_heat_label(decision.risk_score)} ({decision.risk_score:.0f})")  # type: ignore[attr-defined]
+    if command_report is not None:
+        momentum_component = command_report.scores.get("Momentum")
+        risk_component = command_report.scores.get("Volatility/Risk")
+        momentum_score = momentum_component.score if momentum_component is not None else decision.momentum_score
+        risk_score = risk_component.score if risk_component is not None else decision.risk_score
+        frame.bull_meter.set_score(command_report.overall_score, mode="direction", label=f"Command read: {command_report.overall_read} ({command_report.overall_score:.0f}/100)")  # type: ignore[attr-defined]
+        frame.momentum_meter.set_score(momentum_score, mode="direction", label=f"Momentum component: {momentum_score:.0f}/100")  # type: ignore[attr-defined]
+        frame.risk_meter.set_score(risk_score, mode="risk", label=f"Risk component: {risk_score:.0f}/100")  # type: ignore[attr-defined]
+    else:
+        frame.bull_meter.set_score(decision.technical_score, mode="direction", label=f"Bullishness: {direction_strength_label(decision.technical_score)} ({decision.technical_score:.0f})")  # type: ignore[attr-defined]
+        frame.momentum_meter.set_score(decision.momentum_score, mode="direction", label=f"Momentum: {direction_strength_label(decision.momentum_score)} ({decision.momentum_score:.0f})")  # type: ignore[attr-defined]
+        frame.risk_meter.set_score(decision.risk_score, mode="risk", label=f"Risk Heat: {risk_heat_label(decision.risk_score)} ({decision.risk_score:.0f})")  # type: ignore[attr-defined]
+
+    _replace_tree_rows(frame.timeframe_tree, _technical_timeframe_stack_rows(command_report))  # type: ignore[attr-defined]
+    _replace_tree_rows(frame.prc_tree, _technical_prc_rows(command_report))  # type: ignore[attr-defined]
+    _replace_tree_rows(frame.score_tree, _technical_score_breakdown_rows(command_report))  # type: ignore[attr-defined]
+    _replace_tree_rows(frame.ticket_tree, _technical_ticket_check_rows(command_report))  # type: ignore[attr-defined]
+    _render_warning_panel(frame, _technical_warning_rows(command_report))
+
     clear_children(frame.chart_readout)  # type: ignore[attr-defined]
     chart_rows = [f"{label}: {text}" for label, text in narrative.rows.items()]
     Checklist(frame.chart_readout, "What The Chart Is Saying", chart_rows).grid(row=0, column=0, sticky="nsew", padx=(0, 8))  # type: ignore[attr-defined]
@@ -2630,56 +3024,10 @@ def _render_technicals(self: tk.Tk, payload: _ResearchPayload) -> None:
         ],
     ).grid(row=0, column=1, sticky="nsew")  # type: ignore[attr-defined]
     tree = frame.indicator_tree  # type: ignore[attr-defined]
-    for row_id in tree.get_children():
-        tree.delete(row_id)
-    rows = [
-        ("SMA 20", indicators.sma_20, "Short trend average"),
-        ("SMA 50", indicators.sma_50, "Intermediate trend average"),
-        ("SMA 100", indicators.sma_100, "Intermediate/long trend"),
-        ("SMA 200", indicators.sma_200, "Long trend reference"),
-        ("EMA 12", indicators.ema_12, "Fast momentum average"),
-        ("EMA 26", indicators.ema_26, "Slow momentum average"),
-        ("MACD", indicators.macd, TERM_HELPERS["MACD"]),
-        ("MACD signal", indicators.macd_signal, "9-period MACD signal; compare it with MACD for momentum turns."),
-        ("RSI 14", indicators.rsi_14, TERM_HELPERS["RSI"]),
-        ("Bollinger upper", indicators.bollinger_upper, TERM_HELPERS["Bollinger Bands"]),
-        ("Bollinger middle", indicators.bollinger_middle, "20 SMA band middle."),
-        ("Bollinger lower", indicators.bollinger_lower, TERM_HELPERS["Bollinger Bands"]),
-        ("ATR 14", indicators.atr_14, TERM_HELPERS["ATR"]),
-        ("Volume avg 20", indicators.volume_average_20, "Average daily volume"),
-        ("Swing high", indicators.swing_high, TERM_HELPERS["Swing high / swing low"]),
-        ("Swing low", indicators.swing_low, TERM_HELPERS["Swing high / swing low"]),
-    ]
-    for metric, value, read in rows:
-        tree.insert("", tk.END, values=(metric, _number(value), read))
-    for label, value in indicators.fibonacci_levels.items():
-        tree.insert("", tk.END, values=(f"Fib {label}", _money(value), TERM_HELPERS["Fibonacci retracement"]))
-    if payload.command_center_report is not None:
-        classification = payload.command_center_report.setup_classification
-        tree.insert(
-            "",
-            tk.END,
-            values=(
-                "Setup classification",
-                f"{classification.regime}/{classification.setup}/{classification.timing}",
-                classification.main_reason,
-            ),
-        )
-        tree.insert(
-            "",
-            tk.END,
-            values=(
-                "Entry quality",
-                classification.action_quality.replace("_", " "),
-                f"Confirmation {_money(classification.confirmation_level)}; invalidation {_money(classification.invalidation_level)}.",
-            ),
-        )
-        for name, component in payload.command_center_report.scores.items():
-            tree.insert("", tk.END, values=(f"Command {name}", f"{component.score:.0f}/100", component.reason))
-        tree.insert("", tk.END, values=("Command action", payload.command_center_report.best_action, "Best action is derived from transparent scores and ticket quality."))
+    _replace_tree_rows(tree, _legacy_indicator_rows(indicators))
     command_text = (
-        format_technical_command_center_report(payload.command_center_report)
-        if payload.command_center_report is not None
+        format_technical_command_center_report(command_report)
+        if command_report is not None
         else "Technical Command Center unavailable."
     )
     notes = "\n".join(
