@@ -9,6 +9,7 @@ from app.analytics.capital_structure_pressure import (
     analyze_capital_structure_pressure,
     capital_structure_technical_modifier,
     classify_capital_pressure_score,
+    parse_capital_structure_terms,
     scan_capital_structure_filings,
     unknown_capital_structure_report,
 )
@@ -36,6 +37,18 @@ def _filing(
 def _scan(*texts: str) -> Any:
     filings = [_filing(text, source_url=f"https://www.sec.gov/test-{index}.htm") for index, text in enumerate(texts)]
     return scan_capital_structure_filings("TEST", company_name="Test Corp", filings=filings, as_of=AS_OF)
+
+
+def _all_terms(report: Any) -> list[Any]:
+    parsed = report.parsed_terms
+    return [
+        *parsed.common_share_classes,
+        *parsed.preferred_series,
+        *parsed.warrants,
+        *parsed.convertibles,
+        *parsed.offering_programs,
+        *parsed.ads_adr_structures,
+    ]
 
 
 def _candles(count: int, *, start: float = 20.0, step: float = 0.20) -> list[Candle]:
@@ -104,9 +117,66 @@ class CapitalStructurePressureTests(unittest.TestCase):
         self.assertIn("Convertibles / notes", labels)
         self.assertTrue(any(level.level_type == "conversion_price" and level.price == 2.25 for level in report.possible_supply_levels))
 
+    def test_parses_series_a_preferred_terms(self) -> None:
+        report = _scan(
+            "The company designated 10,000 shares of Series A Preferred Stock. "
+            "Each share of Series A Preferred Stock has a liquidation preference of $1,000 per share. "
+            "The Series A Preferred Stock is convertible into common stock at a conversion price of $2.50 per share. "
+            "Holders have voting rights on an as-converted basis and redemption rights after June 30, 2028."
+        )
+        preferred = report.parsed_terms.preferred_series[0]
+        self.assertEqual(preferred.series_name, "Series A Preferred Stock")
+        self.assertEqual(preferred.shares, 10_000)
+        self.assertEqual(preferred.conversion_price, 2.5)
+        self.assertEqual(preferred.liquidation_preference, 1000.0)
+        self.assertIsNotNone(preferred.voting_language)
+        self.assertIsNotNone(preferred.conversion_language)
+        self.assertIsNotNone(preferred.redemption_language)
+        self.assertTrue(any("Preferred conversion overhang" in line for line in report.parsed_terms.technical_impact_lines))
+
+    def test_parses_series_b_preferred_redemption_voting_conversion_terms(self) -> None:
+        report = _scan(
+            "The Series B Convertible Preferred Stock is redeemable beginning July 1, 2027. "
+            "Holders vote together with common stock on an as-converted basis. "
+            "The Series B Convertible Preferred Stock is convertible into common stock at a conversion price of $3.75 per share."
+        )
+        preferred = report.parsed_terms.preferred_series[0]
+        self.assertEqual(preferred.series_name, "Series B Convertible Preferred Stock")
+        self.assertEqual(preferred.conversion_price, 3.75)
+        self.assertIsNotNone(preferred.redemption_language)
+        self.assertIsNotNone(preferred.voting_language)
+        self.assertIsNotNone(preferred.conversion_language)
+
     def test_detects_convertible_notes(self) -> None:
         report = _scan("The issuer sold convertible senior notes with a conversion rate subject to adjustment.")
         self.assertIn("Convertibles / notes", {signal.label for signal in report.signals})
+
+    def test_parses_common_and_prefunded_warrants(self) -> None:
+        report = _scan(
+            "The Common Warrants are exercisable for 1,250,000 shares of common stock at an exercise price of $5.00 per share "
+            "and expire on June 30, 2028. The Pre-Funded Warrants are exercisable for 500,000 shares of common stock at a "
+            "nominal exercise price of $0.001 per share and may be exercised on a cashless exercise basis."
+        )
+        common = next(item for item in report.parsed_terms.warrants if item.instrument_type == "common warrant")
+        prefunded = next(item for item in report.parsed_terms.warrants if item.instrument_type == "pre-funded warrant")
+        self.assertEqual(common.underlying_shares, 1_250_000)
+        self.assertEqual(common.exercise_price, 5.0)
+        self.assertEqual(common.expiration_date, "june 30, 2028")
+        self.assertEqual(prefunded.exercise_price, 0.001)
+        self.assertIsNotNone(prefunded.cashless_exercise_language)
+        self.assertTrue(any(level.level_type == "warrant_strike" and level.price == 0.001 for level in report.possible_supply_levels))
+
+    def test_parses_placement_agent_warrants(self) -> None:
+        report = _scan(
+            "The Placement Agent Warrants are exercisable for 125,000 shares of common stock at an exercise price of $6.25 per share "
+            "and expire on August 15, 2029."
+        )
+        warrant = report.parsed_terms.warrants[0]
+        self.assertEqual(warrant.instrument_type, "placement agent warrant")
+        self.assertEqual(warrant.series_name, "Placement Agent Warrants")
+        self.assertEqual(warrant.underlying_shares, 125_000)
+        self.assertEqual(warrant.exercise_price, 6.25)
+        self.assertEqual(warrant.expiration_date, "august 15, 2029")
 
     def test_detects_share_classes_and_voting_control(self) -> None:
         report = _scan(
@@ -114,6 +184,119 @@ class CapitalStructurePressureTests(unittest.TestCase):
             "The dual class structure gives founders high vote voting power."
         )
         self.assertIn("Share classes / voting control", {signal.label for signal in report.signals})
+
+    def test_parses_class_a_and_class_b_common_terms(self) -> None:
+        report = _scan(
+            "The authorized capital includes 10,000,000 shares of Class A common stock entitled to one vote per share "
+            "and 2,000,000 shares of Class B common stock entitled to ten votes per share. "
+            "The Class B common stock is convertible into Class A common stock at any time."
+        )
+        by_class = {item.class_name: item for item in report.parsed_terms.common_share_classes}
+        self.assertEqual(by_class["Class A Common Stock"].shares, 10_000_000)
+        self.assertEqual(by_class["Class B Common Stock"].shares, 2_000_000)
+        self.assertIsNotNone(by_class["Class A Common Stock"].voting_language)
+        self.assertIsNone(by_class["Class A Common Stock"].conversion_language)
+        self.assertIsNotNone(by_class["Class B Common Stock"].conversion_language)
+
+    def test_parses_high_vote_super_voting_and_non_voting_classes(self) -> None:
+        report = _scan(
+            "The company has 1,000,000 shares of high-vote common stock with twenty votes per share "
+            "and 5,000,000 shares of non-voting common stock with no voting rights. "
+            "The super-voting common stock controls the vote."
+        )
+        by_class = {item.class_name: item for item in report.parsed_terms.common_share_classes}
+        self.assertEqual(by_class["High-Vote Common Stock"].shares, 1_000_000)
+        self.assertEqual(by_class["Non-Voting Common Stock"].shares, 5_000_000)
+        self.assertIn("Super-Voting Common Stock", by_class)
+        self.assertIsNotNone(by_class["High-Vote Common Stock"].voting_language)
+        self.assertIsNotNone(by_class["Non-Voting Common Stock"].voting_language)
+
+    def test_parses_atm_and_resale_program_terms(self) -> None:
+        report = _scan(
+            "Under the sales agreement and equity distribution agreement, we may offer and sell up to $75,000,000 of common stock "
+            "from time to time in an at-the-market offering program.",
+            "This resale prospectus relates to the resale of 4,000,000 shares of common stock by selling stockholders.",
+        )
+        atm = next(item for item in report.parsed_terms.offering_programs if item.program_type == "ATM program")
+        resale = next(item for item in report.parsed_terms.offering_programs if item.program_type == "Resale prospectus")
+        self.assertEqual(atm.amount, 75_000_000)
+        self.assertEqual(resale.shares, 4_000_000)
+        self.assertTrue(any("ATM overhang warning" in line for line in report.parsed_terms.technical_impact_lines))
+        self.assertTrue(any("Resale prospectus overhang warning" in line for line in report.parsed_terms.technical_impact_lines))
+
+    def test_parses_s3_shelf_and_424b5_offering_price(self) -> None:
+        report = scan_capital_structure_filings(
+            "TEST",
+            company_name="Test Corp",
+            filings=[
+                _filing(
+                    "This Form S-3 shelf registration statement and prospectus supplement on Form 424B5 "
+                    "offers 2,500,000 shares of common stock at a public offering price of $4.20 per share.",
+                    form="424B5",
+                )
+            ],
+            as_of=AS_OF,
+        )
+        programs = report.parsed_terms.offering_programs
+        self.assertTrue(any(program.program_type == "Shelf registration" for program in programs))
+        self.assertTrue(any(program.program_type == "Offering" for program in programs))
+        self.assertTrue(any(program.shares == 2_500_000 for program in programs))
+        self.assertTrue(any(program.offering_price == 4.2 for program in programs))
+        self.assertTrue(any(level.level_type == "offering_price" and level.price == 4.2 for level in report.possible_supply_levels))
+
+    def test_parses_convertible_notes_terms(self) -> None:
+        report = _scan(
+            "The company issued $10,000,000 aggregate principal amount of 8.00% Convertible Senior Notes due 2029. "
+            "The notes have a conversion rate of 25.0000 shares of common stock per $1,000 principal amount, "
+            "equivalent to a conversion price of $40.00 per share. The notes mature on May 1, 2029."
+        )
+        note = report.parsed_terms.convertibles[0]
+        self.assertEqual(note.principal_amount, 10_000_000)
+        self.assertEqual(note.coupon_rate, "8.00%")
+        self.assertEqual(note.conversion_price, 40.0)
+        self.assertIn("25.0000 shares", note.conversion_rate or "")
+        self.assertEqual(note.maturity_date, "may 1, 2029")
+
+    def test_parses_ads_adr_foreign_issuer_terms(self) -> None:
+        report = _scan(
+            "We are a foreign private issuer. American Depositary Shares, or ADSs, are evidenced by American Depositary Receipts. "
+            "Each ADS represents two Class A ordinary shares. Holders of ADSs may instruct the depositary to vote the ordinary shares."
+        )
+        ads = report.parsed_terms.ads_adr_structures[0]
+        self.assertEqual(ads.structure_name, "Foreign Private Issuer")
+        self.assertIn("two class a ordinary shares", ads.ratio or "")
+        self.assertEqual(ads.ordinary_share_class, "Class A Ordinary Shares")
+        self.assertTrue(any("ADS/ADR" in warning for warning in report.warnings))
+
+    def test_ambiguous_terms_do_not_produce_fake_values(self) -> None:
+        filing = _filing(
+            "The company may issue warrants and convertible notes. The exercise price was not determined. "
+            "The conversion price will be determined in the future. Gross proceeds may be $50 million. "
+            "The maturity date has not been determined."
+        )
+        parsed = parse_capital_structure_terms([filing])
+        self.assertEqual(parsed.warrants, [])
+        self.assertEqual(len(parsed.convertibles), 1)
+        self.assertIsNone(parsed.convertibles[0].conversion_price)
+        self.assertIsNone(parsed.convertibles[0].maturity_date)
+        report = scan_capital_structure_filings("TEST", filings=[filing], as_of=AS_OF)
+        self.assertEqual(report.possible_supply_levels, [])
+
+    def test_every_parsed_term_is_source_backed(self) -> None:
+        report = _scan(
+            "The company has 1,000 shares of Class A common stock with one vote per share. "
+            "The Series A Preferred Stock has a liquidation preference of $1,000 and a conversion price of $2.50. "
+            "Common Warrants are exercisable for 100,000 shares at an exercise price of $5.00 and expire on June 30, 2028. "
+            "The issuer sold $5,000,000 aggregate principal amount of Convertible Notes with a conversion price of $10.00 and maturity date of May 1, 2029. "
+            "This resale prospectus relates to the resale of 300,000 shares by selling stockholders. "
+            "Each ADS represents one ordinary share."
+        )
+        self.assertGreater(len(_all_terms(report)), 0)
+        for term in _all_terms(report):
+            self.assertEqual(term.source_form, "8-K")
+            self.assertEqual(term.source_date, "2026-04-12")
+            self.assertTrue(term.source_url.startswith("https://www.sec.gov/test-"))
+            self.assertTrue(term.excerpt)
 
     def test_detects_dilution_warning(self) -> None:
         report = _scan(
