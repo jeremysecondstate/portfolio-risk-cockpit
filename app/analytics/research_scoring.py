@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.analytics.decision_engine import ThesisReadout, build_thesis_readout
 from app.analytics.stock_research import AdvancedIndicatorSnapshot, DataSourceStatus, PortfolioSymbolContext, ScenarioRow
 
 
@@ -37,6 +38,7 @@ class ResearchDecisionReadout:
     profitability: BadgeReadout
     balance_sheet: BadgeReadout
     cash_flow: BadgeReadout
+    thesis: ThesisReadout
     summary: list[str]
     matters: list[str]
     changes_view: list[str]
@@ -79,14 +81,32 @@ def build_decision_readout(
     profitability = _text_factor_badge("Profitability", fundamentals_text, positives=("margin", "profit", "income increased"), negatives=("loss", "margin pressure", "income decreased"))
     balance_sheet = _text_factor_badge("Balance Sheet", fundamentals_text, positives=("cash", "liquidity"), negatives=("debt", "leverage", "going concern"))
     cash_flow = _text_factor_badge("Cash Flow", fundamentals_text, positives=("free cash flow", "operating cash"), negatives=("cash used", "negative free cash"))
-    action_bias = _action_badge(overall.score, risk_score, context)
+    thesis = build_thesis_readout(
+        indicators=indicators,
+        context=context,
+        fundamentals_text=fundamentals_text,
+        valuation_score=valuation_score,
+        macro_score=macro_score,
+        earnings_risk_score=earnings_risk_score,
+        technical_score=technical_score,
+        momentum_score=momentum_score,
+        macro_text=macro_text,
+    )
+    action_bias = _thesis_action_badge(thesis, overall.score)
 
     summary = simple_summary(overall, risk_level, macro_backdrop, context, indicators)
+    summary.insert(1, thesis.trade_judgment)
     matters = what_matters(indicators, context, earnings_risk, macro_backdrop)
+    matters.append(f"THESIS: {thesis.recommendation}; preferred vehicle: {thesis.preferred_vehicle}.")
     changes_view = what_changes_view(indicators, context, macro_backdrop)
+    if thesis.invalidation:
+        changes_view.insert(0, thesis.invalidation)
     macro_good, macro_bad, macro_watch = macro_bullets(macro_text, macro_backdrop)
     top_things = top_three_things(overall, risk_level, macro_backdrop, indicators)
     operator_view = build_operator_view(action_bias, position_impact, indicators, context, macro_backdrop)
+    operator_view["Thesis read"] = thesis.trade_judgment
+    operator_view["Preferred vehicle"] = thesis.preferred_vehicle
+    operator_view["What proves it wrong"] = thesis.invalidation
 
     return ResearchDecisionReadout(
         technical_score=technical_score,
@@ -110,6 +130,7 @@ def build_decision_readout(
         profitability=profitability,
         balance_sheet=balance_sheet,
         cash_flow=cash_flow,
+        thesis=thesis,
         summary=summary,
         matters=matters,
         changes_view=changes_view,
@@ -157,6 +178,8 @@ def score_momentum(indicators: AdvancedIndicatorSnapshot) -> float:
     score = 0.0
     if indicators.rsi_14 is not None:
         score += _clamp((indicators.rsi_14 - 50) * 2.2, -55, 55)
+        if 35 <= indicators.rsi_14 <= 45 and _constructive_pullback_tape(indicators):
+            score += 12
         if indicators.rsi_14 >= 75:
             score -= 15
         if indicators.rsi_14 <= 25:
@@ -500,6 +523,32 @@ def _action_badge(overall_score: float, risk_score: float, context: PortfolioSym
     if overall_score <= -35:
         return BadgeReadout("Action Bias", "Avoid", "bad", overall_score, "setup is not supportive.")
     return BadgeReadout("Action Bias", "Watch", "mixed", overall_score, "mixed read; wait for confirmation.")
+
+
+def _thesis_action_badge(thesis: ThesisReadout, score: float) -> BadgeReadout:
+    status_by_recommendation = {
+        "Accumulate Pullback": "good",
+        "Add Carefully": "good",
+        "Hold": "mixed",
+        "Wait for Confirmation": "mixed",
+        "Hedge Only If Size Warrants": "mixed",
+        "Avoid": "bad",
+        "Trim": "bad",
+    }
+    status = status_by_recommendation.get(thesis.recommendation, "mixed")
+    why = f"{thesis.trade_judgment} Preferred vehicle: {thesis.preferred_vehicle}. {thesis.why}"
+    return BadgeReadout("Action Bias", thesis.recommendation, status, score, why)
+
+
+def _constructive_pullback_tape(indicators: AdvancedIndicatorSnapshot) -> bool:
+    price = indicators.latest_close
+    if price is None or price <= 0:
+        return False
+    support = indicators.support or indicators.swing_low
+    support_ok = support is not None and price >= support * 0.985 and (price - support) / price <= 0.05
+    long_term_ok = indicators.sma_200 is None or price >= indicators.sma_200 * 0.98
+    trend_ok = indicators.trend in {"bullish", "sideways"}
+    return support_ok and long_term_ok and trend_ok
 
 
 def _risk_why(

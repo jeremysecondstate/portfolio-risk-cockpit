@@ -115,6 +115,40 @@ def _weak_call_chain_row() -> dict:
     return row
 
 
+def _high_iv_call_chain_row() -> dict:
+    row = _chain_row(strike=10.5, premium=1.0)
+    row["call"].update(
+        {
+            "bid": 1.0,
+            "ask": 1.0,
+            "mark": 1.0,
+            "openInterest": 800,
+            "totalVolume": 150,
+            "delta": 0.42,
+            "impliedVolatility": 1.20,
+        }
+    )
+    return row
+
+
+def _bearish_indicators(price: float = 10.0) -> AdvancedIndicatorSnapshot:
+    return AdvancedIndicatorSnapshot(
+        **{
+            **_indicators(price).__dict__,
+            "sma_20": price * 1.05,
+            "sma_50": price * 1.08,
+            "sma_100": price * 1.1,
+            "sma_200": price * 1.12,
+            "macd_histogram": -0.10,
+            "rsi_14": 38.0,
+            "trend": "bearish",
+            "momentum": "weakening",
+            "support": price * 0.92,
+            "resistance": price * 1.05,
+        }
+    )
+
+
 def _candidate(*, option_type: str = "call", covered: bool = False, contracts: int = 1, strike: float = 12.0, premium: float = 2.0) -> OptionCandidate:
     return OptionCandidate(
         key="candidate",
@@ -271,6 +305,55 @@ class OptionScenarioMathTests(unittest.TestCase):
         self.assertIsNotNone(covered_readout)
         self.assertEqual(covered_readout.title, "Coverage")
         self.assertEqual(covered_readout.label, "Not fully covered")
+
+    def test_tiny_holding_protective_put_is_extreme_overhedge(self) -> None:
+        model_position = GeneratedStockPosition(
+            quantity=7.0,
+            entry_price=10.0,
+            stop_price=9.0,
+            risk_dollars=7.0,
+            notional=70.0,
+            portfolio_weight=0.0007,
+            per_share_risk=1.0,
+            basis="test model target",
+        )
+        candidates = suggest_option_candidates([_chain_row(strike=10.0, premium=0.5)], _bearish_indicators(), _context(quantity=4), stock_plan=model_position)
+        protective = next(candidate for candidate in candidates if candidate.group == "Protective Put")
+
+        self.assertEqual(candidates[0].strategy, "No-trade / wait")
+        self.assertLess(protective.score, 50.0)
+        self.assertTrue(any("extreme over-hedge" in warning.lower() for warning in protective.practical_warnings))
+        self.assertIn("too large", protective.avoid_reason.lower())
+
+        readout = option_position_readout(protective, _context(quantity=4), model_position)
+        self.assertIsNotNone(readout)
+        self.assertEqual(readout.label, "Extreme over-hedge")
+
+    def test_high_iv_earnings_debit_candidate_is_penalized(self) -> None:
+        model_position = GeneratedStockPosition(
+            quantity=10.0,
+            entry_price=10.0,
+            stop_price=9.0,
+            risk_dollars=10.0,
+            notional=100.0,
+            portfolio_weight=0.001,
+            per_share_risk=1.0,
+            basis="test model target",
+        )
+        candidates = suggest_option_candidates(
+            [_high_iv_call_chain_row()],
+            _indicators(),
+            _context(quantity=0, is_held=False),
+            macro_label="Headwind",
+            earnings_text="Earnings imminent; event risk soon.",
+            risk_budget=10.0,
+            stock_plan=model_position,
+        )
+
+        self.assertEqual(candidates[0].strategy, "No-trade / wait")
+        call = next(candidate for candidate in candidates if candidate.option_type == "call")
+        self.assertTrue(any("high iv" in warning.lower() for warning in call.practical_warnings))
+        self.assertLess(call.score, 50.0)
 
     def test_normalized_candidate_bar_rows_preserve_signs(self) -> None:
         rows = [

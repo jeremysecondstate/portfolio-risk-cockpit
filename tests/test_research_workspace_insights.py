@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from app.analytics.research_scoring import BadgeReadout
+from app.analytics.research_scoring import BadgeReadout, build_decision_readout
 from app.analytics.research_workspace_insights import (
     build_cross_read_conflict_badge,
     build_earnings_workspace_summary,
@@ -11,7 +11,7 @@ from app.analytics.research_workspace_insights import (
     build_fundamental_verdict,
     build_technical_at_glance_read,
 )
-from app.analytics.stock_research import AdvancedIndicatorSnapshot
+from app.analytics.stock_research import AdvancedIndicatorSnapshot, PortfolioSymbolContext
 
 
 def _indicators(*, trend: str = "bullish", momentum: str = "improving") -> AdvancedIndicatorSnapshot:
@@ -43,6 +43,89 @@ def _indicators(*, trend: str = "bullish", momentum: str = "improving") -> Advan
         momentum=momentum,
         support=45.0,
         resistance=54.0,
+        notes=[],
+    )
+
+
+def _context(*, quantity: float = 0.0, price: float = 50.0) -> PortfolioSymbolContext:
+    portfolio_value = 100_000.0
+    return PortfolioSymbolContext(
+        symbol="TEST",
+        is_held=quantity > 0,
+        quantity=quantity,
+        average_cost=price if quantity else None,
+        last_price=price,
+        market_value=quantity * price,
+        portfolio_value=portfolio_value,
+        portfolio_weight=(quantity * price) / portfolio_value,
+        unrealized_pnl=0.0 if quantity else None,
+        day_pnl=0.0 if quantity else None,
+        cash_available=50_000.0,
+    )
+
+
+def _pullback_indicators() -> AdvancedIndicatorSnapshot:
+    return AdvancedIndicatorSnapshot(
+        symbol="TEST",
+        latest_close=100.0,
+        sma_20=104.0,
+        sma_50=102.0,
+        sma_100=94.0,
+        sma_200=86.0,
+        ema_12=101.0,
+        ema_26=102.0,
+        macd=-0.4,
+        macd_signal=-0.2,
+        macd_histogram=-0.2,
+        rsi_14=40.0,
+        bollinger_upper=112.0,
+        bollinger_middle=104.0,
+        bollinger_lower=96.0,
+        atr_14=2.5,
+        volume_average_20=100_000,
+        week_52_high=130.0,
+        week_52_low=70.0,
+        swing_high=122.0,
+        swing_low=97.0,
+        fibonacci_levels={"50.0%": 99.5},
+        trend="sideways",
+        volatility="normal",
+        momentum="weakening",
+        support=98.0,
+        resistance=110.0,
+        notes=[],
+    )
+
+
+def _broken_indicators() -> AdvancedIndicatorSnapshot:
+    return AdvancedIndicatorSnapshot(
+        symbol="TEST",
+        latest_close=80.0,
+        sma_20=88.0,
+        sma_50=94.0,
+        sma_100=98.0,
+        sma_200=104.0,
+        ema_12=83.0,
+        ema_26=90.0,
+        macd=-1.4,
+        macd_signal=-0.6,
+        macd_histogram=-0.8,
+        rsi_14=32.0,
+        bollinger_upper=100.0,
+        bollinger_middle=90.0,
+        bollinger_lower=80.0,
+        atr_14=3.0,
+        volume_average_20=100_000,
+        week_52_high=130.0,
+        week_52_low=70.0,
+        swing_high=112.0,
+        swing_low=90.0,
+        fibonacci_levels={},
+        trend="bearish",
+        volatility="elevated",
+        momentum="weakening",
+        support=90.0,
+        resistance=88.0,
         notes=[],
     )
 
@@ -171,6 +254,53 @@ class ResearchWorkspaceInsightTests(unittest.TestCase):
 
         self.assertEqual(badge.label, "Explicit Conflict")
         self.assertIn("Conflict:", badge.why)
+
+    def test_thesis_read_separates_constructive_pullback_from_technical_weakness(self) -> None:
+        decision = build_decision_readout(
+            indicators=_pullback_indicators(),
+            context=_context(quantity=4, price=100.0),
+            scenario_rows=[],
+            earnings_text="Next earnings not soon.",
+            fundamentals_text=_structured_fundamentals(),
+            macro_text="Official Macro Snapshot\nNeutral/mixed.",
+            statuses=[],
+        )
+
+        self.assertEqual(decision.thesis.setup_type, "pullback")
+        self.assertIn(decision.thesis.recommendation, {"Accumulate Pullback", "Hold"})
+        self.assertNotEqual(decision.action_bias.label, "Avoid")
+        self.assertIn("Bearish tape, but constructive pullback candidate", decision.thesis.trade_judgment)
+        self.assertEqual(len(decision.thesis.forecast), 4)
+
+    def test_thesis_read_rejects_broken_support_and_weak_fundamentals(self) -> None:
+        decision = build_decision_readout(
+            indicators=_broken_indicators(),
+            context=_context(quantity=0, price=80.0),
+            scenario_rows=[],
+            earnings_text="Next earnings timing unknown.",
+            fundamentals_text=_structured_fundamentals(with_pressure=True),
+            macro_text="Official Macro Snapshot\nMacro headwind; higher yield pressure.",
+            statuses=[],
+        )
+
+        self.assertEqual(decision.thesis.setup_type, "breakdown")
+        self.assertEqual(decision.thesis.recommendation, "Avoid")
+        self.assertEqual(decision.action_bias.label, "Avoid")
+        self.assertTrue(any("support" in warning.lower() for warning in decision.thesis.warnings))
+
+    def test_bullish_trend_and_improving_momentum_adds_carefully(self) -> None:
+        decision = build_decision_readout(
+            indicators=_indicators(trend="bullish", momentum="improving"),
+            context=_context(quantity=0, price=50.0),
+            scenario_rows=[],
+            earnings_text="Next earnings not soon.",
+            fundamentals_text=_structured_fundamentals(),
+            macro_text="Official Macro Snapshot\nMacro tailwind; cooler rates.",
+            statuses=[],
+        )
+
+        self.assertEqual(decision.thesis.recommendation, "Add Carefully")
+        self.assertIn(decision.thesis.preferred_vehicle, {"Starter Shares", "Shares"})
 
 
 if __name__ == "__main__":

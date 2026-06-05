@@ -80,6 +80,7 @@ class OptionCandidate:
     contract_count: int = 1
     controlled_shares: int = 100
     coverage_note: str = ""
+    practical_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -642,6 +643,8 @@ def option_position_readout(
         label_ratio = current_ratio if current_ratio is not None else model_ratio
         if label_ratio is None:
             label, status = "Hedge check", "info"
+        elif label_ratio > 3.0:
+            label, status = "Extreme over-hedge", "bad"
         elif label_ratio > 1.25:
             label, status = "Over-hedged", "mixed"
         elif label_ratio >= 0.75:
@@ -831,6 +834,7 @@ def selected_candidate_detail(candidate: OptionCandidate, context: PortfolioSymb
         f"- {option_breakeven_explanation(candidate)}",
         f"- Score: {candidate.score:.0f}/100. {candidate.score_reason}",
         f"- Better/worse than stock: {candidate.better_than_stock or 'No stock-only comparison was available.'}",
+        *[f"- Warning: {warning}" for warning in candidate.practical_warnings],
         "",
         "Score breakdown:",
         *[f"- {line}" for line in candidate.score_breakdown],
@@ -1379,6 +1383,7 @@ def _with_candidate_reason(
             "score_breakdown": scoring["score_breakdown"],
             "avoid_reason": scoring["avoid_reason"],
             "better_than_stock": scoring["better_than_stock"],
+            "practical_warnings": scoring["practical_warnings"],
         }
     )
 
@@ -1411,10 +1416,14 @@ def _option_candidate_scoring(
     liquidity_score, liquidity_reason = _liquidity_fit_score(candidate)
     greek_score, greek_reason = _greek_fit_score(candidate)
     risk_score, risk_reason = _risk_budget_fit_score(candidate, risk_budget)
-    move_adjust, move_reason = _required_move_adjustment(candidate)
+    move_adjust, move_reason = _required_move_adjustment(candidate, indicators)
+    hedge_adjust, hedge_reason, hedge_warnings = _hedge_ratio_adjustment(candidate, context, stock_plan)
     stock_adjust, stock_note = _stock_comparison_adjustment(candidate, context, stock_plan, risk_budget)
-    event_adjust = -7.0 if earnings_soon and not _is_covered_call(candidate) else -3.0 if earnings_soon else 0.0
+    high_iv_event = earnings_soon and candidate.iv is not None and candidate.iv >= 0.70 and not _is_covered_call(candidate)
+    event_adjust = -14.0 if high_iv_event else -7.0 if earnings_soon and not _is_covered_call(candidate) else -3.0 if earnings_soon else 0.0
     event_reason = "earnings/event risk can distort premium" if earnings_soon else ""
+    if high_iv_event:
+        event_reason = "earnings/event risk plus high IV makes debit premium harder to justify"
 
     score = (
         technical_score * 0.34
@@ -1422,6 +1431,7 @@ def _option_candidate_scoring(
         + greek_score * 0.18
         + risk_score * 0.22
         + move_adjust
+        + hedge_adjust
         + stock_adjust
         + event_adjust
     )
@@ -1434,15 +1444,17 @@ def _option_candidate_scoring(
             score -= 3.0
 
     score = max(0.0, min(100.0, score))
-    reasons = [technical_reason, liquidity_reason, greek_reason, risk_reason, move_reason, stock_note, event_reason]
+    reasons = [technical_reason, liquidity_reason, greek_reason, risk_reason, move_reason, hedge_reason, stock_note, event_reason]
     score_reason = "; ".join(reason for reason in reasons if reason) or "Balanced candidate score."
-    avoid_reason = _candidate_avoid_reason(candidate, technical_score, liquidity_score, greek_score, risk_score)
+    practical_warnings = tuple(dict.fromkeys([*hedge_warnings, *(_event_warnings(candidate, earnings_soon))]))
+    avoid_reason = _candidate_avoid_reason(candidate, technical_score, liquidity_score, greek_score, risk_score, practical_warnings)
     breakdown = (
         f"Technical fit {technical_score:.0f}/100: {technical_reason}",
         f"Liquidity fit {liquidity_score:.0f}/100: {liquidity_reason}",
         f"Greek fit {greek_score:.0f}/100: {greek_reason}",
         f"Risk-budget fit {risk_score:.0f}/100: {risk_reason}",
         f"Move to breakeven: {_move_required_label(candidate.expected_move_required)}. {move_reason}",
+        f"Position/contract fit: {hedge_reason or 'No hedge-ratio sizing issue for this candidate.'}",
         f"Stock comparison: {stock_note or 'No model stock comparison was available.'}",
     )
     return {
@@ -1455,6 +1467,7 @@ def _option_candidate_scoring(
         "score_breakdown": breakdown,
         "avoid_reason": avoid_reason,
         "better_than_stock": stock_note,
+        "practical_warnings": practical_warnings,
     }
 
 
@@ -1500,6 +1513,7 @@ def _wait_candidate_scoring(
         "score_breakdown": breakdown,
         "avoid_reason": "",
         "better_than_stock": "Waiting keeps the model stock plan optional until confirmation improves.",
+        "practical_warnings": (),
     }
 
 
@@ -1571,6 +1585,7 @@ def _raise_wait_when_options_are_weak(candidates: list[OptionCandidate]) -> list
                 f"Stock comparison: best actionable candidate was {best_actionable.strategy} at {best_actionable.score:.0f}/100.",
             ),
             "better_than_stock": f"Waiting is cleaner than forcing {best_actionable.strategy} at {best_actionable.score:.0f}/100.",
+            "practical_warnings": wait.practical_warnings,
         }
     )
     return [updated_wait if item is wait else item for item in candidates]
@@ -1821,17 +1836,68 @@ def _risk_budget_fit_score(candidate: OptionCandidate, risk_budget: float | None
     return 48.0, "premium/risk budget comparison is unavailable"
 
 
-def _required_move_adjustment(candidate: OptionCandidate) -> tuple[float, str]:
+def _required_move_adjustment(candidate: OptionCandidate, indicators: AdvancedIndicatorSnapshot | None = None) -> tuple[float, str]:
     move = candidate.expected_move_required
     if move is None or _is_covered_call(candidate):
         return 0.0, "breakeven move is not the main rank driver for this structure"
+    move_context = _move_context_text(candidate, indicators)
     if move <= 0.03:
-        return 8.0, "breakeven is nearby"
+        return 8.0, f"breakeven is nearby. {move_context}"
     if move <= 0.06:
-        return 3.0, "breakeven needs a moderate move"
+        return 3.0, f"breakeven needs a moderate move. {move_context}"
     if move <= 0.10:
-        return -7.0, "breakeven needs a large move"
-    return -16.0, "breakeven needs an unusually large move"
+        return -7.0, f"breakeven needs a large move. {move_context}"
+    return -16.0, f"breakeven needs an unusually large move. {move_context}"
+
+
+def _move_context_text(candidate: OptionCandidate, indicators: AdvancedIndicatorSnapshot | None) -> str:
+    parts: list[str] = []
+    required = candidate.expected_move_required
+    if indicators is not None and candidate.underlying_price:
+        atr = abs(indicators.atr_14 or 0.0)
+        if atr > 0:
+            atr_pct = atr / candidate.underlying_price
+            parts.append(f"1 ATR is {atr_pct:.1%}")
+            if required is not None and required > atr_pct * 2:
+                parts.append("required move is beyond 2 ATR")
+    implied = option_expected_move_pct(candidate)
+    if implied is not None:
+        parts.append(f"option-implied move is about {implied:.1%}")
+        if required is not None and required > implied:
+            parts.append("breakeven is beyond the implied move")
+    return "; ".join(parts) if parts else "ATR/implied-move comparison unavailable"
+
+
+def _hedge_ratio_adjustment(
+    candidate: OptionCandidate,
+    context: PortfolioSymbolContext | None,
+    stock_plan: GeneratedStockPosition | None,
+) -> tuple[float, str, list[str]]:
+    if not _is_protective_put(candidate):
+        return 0.0, "", []
+    contracts = max(int(candidate.contract_count or 0), 0)
+    controlled_shares = contracts * 100
+    if controlled_shares <= 0:
+        return -20.0, "protective put has no usable contract count", ["Protective put has no usable contract count."]
+    current_shares = max(float(getattr(context, "quantity", 0.0) or 0.0), 0.0) if context is not None else 0.0
+    model_shares = _model_share_quantity(stock_plan)
+    effective_shares = max(current_shares, model_shares or 0.0)
+    if effective_shares <= 0:
+        warning = f"Not appropriate as a hedge: {contracts} put contract(s) control {controlled_shares} shares, but no current/model shares are available to hedge."
+        return -36.0, warning, [warning]
+    ratio = controlled_shares / effective_shares
+    current_text = f"{current_shares:g} current shares"
+    model_text = f"; model target {model_shares:g} shares" if model_shares is not None else ""
+    base = f"{contracts} put contract(s) control {controlled_shares} shares vs {current_text}{model_text}; effective hedge ratio {ratio:.0%}"
+    if ratio <= 0.80:
+        return 3.0, base + "; partial hedge is acceptable if the intent is only partial protection", []
+    if ratio <= 1.25:
+        return 8.0, base + "; near-full hedge sizing is practical", []
+    if ratio <= 3.0:
+        warning = base + "; over-hedged above 125%, so shares, trimming, or waiting may be cleaner."
+        return -18.0, warning, [warning]
+    warning = base + "; extreme over-hedge above 300%. Not appropriate for current size unless this is an intentional standalone bearish put."
+    return -48.0, warning, [warning]
 
 
 def _stock_comparison_adjustment(
@@ -1841,7 +1907,19 @@ def _stock_comparison_adjustment(
     risk_budget: float | None,
 ) -> tuple[float, str]:
     if candidate.option_type == "put" and ("protective" in candidate.strategy.lower() or "hedge" in candidate.strategy.lower()):
-        return 0.0, "hedge should be judged against held-share downside, not upside participation"
+        contracts = max(int(candidate.contract_count or 0), 0)
+        controlled_shares = contracts * 100
+        current_shares = max(float(getattr(context, "quantity", 0.0) or 0.0), 0.0) if context is not None else 0.0
+        model_shares = _model_share_quantity(stock_plan)
+        effective_shares = max(current_shares, model_shares or 0.0)
+        if effective_shares <= 0:
+            return -12.0, "no-trade is cleaner: a protective put needs shares to protect"
+        ratio = controlled_shares / effective_shares if effective_shares > 0 else 0.0
+        if ratio > 3.0:
+            return -14.0, f"shares/waiting are cleaner: one put controls {controlled_shares} shares versus {effective_shares:g} current/model shares"
+        if ratio > 1.25:
+            return -8.0, f"share trimming or waiting may be cleaner because the hedge ratio is {ratio:.0%}"
+        return 2.0, "put can be better than stock-only only when held-share downside protection is the explicit intent"
     if _is_covered_call(candidate):
         return 0.0, "covered call may be better than stock-only only when income is worth the capped upside"
     if candidate.option_type != "call" or context is None or context.is_held or stock_plan is None:
@@ -1870,6 +1948,7 @@ def _candidate_avoid_reason(
     liquidity_score: float,
     greek_score: float,
     risk_score: float,
+    practical_warnings: tuple[str, ...] = (),
 ) -> str:
     flags: list[str] = []
     if technical_score < 42:
@@ -1882,11 +1961,42 @@ def _candidate_avoid_reason(
         flags.append("debit is too large for the risk budget")
     if candidate.expected_move_required is not None and candidate.expected_move_required > 0.10 and not _is_covered_call(candidate):
         flags.append("breakeven requires too much move")
+    for warning in practical_warnings:
+        lower = warning.lower()
+        if "extreme over-hedge" in lower:
+            flags.append("option contract is too large for the current/model share position")
+        elif "over-hedged" in lower:
+            flags.append("hedge ratio is too large for practical protection")
     return "Avoid/low rank: " + "; ".join(flags) + "." if flags else ""
 
 
 def _is_covered_call(candidate: OptionCandidate) -> bool:
     return candidate.option_type == "call" and ("covered" in candidate.strategy.lower() or candidate.group in {"Income", "Covered Call"})
+
+
+def _is_protective_put(candidate: OptionCandidate) -> bool:
+    strategy = candidate.strategy.lower()
+    return candidate.option_type == "put" and ("protective" in strategy or "hedge" in strategy or candidate.group == "Protective Put")
+
+
+def _model_share_quantity(stock_plan: GeneratedStockPosition | None) -> float | None:
+    if stock_plan is None:
+        return None
+    quantity = float(getattr(stock_plan, "quantity", 0.0) or 0.0)
+    return quantity if quantity > 0 else None
+
+
+def _event_warnings(candidate: OptionCandidate, earnings_soon: bool) -> list[str]:
+    warnings: list[str] = []
+    if earnings_soon and candidate.iv is not None and candidate.iv >= 0.70 and not _is_covered_call(candidate):
+        warnings.append(f"High IV ({candidate.iv:.1%}) with near-term earnings/event risk makes debit options harder to justify.")
+    elif earnings_soon and not _is_covered_call(candidate):
+        warnings.append("Near-term earnings/event risk can inflate option premium and make wait/shares cleaner.")
+    if candidate.expected_move_required is not None:
+        implied = option_expected_move_pct(candidate)
+        if implied is not None and candidate.expected_move_required > implied and not _is_covered_call(candidate):
+            warnings.append("Breakeven requires more movement than the option-implied move before expiration.")
+    return warnings
 
 
 def _expected_move_required(option_type: str, breakeven: float | None, underlying: float | None) -> float | None:

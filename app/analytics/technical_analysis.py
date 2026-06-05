@@ -1362,7 +1362,10 @@ def score_momentum(rsi_14: float | None, histogram: float | None, histogram_chan
         elif rsi_14 > 75:
             score -= 8
             reasons.append(f"RSI is stretched at {rsi_14:.1f}")
-        elif rsi_14 < 45:
+        elif 35 <= rsi_14 < 45:
+            score -= 8
+            reasons.append(f"RSI is soft at {rsi_14:.1f}; this can be pullback pressure if support holds")
+        elif rsi_14 < 35:
             score -= 14
             reasons.append(f"RSI is weak at {rsi_14:.1f}")
     if histogram is not None:

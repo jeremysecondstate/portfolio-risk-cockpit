@@ -585,7 +585,7 @@ def _refresh_summary_tearout(self: tk.Tk, payload: _ResearchPayload) -> None:
     conflict_read = build_cross_read_conflict_badge(fundamental_verdict.verdict, decision.macro_backdrop.label, technical_read)
     metric_grid(
         cards,
-        [decision.overall, technical_read, decision.risk_level, conflict_read, decision.macro_backdrop, decision.action_bias],
+        [decision.overall, technical_read, _thesis_read_badge(decision), _preferred_vehicle_badge(decision), decision.risk_level, conflict_read, decision.macro_backdrop, decision.action_bias],
         columns=3,
         card_height=132,
         prominent_height=142,
@@ -2257,10 +2257,17 @@ def _overview_text(payload: _ResearchPayload) -> str:
         f"Schwab Research Workspace - {payload.symbol}",
         "",
         "At a glance:",
+        f"- Technical read: {build_technical_at_glance_read(decision, payload.command_center_report).label}",
+        f"- Thesis read: {decision.thesis.trade_judgment}",
+        f"- Preferred vehicle: {decision.thesis.preferred_vehicle}; confidence {decision.thesis.confidence}",
+        f"- What proves it wrong: {decision.thesis.invalidation}",
         f"- Overall: {decision.overall.label} ({decision.overall.why})",
         f"- Risk: {decision.risk_level.label} ({decision.risk_level.why})",
         f"- Action bias: {decision.action_bias.label} ({decision.action_bias.why})",
         f"- Evidence posture: {evidence.posture}; setup type {evidence.setup_type}.",
+        "",
+        "Scenario forecast (model estimate, not a guarantee):",
+        *[f"- {row.scenario}: {row.probability:.1f}% / {row.likelihood}. {row.reference}. {row.why}" for row in decision.thesis.forecast],
         "",
         "Plain-English summary:",
         *[f"- {line}" for line in decision.summary],
@@ -2299,9 +2306,14 @@ def _overview_popout_text(payload: _ResearchPayload) -> str:
         key_points=[
             f"Evidence verdict: {evidence.verdict}",
             f"Evidence posture: {evidence.posture}; setup type: {evidence.setup_type}.",
+            f"Technical read: {build_technical_at_glance_read(decision, payload.command_center_report).label}",
+            f"Thesis read: {decision.thesis.trade_judgment}",
+            f"Preferred vehicle: {decision.thesis.preferred_vehicle}; confidence {decision.thesis.confidence}.",
+            f"What proves it wrong: {decision.thesis.invalidation}",
             f"Overall read: {decision.overall.label} ({decision.overall.why})",
             f"Risk level: {decision.risk_level.label} ({decision.risk_level.why})",
             f"Action bias: {decision.action_bias.label} ({decision.action_bias.why})",
+            *[f"Forecast estimate: {row.scenario} {row.probability:.1f}% ({row.likelihood})" for row in decision.thesis.forecast],
             *decision.summary,
         ],
         why_it_matters="Use this view to decide whether the symbol belongs on watch, needs a smaller position, needs a hedge, or has enough confirmation for a planned trade.",
@@ -2358,24 +2370,26 @@ def _render_at_glance(self: tk.Tk, payload: _ResearchPayload) -> None:
         cards = [
             decision.overall,
             technical_read,
+            _thesis_read_badge(decision),
+            _preferred_vehicle_badge(decision),
             decision.risk_level,
             conflict_read,
             decision.macro_backdrop,
             decision.action_bias,
         ]
-        columns = 3
-        prominent = {0, 1, 5}
+        columns = 4
+        prominent = {0, 2, 7}
         card_height = 116
         prominent_height = 124
     else:
         cards = [
-            decision.overall,
+            technical_read,
+            _thesis_read_badge(decision),
+            _preferred_vehicle_badge(decision),
             decision.action_bias,
-            decision.risk_level,
-            _synthetic_badge("Key Trigger", decision.top_things[2], "info", "Primary trigger from the analysis summary."),
         ]
         columns = 4
-        prominent = {0, 1}
+        prominent = {1, 3}
         card_height = 108
         prominent_height = 112
     metric_grid(
@@ -2389,11 +2403,13 @@ def _render_at_glance(self: tk.Tk, payload: _ResearchPayload) -> None:
     labeled_value_grid(
         self.schwab_research_top_strip,
         {
-            "Best thing": decision.top_things[0],
-            "Biggest risk": decision.top_things[1],
-            "Key trigger": decision.top_things[2],
+            "Technical Read": technical_read.label,
+            "Thesis Read": decision.thesis.trade_judgment,
+            "Preferred Vehicle": decision.thesis.preferred_vehicle,
+            "Confidence": decision.thesis.confidence,
+            "What proves it wrong": decision.thesis.invalidation,
         },
-        columns=3,
+        columns=5,
     )
     self.schwab_research_bull_bear_meter.set_score(technical_read.score, mode="direction", label=f"Technical: {technical_read.label} ({technical_read.score:.0f})")
     self.schwab_research_risk_meter.set_score(decision.risk_score, mode="risk", label=f"Risk Heat: {risk_heat_label(decision.risk_score)} ({decision.risk_score:.0f}/100)")
@@ -2407,6 +2423,10 @@ def _render_overview(self: tk.Tk, payload: _ResearchPayload) -> None:
     metric_grid(
         frame.cards,  # type: ignore[attr-defined]
         [
+            build_technical_at_glance_read(decision, payload.command_center_report),
+            _thesis_read_badge(decision),
+            _preferred_vehicle_badge(decision),
+            _synthetic_badge("What Proves It Wrong", decision.thesis.invalidation, "info", "Invalidation line from the thesis-aware decision layer."),
             decision.overall,
             decision.risk_level,
             decision.position_impact,
@@ -2419,7 +2439,7 @@ def _render_overview(self: tk.Tk, payload: _ResearchPayload) -> None:
         columns=4,
         card_height=132,
         prominent_height=146,
-        prominent_indexes={0, 3},
+        prominent_indexes={1, 3, 7},
         adaptive_height=True,
     )
     labeled_value_grid(frame.operator, decision.operator_view, columns=3)  # type: ignore[attr-defined]
@@ -2908,6 +2928,9 @@ def _render_option_strategy_cards(
     position_readout = option_position_readout(position_candidate, context, model_position)
     if position_readout is not None:
         cards.append(_synthetic_badge(position_readout.title, position_readout.label, position_readout.status, position_readout.detail))
+    if selected.practical_warnings:
+        warning_text = " ".join(selected.practical_warnings[:2])
+        cards.append(_synthetic_badge("Option Warning", "Check Fit", "bad", warning_text))
     metric_grid(
         frame.cards,  # type: ignore[attr-defined]
         cards,
@@ -3353,6 +3376,8 @@ def _render_candidate_score_breakdown(frame: ttk.Frame, candidate: OptionCandida
         }
     if candidate.avoid_reason:
         rows["Avoid / Low Rank Reason"] = candidate.avoid_reason
+    if candidate.practical_warnings:
+        rows["Option Warning"] = "; ".join(candidate.practical_warnings)
     breakdown = getattr(frame, "score_breakdown", None)
     if breakdown is not None:
         labeled_value_grid(breakdown, rows, columns=3)
@@ -3396,6 +3421,7 @@ def _options_strategy_popout_text(
         key_points.append(candidate.avoid_reason)
     if candidate.coverage_note:
         key_points.append(candidate.coverage_note)
+    key_points.extend(f"Warning: {warning}" for warning in candidate.practical_warnings)
     key_points.extend(_candidate_alternative_lines(candidate, alternatives or []))
     if context is not None:
         key_points.append(f"Stock context: {context.quantity:g} shares, weight {context.portfolio_weight:.2%}, quote {_money(context.last_price)}.")
@@ -4122,6 +4148,55 @@ def _macro_popout_text(payload: _ResearchPayload, readouts: list[Any]) -> str:
 
 def _synthetic_badge(title: str, label: str, status: str, why: str, score: float = 0.0) -> BadgeReadout:
     return BadgeReadout(title=title, label=label, status=status, score=score, why=why)
+
+
+def _thesis_read_badge(decision: ResearchDecisionReadout) -> BadgeReadout:
+    thesis = decision.thesis
+    status = _thesis_status(thesis.recommendation)
+    label = _thesis_short_label(thesis)
+    why = f"{thesis.trade_judgment} {thesis.why} Confidence: {thesis.confidence}."
+    return _synthetic_badge("Thesis Read", label, status, why, decision.technical_score)
+
+
+def _preferred_vehicle_badge(decision: ResearchDecisionReadout) -> BadgeReadout:
+    thesis = decision.thesis
+    warning = f" Warning: {thesis.warnings[0]}" if thesis.warnings else ""
+    return _synthetic_badge(
+        "Preferred Vehicle",
+        thesis.preferred_vehicle,
+        _vehicle_status(thesis.preferred_vehicle, thesis.recommendation),
+        f"{thesis.recommendation}. {thesis.invalidation}{warning}",
+    )
+
+
+def _thesis_short_label(thesis: Any) -> str:
+    if thesis.setup_type == "pullback":
+        return "Pullback Candidate"
+    if thesis.setup_type == "breakdown":
+        return "Breakdown Risk"
+    if thesis.setup_type == "hedge":
+        return "Hedge"
+    if thesis.setup_type == "no-trade":
+        return "Wait"
+    if thesis.recommendation in {"Avoid", "Trim"}:
+        return thesis.recommendation
+    return thesis.recommendation
+
+
+def _thesis_status(recommendation: str) -> str:
+    if recommendation in {"Accumulate Pullback", "Add Carefully"}:
+        return "good"
+    if recommendation in {"Avoid", "Trim"}:
+        return "bad"
+    return "mixed"
+
+
+def _vehicle_status(vehicle: str, recommendation: str) -> str:
+    if recommendation in {"Avoid", "Trim"} or vehicle in {"Cash", "No Trade"}:
+        return "mixed" if recommendation not in {"Avoid", "Trim"} else "bad"
+    if vehicle in {"Shares", "Starter Shares"}:
+        return "good"
+    return "mixed"
 
 
 def _badge_from_etf_card(card: ETFCard) -> BadgeReadout:
