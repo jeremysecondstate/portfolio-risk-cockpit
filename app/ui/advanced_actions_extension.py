@@ -217,7 +217,7 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
         style="Subtle.TLabel",
     ).grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 6))
     ttk.Button(advanced, text="Cancel Order", command=self.show_cancel_order_placeholder, style="Danger.TButton").grid(row=0, column=1, sticky="ew", padx=(0, 6), pady=(0, 6))
-    ttk.Button(advanced, text="LIVE Submit", command=self.submit_live_schwab_order_guarded, style="Danger.TButton").grid(row=0, column=2, sticky="ew", pady=(0, 6))
+    ttk.Button(advanced, text="LIVE Submit", command=self.submit_live_schwab_order, style="Danger.TButton").grid(row=0, column=2, sticky="ew", pady=(0, 6))
 
     status_bar = ttk.Frame(ticket, style="Panel.TFrame")
     status_bar.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(8, 0))

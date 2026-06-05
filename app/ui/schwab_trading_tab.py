@@ -386,7 +386,7 @@ def _estimated_stock_order_value(payload: dict[str, Any]) -> float | str:
     return "--"
 
 
-def _submit_schwab_stock_limit_order(self: tk.Tk) -> None:
+def _submit_schwab_live_order(self: tk.Tk) -> None:
     import json
     import sys
     import traceback
@@ -596,7 +596,7 @@ def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
         setattr(actions, "_ipo_pipeline_button_installed", True)
 
     _add_action_button(actions, row=2, column=2, text="Cancel Order", command=schwab_action("cancel_selected_order", "show_cancel_order_placeholder"), style="Danger.TButton")
-    _add_action_button(actions, row=2, column=3, text="LIVE Submit", command=lambda app=self: _submit_schwab_stock_limit_order(app), style="Danger.TButton")
+    _add_action_button(actions, row=2, column=3, text="LIVE Submit", command=lambda app=self: _submit_schwab_live_order(app), style="Danger.TButton")
 
 
 def _install_schwab_account_tabs(self: tk.Tk, schwab_tab: ttk.Frame) -> None:
@@ -1368,7 +1368,7 @@ def _run_schwab_workspace_action(self: tk.Tk, *command_names: str) -> None:
     output = getattr(self, "schwab_trading_preview_text", None)
     command = _first_available_command(self, *command_names)
     command_label = ", ".join(command_names) or "(none)"
-    is_live_submit = "submit_live_schwab_order_guarded" in command_names
+    is_live_submit = "submit_live_schwab_order" in command_names
 
     def emit(text: str) -> None:
         if output is not None:
@@ -1399,7 +1399,7 @@ def _run_schwab_workspace_action(self: tk.Tk, *command_names: str) -> None:
                 "SCHWAB LIVE SUBMIT CLICK RECEIVED\n"
                 "================================\n\n"
                 "The Schwab Trading tab button click reached Python.\n"
-                "Command: submit_live_schwab_order_guarded\n\n"
+                "Command: submit_live_schwab_order\n\n"
                 "Next step: running the guarded Schwab submit handler now.\n"
                 "If this text stays here, the submit handler is hanging or blocking before it writes its own result."
             )

@@ -62,15 +62,15 @@ def install_hyperliquid_trading_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls.parse_hyperliquid_spot_ticket = _parse_hyperliquid_spot_ticket  # type: ignore[attr-defined]
     app_cls.submit_selected_venue = _submit_selected_venue  # type: ignore[attr-defined]
     app_cls.cancel_selected_order = _cancel_selected_order  # type: ignore[attr-defined]
-    app_cls.cancel_hyperliquid_order_guarded = _cancel_hyperliquid_order_guarded  # type: ignore[attr-defined]
+    app_cls.cancel_hyperliquid_order = _cancel_hyperliquid_order  # type: ignore[attr-defined]
     app_cls.show_hyperliquid_order_edit_dialog = _show_hyperliquid_order_edit_dialog  # type: ignore[attr-defined]
-    app_cls.edit_hyperliquid_order_guarded = _edit_hyperliquid_order_guarded  # type: ignore[attr-defined]
+    app_cls.edit_hyperliquid_order = _edit_hyperliquid_order  # type: ignore[attr-defined]
     app_cls.show_hyperliquid_position_tpsl_dialog = _show_hyperliquid_position_tpsl_dialog  # type: ignore[attr-defined]
-    app_cls.place_hyperliquid_position_tpsl_guarded = _place_hyperliquid_position_tpsl_guarded  # type: ignore[attr-defined]
+    app_cls.place_hyperliquid_position_tpsl = _place_hyperliquid_position_tpsl  # type: ignore[attr-defined]
     app_cls.show_hyperliquid_perp_position_size = _show_hyperliquid_perp_position_size  # type: ignore[attr-defined]
     app_cls.show_hyperliquid_perp_position_editor = _show_hyperliquid_perp_position_editor  # type: ignore[attr-defined]
     app_cls.use_hyperliquid_perp_position = _use_hyperliquid_perp_position  # type: ignore[attr-defined]
-    app_cls.apply_hyperliquid_leverage_guarded = _apply_hyperliquid_leverage_guarded  # type: ignore[attr-defined]
+    app_cls.apply_hyperliquid_leverage = _apply_hyperliquid_leverage  # type: ignore[attr-defined]
     app_cls.load_selected_recent_orders = _load_selected_recent_orders  # type: ignore[attr-defined]
     app_cls._build_order_panel = _build_order_panel_with_hyperliquid  # type: ignore[method-assign]
     app_cls.load_selected_open_orders_only = _load_selected_open_orders_only  # type: ignore[attr-defined]
@@ -625,7 +625,7 @@ def _submit_cockpit_selected_venue(self: tk.Tk) -> None:
             return
         self.show_hyperliquid_spot_live_submit_safety_review()
         return
-    self.submit_live_schwab_order_guarded()
+    self.submit_live_schwab_order()
 
 
 def _selected_venue_is_hyperliquid(self: tk.Tk) -> bool:
@@ -823,7 +823,7 @@ def _load_selected_open_orders_only(self: tk.Tk) -> None:
 
 def _cancel_selected_order(self: tk.Tk) -> None:
     if _selected_venue_is_hyperliquid(self):
-        self.cancel_hyperliquid_order_guarded()
+        self.cancel_hyperliquid_order()
         return
     self.show_cancel_order_placeholder()
 
@@ -931,7 +931,7 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
     def submit_edit() -> None:
         new_size = size_var.get()
         new_price = price_var.get()
-        self.edit_hyperliquid_order_guarded(
+        self.edit_hyperliquid_order(
             raw_order_id,
             market,
             side,
@@ -1237,7 +1237,7 @@ def _order_side_for_edit(order: dict[str, Any] | None, fallback: str) -> str:
     return "buy"
 
 
-def _edit_hyperliquid_order_guarded(
+def _edit_hyperliquid_order(
     self: tk.Tk,
     raw_order_id: str,
     raw_market: str,
@@ -1496,7 +1496,7 @@ def _show_hyperliquid_position_tpsl_dialog(self: tk.Tk) -> None:
     def submit_tpsl() -> None:
         amount = size_var.get() if configure_amount_var.get() else _format_hyperliquid_size(position.quantity)
         limit_price = limit_price_var.get() if limit_trigger_var.get() else ""
-        self.place_hyperliquid_position_tpsl_guarded(
+        self.place_hyperliquid_position_tpsl(
             coin_var.get(),
             close_side,
             amount,
@@ -1511,7 +1511,7 @@ def _show_hyperliquid_position_tpsl_dialog(self: tk.Tk) -> None:
     ttk.Button(buttons, text="Confirm TP/SL", command=submit_tpsl, style="CompactDanger.TButton").grid(row=0, column=1, sticky="ew")
 
 
-def _place_hyperliquid_position_tpsl_guarded(
+def _place_hyperliquid_position_tpsl(
     self: tk.Tk,
     raw_coin: str,
     raw_close_side: str,
@@ -2055,7 +2055,7 @@ def _use_hyperliquid_perp_position(self: tk.Tk, raw_coin: str | None = None) -> 
     )
 
 
-def _apply_hyperliquid_leverage_guarded(self: tk.Tk) -> None:
+def _apply_hyperliquid_leverage(self: tk.Tk) -> None:
     _ensure_hyperliquid_vars(self)
     self.trade_venue_var.set("Hyperliquid")
     try:
@@ -2170,7 +2170,7 @@ def _matching_tpsl_orders(self: tk.Tk, coin: str) -> list[HyperliquidOpenOrder]:
 
 def _cancel_tpsl_from_dialog(self: tk.Tk, order_id: str) -> None:
     self.cancel_order_id_var.set(order_id)
-    self.cancel_hyperliquid_order_guarded()
+    self.cancel_hyperliquid_order()
 
 
 def _lookup_hyperliquid_perp_mid(coin: str) -> float:
@@ -2204,7 +2204,7 @@ def _hyperliquid_cancel_coin_for_order(self: tk.Tk, order_id: str) -> str:
     )
 
 
-def _cancel_hyperliquid_order_guarded(self: tk.Tk) -> None:
+def _cancel_hyperliquid_order(self: tk.Tk) -> None:
     raw_order_id = self.cancel_order_id_var.get().strip()
     if not raw_order_id:
         messagebox.showerror("Hyperliquid cancel blocked", "Enter an active Hyperliquid order ID first.")

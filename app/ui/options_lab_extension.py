@@ -1444,7 +1444,7 @@ def _build_schwab_trading_tab(
     _add_workspace_button(actions, row=2, column=2, text="Order Checklist", command=schwab_action("show_manual_checklist"))
     _add_workspace_button(actions, row=3, column=0, text="Cancel Order", command=schwab_action("cancel_selected_order", "show_cancel_order_placeholder"), style="Danger.TButton")
     _add_workspace_button(actions, row=3, column=1, text="NOT UNIQUE BUTTON", command=schwab_action("show_live_submit_safety_review"))
-    _add_workspace_button(actions, row=3, column=2, text="LIVE Submit", command=schwab_action("submit_live_schwab_order_guarded"), style="Danger.TButton")
+    _add_workspace_button(actions, row=3, column=2, text="LIVE Submit", command=schwab_action("submit_live_schwab_order"), style="Danger.TButton")
 
     _set_workspace_text(
         self.schwab_trading_preview_text,
@@ -1687,7 +1687,7 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     _add_workspace_button(spot_actions, row=0, column=2, text="Preview Spot", command=hyperliquid_action("spot", "preview_hyperliquid_spot_ticket"))
     _add_workspace_button(spot_actions, row=1, column=0, text="Open Orders", command=hyperliquid_action("spot", "load_hyperliquid_open_orders"))
     _add_workspace_button(spot_actions, row=1, column=1, text="Edit Order", command=hyperliquid_action("spot", "show_hyperliquid_order_edit_dialog"))
-    _add_workspace_button(spot_actions, row=1, column=2, text="Cancel Order", command=hyperliquid_action("spot", "cancel_hyperliquid_order_guarded"), style="Danger.TButton")
+    _add_workspace_button(spot_actions, row=1, column=2, text="Cancel Order", command=hyperliquid_action("spot", "cancel_hyperliquid_order"), style="Danger.TButton")
     _add_workspace_button(spot_actions, row=2, column=0, text="LIVE Submit", command=hyperliquid_action("spot", "show_hyperliquid_spot_live_submit_safety_review"), style="Danger.TButton", columnspan=3)
 
     ticket = perp_ticket
@@ -1749,7 +1749,7 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     _add_workspace_button(actions, row=1, column=2, text="Position Size", command=hyperliquid_action("perp", "show_hyperliquid_perp_position_size", "show_position_size"))
     _add_workspace_button(actions, row=2, column=0, text="Open Orders", command=hyperliquid_action("perp", "load_selected_open_orders_only", "load_hyperliquid_open_orders"))
     _add_workspace_button(actions, row=2, column=1, text="Edit Order", command=hyperliquid_action("perp", "show_hyperliquid_order_edit_dialog"))
-    _add_workspace_button(actions, row=2, column=2, text="Cancel Order", command=hyperliquid_action("perp", "cancel_selected_order", "cancel_hyperliquid_order_guarded"), style="Danger.TButton")
+    _add_workspace_button(actions, row=2, column=2, text="Cancel Order", command=hyperliquid_action("perp", "cancel_selected_order", "cancel_hyperliquid_order"), style="Danger.TButton")
     _add_workspace_button(actions, row=3, column=0, text="LIVE Submit", command=hyperliquid_action("perp", "show_hyperliquid_perp_live_submit_safety_review"), style="Danger.TButton", columnspan=3)
 
     _set_workspace_text(

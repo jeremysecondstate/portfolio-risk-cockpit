@@ -432,7 +432,7 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
         ("Open Only", self.load_schwab_open_orders_only, "TButton"),
         ("Reset Session", self.reset_schwab_session, "TButton"),
         ("Cancel Order", self.show_cancel_order_placeholder, "Danger.TButton"),
-        ("LIVE Submit", self.submit_live_schwab_order_guarded, "Danger.TButton"),
+        ("LIVE Submit", self.submit_live_schwab_order, "Danger.TButton"),
     ]):
         ttk.Button(secondary_actions, text=label, command=command, style=style_name).grid(
             row=index // 4,

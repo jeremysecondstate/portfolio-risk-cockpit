@@ -94,7 +94,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         ttk.Button(button_bar, text="Cancel Order", command=self.show_cancel_order_placeholder).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Technical Analysis", command=self.show_technical_analysis).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="NOT UNIQUE BUTTON", command=self.show_live_submit_safety_review).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(button_bar, text="LIVE Submit", command=self.submit_live_schwab_order_guarded).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Button(button_bar, text="LIVE Submit", command=self.submit_live_schwab_order).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Position Size", command=self.show_position_size).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Order Checklist", command=self.show_manual_checklist).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Submit Paper Order", command=self.submit_order).pack(side=tk.RIGHT)
@@ -560,7 +560,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         except Exception as exc:
             messagebox.showerror("Schwab cancel failed", str(exc))
 
-    def submit_live_schwab_order_guarded(self) -> None:
+    def submit_live_schwab_order(self) -> None:
         enable_live = os.getenv("SCHWAB_ENABLE_LIVE_ORDERS", "").strip().lower()
         if enable_live != "true":
             messagebox.showerror("Live submit blocked", "SCHWAB_ENABLE_LIVE_ORDERS=true is required in your local .env.")

@@ -10,7 +10,7 @@ from typing import Any, Type
 def install_schwab_mechanical_submit_extension(app_cls: Type[tk.Tk]) -> None:
     """Use mechanical checks instead of the removed DELETE ME confirmation field."""
 
-    app_cls.submit_live_schwab_order_guarded = _submit_with_mechanical_checks  # type: ignore[method-assign]
+    app_cls.submit_live_schwab_order = _submit_with_mechanical_checks  # type: ignore[method-assign]
     app_cls.show_live_submit_safety_review = _show_mechanical_submit_review  # type: ignore[method-assign]
     app_cls.format_schwab_preview_response = _format_schwab_preview_response  # type: ignore[method-assign]
 
