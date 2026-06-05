@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 
 from app.analytics.research_workspace_insights import (
@@ -9,6 +10,9 @@ from app.analytics.research_workspace_insights import (
     combined_option_scenarios,
     covered_contract_capacity,
     option_expiration_payoff,
+    option_position_readout,
+    option_strategy_scenario_move_note,
+    option_strategy_scenario_moves,
     suggest_option_candidates,
 )
 from app.analytics.stock_research import AdvancedIndicatorSnapshot, GeneratedStockPosition, PortfolioSymbolContext
@@ -220,6 +224,53 @@ class OptionScenarioMathTests(unittest.TestCase):
         self.assertAlmostEqual(row.option_pnl, 50.0)
         self.assertAlmostEqual(row.current_combined_pnl, 150.0)
         self.assertAlmostEqual(row.model_combined_pnl or 0.0, 75.0)
+
+    def test_option_strategy_scenario_moves_include_option_specific_points(self) -> None:
+        candidate = replace(_candidate(option_type="call", strike=12.0, premium=1.0), dte=30, iv=0.40)
+        moves = option_strategy_scenario_moves(candidate, _indicators())
+        rounded = {round(move, 4) for move in moves}
+        expected_move = round(0.40 * (30 / 365) ** 0.5, 4)
+
+        self.assertIn(-0.10, rounded)
+        self.assertIn(0.10, rounded)
+        self.assertIn(0.20, rounded)  # strike
+        self.assertIn(0.30, rounded)  # breakeven
+        self.assertIn(0.32, rounded)  # beyond breakeven
+        self.assertIn(expected_move, rounded)
+        self.assertIn(-expected_move, rounded)
+        self.assertIn(0.05, rounded)  # 1 ATR
+
+    def test_option_strategy_scenario_move_note_labels_key_points(self) -> None:
+        candidate = replace(_candidate(option_type="call", strike=12.0, premium=1.0), dte=30, iv=0.40)
+        expected_move = round(0.40 * (30 / 365) ** 0.5, 4)
+
+        self.assertIn("breakeven", option_strategy_scenario_move_note(candidate, _indicators(), 0.30))
+        self.assertIn("beyond breakeven", option_strategy_scenario_move_note(candidate, _indicators(), 0.32))
+        self.assertIn("1 ATR", option_strategy_scenario_move_note(candidate, _indicators(), 0.05))
+        self.assertIn("expected move", option_strategy_scenario_move_note(candidate, _indicators(), expected_move))
+
+    def test_option_position_readout_is_candidate_aware(self) -> None:
+        model_position = GeneratedStockPosition(
+            quantity=25.0,
+            entry_price=10.0,
+            stop_price=9.0,
+            risk_dollars=25.0,
+            notional=250.0,
+            portfolio_weight=0.0025,
+            per_share_risk=1.0,
+            basis="test model target",
+        )
+        put_readout = option_position_readout(_candidate(option_type="put", contracts=1), _context(quantity=45), model_position)
+        self.assertIsNotNone(put_readout)
+        self.assertEqual(put_readout.title, "Hedge Ratio")
+        self.assertIn("100 shares", put_readout.detail)
+        self.assertIn("45 current shares", put_readout.detail)
+        self.assertIn("25", put_readout.detail)
+
+        covered_readout = option_position_readout(_candidate(covered=True, contracts=1), _context(quantity=45), model_position)
+        self.assertIsNotNone(covered_readout)
+        self.assertEqual(covered_readout.title, "Coverage")
+        self.assertEqual(covered_readout.label, "Not fully covered")
 
     def test_normalized_candidate_bar_rows_preserve_signs(self) -> None:
         rows = [

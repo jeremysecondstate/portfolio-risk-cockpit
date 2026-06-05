@@ -77,9 +77,11 @@ from app.analytics.research_workspace_insights import (
     build_technical_narrative,
     combined_current_model_option_scenarios,
     combined_option_scenarios,
-    covered_contract_capacity,
     inflation_read_from_metrics,
     macro_why_it_matters,
+    option_position_readout,
+    option_strategy_scenario_move_note,
+    option_strategy_scenario_moves,
     option_timeline_text,
     selected_candidate_detail,
     suggest_option_candidates,
@@ -2452,7 +2454,7 @@ def _render_options_strategy(self: tk.Tk) -> None:
             ),
         )
     tree.selection_set("candidate_0")
-    _render_option_strategy_cards(frame, _selected_option_candidate(self) or candidates[0], candidates, payload.context)
+    _render_option_strategy_cards(frame, _selected_option_candidate(self) or candidates[0], candidates, payload.context, getattr(self, "schwab_research_stock_plan", None))
     frame.status_var.set(f"{len(candidates)} candidates generated from loaded {payload.symbol} chain. Select one and click Use This Option to fill fields only.")  # type: ignore[attr-defined]
     _show_selected_option_candidate(self)
     _render_scenarios(self, payload)
@@ -2463,9 +2465,11 @@ def _render_option_strategy_cards(
     selected: OptionCandidate,
     candidates: list[OptionCandidate],
     context: PortfolioSymbolContext,
+    model_position: Any | None = None,
 ) -> None:
     actionable = _best_actionable_contract(candidates)
     selected_is_contract = _is_actionable_contract(selected)
+    position_candidate = selected if selected_is_contract else actionable
     cards = [
         _synthetic_badge("Selected Candidate", selected.strategy, _candidate_status(selected.confidence), selected.why),
     ]
@@ -2494,14 +2498,16 @@ def _render_option_strategy_cards(
             _synthetic_badge("Risk Read", selected.confidence, _candidate_status(selected.confidence), selected.goes_wrong_if),
         ]
     )
-    partial_warning = _partial_covered_call_warning(context)
-    if partial_warning:
-        cards.append(_synthetic_badge("Coverage", "Not fully covered", "bad", partial_warning))
+    position_readout = option_position_readout(position_candidate, context, model_position)
+    if position_readout is not None:
+        cards.append(_synthetic_badge(position_readout.title, position_readout.label, position_readout.status, position_readout.detail))
     metric_grid(
         frame.cards,  # type: ignore[attr-defined]
         cards,
         columns=4,
         prominent_indexes={0},
+        card_height=148,
+        prominent_height=164,
     )
 
 
@@ -2529,6 +2535,14 @@ def _candidate_entry_basis(candidate: OptionCandidate) -> str:
     if candidate.ask is not None:
         return "Midpoint and mark unavailable; estimated entry falls back to selected contract ask."
     return "Selected contract has no usable midpoint, mark, or ask."
+
+
+def _option_scenario_read(read: str, move_note: str = "") -> str:
+    pieces = [read]
+    if move_note:
+        pieces.append(move_note)
+    pieces.append("expiration payoff estimate")
+    return "; ".join(piece for piece in pieces if piece)
 
 
 def _load_chain_from_research_tab(self: tk.Tk) -> None:
@@ -2836,7 +2850,7 @@ def _show_selected_option_candidate(self: tk.Tk) -> None:
     context = _active_stock_scenario_context(self, payload) if payload is not None else None
     candidates = getattr(self, "schwab_research_option_candidates", []) or []
     if payload is not None:
-        _render_option_strategy_cards(frame, candidate, candidates, payload.context)
+        _render_option_strategy_cards(frame, candidate, candidates, payload.context, getattr(self, "schwab_research_stock_plan", None))
     frame.timeline_var.set(option_timeline_text(candidate, earnings_text))  # type: ignore[attr-defined]
     _render_candidate_score_breakdown(frame, candidate)
     scenario_tree = frame.candidate_scenario_tree  # type: ignore[attr-defined]
@@ -2844,9 +2858,11 @@ def _show_selected_option_candidate(self: tk.Tk) -> None:
         scenario_tree.delete(row_id)
     if payload is not None and _is_actionable_contract(candidate):
         stock_plan = getattr(self, "schwab_research_stock_plan", None)
-        scenario_rows = combined_current_model_option_scenarios(candidate, payload.context, stock_plan, moves=(-0.10, -0.05, -0.03, -0.02, 0.0, 0.02, 0.03, 0.05, 0.10))
+        moves = option_strategy_scenario_moves(candidate, payload.indicators)
+        scenario_rows = combined_current_model_option_scenarios(candidate, payload.context, stock_plan, moves=moves)
         frame.candidate_bars.set_rows(_normalized_current_model_option_bar_rows(scenario_rows))  # type: ignore[attr-defined]
-        for row in scenario_rows:
+        for move, row in zip(moves, scenario_rows):
+            move_note = option_strategy_scenario_move_note(candidate, payload.indicators, move)
             tag_basis = row.model_combined_pnl if row.model_combined_pnl is not None else row.current_combined_pnl
             tag = "positive" if tag_basis > 0 else "negative" if tag_basis < 0 else ""
             scenario_tree.insert(
@@ -2861,20 +2877,22 @@ def _show_selected_option_candidate(self: tk.Tk) -> None:
                     _money(row.option_pnl),
                     _money(row.current_combined_pnl),
                     _money(row.model_combined_pnl),
-                    f"{row.read}; expiration payoff estimate",
+                    _option_scenario_read(row.read, move_note),
                 ),
                 tags=(tag,) if tag else (),
             )
         lines = selected_candidate_detail(candidate, context or payload.context, earnings_text)
     elif context is not None and _is_actionable_contract(candidate):
-        scenario_rows = combined_option_scenarios(candidate, context, moves=(-0.10, -0.05, -0.03, -0.02, 0.0, 0.02, 0.03, 0.05, 0.10))
+        moves = option_strategy_scenario_moves(candidate, None)
+        scenario_rows = combined_option_scenarios(candidate, context, moves=moves)
         frame.candidate_bars.set_rows(_normalized_candidate_bar_rows(scenario_rows))  # type: ignore[attr-defined]
-        for row in scenario_rows:
+        for move, row in zip(moves, scenario_rows):
+            move_note = option_strategy_scenario_move_note(candidate, None, move)
             tag = "positive" if row.combined_pnl > 0 else "negative" if row.combined_pnl < 0 else ""
             scenario_tree.insert(
                 "",
                 tk.END,
-                values=(row.move_label, _money(row.underlying_price), candidate.contract_count, _money(row.stock_pnl), "--", _money(row.option_pnl), _money(row.combined_pnl), "--", f"{row.read}; expiration payoff estimate"),
+                values=(row.move_label, _money(row.underlying_price), candidate.contract_count, _money(row.stock_pnl), "--", _money(row.option_pnl), _money(row.combined_pnl), "--", _option_scenario_read(row.read, move_note)),
                 tags=(tag,) if tag else (),
             )
         lines = selected_candidate_detail(candidate, context, earnings_text)
@@ -2986,15 +3004,6 @@ def _candidate_alternative_lines(candidate: OptionCandidate, alternatives: list[
         reason = item.avoid_reason or item.score_reason or item.goes_wrong_if
         lines.append(f"Alternative ranked lower: {item.group}: {item.strategy} scored {item.score:.0f}/100 because {reason}")
     return lines
-
-
-def _partial_covered_call_warning(context: PortfolioSymbolContext) -> str:
-    if not context.is_held:
-        return ""
-    capacity = covered_contract_capacity(context)
-    if capacity > 0:
-        return ""
-    return f"You hold {context.quantity:g} shares; one call contract controls 100 shares, so a covered call would not be fully covered."
 
 
 def _normalized_candidate_bar_rows(scenario_rows: list[Any]) -> list[tuple[str, float, str]]:
@@ -3165,7 +3174,9 @@ def _render_option_scenarios_from_top(self: tk.Tk) -> None:
         )
         return
     stock_plan = getattr(self, "schwab_research_stock_plan", None)
-    for row in combined_current_model_option_scenarios(candidate, payload.context, stock_plan):
+    moves = option_strategy_scenario_moves(candidate, payload.indicators)
+    for move, row in zip(moves, combined_current_model_option_scenarios(candidate, payload.context, stock_plan, moves=moves)):
+        move_note = option_strategy_scenario_move_note(candidate, payload.indicators, move)
         tag_basis = row.model_combined_pnl if row.model_combined_pnl is not None else row.current_combined_pnl
         tag = "positive" if tag_basis > 0 else "negative" if tag_basis < 0 else ""
         tree.insert(
@@ -3179,7 +3190,7 @@ def _render_option_scenarios_from_top(self: tk.Tk) -> None:
                 _money(row.option_pnl),
                 _money(row.current_combined_pnl),
                 _money(row.model_combined_pnl),
-                f"{row.read}; expiration-style estimate",
+                _option_scenario_read(row.read, move_note),
             ),
             tags=(tag,) if tag else (),
         )

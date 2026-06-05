@@ -111,6 +111,14 @@ class CurrentModelOptionScenarioRow:
 
 
 @dataclass(frozen=True)
+class OptionPositionReadout:
+    title: str
+    label: str
+    status: str
+    detail: str
+
+
+@dataclass(frozen=True)
 class FundamentalVerdict:
     verdict: str
     action_bias: str
@@ -489,6 +497,166 @@ def option_expiration_value(candidate: OptionCandidate, underlying_price: float,
     if _is_covered_call(candidate):
         return -intrinsic * multiplier
     return intrinsic * multiplier
+
+
+DEFAULT_OPTION_SCENARIO_MOVES = (-0.10, -0.05, -0.03, -0.02, 0.0, 0.02, 0.03, 0.05, 0.10)
+
+
+def option_strategy_scenario_moves(
+    candidate: OptionCandidate | None,
+    indicators: AdvancedIndicatorSnapshot | None = None,
+    default_moves: tuple[float, ...] = DEFAULT_OPTION_SCENARIO_MOVES,
+) -> tuple[float, ...]:
+    if candidate is None or candidate.underlying_price is None or candidate.underlying_price <= 0:
+        return tuple(sorted({_round_move(move) for move in default_moves}))
+    base = candidate.underlying_price
+    moves = {_round_move(move) for move in default_moves}
+
+    def add_price(price: float | None) -> None:
+        if price is not None and price > 0:
+            moves.add(_round_move((price - base) / base))
+
+    add_price(candidate.strike)
+    add_price(candidate.breakeven)
+    if indicators is not None:
+        add_price(indicators.support or indicators.swing_low)
+        atr = abs(indicators.atr_14 or 0.0)
+        if atr > 0:
+            atr_move = _round_move(atr / base)
+            moves.update({_round_move(atr_move), _round_move(-atr_move), _round_move(atr_move * 2), _round_move(-atr_move * 2)})
+    expected_move = option_expected_move_pct(candidate)
+    if expected_move is not None:
+        moves.update({_round_move(expected_move), _round_move(-expected_move)})
+    breakeven_move = _price_move(candidate.breakeven, base)
+    if breakeven_move is not None and abs(breakeven_move) > 0.10:
+        direction = 1.0 if breakeven_move > 0 else -1.0
+        moves.add(_round_move(breakeven_move + direction * 0.02))
+    return tuple(sorted(moves))
+
+
+def option_strategy_scenario_move_note(
+    candidate: OptionCandidate | None,
+    indicators: AdvancedIndicatorSnapshot | None,
+    move: float,
+) -> str:
+    if candidate is None or candidate.underlying_price is None or candidate.underlying_price <= 0:
+        return ""
+    base = candidate.underlying_price
+    notes: list[str] = []
+    comparisons = (
+        ("strike", _price_move(candidate.strike, base)),
+        ("breakeven", _price_move(candidate.breakeven, base)),
+    )
+    for label, target in comparisons:
+        if _move_near(move, target):
+            notes.append(label)
+    if indicators is not None:
+        support_move = _price_move(indicators.support or indicators.swing_low, base)
+        if _move_near(move, support_move):
+            notes.append("support/risk line")
+        atr = abs(indicators.atr_14 or 0.0)
+        if atr > 0:
+            atr_move = atr / base
+            if _move_near(abs(move), atr_move):
+                notes.append("1 ATR")
+            if _move_near(abs(move), atr_move * 2):
+                notes.append("2 ATR")
+    expected_move = option_expected_move_pct(candidate)
+    if _move_near(abs(move), expected_move):
+        notes.append("expected move")
+    breakeven_move = _price_move(candidate.breakeven, base)
+    if breakeven_move is not None and abs(breakeven_move) > 0.10:
+        direction = 1.0 if breakeven_move > 0 else -1.0
+        beyond = breakeven_move + direction * 0.02
+        if _move_near(move, beyond):
+            notes.append("beyond breakeven")
+    return "; ".join(dict.fromkeys(notes))
+
+
+def option_expected_move_pct(candidate: OptionCandidate | None) -> float | None:
+    if candidate is None or candidate.iv is None or candidate.iv <= 0 or candidate.dte is None or candidate.dte <= 0:
+        return None
+    return _round_move(candidate.iv * math.sqrt(candidate.dte / 365.0))
+
+
+def option_position_readout(
+    candidate: OptionCandidate | None,
+    current_context: PortfolioSymbolContext,
+    model_position: GeneratedStockPosition | None = None,
+) -> OptionPositionReadout | None:
+    if candidate is None or candidate.option_type not in {"call", "put"}:
+        return None
+    contracts = _scenario_contract_count(candidate)
+    controlled_shares = contracts * 100
+    current_shares = max(float(current_context.quantity or 0.0), 0.0)
+    model_shares = float(model_position.quantity) if model_position is not None and model_position.quantity > 0 else None
+    model_text = f"; model target {model_shares:g} shares" if model_shares is not None else ""
+    if _is_covered_call(candidate):
+        if controlled_shares <= 0:
+            return OptionPositionReadout("Coverage", "No contract", "info", "No covered-call contract count is selected.")
+        if current_shares >= controlled_shares:
+            return OptionPositionReadout(
+                "Coverage",
+                "Fully covered",
+                "good",
+                f"{contracts} call contract(s) control {controlled_shares} shares vs {current_shares:g} current shares{model_text}.",
+            )
+        return OptionPositionReadout(
+            "Coverage",
+            "Not fully covered",
+            "bad",
+            f"{contracts} call contract(s) control {controlled_shares} shares vs only {current_shares:g} current shares{model_text}.",
+        )
+    if candidate.option_type == "put":
+        current_ratio = _coverage_ratio(controlled_shares, current_shares)
+        model_ratio = _coverage_ratio(controlled_shares, model_shares)
+        pieces = [f"{contracts} put contract(s) control {controlled_shares} shares vs {current_shares:g} current shares"]
+        if current_ratio is not None:
+            pieces.append(f"current hedge ratio {current_ratio:.0%}")
+        if model_shares is not None:
+            pieces.append(f"model target {model_shares:g} shares")
+        if model_ratio is not None:
+            pieces.append(f"model hedge ratio {model_ratio:.0%}")
+        if current_ratio is None and model_ratio is None:
+            return OptionPositionReadout(
+                "Hedge Ratio",
+                "Standalone put",
+                "info",
+                f"{contracts} put contract(s) control {controlled_shares} shares; no current/model shares are available to hedge.",
+            )
+        label_ratio = current_ratio if current_ratio is not None else model_ratio
+        if label_ratio is None:
+            label, status = "Hedge check", "info"
+        elif label_ratio > 1.25:
+            label, status = "Over-hedged", "mixed"
+        elif label_ratio >= 0.75:
+            label, status = "Near full hedge", "good"
+        else:
+            label, status = "Partial hedge", "mixed"
+        return OptionPositionReadout("Hedge Ratio", label, status, "; ".join(pieces) + ".")
+    return None
+
+
+def _coverage_ratio(controlled_shares: int, shares: float | None) -> float | None:
+    if shares is None or shares <= 0:
+        return None
+    return controlled_shares / shares
+
+
+def _price_move(price: float | None, base: float) -> float | None:
+    if price is None or base <= 0:
+        return None
+    return (price - base) / base
+
+
+def _round_move(move: float) -> float:
+    return round(float(move), 4)
+
+
+def _move_near(move: float, target: float | None) -> bool:
+    if target is None:
+        return False
+    return abs(_round_move(move) - _round_move(target)) <= 0.001
 
 
 def combined_option_scenarios(
