@@ -94,22 +94,20 @@ class MetricCard(tk.Frame):
     ) -> None:
         colors = STATUS_COLORS.get(readout.status, STATUS_COLORS["neutral"])
         super().__init__(parent, bg=colors["bg"], highlightbackground=colors["bar"], highlightthickness=2 if prominent else 1, width=width, height=height)
-        if not adaptive_height:
-            self.grid_propagate(False)
+        # These cards appear inside resizable and detached dashboards. Do not
+        # freeze the frame height: fixed-height cards made wrapped text show
+        # ellipses or clip even when the surrounding window had plenty of room.
+        # Treat the configured height as a minimum, then let Tk grow the card to
+        # the full wrapped label/body text.
+        self.grid_propagate(True)
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(2, weight=1, minsize=max(38, height - 70) if adaptive_height else 0)
+        self.rowconfigure(2, weight=1, minsize=max(38, height - 70))
         tk.Frame(self, bg=colors["bar"], width=5).grid(row=0, column=0, rowspan=3, sticky="nsw")
         title_font = ("Segoe UI", 8, "bold")
         label_font = ("Segoe UI", 15 if prominent else 12, "bold")
         body_font = ("Segoe UI", 9 if adaptive_height else 8)
-        label_text = readout.label if adaptive_height else _compact_text(
-            readout.label,
-            COMPACT_CARD_LABEL_LIMIT + (12 if prominent else 0),
-        )
-        why_text = readout.why if adaptive_height else _compact_text(
-            readout.why,
-            COMPACT_CARD_WHY_LIMIT + (18 if prominent else 0),
-        )
+        label_text = str(readout.label or "")
+        why_text = str(readout.why or "")
         tk.Label(self, text=readout.title.upper(), bg=colors["bg"], fg=MUTED, font=title_font, anchor="w").grid(row=0, column=1, sticky="ew", padx=METRIC_CARD_PAD_X, pady=(METRIC_CARD_PAD_TOP, 0))
         self._label = tk.Label(self, text=label_text, bg=colors["bg"], fg=colors["fg"], font=label_font, anchor="w", justify=tk.LEFT, wraplength=width - (METRIC_CARD_PAD_X * 2))
         self._label.grid(row=1, column=1, sticky="ew", padx=METRIC_CARD_PAD_X, pady=(2, 0))
