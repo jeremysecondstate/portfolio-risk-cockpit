@@ -2655,6 +2655,25 @@ def _render_technicals(self: tk.Tk, payload: _ResearchPayload) -> None:
     for label, value in indicators.fibonacci_levels.items():
         tree.insert("", tk.END, values=(f"Fib {label}", _money(value), TERM_HELPERS["Fibonacci retracement"]))
     if payload.command_center_report is not None:
+        classification = payload.command_center_report.setup_classification
+        tree.insert(
+            "",
+            tk.END,
+            values=(
+                "Setup classification",
+                f"{classification.regime}/{classification.setup}/{classification.timing}",
+                classification.main_reason,
+            ),
+        )
+        tree.insert(
+            "",
+            tk.END,
+            values=(
+                "Entry quality",
+                classification.action_quality.replace("_", " "),
+                f"Confirmation {_money(classification.confirmation_level)}; invalidation {_money(classification.invalidation_level)}.",
+            ),
+        )
         for name, component in payload.command_center_report.scores.items():
             tree.insert("", tk.END, values=(f"Command {name}", f"{component.score:.0f}/100", component.reason))
         tree.insert("", tk.END, values=("Command action", payload.command_center_report.best_action, "Best action is derived from transparent scores and ticket quality."))

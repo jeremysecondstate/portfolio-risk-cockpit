@@ -38,26 +38,32 @@ def _install_visible_option_chain(self: tk.Tk) -> None:
         chain.pack(fill=tk.X, padx=0, pady=(0, 10))
     chain.columnconfigure(0, weight=1)
     chain.rowconfigure(1, weight=1)
+    if not hasattr(self, "schwab_option_chain_strike_count_var"):
+        self.schwab_option_chain_strike_count_var = tk.StringVar(value="10")
 
     controls = ttk.Frame(chain, style="Panel.TFrame")
     controls.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-    controls.columnconfigure((0, 1, 2), weight=1, uniform="visible_option_chain_buttons")
+    controls.columnconfigure(2, weight=1, uniform="visible_option_chain_buttons")
+    controls.columnconfigure(3, weight=1, uniform="visible_option_chain_buttons")
+    controls.columnconfigure(4, weight=1, uniform="visible_option_chain_buttons")
+    ttk.Label(controls, text="Strikes", style="Subtle.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 6))
+    ttk.Entry(controls, textvariable=self.schwab_option_chain_strike_count_var, width=6).grid(row=0, column=1, sticky="w", padx=(0, 8))
     ttk.Button(
         controls,
         text="Load Option Chain",
         command=self.load_schwab_option_chain,
         style="Accent.TButton",
-    ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+    ).grid(row=0, column=2, sticky="ew", padx=(0, 6))
     ttk.Button(
         controls,
         text="Use Call Ask",
         command=self.use_selected_schwab_option_call_ask,
-    ).grid(row=0, column=1, sticky="ew", padx=(0, 6))
+    ).grid(row=0, column=3, sticky="ew", padx=(0, 6))
     ttk.Button(
         controls,
         text="Use Put Ask",
         command=self.use_selected_schwab_option_put_ask,
-    ).grid(row=0, column=2, sticky="ew")
+    ).grid(row=0, column=4, sticky="ew")
 
     table_frame = ttk.Frame(chain, style="Panel.TFrame")
     table_frame.grid(row=1, column=0, sticky="nsew")

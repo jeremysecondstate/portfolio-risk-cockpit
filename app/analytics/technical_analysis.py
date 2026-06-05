@@ -110,6 +110,43 @@ class VolumeRead:
 
 
 @dataclass(frozen=True)
+class LevelProximityRead:
+    nearest_support: TechnicalLevel | None
+    nearest_resistance: TechnicalLevel | None
+    distance_to_support_percent: float | None
+    distance_to_resistance_percent: float | None
+    range_position: str
+    risk_reward_location: str
+    stop_atr_multiple: float | None
+    stop_read: str
+    lines: list[str]
+
+
+@dataclass(frozen=True)
+class RsiContextRead:
+    rsi: float | None
+    zone: str
+    context: str
+    warning: str
+
+
+@dataclass(frozen=True)
+class TechnicalSetupClassification:
+    regime: str
+    setup: str
+    timing: str
+    action_quality: str
+    confidence: str
+    invalidation_level: float | None
+    confirmation_level: float | None
+    main_reason: str
+    warnings: list[str]
+    level_proximity: LevelProximityRead | None = None
+    rsi_context: list[RsiContextRead] = field(default_factory=list)
+    lines: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class RelativeStrengthRead:
     benchmark: str
     return_1: float | None
@@ -209,6 +246,10 @@ class TicketCheck:
     verdict: str
     lines: list[str]
     score: ScoreComponent
+    risk_reward: str = "Reward/risk unavailable."
+    risk_reward_ratio: float | None = None
+    target_price: float | None = None
+    risk_reward_read: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -277,6 +318,19 @@ class TechnicalCommandCenterReport:
     plain_english_plan: list[str]
     prc_indexes: dict[str, PrcIndexPrice] = field(default_factory=dict)
     capital_structure_pressure: CapitalStructurePressureReport | None = None
+    setup_classification: TechnicalSetupClassification = field(
+        default_factory=lambda: TechnicalSetupClassification(
+            regime="unknown",
+            setup="unknown",
+            timing="unknown",
+            action_quality="no_edge",
+            confidence="low",
+            invalidation_level=None,
+            confirmation_level=None,
+            main_reason="Technical setup classification was not built.",
+            warnings=[],
+        )
+    )
 
 
 DEFAULT_COMMAND_CENTER_TIMEFRAMES: tuple[TimeframeSpec, ...] = (
@@ -478,6 +532,7 @@ def build_technical_command_center_report(
         ticket=ticket or TechnicalTicket(),
     )
     ticket_check = build_ticket_check(snapshots, ticket or TechnicalTicket())
+    setup_classification = build_technical_setup_classification(snapshots, ticket_check=ticket_check)
     scores = score_command_center(snapshots, benchmark_reads, ticket_check)
     overall_score = _weighted_score(
         scores,
@@ -512,6 +567,7 @@ def build_technical_command_center_report(
         plain_english_plan=plain_english_plan,
         prc_indexes=prc_indexes,
         capital_structure_pressure=capital_structure_pressure,
+        setup_classification=setup_classification,
     )
 
 
@@ -1256,6 +1312,11 @@ def build_ticket_check(snapshots: dict[str, TimeframeTechnicalSnapshot], ticket:
     resistance = _nearest_resistance(primary) if primary else None
     atr = primary.atr_14 if primary else None
     vwap_value = primary.vwap if primary else None
+    level_read = (
+        build_level_proximity_read(primary, entry_price=entry, stop_price=stop, side=side)
+        if primary is not None
+        else None
+    )
     lines: list[str] = []
 
     if entry is None:
@@ -1270,14 +1331,18 @@ def build_ticket_check(snapshots: dict[str, TimeframeTechnicalSnapshot], ticket:
             lines.append(f"Entry vs support: nearest support zone {format_level(support)}.")
         if resistance is not None:
             lines.append(f"Entry vs resistance: nearest resistance zone {format_level(resistance)}.")
+        if level_read is not None:
+            lines.append(f"Entry location: {_humanize_classification_value(level_read.range_position)}; risk/reward location {level_read.risk_reward_location}.")
         entry_quality = _entry_quality(side, entry, latest, vwap_value, support, resistance)
 
     if stop is None:
         stop_quality = "no stop"
-        lines.append("Stop: no stop price was provided, so downside risk is not defined in this read.")
+        lines.append("Stop: no stop price was provided, so downside risk is undefined in this read.")
     else:
         stop_quality = _stop_quality(side, entry, stop, atr, support, resistance)
         lines.append(f"Stop: {_money(stop)}. {stop_quality}.")
+    if level_read is not None:
+        lines.append(f"Stop logic: {level_read.stop_read}")
 
     risk_note = "Risk dollars unavailable; add entry, quantity, and stop."
     if entry is not None and stop is not None and quantity and quantity > 0:
@@ -1292,9 +1357,31 @@ def build_ticket_check(snapshots: dict[str, TimeframeTechnicalSnapshot], ticket:
             risk_note = "Stop is on the wrong side of entry for the selected side."
     lines.append(risk_note)
 
+    risk_reward, risk_reward_ratio, target_price, risk_reward_read = _ticket_risk_reward_read(side, entry, stop, support, resistance)
+    lines.append(risk_reward)
+
     score = score_ticket(entry_quality, stop_quality, risk_note)
+    if risk_reward_read == "poor":
+        score = ScoreComponent(score.name, _clamp_score(score.score - 12), f"{score.reason}; poor reward/risk")
+    elif risk_reward_read == "good":
+        score = ScoreComponent(score.name, _clamp_score(score.score + 6), f"{score.reason}; favorable reward/risk")
     verdict = _ticket_verdict(entry_quality, stop_quality, score.score)
-    return TicketCheck(entry_quality, stop_quality, risk_note, verdict, lines, score)
+    if risk_reward_read == "poor":
+        verdict = "Risk/reward is poor for the visible support/resistance map."
+    elif score.score >= 70 and risk_reward_read == "good":
+        verdict = "Order is coherent; risk is defined and reward/risk is favorable."
+    return TicketCheck(
+        entry_quality,
+        stop_quality,
+        risk_note,
+        verdict,
+        lines,
+        score,
+        risk_reward=risk_reward,
+        risk_reward_ratio=risk_reward_ratio,
+        target_price=target_price,
+        risk_reward_read=risk_reward_read,
+    )
 
 
 def score_command_center(
@@ -1483,12 +1570,14 @@ def score_alignment(daily: TimeframeTechnicalSnapshot | None, timing: TimeframeT
 def score_ticket(entry_quality: str, stop_quality: str, risk_note: str) -> ScoreComponent:
     score = 50.0
     reasons = [entry_quality, stop_quality]
-    if entry_quality in {"pullback entry is better", "wait for confirmation"}:
+    if entry_quality in {"pullback entry is better", "wait for confirmation", "middle of range / no edge"}:
         score -= 10
-    elif entry_quality == "technically coherent":
+    elif entry_quality in {"technically coherent", "entry near support", "entry near resistance"}:
         score += 15
-    elif entry_quality == "breakout entry only":
+    elif entry_quality in {"breakout entry only", "breakdown entry only"}:
         score -= 4
+    elif "chasing" in entry_quality:
+        score -= 18
     if "inside normal noise" in stop_quality or "wrong side" in risk_note:
         score -= 22
     elif "reasonable" in stop_quality or "below support" in stop_quality or "above resistance" in stop_quality:
@@ -1498,6 +1587,568 @@ def score_ticket(entry_quality: str, stop_quality: str, risk_note: str) -> Score
     elif "no stop" in stop_quality:
         score -= 20
     return ScoreComponent("Ticket Quality", _clamp_score(score), "; ".join(reason for reason in reasons if reason))
+
+
+def classify_regime(snapshot: TimeframeTechnicalSnapshot | None) -> str:
+    if snapshot is None or snapshot.latest_close is None or snapshot.candle_count <= 0:
+        return "unknown"
+    trend_score = _snapshot_score(snapshot, "Trend")
+    latest = snapshot.latest_close
+    ema_21 = snapshot.ema_21
+    ema_50 = snapshot.ema_50
+    sma_50 = snapshot.sma_50
+    above_intermediate = (
+        (ema_50 is not None and latest >= ema_50)
+        or (sma_50 is not None and latest >= sma_50)
+    )
+    below_intermediate = (
+        (ema_50 is not None and latest <= ema_50)
+        or (sma_50 is not None and latest <= sma_50)
+    )
+
+    if trend_score >= 64 and snapshot.trend_structure != "lower-high / lower-low":
+        return "bullish"
+    if snapshot.trend_structure == "higher-high / higher-low" and above_intermediate:
+        return "bullish"
+    if ema_21 is not None and ema_50 is not None and latest > ema_21 > ema_50:
+        return "bullish"
+    if trend_score <= 38 and snapshot.trend_structure != "higher-high / higher-low":
+        return "bearish"
+    if snapshot.trend_structure == "lower-high / lower-low" and below_intermediate:
+        return "bearish"
+    if ema_21 is not None and ema_50 is not None and latest < ema_21 < ema_50:
+        return "bearish"
+    return "range"
+
+
+def classify_setup(
+    daily: TimeframeTechnicalSnapshot | None,
+    setup: TimeframeTechnicalSnapshot | None,
+    timing: TimeframeTechnicalSnapshot | None,
+) -> str:
+    primary = setup or timing or daily
+    if primary is None or primary.latest_close is None:
+        return "unknown"
+    regime = classify_regime(daily)
+    setup_read = build_level_proximity_read(primary)
+    timing_read = build_level_proximity_read(timing) if timing is not None else None
+    support_broken = _support_broken(primary, setup_read) or (timing is not None and _support_broken(timing, timing_read))
+    resistance_reclaimed = _resistance_reclaimed(primary, setup_read)
+    distribution = _distribution_heavy(primary) or (timing is not None and _distribution_heavy(timing))
+    constructive_volume = _volume_confirms_up(primary) or (timing is not None and _volume_confirms_up(timing))
+
+    if support_broken and (distribution or primary.trend_structure == "lower-high / lower-low" or _snapshot_score(primary, "Trend") <= 44):
+        return "breakdown"
+    if resistance_reclaimed:
+        return "breakout" if constructive_volume else "chop"
+    if regime == "bullish" and _support_holding(primary, setup_read) and (_pullback_pressure(primary) or (timing is not None and _pullback_pressure(timing))):
+        return "pullback"
+    if regime == "bullish" and support_broken:
+        return "breakdown"
+    if regime == "bearish":
+        if _intraday_bounce(primary) or (timing is not None and _intraday_bounce(timing)):
+            return "mean-reversion"
+        if distribution or _snapshot_score(primary, "Trend") <= 44:
+            return "breakdown"
+    if _support_holding(primary, setup_read) and _washed_out(primary) and constructive_volume and not distribution:
+        return "mean-reversion" if regime != "bullish" else "pullback"
+    if primary.trend_structure == "range/chop" or setup_read.range_position == "middle" or primary.range_state == "compressing":
+        return "chop"
+    if _snapshot_score(primary, "Trend") >= 64 and _snapshot_score(primary, "Momentum") >= 56 and constructive_volume:
+        return "breakout" if setup_read.range_position in {"breakout", "near_resistance"} else "pullback"
+    return "chop"
+
+
+def classify_timing(
+    daily: TimeframeTechnicalSnapshot | None,
+    setup: TimeframeTechnicalSnapshot | None,
+    timing: TimeframeTechnicalSnapshot | None,
+) -> str:
+    if timing is None or timing.latest_close is None:
+        return "unknown"
+    setup_class = classify_setup(daily, setup, timing)
+    timing_read = build_level_proximity_read(timing)
+    trend_score = _snapshot_score(timing, "Trend")
+    momentum_score = _snapshot_score(timing, "Momentum")
+    volume_score = _snapshot_score(timing, "Volume")
+
+    if _support_broken(timing, timing_read) or setup_class == "breakdown":
+        return "failed"
+    if _timing_extended(timing, timing_read):
+        if setup_class == "breakout" and _volume_confirms_up(timing) and volume_score >= 58:
+            return "confirmed"
+        return "extended"
+    if setup_class == "breakout":
+        if timing_read.range_position == "breakout" and _volume_confirms_up(timing):
+            return "confirmed"
+        if trend_score >= 60 and momentum_score >= 55 and _volume_confirms_up(timing):
+            return "confirmed"
+        return "early"
+    if setup_class in {"pullback", "mean-reversion"}:
+        if _reversal_evidence(timing):
+            return "confirmed"
+        return "early"
+    if setup_class == "chop":
+        return "unknown"
+    if trend_score >= 62 and momentum_score >= 56 and volume_score >= 55:
+        return "confirmed"
+    return "early"
+
+
+def classify_action_quality(
+    regime: str,
+    setup: str,
+    timing: str,
+    level_read: LevelProximityRead | None = None,
+    ticket_check: TicketCheck | None = None,
+) -> str:
+    if setup == "breakdown" or timing == "failed":
+        return "protect_or_trim"
+    if timing == "extended" or (level_read is not None and level_read.risk_reward_location == "poor"):
+        return "avoid_chase"
+    if ticket_check is not None:
+        if "chasing" in ticket_check.entry_quality:
+            return "avoid_chase"
+        if "no stop" in ticket_check.stop_quality or "inside normal noise" in ticket_check.stop_quality:
+            return "wait_for_trigger"
+    if setup == "chop" or regime == "unknown" or timing == "unknown":
+        return "no_edge"
+    if setup == "breakout" and timing == "confirmed":
+        return "good_entry"
+    if setup == "pullback" and timing == "confirmed" and level_read is not None and level_read.risk_reward_location == "good":
+        return "good_entry"
+    if setup == "mean-reversion" and timing == "confirmed" and regime != "bearish":
+        return "good_entry"
+    return "wait_for_trigger"
+
+
+def build_level_proximity_read(
+    snapshot: TimeframeTechnicalSnapshot,
+    *,
+    entry_price: float | None = None,
+    stop_price: float | None = None,
+    side: str = "buy",
+) -> LevelProximityRead:
+    latest = snapshot.latest_close
+    reference = entry_price if entry_price is not None and entry_price > 0 else latest
+    support = _nearest_support(snapshot)
+    resistance = _nearest_resistance(snapshot)
+    if reference is None or reference <= 0:
+        return LevelProximityRead(
+            nearest_support=support,
+            nearest_resistance=resistance,
+            distance_to_support_percent=None,
+            distance_to_resistance_percent=None,
+            range_position="unknown",
+            risk_reward_location="unknown",
+            stop_atr_multiple=None,
+            stop_read="Price reference unavailable for stop/ATR read.",
+            lines=["Level proximity unavailable because the snapshot has no latest price."],
+        )
+
+    distance_to_support = _percent(reference - support.center, reference) if support is not None else None
+    distance_to_resistance = _percent(resistance.center - reference, reference) if resistance is not None else None
+    range_position = _range_position(reference, support, resistance, snapshot.atr_percent)
+    risk_reward_location = _risk_reward_location(side, range_position, distance_to_support, distance_to_resistance, snapshot)
+    stop_atr_multiple, stop_read = _stop_atr_read(side, reference, stop_price, snapshot.atr_14, support, resistance)
+    lines = [
+        f"Nearest support: {format_level(support)}; distance {_fmt_percent(distance_to_support)}.",
+        f"Nearest resistance: {format_level(resistance)}; distance {_fmt_percent(distance_to_resistance)}.",
+        f"Location: {_humanize_classification_value(range_position)}; risk/reward location is {risk_reward_location}.",
+        f"Stop/ATR read: {stop_read}",
+    ]
+    return LevelProximityRead(
+        nearest_support=support,
+        nearest_resistance=resistance,
+        distance_to_support_percent=distance_to_support,
+        distance_to_resistance_percent=distance_to_resistance,
+        range_position=range_position,
+        risk_reward_location=risk_reward_location,
+        stop_atr_multiple=stop_atr_multiple,
+        stop_read=stop_read,
+        lines=lines,
+    )
+
+
+def build_technical_setup_classification(
+    snapshots: dict[str, TimeframeTechnicalSnapshot],
+    *,
+    ticket_check: TicketCheck | None = None,
+) -> TechnicalSetupClassification:
+    daily = _preferred_snapshot(snapshots, "regime")
+    setup_snapshot = _preferred_snapshot(snapshots, "setup")
+    timing = _preferred_snapshot(snapshots, "timing")
+    level_snapshot = timing or setup_snapshot or daily
+    regime = classify_regime(daily)
+    setup = classify_setup(daily, setup_snapshot, timing)
+    timing_read = classify_timing(daily, setup_snapshot, timing)
+    level_read = build_level_proximity_read(level_snapshot) if level_snapshot is not None else None
+    action_quality = classify_action_quality(regime, setup, timing_read, level_read, ticket_check)
+    invalidation_level = level_read.nearest_support.low if level_read is not None and level_read.nearest_support is not None else None
+    confirmation_level = level_read.nearest_resistance.high if level_read is not None and level_read.nearest_resistance is not None else None
+    rsi_context = [
+        read
+        for read in (
+            build_rsi_context_read(daily, regime=regime),
+            build_rsi_context_read(setup_snapshot, regime=regime),
+            build_rsi_context_read(timing, regime=regime),
+        )
+        if read is not None
+    ]
+    warnings = _classification_warnings(regime, setup, timing_read, daily, setup_snapshot, timing, level_read, rsi_context, ticket_check)
+    confidence = _classification_confidence(regime, setup, timing_read, snapshots, level_read, warnings)
+    main_reason = _classification_main_reason(regime, setup, timing_read, level_read, ticket_check)
+    lines = [
+        f"Daily regime answers structural health: {regime}.",
+        f"30m setup answers tradability: {setup}.",
+        f"5m/1m timing answers entry quality now: {timing_read}.",
+    ]
+    if level_read is not None:
+        lines.extend(level_read.lines)
+    lines.extend(read.context for read in rsi_context if read.context)
+
+    return TechnicalSetupClassification(
+        regime=regime,
+        setup=setup,
+        timing=timing_read,
+        action_quality=action_quality,
+        confidence=confidence,
+        invalidation_level=invalidation_level,
+        confirmation_level=confirmation_level,
+        main_reason=main_reason,
+        warnings=_dedupe(warnings),
+        level_proximity=level_read,
+        rsi_context=rsi_context,
+        lines=lines,
+    )
+
+
+def build_rsi_context_read(snapshot: TimeframeTechnicalSnapshot | None, *, regime: str = "unknown") -> RsiContextRead | None:
+    if snapshot is None:
+        return None
+    value = snapshot.rsi_14
+    if value is None:
+        return RsiContextRead(None, "unknown", f"{snapshot.label} RSI unavailable.", "")
+    zone = _rsi_zone(value)
+    if zone == "constructive_neutral":
+        context = f"{snapshot.label} RSI {value:.1f}: constructive neutral, useful only with trend/level confirmation."
+        warning = ""
+    elif zone == "soft_pullback":
+        context = f"{snapshot.label} RSI {value:.1f}: soft pullback zone."
+        warning = "" if regime == "bullish" else "Soft RSI is not bullish without a constructive higher-timeframe regime."
+    elif zone == "washed_out":
+        context = f"{snapshot.label} RSI {value:.1f}: washed out; constructive only if support and regime hold."
+        warning = "Washed-out RSI needs support/reversal evidence before it is constructive."
+    elif zone == "dangerous_oversold":
+        context = f"{snapshot.label} RSI {value:.1f}: oversold but dangerous unless reversal evidence appears."
+        warning = "RSI below 25 is not a buy signal by itself."
+    elif zone == "extended":
+        context = f"{snapshot.label} RSI {value:.1f}: extended; avoid chasing unless breakout volume confirms."
+        warning = "RSI above 70 raises chase risk without volume-confirmed breakout evidence."
+    else:
+        context = f"{snapshot.label} RSI {value:.1f}: neutral context."
+        warning = ""
+    return RsiContextRead(value, zone, context, warning)
+
+
+def _snapshot_score(snapshot: TimeframeTechnicalSnapshot | None, name: str, fallback: float = 50.0) -> float:
+    if snapshot is None:
+        return fallback
+    return snapshot.scores.get(name, ScoreComponent(name, fallback, "")).score
+
+
+def _range_position(
+    reference: float,
+    support: TechnicalLevel | None,
+    resistance: TechnicalLevel | None,
+    atr_percent: float | None,
+) -> str:
+    proximity_threshold = max(0.75, min(2.25, (atr_percent or 1.5) * 0.85))
+    if support is not None and reference < support.low:
+        return "breakdown"
+    if resistance is not None and reference > resistance.high:
+        return "breakout"
+    if support is not None and support.low <= reference <= support.high:
+        return "near_support"
+    if resistance is not None and resistance.low <= reference <= resistance.high:
+        return "near_resistance"
+    if support is not None:
+        support_gap = _percent(reference - support.high, reference)
+        if support_gap is not None and 0 <= support_gap <= proximity_threshold:
+            return "near_support"
+    if resistance is not None:
+        resistance_gap = _percent(resistance.low - reference, reference)
+        if resistance_gap is not None and 0 <= resistance_gap <= proximity_threshold:
+            return "near_resistance"
+    if support is not None and resistance is not None:
+        range_width = resistance.center - support.center
+        if range_width > 0:
+            position = (reference - support.center) / range_width
+            if position <= 0.30:
+                return "near_support"
+            if position >= 0.70:
+                return "near_resistance"
+            return "middle"
+    return "unknown"
+
+
+def _risk_reward_location(
+    side: str,
+    range_position: str,
+    distance_to_support: float | None,
+    distance_to_resistance: float | None,
+    snapshot: TimeframeTechnicalSnapshot,
+) -> str:
+    clean_side = side.lower()
+    if range_position == "unknown":
+        return "unknown"
+    if range_position == "middle":
+        return "no_edge"
+    if clean_side == "sell":
+        if range_position in {"near_resistance", "breakdown"}:
+            return "good"
+        if range_position in {"near_support", "breakout"}:
+            return "poor"
+    else:
+        if range_position == "near_support":
+            return "good"
+        if range_position == "breakout":
+            return "good" if _volume_confirms_up(snapshot) else "poor"
+        if range_position == "near_resistance":
+            return "poor"
+        if range_position == "breakdown":
+            return "poor"
+    if distance_to_support is not None and distance_to_resistance is not None:
+        if clean_side == "sell":
+            return "good" if distance_to_resistance < distance_to_support else "poor"
+        return "good" if distance_to_support < distance_to_resistance else "poor"
+    return "unknown"
+
+
+def _stop_atr_read(
+    side: str,
+    reference: float,
+    stop_price: float | None,
+    atr_14: float | None,
+    support: TechnicalLevel | None,
+    resistance: TechnicalLevel | None,
+) -> tuple[float | None, str]:
+    clean_side = side.lower()
+    if atr_14 is None or atr_14 <= 0:
+        return None, "ATR unavailable, so stop placement cannot be normalized."
+    if stop_price is not None and stop_price > 0:
+        risk = reference - stop_price if clean_side != "sell" else stop_price - reference
+        if risk <= 0:
+            return None, "Stop is on the wrong side of entry for this side."
+        multiple = risk / atr_14
+        if multiple < 0.70:
+            return multiple, f"Stop is inside normal ATR noise at {multiple:.2f}x ATR."
+        if multiple > 3.0:
+            return multiple, f"Stop is wide at {multiple:.2f}x ATR."
+        return multiple, f"Stop distance is reasonable at {multiple:.2f}x ATR."
+    if clean_side == "sell" and resistance is not None:
+        multiple = max(resistance.high - reference, 0.0) / atr_14
+        return multiple, f"No ticket stop; a stop above resistance would be about {multiple:.2f}x ATR from reference."
+    if clean_side != "sell" and support is not None:
+        multiple = max(reference - support.low, 0.0) / atr_14
+        return multiple, f"No ticket stop; a stop below support would be about {multiple:.2f}x ATR from reference."
+    return None, "No stop and no nearby level were available for a stop/ATR read."
+
+
+def _support_broken(snapshot: TimeframeTechnicalSnapshot | None, read: LevelProximityRead | None) -> bool:
+    if snapshot is None or snapshot.latest_close is None:
+        return False
+    if read is not None and read.range_position == "breakdown":
+        return True
+    support = read.nearest_support if read is not None else _nearest_support(snapshot)
+    return support is not None and snapshot.latest_close < support.low
+
+
+def _support_holding(snapshot: TimeframeTechnicalSnapshot | None, read: LevelProximityRead | None) -> bool:
+    if snapshot is None or snapshot.latest_close is None:
+        return False
+    if _support_broken(snapshot, read):
+        return False
+    if read is not None and read.range_position == "near_support":
+        return True
+    support = read.nearest_support if read is not None else _nearest_support(snapshot)
+    if support is None:
+        return False
+    distance = _percent(snapshot.latest_close - support.high, snapshot.latest_close)
+    return distance is not None and 0 <= distance <= max(2.0, snapshot.atr_percent or 0.0)
+
+
+def _resistance_reclaimed(snapshot: TimeframeTechnicalSnapshot | None, read: LevelProximityRead | None) -> bool:
+    if snapshot is None or snapshot.latest_close is None:
+        return False
+    if read is not None and read.range_position == "breakout":
+        return True
+    resistance = read.nearest_resistance if read is not None else _nearest_resistance(snapshot)
+    return resistance is not None and snapshot.latest_close > resistance.high
+
+
+def _volume_confirms_up(snapshot: TimeframeTechnicalSnapshot | None) -> bool:
+    if snapshot is None:
+        return False
+    volume = snapshot.volume_read
+    relative = volume.relative_volume
+    return (
+        volume.accumulation_read == "accumulation"
+        or (relative is not None and relative >= 1.15 and (snapshot.close_location is None or snapshot.close_location >= 0.0))
+        or _snapshot_score(snapshot, "Volume") >= 62
+    )
+
+
+def _distribution_heavy(snapshot: TimeframeTechnicalSnapshot | None) -> bool:
+    if snapshot is None:
+        return False
+    volume = snapshot.volume_read
+    return (
+        volume.accumulation_read == "distribution"
+        or _snapshot_score(snapshot, "Volume") <= 38
+        or (snapshot.close_location is not None and snapshot.close_location <= -0.45 and (volume.relative_volume or 0.0) >= 1.0)
+    )
+
+
+def _pullback_pressure(snapshot: TimeframeTechnicalSnapshot | None) -> bool:
+    if snapshot is None:
+        return False
+    rsi_read = build_rsi_context_read(snapshot)
+    rsi_zone = rsi_read.zone if rsi_read is not None else "unknown"
+    return (
+        rsi_zone in {"soft_pullback", "washed_out", "dangerous_oversold"}
+        or _snapshot_score(snapshot, "Momentum") <= 48
+        or (snapshot.vwap_distance_percent is not None and snapshot.vwap_distance_percent < -0.60)
+        or (snapshot.macd_histogram is not None and snapshot.macd_histogram < 0)
+    )
+
+
+def _washed_out(snapshot: TimeframeTechnicalSnapshot | None) -> bool:
+    if snapshot is None or snapshot.rsi_14 is None:
+        return False
+    return snapshot.rsi_14 < 35
+
+
+def _intraday_bounce(snapshot: TimeframeTechnicalSnapshot | None) -> bool:
+    if snapshot is None:
+        return False
+    return (
+        _snapshot_score(snapshot, "Momentum") >= 56
+        or (snapshot.macd_histogram_change is not None and snapshot.macd_histogram_change > 0)
+        or (snapshot.roc_5 is not None and snapshot.roc_5 > 0)
+    )
+
+
+def _reversal_evidence(snapshot: TimeframeTechnicalSnapshot | None) -> bool:
+    if snapshot is None:
+        return False
+    return (
+        (snapshot.macd_histogram_change is not None and snapshot.macd_histogram_change > 0)
+        and (snapshot.close_location is None or snapshot.close_location >= 0.0)
+        and not _distribution_heavy(snapshot)
+    ) or (_volume_confirms_up(snapshot) and (snapshot.roc_5 or 0.0) > 0)
+
+
+def _timing_extended(snapshot: TimeframeTechnicalSnapshot, read: LevelProximityRead) -> bool:
+    return (
+        (snapshot.rsi_14 is not None and snapshot.rsi_14 > 70)
+        or (snapshot.vwap_distance_percent is not None and snapshot.vwap_distance_percent > 4.0)
+        or (read.range_position == "near_resistance" and not _volume_confirms_up(snapshot))
+    )
+
+
+def _rsi_zone(value: float) -> str:
+    if 45 <= value <= 60:
+        return "constructive_neutral"
+    if 35 <= value < 45:
+        return "soft_pullback"
+    if 25 <= value < 35:
+        return "washed_out"
+    if value < 25:
+        return "dangerous_oversold"
+    if value > 70:
+        return "extended"
+    return "neutral"
+
+
+def _classification_warnings(
+    regime: str,
+    setup: str,
+    timing: str,
+    daily: TimeframeTechnicalSnapshot | None,
+    setup_snapshot: TimeframeTechnicalSnapshot | None,
+    timing_snapshot: TimeframeTechnicalSnapshot | None,
+    level_read: LevelProximityRead | None,
+    rsi_context: list[RsiContextRead],
+    ticket_check: TicketCheck | None,
+) -> list[str]:
+    warnings: list[str] = [read.warning for read in rsi_context if read.warning]
+    primary = setup_snapshot or timing_snapshot or daily
+    if setup == "breakout" and primary is not None and not _volume_confirms_up(primary):
+        warnings.append("Breakout label needs volume confirmation; current volume confirmation is incomplete.")
+    if setup == "pullback" and primary is not None and _distribution_heavy(primary):
+        warnings.append("Pullback is lower quality because volume looks distribution-heavy.")
+    if setup == "breakdown":
+        warnings.append("Support broke or lower-high/lower-low structure is deteriorating; do not treat oversold RSI as bullish by itself.")
+    if regime == "bearish" and setup == "mean-reversion":
+        warnings.append("Intraday strength is a countertrend bounce inside a bearish daily regime, not a trend reversal.")
+    if level_read is not None:
+        if level_read.range_position == "middle":
+            warnings.append("Price is in the middle of the range; level location has no clear edge.")
+        if level_read.range_position == "near_resistance" and setup != "breakout":
+            warnings.append("Entry location is close to resistance; chase risk is elevated.")
+        if level_read.range_position == "breakdown":
+            warnings.append("Support broke on the active technical timeframe.")
+    if timing == "extended":
+        warnings.append("Timing is extended; avoid chasing unless the breakout remains volume-confirmed.")
+    if ticket_check is not None:
+        if "no stop" in ticket_check.stop_quality:
+            warnings.append("No stop means ticket risk is undefined.")
+        if "inside normal noise" in ticket_check.stop_quality:
+            warnings.append("Ticket stop is inside normal ATR noise.")
+        if "chasing" in ticket_check.entry_quality:
+            warnings.append("Ticket entry is chasing relative to nearby resistance/extension.")
+    return warnings
+
+
+def _classification_confidence(
+    regime: str,
+    setup: str,
+    timing: str,
+    snapshots: dict[str, TimeframeTechnicalSnapshot],
+    level_read: LevelProximityRead | None,
+    warnings: list[str],
+) -> str:
+    usable = sum(1 for snapshot in snapshots.values() if snapshot.candle_count >= 35)
+    clear_setup = regime != "unknown" and setup != "unknown" and timing != "unknown"
+    has_levels = level_read is not None and (level_read.nearest_support is not None or level_read.nearest_resistance is not None)
+    severe_warning = any("broke" in warning.lower() or "undefined" in warning.lower() for warning in warnings)
+    if usable >= 3 and clear_setup and has_levels and not severe_warning and setup != "chop":
+        return "high"
+    if usable >= 2 and clear_setup and has_levels:
+        return "medium"
+    return "low"
+
+
+def _classification_main_reason(
+    regime: str,
+    setup: str,
+    timing: str,
+    level_read: LevelProximityRead | None,
+    ticket_check: TicketCheck | None,
+) -> str:
+    level_text = ""
+    if level_read is not None:
+        level_text = f" Price is {_humanize_classification_value(level_read.range_position)} with {level_read.risk_reward_location} risk/reward location."
+    ticket_text = f" Ticket: {ticket_check.verdict}" if ticket_check is not None else ""
+    return (
+        f"Daily regime is {regime}; 30m setup is {setup}; near-term timing is {timing}."
+        f"{level_text}{ticket_text}"
+    )
+
+
+def _humanize_classification_value(value: str) -> str:
+    return value.replace("_", " ")
 
 
 def format_technical_command_center_report(report: TechnicalCommandCenterReport) -> str:
@@ -1513,11 +2164,13 @@ def format_technical_command_center_report(report: TechnicalCommandCenterReport)
         f"- Regime: {_short_snapshot_read(daily)}",
         f"- Setup: {_short_snapshot_read(setup)}",
         f"- Timing: {_short_snapshot_read(timing)}",
+        f"- Setup classification: {report.setup_classification.setup}; action quality {report.setup_classification.action_quality}.",
         f"- Risk heat: {report.scores['Volatility/Risk'].score:.0f}/100; {report.scores['Volatility/Risk'].reason}.",
         f"- Best action: {report.best_action}.",
         f"- Confidence: {report.confidence}.",
         "- This is analysis, not a trade recommendation.",
     ]
+    lines.extend(_format_setup_classification_section(report.setup_classification))
     lines.extend(_format_prc_report_section(report, daily, setup, timing))
     if report.capital_structure_pressure is not None:
         lines.extend(
@@ -1571,6 +2224,7 @@ def format_technical_command_center_report(report: TechnicalCommandCenterReport)
     lines.extend(f"- {line}" for line in report.ticket_check.lines)
     lines.append(f"- Entry quality: {report.ticket_check.entry_quality}.")
     lines.append(f"- Stop quality: {report.ticket_check.stop_quality}.")
+    lines.append(f"- Risk/reward read: {report.ticket_check.risk_reward}")
     lines.append(f"- Verdict: {report.ticket_check.verdict}.")
 
     lines.extend(["", "PLAIN-ENGLISH PLAN"])
@@ -1583,6 +2237,39 @@ def format_technical_command_center_report(report: TechnicalCommandCenterReport)
         lines.extend(["", "DATA WARNINGS"])
         lines.extend(f"- {warning}" for warning in report.warnings)
     return "\n".join(lines)
+
+
+def _format_setup_classification_section(classification: TechnicalSetupClassification) -> list[str]:
+    lines = [
+        "",
+        "SETUP CLASSIFICATION",
+        "--------------------",
+        f"- Regime: {classification.regime}.",
+        f"- Setup: {classification.setup}.",
+        f"- Timing: {classification.timing}.",
+        f"- Action quality: {_humanize_classification_value(classification.action_quality)}.",
+        f"- Confidence: {classification.confidence}.",
+        f"- Confirmation level: {_money(classification.confirmation_level)}.",
+        f"- Invalidation / stop logic: {_money(classification.invalidation_level)}.",
+        f"- Main reason: {classification.main_reason}",
+    ]
+    if classification.level_proximity is not None:
+        proximity = classification.level_proximity
+        lines.extend(
+            [
+                f"- Level location: {_humanize_classification_value(proximity.range_position)}; risk/reward location {proximity.risk_reward_location}.",
+                f"- Distance to support: {_fmt_percent(proximity.distance_to_support_percent)}.",
+                f"- Distance to resistance: {_fmt_percent(proximity.distance_to_resistance_percent)}.",
+                f"- Stop/ATR read: {proximity.stop_read}",
+            ]
+        )
+    if classification.rsi_context:
+        lines.append("- RSI context:")
+        lines.extend(f"  - {read.context}" for read in classification.rsi_context)
+    if classification.warnings:
+        lines.append("- Warnings:")
+        lines.extend(f"  - {warning}" for warning in classification.warnings)
+    return lines
 
 
 def _format_prc_report_section(
@@ -2151,19 +2838,31 @@ def _entry_quality(
         return "incomplete"
     extended_from_vwap = vwap_value is not None and abs(_percent(entry - vwap_value, vwap_value) or 0) >= 3.0
     if side == "buy":
-        if resistance is not None and entry >= resistance.center:
+        if resistance is not None and entry > resistance.high:
             return "breakout entry only"
-        if support is not None and entry <= support.high * 1.02:
-            return "technically coherent"
+        if resistance is not None and entry >= resistance.low * 0.995:
+            return "entry is chasing near resistance"
+        if support is not None and support.low * 0.995 <= entry <= support.high * 1.025:
+            return "entry near support"
+        if support is not None and resistance is not None and support.center < entry < resistance.center:
+            midpoint = support.center + ((resistance.center - support.center) * 0.50)
+            if entry >= midpoint:
+                return "middle of range / no edge"
         if extended_from_vwap and entry > latest:
             return "pullback entry is better"
         if entry > latest * 1.03:
             return "wait for confirmation"
     else:
-        if support is not None and entry <= support.center:
+        if support is not None and entry < support.low:
             return "breakdown entry only"
-        if resistance is not None and entry >= resistance.low * 0.98:
-            return "technically coherent"
+        if support is not None and entry <= support.high * 1.005:
+            return "entry is chasing near support"
+        if resistance is not None and resistance.low * 0.975 <= entry <= resistance.high * 1.005:
+            return "entry near resistance"
+        if support is not None and resistance is not None and support.center < entry < resistance.center:
+            midpoint = support.center + ((resistance.center - support.center) * 0.50)
+            if entry <= midpoint:
+                return "middle of range / no edge"
         if extended_from_vwap and entry < latest:
             return "pullback entry is better"
     return "watch"
@@ -2204,15 +2903,53 @@ def _stop_quality(
 def _ticket_verdict(entry_quality: str, stop_quality: str, score: float) -> str:
     if "inside normal noise" in stop_quality:
         return "Stop is likely inside normal noise."
+    if "chasing" in entry_quality:
+        return "Entry is chasing; wait for a better location or confirmed breakout."
     if score >= 70:
         return "Risk is defined and technically coherent."
     if entry_quality in {"pullback entry is better", "watch"}:
         return "Pullback entry is better."
+    if entry_quality == "middle of range / no edge":
+        return "Middle of range; no clear ticket edge."
     if "breakout" in entry_quality:
         return "Wait for breakout confirmation."
     if "no stop" in stop_quality:
-        return "Wait for confirmation; risk is not defined."
+        return "No stop means risk is undefined."
     return "Wait for confirmation."
+
+
+def _ticket_risk_reward_read(
+    side: str,
+    entry: float | None,
+    stop: float | None,
+    support: TechnicalLevel | None,
+    resistance: TechnicalLevel | None,
+) -> tuple[str, float | None, float | None, str]:
+    if entry is None or stop is None:
+        return "Reward/risk: unavailable because entry or stop is missing.", None, None, "unknown"
+    if side == "buy":
+        target = resistance.center if resistance is not None and resistance.center > entry else None
+    else:
+        target = support.center if support is not None and support.center < entry else None
+    if target is None:
+        return "Reward/risk: unavailable because a nearby target level was not available.", None, None, "unknown"
+    risk = entry - stop if side == "buy" else stop - entry
+    reward = target - entry if side == "buy" else entry - target
+    if risk <= 0:
+        return "Reward/risk: invalid because the stop is on the wrong side of entry.", None, target, "poor"
+    if reward <= 0:
+        return f"Reward/risk: poor because nearest target {_money(target)} is not beyond entry.", 0.0, target, "poor"
+    ratio = reward / risk
+    if ratio >= 2.0:
+        read = "good"
+        label = "favorable"
+    elif ratio >= 1.2:
+        read = "acceptable"
+        label = "acceptable"
+    else:
+        read = "poor"
+        label = "poor"
+    return f"Reward/risk: {label} at {ratio:.2f}:1 using target {_money(target)}.", ratio, target, read
 
 
 def _average_component(name: str, components: list[ScoreComponent | None]) -> ScoreComponent:
@@ -2545,15 +3282,18 @@ def _trend_summary(latest_close: float, sma_fast: float | None, sma_slow: float 
 def _rsi_summary(rsi_value: float | None) -> str:
     if rsi_value is None:
         return "RSI: Not enough candles for a 14-period RSI read."
-    if rsi_value >= 70:
-        return f"RSI: {rsi_value:.1f}. This is traditionally considered overbought, meaning momentum is strong but pullback risk may be elevated."
-    if rsi_value <= 30:
-        return f"RSI: {rsi_value:.1f}. This is traditionally considered oversold, meaning selling pressure is stretched but reversal is not guaranteed."
-    if rsi_value >= 55:
-        return f"RSI: {rsi_value:.1f}. Momentum leans bullish but is not in the classic overbought zone."
-    if rsi_value <= 45:
-        return f"RSI: {rsi_value:.1f}. Momentum leans bearish but is not in the classic oversold zone."
-    return f"RSI: {rsi_value:.1f}. Momentum is roughly neutral."
+    zone = _rsi_zone(rsi_value)
+    if zone == "extended":
+        return f"RSI: {rsi_value:.1f}. Extended; avoid chasing unless breakout volume and level confirmation are present."
+    if zone == "dangerous_oversold":
+        return f"RSI: {rsi_value:.1f}. Oversold but dangerous unless support holds and reversal evidence appears."
+    if zone == "washed_out":
+        return f"RSI: {rsi_value:.1f}. Washed out; constructive only if support and higher-timeframe regime hold."
+    if zone == "soft_pullback":
+        return f"RSI: {rsi_value:.1f}. Soft pullback zone; not bearish by itself if support holds."
+    if zone == "constructive_neutral":
+        return f"RSI: {rsi_value:.1f}. Constructive neutral; useful as context, not standalone proof."
+    return f"RSI: {rsi_value:.1f}. Neutral context."
 
 
 def _macd_summary(macd_line: float | None, signal_line: float | None, histogram: float | None) -> str:

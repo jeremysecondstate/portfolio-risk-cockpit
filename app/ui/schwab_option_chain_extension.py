@@ -56,6 +56,9 @@ def _install_option_chain_widgets(self: tk.Tk) -> None:
 
     options_fields = _find_labelframe(self, "Options Ticket Fields")
     if options_fields is not None:
+        if getattr(self, "schwab_trading_preview_text", None) is not None:
+            self._schwab_option_chain_widgets_built = True
+            return
         ttk.Label(options_fields, text="Chain strikes", style="Subtle.TLabel").grid(
             row=6, column=0, sticky="w", padx=(0, 6), pady=(8, 4)
         )

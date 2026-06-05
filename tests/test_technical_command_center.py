@@ -11,6 +11,7 @@ from app.analytics.technical_analysis import (
     _classify_prc_read,
     average_true_range,
     build_prc_index_price,
+    build_level_proximity_read,
     build_technical_command_center_report,
     build_timeframe_technical_snapshot,
     close_location_value,
@@ -86,6 +87,102 @@ def _session_candles(
             )
         )
         price = close
+    return rows
+
+
+def _trend_candles(count: int = 140, *, start: float = 80.0, step: float = 0.15) -> list[Candle]:
+    rows: list[Candle] = []
+    price = start
+    for index in range(count):
+        step_value = step if index % 7 else -step * 0.5
+        open_price = price
+        close = price + step_value
+        rows.append(Candle(index, open_price, max(open_price, close) + 0.35, min(open_price, close) - 0.35, close, 1_000 + index * 3))
+        price = close
+    return rows
+
+
+def _downtrend_candles(count: int = 140, *, start: float = 120.0, step: float = -0.16) -> list[Candle]:
+    rows: list[Candle] = []
+    price = start
+    for index in range(count):
+        step_value = step if index % 7 else abs(step) * 0.4
+        open_price = price
+        close = price + step_value
+        rows.append(Candle(index, open_price, max(open_price, close) + 0.35, min(open_price, close) - 0.35, close, 1_000 + index * 3))
+        price = close
+    return rows
+
+
+def _range_breakout_candles(count: int = 100, *, base: float = 100.0, breakout: float = 110.0) -> list[Candle]:
+    rows: list[Candle] = []
+    for index in range(count - 5):
+        close = base + ((index % 10) / 10) * 4
+        open_price = close - 0.2 if index % 2 else close + 0.2
+        rows.append(Candle(index, open_price, max(open_price, close) + 0.5, min(open_price, close) - 0.5, close, 1_000 + (index % 5) * 20))
+    price = base + 4
+    for offset in range(5):
+        index = count - 5 + offset
+        open_price = price
+        close = price + (breakout - price) / (5 - offset)
+        rows.append(Candle(index, open_price, max(open_price, close) + 0.2, min(open_price, close) - 0.2, close, 2_500 + offset * 300))
+        price = close
+    return rows
+
+
+def _range_breakdown_candles(count: int = 100, *, base: float = 100.0, breakdown: float = 94.0) -> list[Candle]:
+    rows: list[Candle] = []
+    for index in range(count - 6):
+        close = base + ((index % 10) / 10) * 4
+        open_price = close + 0.2 if index % 2 else close - 0.2
+        rows.append(Candle(index, open_price, max(open_price, close) + 0.5, min(open_price, close) - 0.5, close, 1_000 + (index % 4) * 20))
+    price = base
+    for offset in range(6):
+        index = count - 6 + offset
+        open_price = price
+        close = price + (breakdown - price) / (6 - offset)
+        rows.append(Candle(index, open_price, max(open_price, close) + 0.2, min(open_price, close) - 0.2, close, 2_600 + offset * 400))
+        price = close
+    return rows
+
+
+def _pullback_to_support_candles(count: int = 100) -> list[Candle]:
+    rows: list[Candle] = []
+    for index in range(count - 12):
+        close = 101 + (index % 12) * 0.75
+        open_price = close + (0.2 if index % 2 == 0 else -0.2)
+        rows.append(Candle(index, open_price, max(open_price, close) + 0.45, min(open_price, close) - 0.45, close, 1_000 + (index % 4) * 25))
+    for offset in range(12):
+        index = count - 12 + offset
+        close = 109 - offset * 0.6
+        if offset == 11:
+            close = 102.4
+        open_price = close + 0.5
+        rows.append(Candle(index, open_price, max(open_price, close) + 0.25, min(open_price, close) - 0.25, close, 900 - offset * 10))
+    return rows
+
+
+def _washed_support_hold_candles(count: int = 110) -> list[Candle]:
+    rows: list[Candle] = []
+    for index in range(count - 20):
+        close = 101 + (index % 16) * 0.85
+        open_price = close + (0.2 if index % 2 == 0 else -0.2)
+        rows.append(Candle(index, open_price, max(open_price, close) + 0.45, min(open_price, close) - 0.45, close, 1_000 + (index % 4) * 25))
+    closes = [113, 112, 111, 110, 109, 108, 107, 106, 105, 104, 103, 102, 101.3, 100.95, 100.75, 100.7, 100.72, 100.76, 100.82, 100.9]
+    for offset, close in enumerate(closes):
+        index = count - 20 + offset
+        open_price = close + 0.65 if offset < 16 else close - 0.25
+        volume = 900 if offset < 16 else 2_500 + offset * 100
+        rows.append(Candle(index, open_price, max(open_price, close) + 0.20, min(open_price, close) - 0.20, close, volume))
+    return rows
+
+
+def _chop_candles(count: int = 91, *, base: float = 100.0, amplitude: float = 2.0) -> list[Candle]:
+    rows: list[Candle] = []
+    for index in range(count):
+        close = base + ((index % 20) - 10) / 10 * amplitude
+        open_price = close + (0.15 if index % 2 else -0.15)
+        rows.append(Candle(index, open_price, max(open_price, close) + 0.4, min(open_price, close) - 0.4, close, 1_000 + (index % 3) * 10))
     return rows
 
 
@@ -306,6 +403,167 @@ class TechnicalCommandCenterTests(unittest.TestCase):
         self.assertNotIn("PRC INDEX PRICE", text)
         self.assertIn("session VWAP", text)
         self.assertIn("multi-day VWAP", text)
+
+    def test_setup_classifies_clean_bullish_breakout(self) -> None:
+        report = build_technical_command_center_report(
+            "TST",
+            {
+                "daily_1y": _trend_candles(),
+                "setup_30m": _range_breakout_candles(),
+                "timing_5m": _range_breakout_candles(90, base=105.0, breakout=112.0),
+            },
+            ticket=TechnicalTicket(side="buy", quantity=10, entry_price=112.0, stop_price=108.0, portfolio_value=100_000),
+        )
+
+        classification = report.setup_classification
+
+        self.assertEqual(classification.regime, "bullish")
+        self.assertEqual(classification.setup, "breakout")
+        self.assertEqual(classification.timing, "confirmed")
+        self.assertEqual(classification.action_quality, "good_entry")
+        self.assertIsNotNone(classification.confirmation_level)
+
+    def test_setup_classifies_bullish_daily_pullback_with_weak_intraday_timing(self) -> None:
+        report = build_technical_command_center_report(
+            "TST",
+            {
+                "daily_1y": _trend_candles(),
+                "setup_30m": _pullback_to_support_candles(),
+                "timing_5m": _pullback_to_support_candles(80),
+            },
+            ticket=TechnicalTicket(side="buy", quantity=10, entry_price=102.5, stop_price=100.8, portfolio_value=100_000),
+        )
+
+        classification = report.setup_classification
+
+        self.assertEqual(classification.regime, "bullish")
+        self.assertEqual(classification.setup, "pullback")
+        self.assertEqual(classification.timing, "early")
+        self.assertEqual(classification.action_quality, "wait_for_trigger")
+        self.assertEqual(report.ticket_check.entry_quality, "entry near support")
+
+    def test_setup_classifies_bearish_breakdown_below_support(self) -> None:
+        report = build_technical_command_center_report(
+            "TST",
+            {
+                "daily_1y": _downtrend_candles(),
+                "setup_30m": _range_breakdown_candles(),
+                "timing_5m": _range_breakdown_candles(80, base=98.0, breakdown=92.0),
+            },
+            ticket=TechnicalTicket(side="buy", quantity=10, entry_price=94.0, stop_price=91.0, portfolio_value=100_000),
+        )
+
+        classification = report.setup_classification
+
+        self.assertEqual(classification.regime, "bearish")
+        self.assertEqual(classification.setup, "breakdown")
+        self.assertEqual(classification.timing, "failed")
+        self.assertEqual(classification.action_quality, "protect_or_trim")
+        self.assertTrue(any("Support broke" in warning for warning in classification.warnings))
+
+    def test_setup_classifies_range_chop_no_edge(self) -> None:
+        report = build_technical_command_center_report(
+            "TST",
+            {
+                "daily_1y": _chop_candles(111),
+                "setup_30m": _chop_candles(),
+                "timing_5m": _chop_candles(),
+            },
+            ticket=TechnicalTicket(side="buy", quantity=10, entry_price=100.0, stop_price=98.0, portfolio_value=100_000),
+        )
+
+        classification = report.setup_classification
+
+        self.assertEqual(classification.regime, "range")
+        self.assertEqual(classification.setup, "chop")
+        self.assertEqual(classification.action_quality, "no_edge")
+        self.assertIsNotNone(classification.level_proximity)
+        assert classification.level_proximity is not None
+        self.assertEqual(classification.level_proximity.range_position, "middle")
+
+    def test_oversold_with_support_broken_stays_breakdown(self) -> None:
+        report = build_technical_command_center_report(
+            "TST",
+            {
+                "daily_1y": _downtrend_candles(),
+                "setup_30m": _range_breakdown_candles(),
+                "timing_5m": _range_breakdown_candles(80, base=98.0, breakdown=92.0),
+            },
+        )
+
+        classification = report.setup_classification
+
+        self.assertEqual(classification.setup, "breakdown")
+        self.assertEqual(classification.timing, "failed")
+        self.assertTrue(any(read.rsi is not None and read.rsi < 25 for read in classification.rsi_context))
+        self.assertTrue(any("oversold RSI" in warning or "RSI below 25" in warning for warning in classification.warnings))
+
+    def test_oversold_support_holding_with_improving_volume_is_constructive_pullback(self) -> None:
+        report = build_technical_command_center_report(
+            "TST",
+            {
+                "daily_1y": _trend_candles(),
+                "setup_30m": _washed_support_hold_candles(),
+                "timing_5m": _washed_support_hold_candles(90),
+            },
+            ticket=TechnicalTicket(side="buy", quantity=10, entry_price=100.9, stop_price=100.0, portfolio_value=100_000),
+        )
+
+        classification = report.setup_classification
+
+        self.assertEqual(classification.setup, "pullback")
+        self.assertEqual(classification.timing, "confirmed")
+        self.assertEqual(classification.action_quality, "good_entry")
+        self.assertTrue(any(read.zone == "washed_out" for read in classification.rsi_context))
+        self.assertIsNotNone(classification.level_proximity)
+        assert classification.level_proximity is not None
+        self.assertEqual(classification.level_proximity.range_position, "near_support")
+
+    def test_ticket_flags_stop_inside_atr_noise(self) -> None:
+        report = build_technical_command_center_report(
+            "TST",
+            {
+                "daily_1y": _chop_candles(111),
+                "setup_30m": _chop_candles(),
+                "timing_5m": _chop_candles(),
+            },
+            ticket=TechnicalTicket(side="buy", quantity=10, entry_price=100.0, stop_price=99.7, portfolio_value=100_000),
+        )
+
+        self.assertIn("inside normal noise", report.ticket_check.stop_quality)
+        self.assertIn("inside normal ATR noise", " ".join(report.ticket_check.lines))
+        self.assertIn("inside normal ATR noise", " ".join(report.setup_classification.warnings))
+
+    def test_ticket_flags_good_entry_near_support_with_defined_stop(self) -> None:
+        report = build_technical_command_center_report(
+            "TST",
+            {
+                "daily_1y": _trend_candles(),
+                "setup_30m": _washed_support_hold_candles(),
+                "timing_5m": _washed_support_hold_candles(90),
+            },
+            ticket=TechnicalTicket(side="buy", quantity=10, entry_price=100.9, stop_price=100.0, portfolio_value=100_000),
+        )
+
+        self.assertEqual(report.ticket_check.entry_quality, "entry near support")
+        self.assertIn("below support", report.ticket_check.stop_quality)
+        self.assertEqual(report.ticket_check.risk_reward_read, "good")
+        self.assertIn("Order is coherent", report.ticket_check.verdict)
+
+    def test_ticket_flags_chase_entry_near_resistance(self) -> None:
+        report = build_technical_command_center_report(
+            "TST",
+            {
+                "daily_1y": _chop_candles(111),
+                "setup_30m": _chop_candles(),
+                "timing_5m": _chop_candles(),
+            },
+            ticket=TechnicalTicket(side="buy", quantity=10, entry_price=102.2, stop_price=99.5, portfolio_value=100_000),
+        )
+
+        self.assertIn("chasing near resistance", report.ticket_check.entry_quality)
+        self.assertEqual(report.ticket_check.risk_reward_read, "poor")
+        self.assertEqual(report.setup_classification.action_quality, "avoid_chase")
 
 
 if __name__ == "__main__":

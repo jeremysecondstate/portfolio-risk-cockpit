@@ -16,6 +16,7 @@ from app.ui.options_lab import (
     _format_analysis,
     _init_options_vars,
     _parse_scenario,
+    use_mid_as_limit,
 )
 from app.ui.options_lab_extension import (
     _bind_side_combobox_style,
@@ -135,7 +136,7 @@ def _rebuild_schwab_ticket_side_by_side(self: tk.Tk, ticket: ttk.LabelFrame) -> 
     ticket_fields.columnconfigure(1, weight=1, uniform="schwab_ticket_columns")
 
     stock = ttk.LabelFrame(ticket_fields, text="Stock / ETF Ticket", style="Card.TLabelframe")
-    stock.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+    stock.grid(row=0, column=0, sticky="new", padx=(0, 8))
     stock.columnconfigure(1, weight=1)
     stock.columnconfigure(3, weight=1)
 
@@ -183,7 +184,7 @@ def _rebuild_schwab_ticket_side_by_side(self: tk.Tk, ticket: ttk.LabelFrame) -> 
     ttk.Entry(stock, textvariable=self.cancel_order_id_var).grid(row=5, column=1, columnspan=3, sticky="ew", pady=5)
 
     options = ttk.LabelFrame(ticket_fields, text="Options Ticket Fields", style="Card.TLabelframe")
-    options.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+    options.grid(row=0, column=1, sticky="new", padx=(8, 0))
     options.columnconfigure(1, weight=1)
     options.columnconfigure(3, weight=1)
 
@@ -205,7 +206,11 @@ def _rebuild_schwab_ticket_side_by_side(self: tk.Tk, ticket: ttk.LabelFrame) -> 
         ttk.Entry(options, textvariable=self.options_bid_var),
     )
     _grid_pair(options, 3, "Ask", ttk.Entry(options, textvariable=self.options_ask_var), "Mark", ttk.Entry(options, textvariable=self.options_mark_var))
-    _grid_pair(options, 4, "Limit / Debit", ttk.Entry(options, textvariable=self.options_premium_var), "Short strike", ttk.Entry(options, textvariable=self.options_short_strike_var))
+    limit_box = ttk.Frame(options, style="Panel.TFrame")
+    limit_box.columnconfigure(0, weight=1)
+    ttk.Entry(limit_box, textvariable=self.options_premium_var).grid(row=0, column=0, sticky="ew")
+    ttk.Button(limit_box, text="Use Mid", command=lambda app=self: use_mid_as_limit(app), style="Accent.TButton").grid(row=0, column=1, sticky="e", padx=(6, 0))
+    _grid_pair(options, 4, "Limit / Debit", limit_box, "Short strike", ttk.Entry(options, textvariable=self.options_short_strike_var))
     _grid_pair(options, 5, "Credit", ttk.Entry(options, textvariable=self.options_credit_var), "Target price", ttk.Entry(options, textvariable=self.options_target_price_var))
 
     _build_schwab_action_grid(self, ticket)
@@ -567,9 +572,9 @@ def _submit_schwab_stock_limit_order(self: tk.Tk) -> None:
 
 def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
     actions = ttk.LabelFrame(ticket, text="Schwab Actions", style="Card.TLabelframe")
-    actions.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+    actions.grid(row=1, column=0, sticky="ew", pady=(8, 0))
     setattr(actions, "_company_reports_installed", True)
-    for column in range(3):
+    for column in range(4):
         actions.columnconfigure(column, weight=1, uniform="schwab_actions")
 
     def schwab_action(*names: str) -> Callable[[], None]:
@@ -578,14 +583,20 @@ def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
     _add_action_button(actions, row=0, column=0, text="Connect Schwab", command=schwab_action("connect_schwab", "run_schwab_preview"))
     _add_action_button(actions, row=0, column=1, text="Refresh Account", command=schwab_action("refresh_schwab_account", "refresh_portfolio"))
     _add_action_button(actions, row=0, column=2, text="Tech Analysis", command=schwab_action("show_technical_analysis"))
-    _add_action_button(actions, row=1, column=0, text="Recent Orders", command=lambda app=self: _refresh_schwab_recent_orders_tab(app))
+    _add_action_button(actions, row=0, column=3, text="Preview Risk", command=schwab_action("preview_order"), style="Accent.TButton")
+    _add_action_button(actions, row=1, column=0, text="Preview Schwab", command=schwab_action("run_schwab_preview"))
+    _add_action_button(actions, row=1, column=1, text="Position Size", command=schwab_action("show_position_size"))
+    _add_action_button(actions, row=1, column=2, text="Recent Orders", command=lambda app=self: _refresh_schwab_recent_orders_tab(app))
+    _add_action_button(actions, row=1, column=3, text="Open Only", command=schwab_action("load_selected_open_orders_only", "load_schwab_open_orders_only"))
+    _add_action_button(actions, row=2, column=0, text="Order Checklist", command=schwab_action("show_manual_checklist"))
 
     show_ipo_pipeline = getattr(self, "show_ipo_pipeline", None)
     if callable(show_ipo_pipeline):
-        _add_action_button(actions, row=1, column=1, text="IPO Pipeline", command=show_ipo_pipeline, style="Accent.TButton")
+        _add_action_button(actions, row=2, column=1, text="IPO Pipeline", command=show_ipo_pipeline, style="Accent.TButton")
         setattr(actions, "_ipo_pipeline_button_installed", True)
 
-    _add_action_button(actions, row=1, column=2, text="LIVE Submit", command=lambda app=self: _submit_schwab_stock_limit_order(app), style="Danger.TButton")
+    _add_action_button(actions, row=2, column=2, text="Cancel Order", command=schwab_action("cancel_selected_order", "show_cancel_order_placeholder"), style="Danger.TButton")
+    _add_action_button(actions, row=2, column=3, text="LIVE Submit", command=lambda app=self: _submit_schwab_stock_limit_order(app), style="Danger.TButton")
 
 
 def _install_schwab_account_tabs(self: tk.Tk, schwab_tab: ttk.Frame) -> None:
@@ -1348,8 +1359,8 @@ def _add_action_button(parent: ttk.Frame, *, row: int, column: int, text: str, c
         column=column,
         sticky="ew",
         padx=(0 if column == 0 else 4, 0),
-        pady=(0 if row == 0 else 6, 6),
-        ipady=1,
+        pady=(0 if row == 0 else 4, 4),
+        ipady=0,
     )
 
 
