@@ -19,6 +19,12 @@ PANEL_BG = "#f8fafc"
 TEXT = "#111827"
 MUTED = "#64748b"
 BORDER = "#cbd5e1"
+METRIC_CARD_PAD_X = 14
+METRIC_CARD_PAD_TOP = 10
+METRIC_CARD_PAD_BOTTOM = 12
+METRIC_CARD_GAP = 10
+DEFAULT_METRIC_CARD_HEIGHT = 104
+DEFAULT_PROMINENT_CARD_HEIGHT = 116
 
 
 def clear_children(parent: tk.Widget) -> None:
@@ -72,27 +78,30 @@ class MetricCard(tk.Frame):
         readout: BadgeReadout,
         *,
         width: int = 150,
-        height: int = 92,
+        height: int = DEFAULT_METRIC_CARD_HEIGHT,
         prominent: bool = False,
+        adaptive_height: bool = False,
     ) -> None:
         colors = STATUS_COLORS.get(readout.status, STATUS_COLORS["neutral"])
         super().__init__(parent, bg=colors["bg"], highlightbackground=colors["bar"], highlightthickness=2 if prominent else 1, width=width, height=height)
-        self.grid_propagate(False)
+        if not adaptive_height:
+            self.grid_propagate(False)
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(2, weight=1)
+        self.rowconfigure(2, weight=1, minsize=max(38, height - 70) if adaptive_height else 0)
         tk.Frame(self, bg=colors["bar"], width=5).grid(row=0, column=0, rowspan=3, sticky="nsw")
         title_font = ("Segoe UI", 8, "bold")
         label_font = ("Segoe UI", 16 if prominent else 13, "bold")
-        tk.Label(self, text=readout.title.upper(), bg=colors["bg"], fg=MUTED, font=title_font, anchor="w").grid(row=0, column=1, sticky="ew", padx=12, pady=(9, 0))
-        self._label = tk.Label(self, text=readout.label, bg=colors["bg"], fg=colors["fg"], font=label_font, anchor="w", justify=tk.LEFT, wraplength=width - 28)
-        self._label.grid(row=1, column=1, sticky="ew", padx=12, pady=(2, 0))
-        self._why_label = tk.Label(self, text=readout.why, bg=colors["bg"], fg=TEXT, font=("Segoe UI", 8), wraplength=width - 28, justify=tk.LEFT, anchor="nw")
-        self._why_label.grid(row=2, column=1, sticky="nsew", padx=12, pady=(4, 10))
+        tk.Label(self, text=readout.title.upper(), bg=colors["bg"], fg=MUTED, font=title_font, anchor="w").grid(row=0, column=1, sticky="ew", padx=METRIC_CARD_PAD_X, pady=(METRIC_CARD_PAD_TOP, 0))
+        self._label = tk.Label(self, text=readout.label, bg=colors["bg"], fg=colors["fg"], font=label_font, anchor="w", justify=tk.LEFT, wraplength=width - (METRIC_CARD_PAD_X * 2))
+        self._label.grid(row=1, column=1, sticky="ew", padx=METRIC_CARD_PAD_X, pady=(2, 0))
+        self._why_label = tk.Label(self, text=readout.why, bg=colors["bg"], fg=TEXT, font=("Segoe UI", 9), wraplength=width - (METRIC_CARD_PAD_X * 2), justify=tk.LEFT, anchor="nw")
+        self._why_label.grid(row=2, column=1, sticky="nsew", padx=METRIC_CARD_PAD_X, pady=(4, METRIC_CARD_PAD_BOTTOM))
         self.bind("<Configure>", self._on_resize, add="+")
 
     def _on_resize(self, event: tk.Event) -> None:
-        self._label.configure(wraplength=max(140, int(event.width) - 34))
-        self._why_label.configure(wraplength=max(140, int(event.width) - 34))
+        wrap = max(140, int(event.width) - (METRIC_CARD_PAD_X * 2) - 8)
+        self._label.configure(wraplength=wrap)
+        self._why_label.configure(wraplength=wrap)
 
 
 class ScoreBadge(tk.Frame):
@@ -202,16 +211,26 @@ def metric_grid(
     *,
     columns: int = 4,
     prominent_indexes: set[int] | None = None,
-    card_height: int = 92,
-    prominent_height: int = 102,
+    card_height: int = DEFAULT_METRIC_CARD_HEIGHT,
+    prominent_height: int = DEFAULT_PROMINENT_CARD_HEIGHT,
+    adaptive_height: bool = False,
 ) -> None:
     clear_children(parent)
     prominent_indexes = prominent_indexes or set()
     for column in range(columns):
         parent.columnconfigure(column, weight=1, uniform="metric_cards")
+    row_count = max(1, (len(readouts) + max(columns, 1) - 1) // max(columns, 1))
+    for row in range(row_count):
+        parent.rowconfigure(row, weight=0)
     for index, readout in enumerate(readouts):
-        card = MetricCard(parent, readout, prominent=index in prominent_indexes, height=prominent_height if index in prominent_indexes else card_height)
-        card.grid(row=index // columns, column=index % columns, sticky="nsew", padx=(0 if index % columns == 0 else 8, 0), pady=(0, 8))
+        card = MetricCard(
+            parent,
+            readout,
+            prominent=index in prominent_indexes,
+            height=prominent_height if index in prominent_indexes else card_height,
+            adaptive_height=adaptive_height,
+        )
+        card.grid(row=index // columns, column=index % columns, sticky="nsew", padx=(0 if index % columns == 0 else METRIC_CARD_GAP, 0), pady=(0, METRIC_CARD_GAP))
 
 
 def labeled_value_grid(parent: tk.Widget, rows: dict[str, str], *, columns: int = 3) -> None:

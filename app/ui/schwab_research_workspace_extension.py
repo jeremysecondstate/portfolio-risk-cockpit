@@ -150,6 +150,22 @@ GREEK_AMBER = "#d97706"
 GREEK_TEAL = "#0f766e"
 GREEK_PURPLE = "#7c3aed"
 
+WORKSPACE_GEOMETRY = "1550x980"
+WORKSPACE_MIN_SIZE = (1180, 760)
+WORKSPACE_PAD = 14
+PANE_PAD = 12
+LEFT_PANE_WIDTH = 370
+LEFT_PANE_MIN = 330
+RIGHT_PANE_MIN = 760
+TAB_PADDING = 16
+SECTION_GAP = 12
+READABLE_TREE_ROW_HEIGHT = 28
+FOCUS_WINDOW_GEOMETRY = "1220x840"
+FOCUS_WINDOW_MIN_SIZE = (860, 600)
+SUMMARY_PANE_MIN = 130
+TAB_PANE_MIN = 440
+DETACH_DRAG_PIXELS = 42
+
 
 @dataclass(frozen=True)
 class _ResearchPayload:
@@ -198,10 +214,11 @@ def _open_schwab_research_workspace(self: tk.Tk) -> None:
 
     window = tk.Toplevel(self)
     window.title("Schwab Research + Risk Workspace")
-    window.geometry("1280x820")
-    window.minsize(1020, 640)
+    window.geometry(WORKSPACE_GEOMETRY)
+    window.minsize(*WORKSPACE_MIN_SIZE)
     window.columnconfigure(0, weight=1)
     window.rowconfigure(1, weight=1)
+    _configure_research_workspace_styles(window)
     self.schwab_research_window = window
 
     selected_symbol = _initial_research_symbol(self)
@@ -209,22 +226,29 @@ def _open_schwab_research_workspace(self: tk.Tk) -> None:
     self.schwab_research_max_risk_var = tk.StringVar(value="Run analysis")
     self.schwab_research_scenario_basis_var = tk.StringVar(value="Scenario moves will be generated from technical levels.")
     self.schwab_research_status_var = tk.StringVar(value="Choose a holding or enter a symbol, then run analysis.")
+    self.schwab_research_sidebar_visible = tk.BooleanVar(value=True)
+    self.schwab_research_summary_expanded = tk.BooleanVar(value=False)
 
-    header = ttk.Frame(window, padding=(12, 10), style="Panel.TFrame")
+    header = ttk.Frame(window, padding=(WORKSPACE_PAD, 10), style="Panel.TFrame")
     header.grid(row=0, column=0, sticky="ew")
     header.columnconfigure(0, weight=1)
     ttk.Label(header, text="Schwab Research + Risk Workspace", font=("Segoe UI", 14, "bold")).grid(row=0, column=0, sticky="w")
     ttk.Label(header, textvariable=self.schwab_research_status_var, style="Subtle.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 0))
     ttk.Button(header, text="Refresh Holdings", command=lambda app=self: _refresh_research_holdings(app)).grid(row=0, column=1, rowspan=2, sticky="e", padx=(8, 0))
+    self.schwab_research_sidebar_button = ttk.Button(header, text="Hide Sidebar", command=lambda app=self: _toggle_research_sidebar(app))
+    self.schwab_research_sidebar_button.grid(row=0, column=2, rowspan=2, sticky="e", padx=(8, 0))
 
     body = tk.PanedWindow(window, orient=tk.HORIZONTAL, bg="#0f172a", bd=0, sashwidth=8, sashpad=4, showhandle=True)
-    body.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
+    body.grid(row=1, column=0, sticky="nsew", padx=WORKSPACE_PAD, pady=(0, WORKSPACE_PAD))
 
-    left = ttk.Frame(body, style="Panel.TFrame", padding=10)
-    right = ttk.Frame(body, style="Panel.TFrame", padding=10)
-    body.add(left, minsize=330, stretch="never")
-    body.add(right, minsize=680, stretch="always")
-    window.after_idle(lambda: body.sash_place(0, 370, 0))
+    left = ttk.Frame(body, style="Panel.TFrame", padding=PANE_PAD)
+    right = ttk.Frame(body, style="Panel.TFrame", padding=PANE_PAD)
+    body.add(left, minsize=LEFT_PANE_MIN, stretch="never")
+    body.add(right, minsize=RIGHT_PANE_MIN, stretch="always")
+    self.schwab_research_paned = body
+    self.schwab_research_left_panel = left
+    self.schwab_research_right_panel = right
+    window.after_idle(lambda: body.sash_place(0, LEFT_PANE_WIDTH, 0))
 
     _build_research_left_panel(self, left)
     _build_research_right_panel(self, right)
@@ -266,7 +290,8 @@ def _build_research_left_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     holdings.rowconfigure(0, weight=1)
     holdings.columnconfigure(0, weight=1)
     columns = ("symbol", "type", "qty", "avg", "last", "value", "weight", "pnl")
-    tree = ttk.Treeview(holdings, columns=columns, show="headings", height=16, selectmode="browse")
+    tree = ttk.Treeview(holdings, columns=columns, show="headings", height=18, selectmode="browse")
+    _style_research_tree(tree)
     specs = {
         "symbol": ("Symbol", 82, tk.W),
         "type": ("Type", 70, tk.W),
@@ -286,43 +311,363 @@ def _build_research_left_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     y_scroll = ttk.Scrollbar(holdings, orient=tk.VERTICAL, command=tree.yview)
     y_scroll.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=y_scroll.set)
+    _add_horizontal_tree_scrollbar(holdings, tree, row=1)
     tree.bind("<ButtonRelease-1>", lambda event, app=self: _select_research_holding(app, event), add="+")
     tree.bind("<Double-1>", lambda _event, app=self: _run_research_analysis(app), add="+")
     self.schwab_research_holdings_tree = tree
 
 
+def _configure_research_workspace_styles(window: tk.Widget) -> None:
+    style = ttk.Style(window)
+    style.configure("Research.Treeview", rowheight=READABLE_TREE_ROW_HEIGHT, font=("Segoe UI", 9))
+    style.configure("Research.Treeview.Heading", font=("Segoe UI", 9, "bold"))
+
+
+def _style_research_tree(tree: ttk.Treeview, *, height: int | None = None) -> None:
+    tree.configure(style="Research.Treeview")
+    if height is not None:
+        tree.configure(height=height)
+
+
+def _add_horizontal_tree_scrollbar(parent: tk.Widget, tree: ttk.Treeview, *, row: int, column: int = 0) -> None:
+    x_scroll = ttk.Scrollbar(parent, orient=tk.HORIZONTAL, command=tree.xview)
+    x_scroll.grid(row=row, column=column, sticky="ew")
+    tree.configure(xscrollcommand=x_scroll.set)
+
+
+def _toggle_research_sidebar(self: tk.Tk) -> None:
+    body = getattr(self, "schwab_research_paned", None)
+    left = getattr(self, "schwab_research_left_panel", None)
+    right = getattr(self, "schwab_research_right_panel", None)
+    if body is None or left is None or right is None:
+        return
+    visible = bool(getattr(self, "schwab_research_sidebar_visible", tk.BooleanVar(value=True)).get())
+    if visible:
+        try:
+            body.forget(left)
+        except tk.TclError:
+            return
+        self.schwab_research_sidebar_visible.set(False)
+        _set_button_text(getattr(self, "schwab_research_sidebar_button", None), "Show Sidebar")
+        return
+    try:
+        body.add(left, before=right, minsize=LEFT_PANE_MIN, stretch="never")
+        body.after_idle(lambda: body.sash_place(0, LEFT_PANE_WIDTH, 0))
+    except tk.TclError:
+        return
+    self.schwab_research_sidebar_visible.set(True)
+    _set_button_text(getattr(self, "schwab_research_sidebar_button", None), "Hide Sidebar")
+
+
+def _toggle_research_summary(self: tk.Tk) -> None:
+    expanded_var = getattr(self, "schwab_research_summary_expanded", None)
+    if expanded_var is None:
+        return
+    expanded_var.set(not bool(expanded_var.get()))
+    payload = getattr(self, "schwab_research_last_payload", None)
+    if payload is not None:
+        _render_at_glance(self, payload)
+    else:
+        _apply_research_summary_visibility(self)
+
+
+def _apply_research_summary_visibility(self: tk.Tk) -> None:
+    expanded = bool(getattr(self, "schwab_research_summary_expanded", tk.BooleanVar(value=False)).get())
+    _set_button_text(getattr(self, "schwab_research_summary_button", None), "Collapse Summary" if expanded else "Expand Summary")
+    for widget_name in ("schwab_research_top_strip", "schwab_research_summary_meters"):
+        widget = getattr(self, widget_name, None)
+        if widget is None:
+            continue
+        try:
+            if expanded:
+                widget.grid()
+            else:
+                widget.grid_remove()
+        except tk.TclError:
+            continue
+
+
+def _set_button_text(button: Any, text: str) -> None:
+    try:
+        if button is not None:
+            button.configure(text=text)
+    except tk.TclError:
+        pass
+
+
+def _open_current_research_tab_focus(self: tk.Tk) -> None:
+    detail = _current_research_tab_detail(self)
+    if detail is None:
+        messagebox.showinfo("Focus tab", "Run analysis first, then focus the selected tab.")
+        return
+    _open_readout_popout(detail)
+
+
+def _current_research_tab_detail(self: tk.Tk) -> tk.Text | None:
+    notebook = getattr(self, "schwab_research_tabs", None)
+    if notebook is None:
+        return None
+    try:
+        tab_title = notebook.tab(notebook.select(), "text")
+    except tk.TclError:
+        return None
+    frame_by_title = {
+        "Overview": getattr(self, "schwab_research_overview_frame", None),
+        "Evidence Desk": getattr(self, "schwab_trade_evidence_frame", None),
+        "Technicals": getattr(self, "schwab_research_technicals_frame", None),
+        "Risk Scenarios": getattr(self, "schwab_research_scenarios_frame", None),
+        "Options Strategy": getattr(self, "schwab_research_options_frame", None),
+        "Greeks": getattr(self, "schwab_research_greeks_frame", None),
+        "Earnings / News": getattr(self, "schwab_research_earnings_frame", None),
+        "Fundamentals": getattr(self, "schwab_research_fundamentals_frame", None),
+        "Macro Context": getattr(self, "schwab_research_macro_frame", None),
+    }
+    frame = frame_by_title.get(str(tab_title))
+    if frame is None:
+        return None
+    detail = getattr(frame, "detail_text", None) or getattr(frame, "technical_notes_text", None) or getattr(frame, "scenario_note_text", None)
+    return detail if isinstance(detail, tk.Text) else None
+
+
+def _bind_summary_detach_drag(self: tk.Tk, handle: tk.Widget) -> None:
+    state: dict[str, Any] = {"start": None, "detached": False}
+
+    def press(event: tk.Event) -> None:
+        state["start"] = (event.x_root, event.y_root)
+        state["detached"] = False
+
+    def motion(event: tk.Event) -> None:
+        start = state.get("start")
+        if start is None or state.get("detached"):
+            return
+        if abs(event.x_root - start[0]) + abs(event.y_root - start[1]) < DETACH_DRAG_PIXELS:
+            return
+        state["detached"] = True
+        _open_summary_tearout(self)
+
+    def release(_event: tk.Event) -> None:
+        state["start"] = None
+        state["detached"] = False
+
+    _bind_drag_handlers(handle, press, motion, release)
+
+
+def _bind_notebook_tab_detach_drag(self: tk.Tk, notebook: ttk.Notebook) -> None:
+    state: dict[str, Any] = {"start": None, "tab_index": None, "detached": False}
+
+    def press(event: tk.Event) -> None:
+        try:
+            tab_index = notebook.index(f"@{event.x},{event.y}")
+        except tk.TclError:
+            tab_index = None
+        state["start"] = (event.x_root, event.y_root) if tab_index is not None else None
+        state["tab_index"] = tab_index
+        state["detached"] = False
+
+    def motion(event: tk.Event) -> None:
+        start = state.get("start")
+        tab_index = state.get("tab_index")
+        if start is None or tab_index is None or state.get("detached"):
+            return
+        if abs(event.x_root - start[0]) + abs(event.y_root - start[1]) < DETACH_DRAG_PIXELS:
+            return
+        state["detached"] = True
+        try:
+            notebook.select(tab_index)
+        except tk.TclError:
+            return
+        _open_current_research_tab_focus(self)
+
+    def release(_event: tk.Event) -> None:
+        state["start"] = None
+        state["tab_index"] = None
+        state["detached"] = False
+
+    notebook.bind("<ButtonPress-1>", press, add="+")
+    notebook.bind("<B1-Motion>", motion, add="+")
+    notebook.bind("<ButtonRelease-1>", release, add="+")
+
+
+def _bind_drag_handlers(widget: tk.Widget, press: Any, motion: Any, release: Any) -> None:
+    widget.bind("<ButtonPress-1>", press, add="+")
+    widget.bind("<B1-Motion>", motion, add="+")
+    widget.bind("<ButtonRelease-1>", release, add="+")
+    for child in widget.winfo_children():
+        _bind_drag_handlers(child, press, motion, release)
+
+
+def _open_summary_tearout(self: tk.Tk) -> None:
+    payload = getattr(self, "schwab_research_last_payload", None)
+    if payload is None:
+        messagebox.showinfo("Detach At a Glance", "Run analysis first, then drag At a Glance out into its own window.")
+        return
+    existing = getattr(self, "schwab_research_summary_tearout_window", None)
+    if existing is not None:
+        try:
+            if existing.winfo_exists():
+                _refresh_summary_tearout(self, payload)
+                existing.deiconify()
+                existing.lift()
+                existing.focus_force()
+                return
+        except tk.TclError:
+            pass
+
+    window = tk.Toplevel(getattr(self, "schwab_research_window", self))
+    window.title(f"At a Glance - {payload.symbol}")
+    window.geometry("1120x440")
+    window.minsize(760, 320)
+    window.columnconfigure(0, weight=1)
+    window.rowconfigure(1, weight=1)
+
+    toolbar = ttk.Frame(window, padding=(12, 9), style="Panel.TFrame")
+    toolbar.grid(row=0, column=0, sticky="ew")
+    toolbar.columnconfigure(0, weight=1)
+    ttk.Label(toolbar, text=f"At a Glance - {payload.symbol}", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
+    ttk.Label(toolbar, text="Resizable detached scorecard window", style="Subtle.TLabel").grid(row=0, column=1, sticky="e", padx=(12, 8))
+    ttk.Button(toolbar, text="Close", command=window.destroy).grid(row=0, column=2, sticky="e")
+
+    body = ScrollableFrame(window, padding=16)
+    body.grid(row=1, column=0, sticky="nsew")
+    body.body.columnconfigure(0, weight=1)
+    cards = ttk.Frame(body.body, style="Panel.TFrame")
+    cards.grid(row=0, column=0, sticky="ew")
+    strip = ttk.Frame(body.body, style="Panel.TFrame")
+    strip.grid(row=1, column=0, sticky="ew", pady=(SECTION_GAP, 0))
+    meters = ttk.Frame(body.body, style="Panel.TFrame")
+    meters.grid(row=2, column=0, sticky="ew", pady=(SECTION_GAP, 0))
+    meters.columnconfigure((0, 1), weight=1)
+    bull_meter = ScoreMeter(meters)
+    risk_meter = ScoreMeter(meters)
+    bull_meter.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+    risk_meter.grid(row=0, column=1, sticky="ew")
+
+    self.schwab_research_summary_tearout_window = window
+    self.schwab_research_summary_tearout_cards = cards
+    self.schwab_research_summary_tearout_strip = strip
+    self.schwab_research_summary_tearout_bull_meter = bull_meter
+    self.schwab_research_summary_tearout_risk_meter = risk_meter
+
+    def on_close() -> None:
+        self.schwab_research_summary_tearout_window = None
+        self.schwab_research_summary_tearout_cards = None
+        self.schwab_research_summary_tearout_strip = None
+        self.schwab_research_summary_tearout_bull_meter = None
+        self.schwab_research_summary_tearout_risk_meter = None
+        window.destroy()
+
+    window.protocol("WM_DELETE_WINDOW", on_close)
+    for child in toolbar.winfo_children():
+        if _widget_class(child) == "TButton":
+            try:
+                child.configure(command=on_close)
+            except tk.TclError:
+                pass
+    _refresh_summary_tearout(self, payload)
+
+
+def _refresh_summary_tearout(self: tk.Tk, payload: _ResearchPayload) -> None:
+    window = getattr(self, "schwab_research_summary_tearout_window", None)
+    cards = getattr(self, "schwab_research_summary_tearout_cards", None)
+    strip = getattr(self, "schwab_research_summary_tearout_strip", None)
+    bull_meter = getattr(self, "schwab_research_summary_tearout_bull_meter", None)
+    risk_meter = getattr(self, "schwab_research_summary_tearout_risk_meter", None)
+    if window is None or cards is None or strip is None or bull_meter is None or risk_meter is None:
+        return
+    try:
+        if not window.winfo_exists():
+            return
+    except tk.TclError:
+        return
+    decision = payload.decision
+    technical_read = build_technical_at_glance_read(decision, payload.command_center_report)
+    fundamental_verdict = build_fundamental_verdict(payload.fundamentals_text, payload.indicators, decision.macro_backdrop.label)
+    conflict_read = build_cross_read_conflict_badge(fundamental_verdict.verdict, decision.macro_backdrop.label, technical_read)
+    metric_grid(
+        cards,
+        [decision.overall, technical_read, decision.risk_level, conflict_read, decision.macro_backdrop, decision.action_bias],
+        columns=3,
+        card_height=132,
+        prominent_height=142,
+        prominent_indexes={0, 1, 5},
+    )
+    labeled_value_grid(
+        strip,
+        {
+            "Best thing": decision.top_things[0],
+            "Biggest risk": decision.top_things[1],
+            "Key trigger": decision.top_things[2],
+        },
+        columns=3,
+    )
+    bull_meter.set_score(technical_read.score, mode="direction", label=f"Technical: {technical_read.label} ({technical_read.score:.0f})")
+    risk_meter.set_score(decision.risk_score, mode="risk", label=f"Risk Heat: {risk_heat_label(decision.risk_score)} ({decision.risk_score:.0f}/100)")
+
+
 def _build_research_right_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     parent.columnconfigure(0, weight=1)
-    parent.rowconfigure(2, weight=1)
+    parent.rowconfigure(1, weight=1)
 
-    top = ttk.LabelFrame(parent, text="Selected Symbol", style="Card.TLabelframe")
+    top = ttk.Frame(parent, style="Panel.TFrame")
     top.grid(row=0, column=0, sticky="ew")
-    top.columnconfigure((0, 1, 2, 3), weight=1)
+    top.columnconfigure((1, 2, 3, 4), weight=1)
     self.schwab_research_quote_var = tk.StringVar(value="Quote --")
     self.schwab_research_held_var = tk.StringVar(value="Held --")
     self.schwab_research_weight_var = tk.StringVar(value="Weight --")
     self.schwab_research_risk_var = tk.StringVar(value="Risk --")
+    ttk.Label(top, text="Selected", style="Subtle.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
     for index, var in enumerate((self.schwab_research_quote_var, self.schwab_research_held_var, self.schwab_research_weight_var, self.schwab_research_risk_var)):
-        ttk.Label(top, textvariable=var, style="Chip.TLabel").grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 6, 0))
+        ttk.Label(top, textvariable=var, style="Chip.TLabel").grid(row=0, column=index + 1, sticky="ew", padx=(0 if index == 0 else 6, 0))
+    self.schwab_research_summary_button = ttk.Button(top, text="Expand Summary", command=lambda app=self: _toggle_research_summary(app))
+    self.schwab_research_summary_button.grid(row=0, column=5, sticky="e", padx=(8, 0))
 
-    glance = ttk.LabelFrame(parent, text="At a Glance", style="Card.TLabelframe")
-    glance.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+    vertical = tk.PanedWindow(parent, orient=tk.VERTICAL, bg="#cbd5e1", bd=0, sashwidth=8, sashpad=4, showhandle=True)
+    vertical.grid(row=1, column=0, sticky="nsew", pady=(SECTION_GAP, 0))
+    self.schwab_research_vertical_paned = vertical
+
+    summary_pane = ttk.Frame(vertical, style="Panel.TFrame", padding=(0, 0, 0, PANE_PAD))
+    summary_pane.columnconfigure(0, weight=1)
+    tabs_pane = ttk.Frame(vertical, style="Panel.TFrame")
+    tabs_pane.columnconfigure(0, weight=1)
+    tabs_pane.rowconfigure(1, weight=1)
+    vertical.add(summary_pane, minsize=SUMMARY_PANE_MIN, stretch="never")
+    vertical.add(tabs_pane, minsize=TAB_PANE_MIN, stretch="always")
+    parent.after_idle(lambda: vertical.sash_place(0, 0, 190))
+
+    summary_handle = ttk.Frame(summary_pane, style="Panel.TFrame")
+    summary_handle.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+    summary_handle.columnconfigure(0, weight=1)
+    ttk.Label(summary_handle, text="At a Glance", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
+    ttk.Label(summary_handle, text="Drag this title out to detach", style="Subtle.TLabel").grid(row=0, column=1, sticky="e")
+    _bind_summary_detach_drag(self, summary_handle)
+
+    glance = ttk.LabelFrame(summary_pane, text="", style="Card.TLabelframe")
+    glance.grid(row=1, column=0, sticky="ew")
     glance.columnconfigure(0, weight=1)
     self.schwab_research_glance_cards = ttk.Frame(glance, style="Panel.TFrame")
     self.schwab_research_glance_cards.grid(row=0, column=0, sticky="ew")
     self.schwab_research_top_strip = ttk.Frame(glance, style="Panel.TFrame")
     self.schwab_research_top_strip.grid(row=1, column=0, sticky="ew", pady=(6, 0))
     meters = ttk.Frame(glance, style="Panel.TFrame")
+    self.schwab_research_summary_meters = meters
     meters.grid(row=2, column=0, sticky="ew", pady=(6, 0))
     meters.columnconfigure((0, 1), weight=1)
     self.schwab_research_bull_bear_meter = ScoreMeter(meters)
     self.schwab_research_bull_bear_meter.grid(row=0, column=0, sticky="ew", padx=(0, 8))
     self.schwab_research_risk_meter = ScoreMeter(meters)
     self.schwab_research_risk_meter.grid(row=0, column=1, sticky="ew")
+    self.schwab_research_top_strip.grid_remove()
+    self.schwab_research_summary_meters.grid_remove()
 
-    notebook = ttk.Notebook(parent)
-    notebook.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
+    tab_toolbar = ttk.Frame(tabs_pane, style="Panel.TFrame")
+    tab_toolbar.grid(row=0, column=0, sticky="ew")
+    tab_toolbar.columnconfigure(0, weight=1)
+    ttk.Label(tab_toolbar, text="Tabs - drag a tab label out to detach", style="Subtle.TLabel").grid(row=0, column=0, sticky="w")
+    ttk.Button(tab_toolbar, text="Focus Current Tab", command=lambda app=self: _open_current_research_tab_focus(app), style="Accent.TButton").grid(row=0, column=1, sticky="e")
+    notebook = ttk.Notebook(tabs_pane)
+    notebook.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
     self.schwab_research_tabs = notebook
+    _bind_notebook_tab_detach_drag(self, notebook)
 
     self.schwab_research_overview_frame = _overview_tab(notebook)
     self.schwab_research_overview_text = self.schwab_research_overview_frame.detail_text  # type: ignore[attr-defined]
@@ -340,7 +685,7 @@ def _build_research_right_panel(self: tk.Tk, parent: ttk.Frame) -> None:
 
 
 def _scrollable_tab(notebook: ttk.Notebook, title: str) -> ttk.Frame:
-    outer = ScrollableFrame(notebook, padding=10)
+    outer = ScrollableFrame(notebook, padding=TAB_PADDING)
     frame = outer.body
     frame.columnconfigure(0, weight=1)
     frame._scrollable_outer = outer  # type: ignore[attr-defined]
@@ -385,7 +730,8 @@ def _evidence_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     score_box = ttk.LabelFrame(frame, text="Courtroom Scorecard", style="Card.TLabelframe")
     score_box.grid(row=3, column=0, sticky="ew", pady=(8, 0))
     score_box.columnconfigure(0, weight=1)
-    tree = ttk.Treeview(score_box, columns=("category", "grade", "read"), show="headings", height=9)
+    tree = ttk.Treeview(score_box, columns=("category", "grade", "read"), show="headings", height=12)
+    _style_research_tree(tree)
     for column, label, width, anchor in (
         ("category", "Evidence", 190, tk.W),
         ("grade", "Grade", 80, tk.CENTER),
@@ -397,6 +743,7 @@ def _evidence_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     y_scroll = ttk.Scrollbar(score_box, orient=tk.VERTICAL, command=tree.yview)
     y_scroll.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=y_scroll.set)
+    _add_horizontal_tree_scrollbar(score_box, tree, row=1)
     frame.score_tree = tree  # type: ignore[attr-defined]
     frame.evidence_columns = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.evidence_columns.grid(row=4, column=0, sticky="ew", pady=(8, 0))
@@ -433,7 +780,8 @@ def _macro_tab(notebook: ttk.Notebook) -> ttk.Frame:
     tree_box = ttk.LabelFrame(frame, text="Official Macro Dashboard", style="Card.TLabelframe")
     tree_box.grid(row=2, column=0, sticky="ew", pady=(8, 0))
     tree_box.columnconfigure(0, weight=1)
-    tree = ttk.Treeview(tree_box, columns=("group", "metric", "latest", "prior", "change", "period", "source", "fresh", "read"), show="headings", height=7)
+    tree = ttk.Treeview(tree_box, columns=("group", "metric", "latest", "prior", "change", "period", "source", "fresh", "read"), show="headings", height=11)
+    _style_research_tree(tree)
     specs = (
         ("group", "Card", 130, tk.W),
         ("metric", "Metric", 150, tk.W),
@@ -452,6 +800,7 @@ def _macro_tab(notebook: ttk.Notebook) -> ttk.Frame:
     y_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
     y_scroll.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=y_scroll.set)
+    _add_horizontal_tree_scrollbar(tree_box, tree, row=1)
     frame.metric_tree = tree  # type: ignore[attr-defined]
     frame.interpretation = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.interpretation.grid(row=3, column=0, sticky="ew", pady=(8, 0))
@@ -474,7 +823,8 @@ def _earnings_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     source_box = ttk.LabelFrame(frame, text="Confirmed Sources / Search Helpers", style="Card.TLabelframe")
     source_box.grid(row=2, column=0, sticky="ew", pady=(8, 0))
     source_box.columnconfigure(0, weight=1)
-    tree = ttk.Treeview(source_box, columns=("source", "date", "url"), show="headings", height=6)
+    tree = ttk.Treeview(source_box, columns=("source", "date", "url"), show="headings", height=8)
+    _style_research_tree(tree)
     for column, label, width in (("source", "Source / Helper", 290), ("date", "Date", 110), ("url", "URL", 520)):
         tree.heading(column, text=label)
         tree.column(column, width=width, anchor=tk.W, stretch=column == "url")
@@ -482,6 +832,7 @@ def _earnings_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     y_scroll = ttk.Scrollbar(source_box, orient=tk.VERTICAL, command=tree.yview)
     y_scroll.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=y_scroll.set)
+    _add_horizontal_tree_scrollbar(source_box, tree, row=1)
     tree.bind("<Double-1>", lambda event, source=tree: _open_source_tree_url(source, event), add="+")
     frame.source_tree = tree  # type: ignore[attr-defined]
     frame.detail_text = _readout_launcher(frame, title="Earnings Release Explanation", button_text="Open Earnings Release Explanation", row=3)  # type: ignore[attr-defined]
@@ -561,8 +912,8 @@ def _open_readout_popout(source: tk.Text) -> None:
     window = tk.Toplevel(source.winfo_toplevel())
     title = str(getattr(source, "_readout_title", "Detailed Readout"))
     window.title(title)
-    window.geometry("960x720")
-    window.minsize(640, 420)
+    window.geometry(FOCUS_WINDOW_GEOMETRY)
+    window.minsize(*FOCUS_WINDOW_MIN_SIZE)
     window.columnconfigure(0, weight=1)
     window.rowconfigure(1, weight=1)
 
@@ -580,18 +931,18 @@ def _open_readout_popout(source: tk.Text) -> None:
     target = tk.Text(
         body,
         wrap=tk.WORD,
-        font=("Segoe UI", 10),
-        padx=18,
-        pady=16,
+        font=("Segoe UI", 11),
+        padx=24,
+        pady=22,
         relief=tk.FLAT,
         borderwidth=0,
         background="#f8fafc",
         foreground="#111827",
         insertbackground="#111827",
         selectbackground="#bfdbfe",
-        spacing1=3,
-        spacing2=1,
-        spacing3=6,
+        spacing1=5,
+        spacing2=2,
+        spacing3=8,
     )
     target.grid(row=0, column=0, sticky="nsew")
     scrollbar = ttk.Scrollbar(body, orient=tk.VERTICAL, command=target.yview)
@@ -1028,7 +1379,8 @@ def _technicals_tab(notebook: ttk.Notebook) -> ttk.Frame:
     tree_box = ttk.Frame(frame, style="Panel.TFrame")
     tree_box.grid(row=3, column=0, sticky="ew", pady=(10, 0))
     tree_box.columnconfigure(0, weight=1)
-    tree = ttk.Treeview(tree_box, columns=("metric", "value", "read"), show="headings", height=7)
+    tree = ttk.Treeview(tree_box, columns=("metric", "value", "read"), show="headings", height=12)
+    _style_research_tree(tree)
     for column, label, width in (("metric", "Metric", 160), ("value", "Value", 140), ("read", "Readout", 360)):
         tree.heading(column, text=label)
         tree.column(column, width=width, anchor=tk.W if column != "value" else tk.E, stretch=True)
@@ -1036,9 +1388,11 @@ def _technicals_tab(notebook: ttk.Notebook) -> ttk.Frame:
     y_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
     y_scroll.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=y_scroll.set)
+    _add_horizontal_tree_scrollbar(tree_box, tree, row=1)
     text = _readout_launcher(frame, title="Technical Readout", button_text="Open Technical Readout", row=4, pady=(10, 0))
     frame.indicator_tree = tree  # type: ignore[attr-defined]
     frame.technical_notes_text = text  # type: ignore[attr-defined]
+    frame.detail_text = text  # type: ignore[attr-defined]
     return frame
 
 
@@ -1059,7 +1413,8 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     planner_box = ttk.LabelFrame(frame, text="Move Planner", style="Card.TLabelframe")
     planner_box.grid(row=2, column=0, sticky="ew", pady=(0, 8))
     planner_box.columnconfigure(0, weight=1)
-    move_tree = ttk.Treeview(planner_box, columns=("move", "makes_sense", "protects", "gives_up", "effect"), show="headings", height=7)
+    move_tree = ttk.Treeview(planner_box, columns=("move", "makes_sense", "protects", "gives_up", "effect"), show="headings", height=9)
+    _style_research_tree(move_tree)
     for column, label, width in (
         ("move", "Move", 150),
         ("makes_sense", "When It Makes Sense", 260),
@@ -1073,6 +1428,7 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     move_scroll = ttk.Scrollbar(planner_box, orient=tk.VERTICAL, command=move_tree.yview)
     move_scroll.grid(row=0, column=1, sticky="ns")
     move_tree.configure(yscrollcommand=move_scroll.set)
+    _add_horizontal_tree_scrollbar(planner_box, move_tree, row=1)
     frame.move_planner_tree = move_tree  # type: ignore[attr-defined]
     frame.impact_bars = ScenarioImpactBars(frame, height=170)  # type: ignore[attr-defined]
     frame.impact_bars.grid(row=3, column=0, sticky="ew", pady=(0, 8))  # type: ignore[attr-defined]
@@ -1090,8 +1446,9 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
         tree_box,
         columns=("scenario", "price", "current_shares", "current_pnl", "model_shares", "model_pnl", "model_impact", "model_portfolio"),
         show="headings",
-        height=7,
+        height=10,
     )
+    _style_research_tree(tree)
     for column, label, width in (
         ("scenario", "Move", 72),
         ("price", "Stock Price", 105),
@@ -1110,6 +1467,7 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     y_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
     y_scroll.grid(row=1, column=1, sticky="ns")
     tree.configure(yscrollcommand=y_scroll.set)
+    _add_horizontal_tree_scrollbar(tree_box, tree, row=2)
     note = _readout_launcher(frame, title="Risk Scenario Explanation", button_text="Open Risk Scenario Explanation", row=5, pady=(10, 0))
     frame.scenario_tree = tree  # type: ignore[attr-defined]
     frame.scenario_note_text = note  # type: ignore[attr-defined]
@@ -1131,8 +1489,9 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
         option_box,
         columns=("move", "price", "current_stock", "model_stock", "option", "current_combined", "model_combined", "read"),
         show="headings",
-        height=6,
+        height=9,
     )
+    _style_research_tree(option_tree)
     for column, label, width in (
         ("move", "Move", 70),
         ("price", "Stock Price", 100),
@@ -1151,6 +1510,7 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     option_scroll = ttk.Scrollbar(option_box, orient=tk.VERTICAL, command=option_tree.yview)
     option_scroll.grid(row=2, column=1, sticky="ns")
     option_tree.configure(yscrollcommand=option_scroll.set)
+    _add_horizontal_tree_scrollbar(option_box, option_tree, row=3)
     option_tree.bind("<Double-1>", lambda _event, app=self: _load_chain_from_option_scenario_row(app), add="+")
     option_tree.bind("<Return>", lambda _event, app=self: _load_chain_from_option_scenario_row(app), add="+")
     frame.option_scenario_tree = option_tree  # type: ignore[attr-defined]
@@ -1172,7 +1532,8 @@ def _options_strategy_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     tree_box = ttk.LabelFrame(frame, text="Candidate Options", style="Card.TLabelframe")
     tree_box.grid(row=3, column=0, sticky="ew", pady=(8, 0))
     tree_box.columnconfigure(0, weight=1)
-    tree = ttk.Treeview(tree_box, columns=("group", "strategy", "expiration", "strike", "type", "mid", "max_loss", "breakeven", "score", "confidence"), show="headings", height=6)
+    tree = ttk.Treeview(tree_box, columns=("group", "strategy", "expiration", "strike", "type", "mid", "max_loss", "breakeven", "score", "confidence"), show="headings", height=10)
+    _style_research_tree(tree)
     for column, label, width in (
         ("group", "Group", 110),
         ("strategy", "Strategy", 210),
@@ -1192,6 +1553,7 @@ def _options_strategy_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     y_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
     y_scroll.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=y_scroll.set)
+    _add_horizontal_tree_scrollbar(tree_box, tree, row=1)
     frame.candidate_tree = tree  # type: ignore[attr-defined]
     frame.score_breakdown = ttk.LabelFrame(frame, text="Score Breakdown / Why Ranked Here", style="Card.TLabelframe")  # type: ignore[attr-defined]
     frame.score_breakdown.grid(row=4, column=0, sticky="ew", pady=(8, 0))  # type: ignore[attr-defined]
@@ -1217,8 +1579,9 @@ def _options_strategy_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
         scenario_box,
         columns=("move", "price", "contracts", "current_stock", "model_stock", "option", "current_combined", "model_combined", "read"),
         show="headings",
-        height=7,
+        height=9,
     )
+    _style_research_tree(scenario_tree)
     for column, label, width in (
         ("move", "Move", 75),
         ("price", "Stock Price", 105),
@@ -1238,6 +1601,7 @@ def _options_strategy_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     scenario_scroll = ttk.Scrollbar(scenario_box, orient=tk.VERTICAL, command=scenario_tree.yview)
     scenario_scroll.grid(row=2, column=1, sticky="ns")
     scenario_tree.configure(yscrollcommand=scenario_scroll.set)
+    _add_horizontal_tree_scrollbar(scenario_box, scenario_tree, row=3)
     frame.candidate_scenario_tree = scenario_tree  # type: ignore[attr-defined]
     help_box = ttk.LabelFrame(frame, text="How To Read This", style="Card.TLabelframe")
     help_box.grid(row=7, column=0, sticky="ew", pady=(8, 0))
@@ -1269,7 +1633,8 @@ def _greeks_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     tree_box.grid(row=2, column=0, sticky="ew", pady=(8, 0))
     tree_box.columnconfigure(0, weight=1)
     columns = ("expiration", "dte", "strike", "type", "bid", "ask", "mark", "iv", "delta", "gamma", "theta", "vega", "rho", "source")
-    tree = ttk.Treeview(tree_box, columns=columns, show="headings", height=9, selectmode="browse")
+    tree = ttk.Treeview(tree_box, columns=columns, show="headings", height=12, selectmode="browse")
+    _style_research_tree(tree)
     specs = (
         ("expiration", "Expiration", 130, tk.W),
         ("dte", "DTE", 56, tk.E),
@@ -1988,20 +2353,38 @@ def _render_at_glance(self: tk.Tk, payload: _ResearchPayload) -> None:
     technical_read = build_technical_at_glance_read(decision, payload.command_center_report)
     fundamental_verdict = build_fundamental_verdict(payload.fundamentals_text, payload.indicators, decision.macro_backdrop.label)
     conflict_read = build_cross_read_conflict_badge(fundamental_verdict.verdict, decision.macro_backdrop.label, technical_read)
-    metric_grid(
-        self.schwab_research_glance_cards,
-        [
+    expanded = bool(getattr(self, "schwab_research_summary_expanded", tk.BooleanVar(value=False)).get())
+    if expanded:
+        cards = [
             decision.overall,
             technical_read,
             decision.risk_level,
             conflict_read,
             decision.macro_backdrop,
             decision.action_bias,
-        ],
-        columns=3,
-        card_height=116,
-        prominent_height=124,
-        prominent_indexes={0, 1, 5},
+        ]
+        columns = 3
+        prominent = {0, 1, 5}
+        card_height = 116
+        prominent_height = 124
+    else:
+        cards = [
+            decision.overall,
+            decision.action_bias,
+            decision.risk_level,
+            _synthetic_badge("Key Trigger", decision.top_things[2], "info", "Primary trigger from the analysis summary."),
+        ]
+        columns = 4
+        prominent = {0, 1}
+        card_height = 108
+        prominent_height = 112
+    metric_grid(
+        self.schwab_research_glance_cards,
+        cards,
+        columns=columns,
+        card_height=card_height,
+        prominent_height=prominent_height,
+        prominent_indexes=prominent,
     )
     labeled_value_grid(
         self.schwab_research_top_strip,
@@ -2014,6 +2397,8 @@ def _render_at_glance(self: tk.Tk, payload: _ResearchPayload) -> None:
     )
     self.schwab_research_bull_bear_meter.set_score(technical_read.score, mode="direction", label=f"Technical: {technical_read.label} ({technical_read.score:.0f})")
     self.schwab_research_risk_meter.set_score(decision.risk_score, mode="risk", label=f"Risk Heat: {risk_heat_label(decision.risk_score)} ({decision.risk_score:.0f}/100)")
+    _apply_research_summary_visibility(self)
+    _refresh_summary_tearout(self, payload)
 
 
 def _render_overview(self: tk.Tk, payload: _ResearchPayload) -> None:
@@ -2032,7 +2417,10 @@ def _render_overview(self: tk.Tk, payload: _ResearchPayload) -> None:
             decision.macro_backdrop,
         ],
         columns=4,
+        card_height=132,
+        prominent_height=146,
         prominent_indexes={0, 3},
+        adaptive_height=True,
     )
     labeled_value_grid(frame.operator, decision.operator_view, columns=3)  # type: ignore[attr-defined]
     clear_children(frame.summary)  # type: ignore[attr-defined]
@@ -2050,7 +2438,15 @@ def _render_trade_evidence(self: tk.Tk, payload: _ResearchPayload) -> None:
     if frame is None:
         return
     report = _trade_evidence_report(payload)
-    metric_grid(frame.cards, evidence_scorecards(report), columns=4, card_height=122, prominent_height=128, prominent_indexes={0})  # type: ignore[attr-defined]
+    metric_grid(
+        frame.cards,
+        evidence_scorecards(report),
+        columns=4,
+        card_height=144,
+        prominent_height=156,
+        prominent_indexes={0},
+        adaptive_height=True,
+    )  # type: ignore[attr-defined]
     clear_children(frame.verdict)  # type: ignore[attr-defined]
     ttk.Label(
         frame.verdict,
@@ -2156,9 +2552,10 @@ def _render_technicals(self: tk.Tk, payload: _ResearchPayload) -> None:
             _rsi_badge(indicators),
             _synthetic_badge("Indicator Agreement", narrative.indicator_agreement, narrative.agreement_status, narrative.agreement_explanation),
         ],
-        columns=5,
-        card_height=128,
-        prominent_height=128,
+        columns=4,
+        card_height=142,
+        prominent_height=142,
+        adaptive_height=True,
     )
     frame.bull_meter.set_score(decision.technical_score, mode="direction", label=f"Bullishness: {direction_strength_label(decision.technical_score)} ({decision.technical_score:.0f})")  # type: ignore[attr-defined]
     frame.momentum_meter.set_score(decision.momentum_score, mode="direction", label=f"Momentum: {direction_strength_label(decision.momentum_score)} ({decision.momentum_score:.0f})")  # type: ignore[attr-defined]
@@ -2307,7 +2704,7 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
     if best is not None:
         cards.append(_synthetic_badge("Upside Reward", _money(best.position_pnl), "good" if best.position_pnl > 0 else "info", f"{best.scenario} move, {best.portfolio_pnl_impact:+.2%} portfolio impact."))
     cards.extend([payload.decision.position_impact, payload.decision.risk_level])
-    metric_grid(frame.cards, cards, columns=4, card_height=128, prominent_height=128)  # type: ignore[attr-defined]
+    metric_grid(frame.cards, cards, columns=4, card_height=144, prominent_height=154, adaptive_height=True)  # type: ignore[attr-defined]
     move_tree = frame.move_planner_tree  # type: ignore[attr-defined]
     for row_id in move_tree.get_children():
         move_tree.delete(row_id)
@@ -2516,8 +2913,9 @@ def _render_option_strategy_cards(
         cards,
         columns=4,
         prominent_indexes={0},
-        card_height=148,
-        prominent_height=164,
+        card_height=156,
+        prominent_height=172,
+        adaptive_height=True,
     )
 
 
@@ -2641,7 +3039,15 @@ def _render_greeks(self: tk.Tk, payload: _ResearchPayload | None = None) -> None
         source = active.source_summary if active is not None else "Mixed"
         active_label = _greek_contract_short_label(active) if active is not None else "ATM contract"
         frame.status_var.set(f"{len(summary.rows)} contracts loaded. Active Greeks: {active_label}. Source: {source}.")  # type: ignore[attr-defined]
-        metric_grid(frame.cards, _greek_metric_cards(active), columns=5, prominent_indexes={0}, card_height=118, prominent_height=118)  # type: ignore[attr-defined]
+        metric_grid(
+            frame.cards,
+            _greek_metric_cards(active),
+            columns=4,
+            prominent_indexes={0},
+            card_height=136,
+            prominent_height=144,
+            adaptive_height=True,
+        )  # type: ignore[attr-defined]
     _render_greek_table(frame, summary)
     _render_greek_interpretation(frame, summary)
     frame.detail_text._greek_summary = summary  # type: ignore[attr-defined]
@@ -3388,9 +3794,10 @@ def _render_earnings_news(self: tk.Tk, payload: _ResearchPayload) -> None:
             _synthetic_badge("Profitability", summary.profitability_trend, _trend_status(summary.profitability_trend), "Net income/EPS/margin read from loaded facts and snippets."),
         ],
         columns=3,
-        card_height=136,
-        prominent_height=146,
+        card_height=144,
+        prominent_height=156,
         prominent_indexes={0, 1},
+        adaptive_height=True,
     )
     clear_children(frame.checks)  # type: ignore[attr-defined]
     Checklist(frame.checks, "Plain-English Interpretation", summary.interpretation).grid(row=0, column=0, sticky="ew", padx=(0, 8))  # type: ignore[attr-defined]
@@ -3411,9 +3818,10 @@ def _render_etf_documents(self: tk.Tk, payload: _ResearchPayload) -> None:
         frame.cards,  # type: ignore[attr-defined]
         [_badge_from_etf_card(card) for card in readout.document_cards],
         columns=3,
-        card_height=124,
-        prominent_height=132,
+        card_height=136,
+        prominent_height=146,
         prominent_indexes={0},
+        adaptive_height=True,
     )
     clear_children(frame.checks)  # type: ignore[attr-defined]
     frame.checks.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
@@ -3436,9 +3844,10 @@ def _render_foreign_issuer_documents(self: tk.Tk, payload: _ResearchPayload) -> 
         frame.cards,  # type: ignore[attr-defined]
         [_badge_from_foreign_card(card) for card in foreign_issuer_earnings_cards(snapshot)],
         columns=2,
-        card_height=128,
-        prominent_height=136,
+        card_height=136,
+        prominent_height=146,
         prominent_indexes={0, 1},
+        adaptive_height=True,
     )
     clear_children(frame.checks)  # type: ignore[attr-defined]
     frame.checks.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
@@ -3475,9 +3884,10 @@ def _render_fundamentals(self: tk.Tk, payload: _ResearchPayload) -> None:
             *factor_cards,
         ],
         columns=3,
-        card_height=142,
-        prominent_height=154,
+        card_height=150,
+        prominent_height=164,
         prominent_indexes={0, 1},
+        adaptive_height=True,
     )
     clear_children(frame.checks)  # type: ignore[attr-defined]
     frame.checks.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
@@ -3507,9 +3917,10 @@ def _render_foreign_issuer_fundamentals(self: tk.Tk, payload: _ResearchPayload) 
         frame.cards,  # type: ignore[attr-defined]
         [_badge_from_foreign_card(card) for card in foreign_issuer_fundamental_cards(snapshot)],
         columns=2,
-        card_height=128,
-        prominent_height=136,
+        card_height=136,
+        prominent_height=146,
         prominent_indexes={0, 1},
+        adaptive_height=True,
     )
     clear_children(frame.checks)  # type: ignore[attr-defined]
     frame.checks.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
@@ -3530,9 +3941,10 @@ def _render_etf_fundamentals(self: tk.Tk, payload: _ResearchPayload) -> None:
         frame.cards,  # type: ignore[attr-defined]
         [_badge_from_etf_card(card) for card in readout.structure_cards],
         columns=3,
-        card_height=124,
-        prominent_height=132,
+        card_height=136,
+        prominent_height=146,
         prominent_indexes={0, 7},
+        adaptive_height=True,
     )
     clear_children(frame.checks)  # type: ignore[attr-defined]
     frame.checks.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
@@ -3560,8 +3972,9 @@ def _render_macro(self: tk.Tk, payload: _ResearchPayload) -> None:
             for readout in readouts
         ],
         columns=3,
-        card_height=118,
-        prominent_height=118,
+        card_height=136,
+        prominent_height=144,
+        adaptive_height=True,
     )
     clear_children(frame.why)  # type: ignore[attr-defined]
     why_text = macro_why_it_matters(payload.symbol, None, decision.macro_backdrop.label)
