@@ -5,12 +5,13 @@ from types import SimpleNamespace
 
 from app.analytics.research_workspace_insights import (
     OptionCandidate,
+    combined_current_model_option_scenarios,
     combined_option_scenarios,
     covered_contract_capacity,
     option_expiration_payoff,
     suggest_option_candidates,
 )
-from app.analytics.stock_research import AdvancedIndicatorSnapshot, PortfolioSymbolContext
+from app.analytics.stock_research import AdvancedIndicatorSnapshot, GeneratedStockPosition, PortfolioSymbolContext
 from app.ui.schwab_research_workspace_extension import _normalized_candidate_bar_rows
 
 
@@ -94,6 +95,22 @@ def _chain_row(strike: float = 11.0, premium: float = 2.0) -> dict:
     }
 
 
+def _weak_call_chain_row() -> dict:
+    row = _chain_row(strike=10.5, premium=2.0)
+    row["call"].update(
+        {
+            "bid": 0.05,
+            "ask": 3.95,
+            "mark": 2.0,
+            "openInterest": 1,
+            "totalVolume": 0,
+            "delta": 0.05,
+            "impliedVolatility": 1.20,
+        }
+    )
+    return row
+
+
 def _candidate(*, option_type: str = "call", covered: bool = False, contracts: int = 1, strike: float = 12.0, premium: float = 2.0) -> OptionCandidate:
     return OptionCandidate(
         key="candidate",
@@ -152,6 +169,24 @@ class OptionScenarioMathTests(unittest.TestCase):
         candidates = suggest_option_candidates([_chain_row()], _indicators(), _context(quantity=0, is_held=False))
         self.assertFalse(any(candidate.group == "Covered Call" for candidate in candidates))
 
+    def test_wait_candidate_does_not_receive_fake_option_subscores(self) -> None:
+        candidates = suggest_option_candidates([_chain_row()], _indicators(), _context(quantity=0, is_held=False))
+        wait = next(candidate for candidate in candidates if candidate.strategy == "No-trade / wait")
+
+        self.assertEqual(wait.contract_count, 0)
+        self.assertEqual(wait.controlled_shares, 0)
+        self.assertEqual(wait.liquidity_score, 0.0)
+        self.assertEqual(wait.greek_score, 0.0)
+        self.assertEqual(wait.risk_budget_score, 0.0)
+        self.assertIn("not credited with perfect liquidity", " ".join(wait.score_breakdown).lower())
+
+    def test_wait_candidate_explains_when_it_outranks_weak_actionable_contract(self) -> None:
+        candidates = suggest_option_candidates([_weak_call_chain_row()], _indicators(), _context(quantity=0, is_held=False))
+
+        self.assertEqual(candidates[0].strategy, "No-trade / wait")
+        self.assertIn("no actionable option cleared", candidates[0].score_reason.lower())
+        self.assertIn("best actionable candidate", " ".join(candidates[0].score_breakdown).lower())
+
     def test_expiration_payoff_formulas(self) -> None:
         short_call = _candidate(covered=True, strike=12.0, premium=2.0)
         self.assertAlmostEqual(option_expiration_payoff(short_call, 10.0), 200.0)
@@ -162,6 +197,29 @@ class OptionScenarioMathTests(unittest.TestCase):
 
         long_put = _candidate(option_type="put", covered=False, strike=10.0, premium=1.0)
         self.assertAlmostEqual(option_expiration_payoff(long_put, 8.0), 100.0)
+
+    def test_current_model_option_scenarios_show_both_share_bases(self) -> None:
+        candidate = _candidate(option_type="call", strike=10.0, premium=0.5)
+        model_position = GeneratedStockPosition(
+            quantity=25.0,
+            entry_price=10.0,
+            stop_price=9.0,
+            risk_dollars=25.0,
+            notional=250.0,
+            portfolio_weight=0.0025,
+            per_share_risk=1.0,
+            basis="test model target",
+        )
+
+        row = combined_current_model_option_scenarios(candidate, _context(quantity=100), model_position, moves=(0.10,))[0]
+
+        self.assertEqual(row.current_shares, 100.0)
+        self.assertEqual(row.model_shares, 25.0)
+        self.assertAlmostEqual(row.current_stock_pnl, 100.0)
+        self.assertAlmostEqual(row.model_stock_pnl or 0.0, 25.0)
+        self.assertAlmostEqual(row.option_pnl, 50.0)
+        self.assertAlmostEqual(row.current_combined_pnl, 150.0)
+        self.assertAlmostEqual(row.model_combined_pnl or 0.0, 75.0)
 
     def test_normalized_candidate_bar_rows_preserve_signs(self) -> None:
         rows = [

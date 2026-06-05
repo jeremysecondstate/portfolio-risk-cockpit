@@ -1201,36 +1201,36 @@ def _wait_candidate_scoring(
     context: PortfolioSymbolContext | None,
 ) -> dict[str, Any]:
     agreement, _status, _why = indicator_agreement_classification(indicators, macro_label)
-    score = 40.0
+    score = 34.0
     if agreement == "Mixed":
-        score += 24.0
+        score += 18.0
     if agreement == "Bearish" and not (context and context.is_held):
-        score += 10.0
-    if "headwind" in macro_label.lower():
-        score += 9.0
-    if earnings_soon:
         score += 8.0
+    if "headwind" in macro_label.lower():
+        score += 8.0
+    if earnings_soon:
+        score += 7.0
     if indicators.volatility == "elevated":
-        score += 6.0
+        score += 5.0
     if agreement == "Bullish" and "tailwind" in macro_label.lower() and not earnings_soon:
         score -= 5.0
     score = max(0.0, min(100.0, score))
     reason = "Wait/no-trade ranks higher when confirmation is mixed, macro is a headwind, or premium risk is not justified."
     breakdown = (
-        f"Technical fit {score:.0f}/100: {agreement.lower()} setup with macro {macro_label.lower()}.",
-        "Liquidity fit 100/100: no spread risk because no contract is selected.",
-        "Greek fit 100/100: no delta/theta/IV exposure is taken.",
-        "Risk-budget fit 100/100: no capital is committed.",
+        f"Wait/no-trade action score {score:.0f}/100: {agreement.lower()} setup with macro {macro_label.lower()}.",
+        "Liquidity fit not scored: no contract is selected, so wait/no-trade is not credited with perfect liquidity.",
+        "Greek fit not scored: no delta/theta/IV exposure is taken, but this is not a perfect option Greek score.",
+        "Risk-budget fit not scored: no capital is committed, but this is not a perfect option risk-budget score.",
         "Move to breakeven: not applicable.",
         "Stock comparison: waiting keeps the stock-plan optional instead of forcing an option trade.",
     )
     return {
         "score": score,
         "score_reason": reason,
-        "liquidity_score": 100.0,
+        "liquidity_score": 0.0,
         "technical_fit_score": score,
-        "greek_score": 100.0,
-        "risk_budget_score": 100.0,
+        "greek_score": 0.0,
+        "risk_budget_score": 0.0,
         "score_breakdown": breakdown,
         "avoid_reason": "",
         "better_than_stock": "Waiting keeps the model stock plan optional until confirmation improves.",
@@ -1270,6 +1270,8 @@ def _wait_candidate(context: PortfolioSymbolContext, underlying: float, agreemen
         score_reason="No-trade is preferred until confirmation improves or premium becomes more attractive.",
         primary_risk="Missing an unconfirmed move.",
         primary_payoff_path="Capital is preserved until a cleaner setup appears.",
+        contract_count=0,
+        controlled_shares=0,
     )
 
 
@@ -1279,20 +1281,26 @@ def _raise_wait_when_options_are_weak(candidates: list[OptionCandidate]) -> list
     if wait is None or not actionable:
         return candidates
     best_actionable = max(actionable, key=lambda item: item.score)
-    if best_actionable.score >= 50.0:
+    if best_actionable.score >= 50.0 and wait.score < best_actionable.score:
         return candidates
-    wait_score = max(wait.score, best_actionable.score + 2.0, 50.0)
+    weak_actionable = best_actionable.score < 50.0
+    wait_score = max(wait.score, best_actionable.score + 2.0, 50.0) if weak_actionable else wait.score
+    reason = (
+        "No actionable option cleared the minimum quality bar, so wait/no-trade ranks first."
+        if weak_actionable
+        else f"Wait/no-trade ranks ahead of the best actionable contract because its action score {wait.score:.0f}/100 exceeds {best_actionable.strategy} at {best_actionable.score:.0f}/100."
+    )
     updated_wait = OptionCandidate(
         **{
             **wait.__dict__,
             "score": min(100.0, wait_score),
             "confidence": "Watch",
-            "score_reason": "No actionable option cleared the minimum quality bar, so wait/no-trade ranks first.",
+            "score_reason": reason,
             "score_breakdown": (
-                f"Technical fit {wait_score:.0f}/100: no loaded contract cleared the minimum quality bar.",
-                "Liquidity fit 100/100: no spread risk because no contract is selected.",
-                "Greek fit 100/100: no delta/theta/IV exposure is taken.",
-                "Risk-budget fit 100/100: no capital is committed.",
+                f"Wait/no-trade action score {wait_score:.0f}/100: {reason}",
+                "Liquidity fit not scored: no contract is selected, so wait/no-trade is not credited with perfect liquidity.",
+                "Greek fit not scored: no delta/theta/IV exposure is taken, but this is not a perfect option Greek score.",
+                "Risk-budget fit not scored: no capital is committed, but this is not a perfect option risk-budget score.",
                 "Move to breakeven: not applicable.",
                 f"Stock comparison: best actionable candidate was {best_actionable.strategy} at {best_actionable.score:.0f}/100.",
             ),

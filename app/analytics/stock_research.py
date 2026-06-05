@@ -267,24 +267,20 @@ def build_planned_stock_context(
     indicators: AdvancedIndicatorSnapshot,
     risk_budget: GeneratedRiskBudget,
 ) -> tuple[PortfolioSymbolContext, GeneratedStockPosition]:
-    """Return actual held exposure, or a generated stock plan for watchlist scenarios."""
-    if context.is_held and context.quantity:
-        stop = _scenario_stop_price(context, indicators)
-        per_share_risk = abs((context.last_price or 0.0) - stop) if stop is not None and context.last_price is not None else None
-        return context, GeneratedStockPosition(
-            quantity=context.quantity,
-            entry_price=context.last_price,
-            stop_price=stop,
-            risk_dollars=risk_budget.amount,
-            notional=abs(context.market_value),
-            portfolio_weight=abs(context.portfolio_weight),
-            per_share_risk=per_share_risk,
-            basis="Current held shares.",
-        )
+    """Return an independent generated stock scenario position.
 
+    The input context remains the source of actual held exposure for callers
+    that need current-vs-model comparisons.
+    """
     entry = context.last_price or indicators.latest_close
     if entry is None or entry <= 0 or risk_budget.amount is None or risk_budget.amount <= 0:
-        return context, GeneratedStockPosition(0.0, entry, None, risk_budget.amount, 0.0, 0.0, None, "Insufficient price or risk budget.")
+        planned = _planned_stock_context(context, quantity=0.0, entry_price=entry, notional=0.0)
+        basis = _stock_plan_basis(
+            context,
+            model_quantity=0.0,
+            reason="Insufficient price or risk budget.",
+        )
+        return planned, GeneratedStockPosition(0.0, entry, None, risk_budget.amount, 0.0, 0.0, None, basis)
 
     stop = _scenario_stop_price(context, indicators)
     if stop is None or stop <= 0 or stop >= entry:
@@ -300,23 +296,17 @@ def build_planned_stock_context(
     cash_sized = max(context.cash_available, 0.0) / entry if entry else 0.0
     quantity = math.floor(max(0.0, min(risk_sized, notional_sized, cash_sized)))
     notional = quantity * entry
-    planned = PortfolioSymbolContext(
-        symbol=context.symbol,
-        is_held=False,
-        quantity=quantity,
-        average_cost=entry if quantity else None,
-        last_price=entry,
-        market_value=notional,
-        portfolio_value=context.portfolio_value,
-        portfolio_weight=notional / max(context.portfolio_value, 0.01),
-        unrealized_pnl=None,
-        day_pnl=None,
-        cash_available=context.cash_available,
-    )
-    basis = (
-        f"Generated watchlist stock plan from {_plain_money(risk_budget.amount)} risk, "
-        f"{_plain_money(per_share_risk)} per-share risk to {_plain_money(stop)}, "
-        f"and {_plain_money(max_notional)} max starter notional."
+    planned = _planned_stock_context(context, quantity=quantity, entry_price=entry, notional=notional)
+    basis = _stock_plan_basis(
+        context,
+        model_quantity=quantity,
+        risk_amount=risk_budget.amount,
+        per_share_risk=per_share_risk,
+        stop_price=stop,
+        risk_sized=risk_sized,
+        notional_sized=notional_sized,
+        cash_sized=cash_sized,
+        max_notional=max_notional,
     )
     position = GeneratedStockPosition(
         quantity=quantity,
@@ -329,6 +319,62 @@ def build_planned_stock_context(
         basis=basis,
     )
     return planned, position
+
+
+def _planned_stock_context(
+    context: PortfolioSymbolContext,
+    *,
+    quantity: float,
+    entry_price: float | None,
+    notional: float,
+) -> PortfolioSymbolContext:
+    return PortfolioSymbolContext(
+        symbol=context.symbol,
+        is_held=bool(context.is_held and quantity > 0),
+        quantity=quantity,
+        average_cost=entry_price if quantity else None,
+        last_price=entry_price,
+        market_value=notional,
+        portfolio_value=context.portfolio_value,
+        portfolio_weight=notional / max(context.portfolio_value, 0.01),
+        unrealized_pnl=None,
+        day_pnl=None,
+        cash_available=context.cash_available,
+    )
+
+
+def _stock_plan_basis(
+    context: PortfolioSymbolContext,
+    *,
+    model_quantity: float,
+    reason: str | None = None,
+    risk_amount: float | None = None,
+    per_share_risk: float | None = None,
+    stop_price: float | None = None,
+    risk_sized: float | None = None,
+    notional_sized: float | None = None,
+    cash_sized: float | None = None,
+    max_notional: float | None = None,
+) -> str:
+    prefix = f"Current actual shares: {_plain_shares(context.quantity)}; model target shares: {_plain_shares(model_quantity)}."
+    if reason:
+        return f"{prefix} {reason}"
+    parts = [
+        prefix,
+        (
+            f"Risk-sized from {_plain_money(risk_amount)} budget / {_plain_money(per_share_risk)} "
+            f"per-share risk to {_plain_money(stop_price)}"
+        ),
+    ]
+    if risk_sized is not None:
+        parts[-1] += f" = {risk_sized:,.2f} shares before caps."
+    else:
+        parts[-1] += "."
+    parts.append(
+        f"Caps: {_plain_money(max_notional)} max notional ({_plain_number(notional_sized)} shares) "
+        f"and cash capacity {_plain_number(cash_sized)} shares."
+    )
+    return " ".join(parts)
 
 
 def build_current_model_scenario_rows(
@@ -430,6 +476,18 @@ def _plain_money(value: float | None) -> str:
         return "--"
     prefix = "-$" if value < 0 else "$"
     return f"{prefix}{abs(value):,.2f}"
+
+
+def _plain_shares(value: float | None) -> str:
+    if value is None:
+        return "-- shares"
+    return f"{float(value):g} shares"
+
+
+def _plain_number(value: float | None) -> str:
+    if value is None:
+        return "--"
+    return f"{float(value):,.2f}"
 
 
 def technical_scenario_basis(context: PortfolioSymbolContext, indicators: AdvancedIndicatorSnapshot) -> str:
