@@ -332,7 +332,7 @@ def _child_tpsl_result_lines(
                 "",
                 "Child TP/SL result: FAILED after parent order was sent.",
                 f"Reason: {child_error}",
-                "Use TP/SL Selected after the parent fill is visible to create the missing protection order.",
+                "Use the perp ticket TP/SL action after the parent fill is visible to create the missing protection order.",
                 "",
             ]
         )

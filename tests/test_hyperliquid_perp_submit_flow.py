@@ -6,7 +6,11 @@ from unittest.mock import Mock, patch
 
 from app.brokers.hyperliquid.trading import HyperliquidOrderTicket
 from app.ui import hyperliquid_submit_flow as flow
-from app.ui.hyperliquid_trading_extension import _submit_cockpit_selected_venue
+from app.ui.hyperliquid_trading_extension import (
+    _matching_tpsl_orders,
+    _submit_cockpit_selected_venue,
+    normalize_hyperliquid_open_order,
+)
 
 
 class _Var:
@@ -46,6 +50,17 @@ class _PerpSubmitApp:
 
     def sync_hyperliquid_account(self) -> None:
         self.sync_calls += 1
+
+
+class _OpenOrdersTable:
+    def __init__(self, orders_by_oid: dict[str, dict[str, object]]) -> None:
+        self._hyperliquid_open_order_by_oid = orders_by_oid
+
+
+class _OpenOrdersApp:
+    def __init__(self, table_orders: dict[str, dict[str, object]]) -> None:
+        self.hyperliquid_open_order_by_oid: dict[str, dict[str, object]] = {}
+        self.hyperliquid_workspace_open_orders_table = _OpenOrdersTable(table_orders)
 
 
 class HyperliquidPerpSubmitFlowTests(TestCase):
@@ -151,6 +166,45 @@ class HyperliquidPerpSubmitFlowTests(TestCase):
         adapter.place_position_tpsl.assert_not_called()
         showerror.assert_called_once()
         self.assertIn("perp live submit blocked", showerror.call_args.args[0])
+
+    def test_position_tpsl_open_order_normalizes_as_reduce_only_trigger(self) -> None:
+        order = normalize_hyperliquid_open_order(
+            {
+                "oid": "123",
+                "coin": "HYPE",
+                "side": "B",
+                "sz": "100",
+                "triggerPx": "72",
+                "orderType": "Stop Market",
+                "isPositionTpsl": True,
+                "tpsl": "sl",
+                "price": "Market",
+            }
+        )
+
+        self.assertTrue(order.reduce_only)
+        self.assertTrue(order.is_trigger)
+        self.assertEqual(order.tpsl_label, "SL")
+
+    def test_matching_tpsl_orders_uses_workspace_table_cache(self) -> None:
+        app = _OpenOrdersApp(
+            {
+                "123": {
+                    "oid": "123",
+                    "coin": "HYPE",
+                    "side": "B",
+                    "sz": "100",
+                    "triggerPx": "72",
+                    "orderType": "Stop Market",
+                    "isPositionTpsl": True,
+                    "tpsl": "sl",
+                }
+            }
+        )
+
+        matches = _matching_tpsl_orders(app, "HYPE")  # type: ignore[arg-type]
+
+        self.assertEqual([order.oid for order in matches], ["123"])
 
 
 if __name__ == "__main__":

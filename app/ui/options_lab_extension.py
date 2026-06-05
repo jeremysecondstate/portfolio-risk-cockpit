@@ -658,6 +658,64 @@ def _open_tpsl_for_selected_hyperliquid_perp_position(self: tk.Tk) -> None:
         messagebox.showinfo("TP/SL unavailable", str(exc))
 
 
+def _open_tpsl_orders_for_selected_hyperliquid_perp_position(
+    self: tk.Tk,
+    account_tabs: ttk.Notebook,
+    orders_shell: ttk.Frame,
+) -> None:
+    try:
+        coin = _selected_hyperliquid_perp_coin_from_workspace(self)
+        if not _target_selected_hyperliquid_perp_position(self):
+            return
+        command = _first_available_command(self, "load_hyperliquid_open_orders")
+        _run_hyperliquid_ticket_action(
+            self,
+            ticket_kind="perp",
+            preview_widget=self.hyperliquid_trading_preview_text,
+            command=command,
+        )
+        _select_hyperliquid_workspace_orders_tab(account_tabs, orders_shell)
+        _select_workspace_tpsl_order_for_coin(self, coin)
+    except Exception as exc:
+        messagebox.showinfo("TP/SL orders unavailable", str(exc))
+
+
+def _select_hyperliquid_workspace_orders_tab(account_tabs: ttk.Notebook, orders_shell: ttk.Frame) -> None:
+    try:
+        account_tabs.select(orders_shell)
+    except tk.TclError:
+        return
+
+
+def _select_workspace_tpsl_order_for_coin(self: tk.Tk, coin: str) -> None:
+    table = getattr(self, "hyperliquid_workspace_open_orders_table", None)
+    if table is None:
+        return
+    try:
+        normalized_coin = normalize_hyperliquid_coin(coin)
+    except ValueError:
+        return
+    columns = tuple(str(column) for column in table["columns"])
+    for row_id in table.get_children():
+        raw_values = table.item(row_id, "values")
+        values = {column: str(raw_values[index]) for index, column in enumerate(columns) if index < len(raw_values)}
+        row_coin = _workspace_ticket_symbol(values.get("coin", ""))
+        try:
+            if normalize_hyperliquid_coin(row_coin) != normalized_coin:
+                continue
+        except ValueError:
+            continue
+        if values.get("tpsl", "").strip().upper() not in {"TP", "SL"}:
+            continue
+        table.selection_set(row_id)
+        table.focus(row_id)
+        table.see(row_id)
+        order_id = values.get("oid", "").strip()
+        if order_id and hasattr(self, "cancel_order_id_var"):
+            self.cancel_order_id_var.set(order_id)
+        return
+
+
 def _open_editor_for_selected_hyperliquid_perp_position(self: tk.Tk) -> None:
     try:
         if not _target_selected_hyperliquid_perp_position(self):
@@ -1459,9 +1517,8 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
     ttk.Button(
         hyperliquid_position_actions,
-        text="TP/SL Selected",
-        command=lambda: _open_tpsl_for_selected_hyperliquid_perp_position(self),
-        style="Accent.TButton",
+        text="TP/SL Orders",
+        command=lambda: _open_tpsl_orders_for_selected_hyperliquid_perp_position(self, account_tabs, orders_shell),
     ).grid(row=0, column=1, sticky="ew", padx=(0, 6))
     ttk.Button(
         hyperliquid_position_actions,

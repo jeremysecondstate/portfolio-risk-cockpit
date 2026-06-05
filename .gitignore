@@ -29,3 +29,7 @@ app/data/*cache*.json
 .DS_Store
 Thumbs.db
 *.jsonl
+
+# Schwab portal wrapper responses may contain app credentials/secrets
+schwab-wrapper-*.json
+**/schwab-wrapper-*.json

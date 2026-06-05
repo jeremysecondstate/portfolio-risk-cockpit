@@ -1006,8 +1006,8 @@ def normalize_hyperliquid_open_order(raw_order: dict[str, Any] | None) -> Hyperl
     coin = str(order.get("coin") or "").strip()
     context = "Spot" if coin.startswith("@") or "/" in coin else "Perp"
     side = _order_side_for_edit(order, "buy")
-    reduce_only = _as_bool(order.get("reduceOnly", order.get("reduce_only", False)))
-    is_trigger = _as_bool(order.get("isTrigger", False)) or _optional_order_float(order.get("triggerPx")) is not None
+    reduce_only = _as_bool(order.get("reduceOnly", order.get("reduce_only", False))) or _is_position_tpsl_order(order)
+    is_trigger = _is_position_tpsl_order(order) or _as_bool(order.get("isTrigger", False)) or _optional_order_float(order.get("triggerPx")) is not None
     order_type = str(order.get("orderType") or order.get("type") or ("Stop Market" if is_trigger else "Limit")).strip() or "Limit"
     trigger_price = _optional_order_float(order.get("triggerPx"))
     is_market_trigger = is_trigger and ("market" in order_type.lower() or _price_is_market(order))
@@ -1058,6 +1058,10 @@ def _as_bool(value: Any) -> bool:
     return text in {"1", "true", "yes", "y"}
 
 
+def _is_position_tpsl_order(order: dict[str, Any]) -> bool:
+    return _as_bool(order.get("isPositionTpsl", order.get("is_position_tpsl", False)))
+
+
 def _optional_order_float(value: Any) -> float | None:
     if value in (None, "", "--"):
         return None
@@ -1088,7 +1092,7 @@ def _trigger_is_price_above(order: dict[str, Any]) -> bool:
     if "below" in condition:
         return False
     side = _order_side_for_edit(order, "buy")
-    reduce_only = _as_bool(order.get("reduceOnly", order.get("reduce_only", False)))
+    reduce_only = _as_bool(order.get("reduceOnly", order.get("reduce_only", False))) or _is_position_tpsl_order(order)
     return side == "buy" and reduce_only
 
 
@@ -1128,7 +1132,7 @@ def _order_value_label(order: dict[str, Any], size: float, price: float, close_p
 
 
 def _tpsl_label(order: dict[str, Any], trigger_kind: str, is_trigger: bool) -> str:
-    if _as_bool(order.get("isPositionTpsl", False)):
+    if _is_position_tpsl_order(order):
         return "TP" if trigger_kind == "tp" else "SL"
     if is_trigger:
         return "TP" if trigger_kind == "tp" else "SL"
@@ -2146,11 +2150,20 @@ def _risk_reward(reward_net: float, stop_net: float) -> str:
 
 def _matching_tpsl_orders(self: tk.Tk, coin: str) -> list[HyperliquidOpenOrder]:
     normalized_coin = normalize_hyperliquid_coin(coin)
-    orders = getattr(self, "hyperliquid_open_order_by_oid", {})
+    orders = dict(getattr(self, "hyperliquid_open_order_by_oid", {}) or {})
+    table = getattr(self, "hyperliquid_workspace_open_orders_table", None)
+    table_orders = getattr(table, "_hyperliquid_open_order_by_oid", {}) if table is not None else {}
+    if isinstance(table_orders, dict):
+        for oid, order in table_orders.items():
+            orders.setdefault(str(oid), order)
     matches: list[HyperliquidOpenOrder] = []
     for order in orders.values():
         normalized = normalize_hyperliquid_open_order(order)
-        if normalize_hyperliquid_coin(normalized.coin) == normalized_coin and normalized.is_trigger and normalized.reduce_only:
+        try:
+            order_coin = normalize_hyperliquid_coin(normalized.coin)
+        except ValueError:
+            continue
+        if order_coin == normalized_coin and normalized.is_trigger and normalized.reduce_only:
             matches.append(normalized)
     return matches
 
