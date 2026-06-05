@@ -25,6 +25,16 @@ METRIC_CARD_PAD_BOTTOM = 12
 METRIC_CARD_GAP = 10
 DEFAULT_METRIC_CARD_HEIGHT = 104
 DEFAULT_PROMINENT_CARD_HEIGHT = 116
+COMPACT_CARD_LABEL_LIMIT = 44
+COMPACT_CARD_WHY_LIMIT = 102
+COMPACT_VALUE_LIMIT = 112
+
+
+def _compact_text(value: object, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
 
 
 def clear_children(parent: tk.Widget) -> None:
@@ -90,11 +100,20 @@ class MetricCard(tk.Frame):
         self.rowconfigure(2, weight=1, minsize=max(38, height - 70) if adaptive_height else 0)
         tk.Frame(self, bg=colors["bar"], width=5).grid(row=0, column=0, rowspan=3, sticky="nsw")
         title_font = ("Segoe UI", 8, "bold")
-        label_font = ("Segoe UI", 16 if prominent else 13, "bold")
+        label_font = ("Segoe UI", 15 if prominent else 12, "bold")
+        body_font = ("Segoe UI", 9 if adaptive_height else 8)
+        label_text = readout.label if adaptive_height else _compact_text(
+            readout.label,
+            COMPACT_CARD_LABEL_LIMIT + (12 if prominent else 0),
+        )
+        why_text = readout.why if adaptive_height else _compact_text(
+            readout.why,
+            COMPACT_CARD_WHY_LIMIT + (18 if prominent else 0),
+        )
         tk.Label(self, text=readout.title.upper(), bg=colors["bg"], fg=MUTED, font=title_font, anchor="w").grid(row=0, column=1, sticky="ew", padx=METRIC_CARD_PAD_X, pady=(METRIC_CARD_PAD_TOP, 0))
-        self._label = tk.Label(self, text=readout.label, bg=colors["bg"], fg=colors["fg"], font=label_font, anchor="w", justify=tk.LEFT, wraplength=width - (METRIC_CARD_PAD_X * 2))
+        self._label = tk.Label(self, text=label_text, bg=colors["bg"], fg=colors["fg"], font=label_font, anchor="w", justify=tk.LEFT, wraplength=width - (METRIC_CARD_PAD_X * 2))
         self._label.grid(row=1, column=1, sticky="ew", padx=METRIC_CARD_PAD_X, pady=(2, 0))
-        self._why_label = tk.Label(self, text=readout.why, bg=colors["bg"], fg=TEXT, font=("Segoe UI", 9), wraplength=width - (METRIC_CARD_PAD_X * 2), justify=tk.LEFT, anchor="nw")
+        self._why_label = tk.Label(self, text=why_text, bg=colors["bg"], fg=TEXT, font=body_font, wraplength=width - (METRIC_CARD_PAD_X * 2), justify=tk.LEFT, anchor="nw")
         self._why_label.grid(row=2, column=1, sticky="nsew", padx=METRIC_CARD_PAD_X, pady=(4, METRIC_CARD_PAD_BOTTOM))
         self.bind("<Configure>", self._on_resize, add="+")
 
@@ -217,6 +236,9 @@ def metric_grid(
 ) -> None:
     clear_children(parent)
     prominent_indexes = prominent_indexes or set()
+    if not adaptive_height and columns >= 4:
+        card_height = min(card_height, DEFAULT_METRIC_CARD_HEIGHT)
+        prominent_height = min(prominent_height, DEFAULT_PROMINENT_CARD_HEIGHT)
     for column in range(columns):
         parent.columnconfigure(column, weight=1, uniform="metric_cards")
     row_count = max(1, (len(readouts) + max(columns, 1) - 1) // max(columns, 1))
@@ -243,7 +265,7 @@ def labeled_value_grid(parent: tk.Widget, rows: dict[str, str], *, columns: int 
         cell.grid(row=index // columns, column=index % columns, sticky="nsew", padx=(0 if index % columns == 0 else 8, 0), pady=(0, 8))
         cell.columnconfigure(0, weight=1)
         tk.Label(cell, text=label.upper(), bg="#ffffff", fg=MUTED, font=("Segoe UI", 8, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=10, pady=(7, 0))
-        tk.Label(cell, text=value, bg="#ffffff", fg=colors["fg"], font=("Segoe UI", 10, "bold"), anchor="w", wraplength=260, justify=tk.LEFT).grid(row=1, column=0, sticky="ew", padx=10, pady=(3, 8))
+        tk.Label(cell, text=_compact_text(value, COMPACT_VALUE_LIMIT), bg="#ffffff", fg=colors["fg"], font=("Segoe UI", 9, "bold"), anchor="w", wraplength=260, justify=tk.LEFT).grid(row=1, column=0, sticky="ew", padx=10, pady=(3, 8))
 
 
 def freshness_badges(parent: tk.Widget, statuses: list) -> None:

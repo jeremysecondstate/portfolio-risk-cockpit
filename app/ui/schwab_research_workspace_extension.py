@@ -163,6 +163,8 @@ READABLE_TREE_ROW_HEIGHT = 28
 FOCUS_WINDOW_GEOMETRY = "1220x840"
 FOCUS_WINDOW_MIN_SIZE = (860, 600)
 SUMMARY_PANE_MIN = 130
+SUMMARY_COLLAPSED_HEIGHT = 158
+SUMMARY_EXPANDED_HEIGHT = 286
 TAB_PANE_MIN = 440
 DETACH_DRAG_PIXELS = 42
 
@@ -373,18 +375,51 @@ def _toggle_research_summary(self: tk.Tk) -> None:
 
 def _apply_research_summary_visibility(self: tk.Tk) -> None:
     expanded = bool(getattr(self, "schwab_research_summary_expanded", tk.BooleanVar(value=False)).get())
-    _set_button_text(getattr(self, "schwab_research_summary_button", None), "Collapse Summary" if expanded else "Expand Summary")
+    _set_button_text(
+        getattr(self, "schwab_research_summary_button", None),
+        "Collapse Summary" if expanded else "Expand Summary",
+    )
+
+    # Keep the top scorecard a clean summary band. The old lower strip/meters
+    # are the source of the half-hidden content under the notebook boundary.
+    # Full details remain available in Overview / popouts.
     for widget_name in ("schwab_research_top_strip", "schwab_research_summary_meters"):
         widget = getattr(self, widget_name, None)
         if widget is None:
             continue
         try:
-            if expanded:
-                widget.grid()
-            else:
-                widget.grid_remove()
+            widget.grid_remove()
         except tk.TclError:
             continue
+
+    _schedule_research_summary_resize(self, expanded=expanded)
+
+
+def _schedule_research_summary_resize(self: tk.Tk, *, expanded: bool) -> None:
+    window = getattr(self, "schwab_research_window", None) or self
+    try:
+        window.after_idle(lambda: _resize_research_summary_pane(self, expanded=expanded))
+    except tk.TclError:
+        pass
+
+
+def _resize_research_summary_pane(self: tk.Tk, *, expanded: bool) -> None:
+    vertical = getattr(self, "schwab_research_vertical_paned", None)
+    if vertical is None:
+        return
+    try:
+        vertical.update_idletasks()
+        panes = vertical.panes()
+        summary_widget = vertical.nametowidget(panes[0]) if panes else None
+        requested = summary_widget.winfo_reqheight() + 6 if summary_widget is not None else 0
+
+        target = SUMMARY_EXPANDED_HEIGHT if expanded else SUMMARY_COLLAPSED_HEIGHT
+        desired = max(target, requested if expanded else min(requested, target))
+        desired = min(desired, 330 if expanded else 176)
+
+        vertical.sash_place(0, 0, int(desired))
+    except (tk.TclError, IndexError, ValueError):
+        return
 
 
 def _set_button_text(button: Any, text: str) -> None:
@@ -2379,8 +2414,8 @@ def _render_at_glance(self: tk.Tk, payload: _ResearchPayload) -> None:
         ]
         columns = 4
         prominent = {0, 2, 7}
-        card_height = 116
-        prominent_height = 124
+        card_height = 104
+        prominent_height = 112
     else:
         cards = [
             technical_read,
@@ -2390,8 +2425,8 @@ def _render_at_glance(self: tk.Tk, payload: _ResearchPayload) -> None:
         ]
         columns = 4
         prominent = {1, 3}
-        card_height = 108
-        prominent_height = 112
+        card_height = 96
+        prominent_height = 104
     metric_grid(
         self.schwab_research_glance_cards,
         cards,
@@ -2414,6 +2449,7 @@ def _render_at_glance(self: tk.Tk, payload: _ResearchPayload) -> None:
     self.schwab_research_bull_bear_meter.set_score(technical_read.score, mode="direction", label=f"Technical: {technical_read.label} ({technical_read.score:.0f})")
     self.schwab_research_risk_meter.set_score(decision.risk_score, mode="risk", label=f"Risk Heat: {risk_heat_label(decision.risk_score)} ({decision.risk_score:.0f}/100)")
     _apply_research_summary_visibility(self)
+    _schedule_research_summary_resize(self, expanded=expanded)
     _refresh_summary_tearout(self, payload)
 
 
