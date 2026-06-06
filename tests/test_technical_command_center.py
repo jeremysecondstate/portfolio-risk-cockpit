@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+
+from app.analytics.capital_structure_pressure import (
+    CapitalStructureFilingText,
+    scan_capital_structure_filings,
+    unknown_capital_structure_report,
+)
 
 from app.analytics.technical_analysis import (
     Candle,
@@ -23,6 +29,22 @@ from app.analytics.technical_analysis import (
     volume_pressure_score,
     vwap,
 )
+
+
+AS_OF = date(2026, 6, 4)
+
+
+def _capital_report(*texts: str, form: str = "8-K"):
+    filings = [
+        CapitalStructureFilingText(
+            form=form,
+            filing_date="2026-04-12",
+            source_url=f"https://www.sec.gov/test-capital-{index}.htm",
+            text=text,
+        )
+        for index, text in enumerate(texts)
+    ]
+    return scan_capital_structure_filings("TST", company_name="Test Corp", filings=filings, as_of=AS_OF)
 
 
 def _market_ms(year: int, month: int, day: int, hour: int, minute: int) -> int:
@@ -422,6 +444,113 @@ class TechnicalCommandCenterTests(unittest.TestCase):
         self.assertEqual(classification.timing, "confirmed")
         self.assertEqual(classification.action_quality, "good_entry")
         self.assertIsNotNone(classification.confirmation_level)
+
+    def test_missing_parsed_capital_terms_leave_scoring_stable(self) -> None:
+        candles = {
+            "daily_1y": _trend_candles(),
+            "setup_30m": _range_breakout_candles(),
+            "timing_5m": _range_breakout_candles(90, base=105.0, breakout=112.0),
+        }
+        ticket = TechnicalTicket(side="buy", quantity=10, entry_price=112.0, stop_price=108.0, portfolio_value=100_000)
+        baseline = build_technical_command_center_report("TST", candles, ticket=ticket)
+        no_terms = build_technical_command_center_report(
+            "TST",
+            candles,
+            ticket=ticket,
+            capital_structure_pressure=_capital_report("The company filed a routine update with no security terms."),
+        )
+        unknown = build_technical_command_center_report(
+            "TST",
+            candles,
+            ticket=ticket,
+            capital_structure_pressure=unknown_capital_structure_report("TST", warnings=["offline"]),
+        )
+
+        self.assertIsNone(no_terms.capital_structure_indicator)
+        self.assertIsNone(unknown.capital_structure_indicator)
+        self.assertNotIn("Capital Structure / Supply", no_terms.scores)
+        self.assertEqual(no_terms.best_action, baseline.best_action)
+        self.assertAlmostEqual(no_terms.overall_score, baseline.overall_score)
+
+    def test_capital_indicator_warns_on_active_atm_near_supply_without_confirmation(self) -> None:
+        rows = _chop_candles(111, base=100.0, amplitude=1.0)
+        latest = rows[-1].close
+        capital = _capital_report(
+            f"Under an equity distribution agreement, we may sell up to $75,000,000 of common stock in an at-the-market offering program. "
+            f"The Common Warrants have an exercise price of ${latest:.2f} per share."
+        )
+        report = build_technical_command_center_report(
+            "TST",
+            {"daily_1y": rows, "setup_30m": rows, "timing_5m": rows},
+            capital_structure_pressure=capital,
+        )
+
+        indicator = report.capital_structure_indicator
+        self.assertIsNotNone(indicator)
+        assert indicator is not None
+        self.assertEqual(indicator.read, "rally_fade_risk")
+        self.assertIn("Capital Structure / Supply", report.scores)
+        self.assertEqual(report.best_action, "Avoid chase")
+        self.assertTrue(any("rally-fade risk" in warning for warning in indicator.warnings))
+
+    def test_capital_indicator_uses_warrant_breakout_as_supply_absorption_input(self) -> None:
+        rows = _range_breakout_candles(100, base=105.0, breakout=112.0)
+        capital = _capital_report(
+            "The Common Warrants are exercisable for 1,000,000 shares of common stock at an exercise price of $111.50 per share."
+        )
+        report = build_technical_command_center_report(
+            "TST",
+            {"daily_1y": _trend_candles(), "setup_30m": rows, "timing_5m": rows},
+            ticket=TechnicalTicket(side="buy", quantity=10, entry_price=112.0, stop_price=108.0, portfolio_value=100_000),
+            capital_structure_pressure=capital,
+        )
+
+        indicator = report.capital_structure_indicator
+        self.assertIsNotNone(indicator)
+        assert indicator is not None
+        self.assertEqual(indicator.read, "supply_absorption")
+        self.assertEqual(report.best_action, "Watch for absorption")
+        self.assertTrue(any("Watch for absorption" in line for line in report.plain_english_plan))
+
+    def test_ads_structure_lowers_confidence_without_breaking_analysis(self) -> None:
+        candles = {
+            "daily_1y": _trend_candles(),
+            "setup_30m": _range_breakout_candles(),
+            "timing_5m": _range_breakout_candles(90, base=105.0, breakout=112.0),
+        }
+        benchmarks = {
+            "SPY": _trend_candles(start=400.0, step=0.10),
+            "QQQ": _trend_candles(start=350.0, step=0.08),
+        }
+        baseline = build_technical_command_center_report("TST", candles, benchmark_candles=benchmarks)
+        capital = _capital_report(
+            "We are a foreign private issuer. Each ADS represents two Class A ordinary shares. "
+            "ADS holders may instruct the depositary to vote the ordinary shares."
+        )
+        report = build_technical_command_center_report("TST", candles, benchmark_candles=benchmarks, capital_structure_pressure=capital)
+
+        self.assertEqual(baseline.confidence, "High")
+        self.assertEqual(report.confidence, "Medium")
+        self.assertIsNotNone(report.capital_structure_indicator)
+        assert report.capital_structure_indicator is not None
+        self.assertEqual(report.capital_structure_indicator.read, "verification_needed")
+        self.assertLess(report.capital_structure_indicator.foreign_issuer_confidence_modifier, 0)
+
+    def test_option_contract_exposure_mismatch_becomes_capital_indicator_warning(self) -> None:
+        rows = _range_breakout_candles(100, base=105.0, breakout=112.0)
+        report = build_technical_command_center_report(
+            "TST",
+            {"daily_1y": _trend_candles(), "setup_30m": rows, "timing_5m": rows},
+            ticket=TechnicalTicket(side="buy", quantity=4, entry_price=112.0, stop_price=108.0, portfolio_value=100_000, option_contracts=1),
+            capital_structure_pressure=_capital_report("The company filed a routine update with no security terms."),
+        )
+
+        indicator = report.capital_structure_indicator
+        self.assertIsNotNone(indicator)
+        assert indicator is not None
+        self.assertEqual(indicator.read, "option_size_mismatch")
+        self.assertGreaterEqual(indicator.option_exposure_mismatch_score, 75)
+        self.assertTrue(any("Option exposure mismatch" in warning for warning in indicator.warnings))
 
     def test_setup_classifies_bullish_daily_pullback_with_weak_intraday_timing(self) -> None:
         report = build_technical_command_center_report(

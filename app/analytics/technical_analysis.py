@@ -147,6 +147,27 @@ class TechnicalSetupClassification:
 
 
 @dataclass(frozen=True)
+class CapitalStructureIndicatorRead:
+    technical_score: float
+    read: str
+    supply_overhang_score: float
+    dilution_pressure_score: float
+    warrant_conversion_proximity_score: float
+    offering_activity_score: float
+    float_quality_score: float
+    foreign_issuer_confidence_modifier: float
+    option_exposure_mismatch_score: float
+    chase_risk_score: float
+    nearest_supply_level: float | None
+    nearest_supply_level_label: str | None
+    nearest_supply_level_distance_percent: float | None
+    source_count: int
+    explanation_lines: list[str]
+    warnings: list[str]
+    recommendation_lines: list[str]
+
+
+@dataclass(frozen=True)
 class RelativeStrengthRead:
     benchmark: str
     return_1: float | None
@@ -236,6 +257,8 @@ class TechnicalTicket:
     entry_price: float | None = None
     stop_price: float | None = None
     portfolio_value: float | None = None
+    option_contracts: float | None = None
+    option_contract_multiplier: int = 100
 
 
 @dataclass(frozen=True)
@@ -318,6 +341,7 @@ class TechnicalCommandCenterReport:
     plain_english_plan: list[str]
     prc_indexes: dict[str, PrcIndexPrice] = field(default_factory=dict)
     capital_structure_pressure: CapitalStructurePressureReport | None = None
+    capital_structure_indicator: CapitalStructureIndicatorRead | None = None
     setup_classification: TechnicalSetupClassification = field(
         default_factory=lambda: TechnicalSetupClassification(
             regime="unknown",
@@ -522,6 +546,7 @@ def build_technical_command_center_report(
         report_warnings.append("Benchmark relative-strength data unavailable; PRC excludes relative-strength adjustment.")
     if quote_snapshot is not None:
         report_warnings.extend(quote_snapshot.data_quality_warnings)
+    active_ticket = ticket or TechnicalTicket()
     relative_strength_score = prc_relative_strength_score(benchmark_reads)
     prc_indexes = build_prc_index_prices(
         clean_symbol,
@@ -529,28 +554,40 @@ def build_technical_command_center_report(
         quote_snapshot=quote_snapshot,
         relative_strength_score=relative_strength_score,
         benchmark_data_available=any(read.verdict != "unknown" for read in benchmark_reads),
-        ticket=ticket or TechnicalTicket(),
+        ticket=active_ticket,
     )
-    ticket_check = build_ticket_check(snapshots, ticket or TechnicalTicket())
+    ticket_check = build_ticket_check(snapshots, active_ticket)
     setup_classification = build_technical_setup_classification(snapshots, ticket_check=ticket_check)
-    scores = score_command_center(snapshots, benchmark_reads, ticket_check)
-    overall_score = _weighted_score(
-        scores,
-        {
-            "Trend": 0.20,
-            "Momentum": 0.16,
-            "Volume": 0.12,
-            "Volatility/Risk": 0.14,
-            "Relative Strength": 0.14,
-            "Alignment": 0.12,
-            "Ticket Quality": 0.12,
-        },
+    capital_structure_indicator = build_capital_structure_indicator_read(
+        capital_structure_pressure,
+        snapshots,
+        ticket=active_ticket,
+        prc_indexes=prc_indexes,
     )
+    scores = score_command_center(snapshots, benchmark_reads, ticket_check, capital_structure_indicator=capital_structure_indicator)
+    score_weights = {
+        "Trend": 0.20,
+        "Momentum": 0.16,
+        "Volume": 0.12,
+        "Volatility/Risk": 0.14,
+        "Relative Strength": 0.14,
+        "Alignment": 0.12,
+        "Ticket Quality": 0.12,
+    }
+    if capital_structure_indicator is not None:
+        score_weights["Capital Structure / Supply"] = 0.10
+    overall_score = _weighted_score(scores, score_weights)
     overall_read = _overall_read(overall_score, scores)
-    confidence = _confidence_label(snapshots, benchmark_reads, report_warnings)
-    best_action = _best_action(overall_read, snapshots, ticket_check)
+    confidence = _confidence_label(snapshots, benchmark_reads, report_warnings, capital_structure_indicator=capital_structure_indicator)
+    best_action = _best_action(overall_read, snapshots, ticket_check, capital_structure_indicator=capital_structure_indicator)
     key_triggers = _build_action_triggers(snapshots)
-    plain_english_plan = _plain_english_plan(overall_read, snapshots, ticket_check, key_triggers)
+    plain_english_plan = _plain_english_plan(
+        overall_read,
+        snapshots,
+        ticket_check,
+        key_triggers,
+        capital_structure_indicator=capital_structure_indicator,
+    )
 
     return TechnicalCommandCenterReport(
         symbol=clean_symbol,
@@ -567,6 +604,7 @@ def build_technical_command_center_report(
         plain_english_plan=plain_english_plan,
         prc_indexes=prc_indexes,
         capital_structure_pressure=capital_structure_pressure,
+        capital_structure_indicator=capital_structure_indicator,
         setup_classification=setup_classification,
     )
 
@@ -1388,6 +1426,8 @@ def score_command_center(
     snapshots: dict[str, TimeframeTechnicalSnapshot],
     benchmark_reads: list[RelativeStrengthRead],
     ticket_check: TicketCheck,
+    *,
+    capital_structure_indicator: CapitalStructureIndicatorRead | None = None,
 ) -> dict[str, ScoreComponent]:
     daily = _preferred_snapshot(snapshots, "regime")
     timing = _preferred_snapshot(snapshots, "timing")
@@ -1398,7 +1438,7 @@ def score_command_center(
     risk = _average_component("Volatility/Risk", [snapshot.scores.get("Volatility/Risk") for snapshot in all_snapshots])
     relative_strength = score_relative_strength(benchmark_reads)
     alignment = score_alignment(daily, timing)
-    return {
+    scores = {
         "Trend": trend,
         "Momentum": momentum,
         "Volume": volume_score,
@@ -1407,6 +1447,345 @@ def score_command_center(
         "Alignment": alignment,
         "Ticket Quality": ticket_check.score,
     }
+    if capital_structure_indicator is not None:
+        scores["Capital Structure / Supply"] = ScoreComponent(
+            "Capital Structure / Supply",
+            capital_structure_indicator.technical_score,
+            _capital_structure_score_reason(capital_structure_indicator),
+        )
+    return scores
+
+
+def build_capital_structure_indicator_read(
+    report: CapitalStructurePressureReport | None,
+    snapshots: dict[str, TimeframeTechnicalSnapshot],
+    *,
+    ticket: TechnicalTicket | None = None,
+    prc_indexes: dict[str, PrcIndexPrice] | None = None,
+) -> CapitalStructureIndicatorRead | None:
+    if report is None or report.read == "Unknown":
+        return None
+
+    parsed_count = _capital_structure_parsed_term_count(report)
+    option_mismatch_score, option_lines, option_warnings = _option_exposure_mismatch_read(ticket)
+    if parsed_count == 0 and not report.possible_supply_levels and option_mismatch_score <= 0:
+        return None
+
+    parsed = report.parsed_terms
+    active_snapshot = _preferred_snapshot(snapshots, "timing") or _preferred_snapshot(snapshots, "setup") or _preferred_snapshot(snapshots, "regime")
+    supply_overhang_score = _clamp_score(report.supply_overhang_score)
+    dilution_pressure_score = _capital_structure_dilution_pressure_score(report)
+    offering_activity_score = _capital_structure_offering_activity_score(report)
+    float_quality_score = _capital_structure_float_quality_score(report)
+    foreign_modifier = -12.0 if parsed.ads_adr_structures else 0.0
+    (
+        proximity_score,
+        nearest_level,
+        nearest_level_label,
+        nearest_level_distance,
+        proximity_lines,
+        proximity_warnings,
+        supply_absorption,
+    ) = _capital_structure_supply_level_proximity(report, active_snapshot, prc_indexes=prc_indexes or {})
+    weak_confirmation = active_snapshot is not None and not _volume_confirms_up(active_snapshot)
+    extended = active_snapshot is not None and active_snapshot.vwap_distance_percent is not None and active_snapshot.vwap_distance_percent > 4.0
+    chase_risk_score = max(
+        proximity_score + (15 if weak_confirmation and proximity_score >= 35 else 0),
+        offering_activity_score + (10 if weak_confirmation or extended else 0),
+        dilution_pressure_score + (8 if weak_confirmation else 0),
+        option_mismatch_score,
+    )
+    chase_risk_score = _clamp_score(chase_risk_score)
+    risk_pressure = _clamp_score(
+        (supply_overhang_score * 0.28)
+        + (dilution_pressure_score * 0.18)
+        + (proximity_score * 0.22)
+        + (offering_activity_score * 0.14)
+        + ((100.0 - float_quality_score) * 0.10)
+        + (option_mismatch_score * 0.14)
+        + abs(foreign_modifier)
+    )
+    technical_score = _clamp_score(100.0 - risk_pressure)
+
+    source_labels = _capital_structure_source_labels(report)
+    explanation_lines = [
+        f"Supply overhang risk {supply_overhang_score:.0f}/100 comes from the filing pressure scan.",
+        f"Dilution pressure risk {dilution_pressure_score:.0f}/100 reflects parsed preferred, convertible, offering, and dilution-warning terms.",
+        f"Offering activity risk {offering_activity_score:.0f}/100 reflects parsed ATM, shelf, resale, and offering programs.",
+        f"Float quality score {float_quality_score:.0f}/100 reflects parsed share-class and ADS/ADR complexity.",
+    ]
+    if source_labels:
+        explanation_lines.append(f"Source-backed filing terms came from: {', '.join(source_labels[:4])}.")
+    explanation_lines.extend(proximity_lines)
+    explanation_lines.extend(option_lines)
+    if foreign_modifier < 0:
+        explanation_lines.append("Foreign issuer / ADS structure applies a confidence haircut until issuer or depositary terms are verified.")
+
+    warnings = _dedupe([*proximity_warnings, *option_warnings])
+    if offering_activity_score >= 45:
+        warnings.append("Active ATM, shelf, resale, or offering language can increase chase and rally-fade risk.")
+    if dilution_pressure_score >= 50:
+        warnings.append("Preferred, convertible, or dilution terms make this setup more dilution-sensitive.")
+    if foreign_modifier < 0:
+        warnings.append("ADS/ADR or foreign issuer structure lowers confidence until source documents are verified.")
+
+    read = _capital_structure_indicator_read_label(
+        technical_score=technical_score,
+        dilution_pressure_score=dilution_pressure_score,
+        offering_activity_score=offering_activity_score,
+        proximity_score=proximity_score,
+        float_quality_score=float_quality_score,
+        foreign_modifier=foreign_modifier,
+        option_mismatch_score=option_mismatch_score,
+        chase_risk_score=chase_risk_score,
+        supply_absorption=supply_absorption,
+    )
+    recommendation_lines = _capital_structure_recommendation_lines(
+        read,
+        technical_score=technical_score,
+        nearest_level=nearest_level,
+        nearest_level_label=nearest_level_label,
+        nearest_level_distance=nearest_level_distance,
+    )
+
+    return CapitalStructureIndicatorRead(
+        technical_score=technical_score,
+        read=read,
+        supply_overhang_score=supply_overhang_score,
+        dilution_pressure_score=dilution_pressure_score,
+        warrant_conversion_proximity_score=proximity_score,
+        offering_activity_score=offering_activity_score,
+        float_quality_score=float_quality_score,
+        foreign_issuer_confidence_modifier=foreign_modifier,
+        option_exposure_mismatch_score=option_mismatch_score,
+        chase_risk_score=chase_risk_score,
+        nearest_supply_level=nearest_level,
+        nearest_supply_level_label=nearest_level_label,
+        nearest_supply_level_distance_percent=nearest_level_distance,
+        source_count=len(source_labels),
+        explanation_lines=_dedupe(explanation_lines),
+        warnings=_dedupe(warnings),
+        recommendation_lines=recommendation_lines,
+    )
+
+
+def _capital_structure_dilution_pressure_score(report: CapitalStructurePressureReport) -> float:
+    parsed = report.parsed_terms
+    score = 0.0
+    score += min(len(parsed.preferred_series), 3) * 16
+    score += min(len(parsed.convertibles), 3) * 20
+    score += 14 if any(item.conversion_price is not None or item.conversion_rate for item in parsed.preferred_series) else 0
+    score += 16 if any(item.conversion_price is not None or item.conversion_rate for item in parsed.convertibles) else 0
+    score += 14 if any(item.program_type in {"ATM program", "Resale prospectus", "Offering"} for item in parsed.offering_programs) else 0
+    score += 18 if any(signal.label == "Dilution warning" for signal in report.signals) else 0
+    return _clamp_score(score)
+
+
+def _capital_structure_offering_activity_score(report: CapitalStructurePressureReport) -> float:
+    score = 0.0
+    for program in report.parsed_terms.offering_programs:
+        if program.program_type == "ATM program":
+            score += 35
+        elif program.program_type == "Resale prospectus":
+            score += 28
+        elif program.program_type == "Shelf registration":
+            score += 22
+        elif program.program_type == "Offering":
+            score += 18
+    if any(signal.label == "Shelf / registration capacity" for signal in report.signals):
+        score += 10
+    return _clamp_score(score)
+
+
+def _capital_structure_float_quality_score(report: CapitalStructurePressureReport) -> float:
+    parsed = report.parsed_terms
+    score = 100.0
+    if parsed.common_share_classes:
+        score -= min(len(parsed.common_share_classes), 4) * 8
+    class_text = " ".join((item.class_name or "") for item in parsed.common_share_classes).lower()
+    if any(term in class_text for term in ("non-voting", "high-vote", "super-voting")):
+        score -= 18
+    if parsed.ads_adr_structures:
+        score -= 20
+    return _clamp_score(score)
+
+
+def _capital_structure_supply_level_proximity(
+    report: CapitalStructurePressureReport,
+    snapshot: TimeframeTechnicalSnapshot | None,
+    *,
+    prc_indexes: dict[str, PrcIndexPrice],
+) -> tuple[float, float | None, str | None, float | None, list[str], list[str], bool]:
+    latest = snapshot.latest_close if snapshot is not None else None
+    if latest is None or latest <= 0 or not report.possible_supply_levels:
+        return 0.0, None, None, None, [], [], False
+
+    nearest = min(report.possible_supply_levels, key=lambda level: abs(level.price - latest) / latest)
+    distance = _percent(nearest.price - latest, latest)
+    absolute_distance = abs(distance) if distance is not None else None
+    atr_band = max(1.0, min(6.0, (snapshot.atr_percent or 2.0) * 1.25)) if snapshot is not None else 2.5
+    confirms = _volume_confirms_up(snapshot)
+    distribution = _distribution_heavy(snapshot)
+    score = 10.0
+    lines = [
+        f"Nearest filing-derived supply level is {nearest.label} at {_money(nearest.price)}; distance {_fmt_percent(distance)} from latest price."
+    ]
+    warnings: list[str] = []
+    supply_absorption = False
+
+    if absolute_distance is not None and absolute_distance <= atr_band:
+        if latest > nearest.price and confirms:
+            score = 28
+            supply_absorption = True
+            lines.append("Price is above the parsed supply level with confirming volume; treat as possible supply absorption, not a target.")
+        elif distribution or not confirms:
+            score = 68
+            warnings.append("Price is near a parsed filing supply level without strong volume confirmation; rally-fade risk is elevated.")
+        else:
+            score = 54
+            warnings.append("Price is near a parsed filing supply level; require volume/VWAP confirmation.")
+    elif absolute_distance is not None and absolute_distance <= atr_band * 2:
+        score = 34
+
+    resistance = _nearest_resistance(snapshot)
+    if resistance is not None and resistance.low <= nearest.price <= resistance.high:
+        score += 8
+        lines.append("The filing-derived supply level overlaps the nearest technical resistance zone.")
+
+    prc = prc_indexes.get(snapshot.key) if snapshot is not None else None
+    if prc is not None and prc.index_price is not None:
+        prc_distance = abs(_percent(nearest.price - prc.index_price, prc.index_price) or 0.0)
+        if prc_distance <= atr_band:
+            score += 5
+            lines.append("The filing-derived supply level is close to the PRC Pressure Line reference.")
+
+    return _clamp_score(score), nearest.price, nearest.label, distance, lines, warnings, supply_absorption
+
+
+def _option_exposure_mismatch_read(ticket: TechnicalTicket | None) -> tuple[float, list[str], list[str]]:
+    if ticket is None or ticket.option_contracts is None or ticket.option_contracts <= 0:
+        return 0.0, [], []
+    controlled_shares = abs(ticket.option_contracts) * max(ticket.option_contract_multiplier, 1)
+    stock_shares = abs(ticket.quantity or 0.0)
+    if stock_shares <= 0:
+        score = 90.0
+        ratio_text = "no modeled stock exposure"
+    else:
+        ratio = controlled_shares / stock_shares
+        ratio_text = f"{ratio:.1f}x modeled stock exposure"
+        if ratio >= 10:
+            score = 90.0
+        elif ratio >= 3:
+            score = 75.0
+        elif ratio >= 1.5:
+            score = 55.0
+        else:
+            score = 15.0
+    line = f"Option exposure mismatch: {ticket.option_contracts:g} contract(s) control about {controlled_shares:,.0f} shares versus {stock_shares:,.0f} modeled shares ({ratio_text})."
+    warnings = [line] if score >= 55 else []
+    return score, [line], warnings
+
+
+def _capital_structure_indicator_read_label(
+    *,
+    technical_score: float,
+    dilution_pressure_score: float,
+    offering_activity_score: float,
+    proximity_score: float,
+    float_quality_score: float,
+    foreign_modifier: float,
+    option_mismatch_score: float,
+    chase_risk_score: float,
+    supply_absorption: bool,
+) -> str:
+    if supply_absorption:
+        return "supply_absorption"
+    if option_mismatch_score >= 55:
+        return "option_size_mismatch"
+    if chase_risk_score >= 58 or proximity_score >= 58 or (offering_activity_score >= 45 and proximity_score >= 45):
+        return "rally_fade_risk"
+    if dilution_pressure_score >= 58:
+        return "dilution_sensitive"
+    if offering_activity_score >= 48:
+        return "offering_pressure"
+    if foreign_modifier < 0:
+        return "verification_needed"
+    if float_quality_score <= 62:
+        return "float_quality_watch"
+    if technical_score >= 72:
+        return "clean"
+    return "supply_context"
+
+
+def _capital_structure_recommendation_lines(
+    read: str,
+    *,
+    technical_score: float,
+    nearest_level: float | None,
+    nearest_level_label: str | None,
+    nearest_level_distance: float | None,
+) -> list[str]:
+    level_text = ""
+    if nearest_level is not None:
+        level_text = f" near {nearest_level_label or 'parsed supply level'} {_money(nearest_level)} ({_fmt_percent(nearest_level_distance)} from latest)"
+    if read == "supply_absorption":
+        return [f"Watch for absorption{level_text}; require volume/VWAP hold and do not treat the filing level as a price target."]
+    if read == "rally_fade_risk":
+        return [f"Avoid chase{level_text}; wait for stronger volume/VWAP confirmation before trusting a breakout."]
+    if read == "dilution_sensitive":
+        return ["Treat the setup as dilution-sensitive; bullish reads need stronger participation and clean VWAP behavior."]
+    if read == "offering_pressure":
+        return ["Breakout trigger only while ATM, shelf, resale, or offering pressure is active."]
+    if read == "option_size_mismatch":
+        return ["Hedge/speculation sizing mismatch detected; option contract exposure is large versus modeled stock exposure."]
+    if read == "verification_needed":
+        return ["Verify foreign issuer, ADS/ADR, and ordinary-share documents before raising confidence from U.S. filing text alone."]
+    if read == "clean":
+        return [f"Capital-structure indicator is clean enough to preserve chart confidence ({technical_score:.0f}/100), subject to normal confirmation."]
+    return ["Use filing-derived supply terms as context only; they modify confidence and chase risk, not price direction."]
+
+
+def _capital_structure_score_reason(indicator: CapitalStructureIndicatorRead) -> str:
+    return (
+        f"{indicator.read}; technical score {indicator.technical_score:.0f}/100 from "
+        f"supply {indicator.supply_overhang_score:.0f}, dilution {indicator.dilution_pressure_score:.0f}, "
+        f"level proximity {indicator.warrant_conversion_proximity_score:.0f}, offering {indicator.offering_activity_score:.0f}, "
+        f"float quality {indicator.float_quality_score:.0f}"
+    )
+
+
+def _capital_structure_source_labels(report: CapitalStructurePressureReport) -> list[str]:
+    labels: list[str] = []
+    parsed = report.parsed_terms
+    groups = (
+        parsed.common_share_classes,
+        parsed.preferred_series,
+        parsed.warrants,
+        parsed.convertibles,
+        parsed.offering_programs,
+        parsed.ads_adr_structures,
+    )
+    for group in groups:
+        for item in group:
+            form = getattr(item, "source_form", "")
+            source_date = getattr(item, "source_date", "")
+            if form or source_date:
+                labels.append(f"{form or 'filing'} filed {source_date or '--'}")
+    for level in report.possible_supply_levels:
+        labels.append(level.source)
+    return _dedupe(labels)
+
+
+def _capital_structure_parsed_term_count(report: CapitalStructurePressureReport) -> int:
+    parsed = report.parsed_terms
+    return (
+        len(parsed.common_share_classes)
+        + len(parsed.preferred_series)
+        + len(parsed.warrants)
+        + len(parsed.convertibles)
+        + len(parsed.offering_programs)
+        + len(parsed.ads_adr_structures)
+    )
 
 
 def score_trend(latest: float, ema_21: float | None, ema_50: float | None, sma_50: float | None, structure: str) -> ScoreComponent:
@@ -2170,6 +2549,12 @@ def format_technical_command_center_report(report: TechnicalCommandCenterReport)
         f"- Confidence: {report.confidence}.",
         "- This is analysis, not a trade recommendation.",
     ]
+    if report.capital_structure_indicator is not None:
+        lines.insert(
+            8,
+            f"- Capital structure / supply: {report.capital_structure_indicator.read} "
+            f"({report.capital_structure_indicator.technical_score:.0f}/100).",
+        )
     lines.extend(_format_setup_classification_section(report.setup_classification))
     lines.extend(_format_prc_report_section(report, daily, setup, timing))
     if report.capital_structure_pressure is not None:
@@ -2179,6 +2564,8 @@ def format_technical_command_center_report(report: TechnicalCommandCenterReport)
                 technical_read=report.overall_read,
             )
         )
+    if report.capital_structure_indicator is not None:
+        lines.extend(_format_capital_structure_indicator_section(report.capital_structure_indicator))
     lines.extend(["", "SCORE BREAKDOWN"])
     for name, component in report.scores.items():
         lines.append(f"- {name}: {component.score:.0f}/100 because {component.reason}.")
@@ -2237,6 +2624,33 @@ def format_technical_command_center_report(report: TechnicalCommandCenterReport)
         lines.extend(["", "DATA WARNINGS"])
         lines.extend(f"- {warning}" for warning in report.warnings)
     return "\n".join(lines)
+
+
+def _format_capital_structure_indicator_section(indicator: CapitalStructureIndicatorRead) -> list[str]:
+    lines = [
+        "",
+        "CAPITAL STRUCTURE / SUPPLY INDICATOR",
+        "------------------------------------",
+        f"- Read: {indicator.read}.",
+        f"- Technical score: {indicator.technical_score:.0f}/100.",
+        f"- Supply overhang risk: {indicator.supply_overhang_score:.0f}/100.",
+        f"- Dilution pressure risk: {indicator.dilution_pressure_score:.0f}/100.",
+        f"- Warrant/conversion level proximity risk: {indicator.warrant_conversion_proximity_score:.0f}/100.",
+        f"- Offering activity risk: {indicator.offering_activity_score:.0f}/100.",
+        f"- Float quality score: {indicator.float_quality_score:.0f}/100.",
+        f"- Foreign issuer confidence modifier: {indicator.foreign_issuer_confidence_modifier:+.0f}.",
+        f"- Option exposure mismatch risk: {indicator.option_exposure_mismatch_score:.0f}/100.",
+        "- Filing-derived levels are risk/context modifiers, not support, resistance, target, or price-prediction claims.",
+    ]
+    if indicator.nearest_supply_level is not None:
+        lines.append(
+            f"- Nearest filing supply level: {indicator.nearest_supply_level_label or 'parsed level'} "
+            f"{_money(indicator.nearest_supply_level)} ({_fmt_percent(indicator.nearest_supply_level_distance_percent)} from latest)."
+        )
+    lines.extend(f"- {line}" for line in indicator.explanation_lines[:6])
+    if indicator.warnings:
+        lines.extend(f"- Warning: {warning}" for warning in indicator.warnings[:4])
+    return lines
 
 
 def _format_setup_classification_section(classification: TechnicalSetupClassification) -> list[str]:
@@ -2991,26 +3405,58 @@ def _confidence_label(
     snapshots: dict[str, TimeframeTechnicalSnapshot],
     benchmark_reads: list[RelativeStrengthRead],
     warnings: list[str],
+    *,
+    capital_structure_indicator: CapitalStructureIndicatorRead | None = None,
 ) -> str:
     usable_timeframes = sum(1 for snapshot in snapshots.values() if snapshot.candle_count >= 35)
     usable_benchmarks = sum(1 for read in benchmark_reads if read.verdict != "unknown")
     if usable_timeframes >= 3 and usable_benchmarks >= 2 and not warnings:
-        return "High"
-    if usable_timeframes >= 2:
+        confidence = "High"
+    elif usable_timeframes >= 2:
+        confidence = "Medium"
+    else:
+        confidence = "Low"
+    if capital_structure_indicator is None:
+        return confidence
+    if capital_structure_indicator.foreign_issuer_confidence_modifier < 0 or capital_structure_indicator.technical_score < 45:
+        return _downgrade_confidence(confidence)
+    if capital_structure_indicator.chase_risk_score >= 75 and confidence == "High":
+        return "Medium"
+    return confidence
+
+
+def _downgrade_confidence(confidence: str) -> str:
+    if confidence == "High":
         return "Medium"
     return "Low"
 
 
-def _best_action(overall_read: str, snapshots: dict[str, TimeframeTechnicalSnapshot], ticket_check: TicketCheck) -> str:
+def _best_action(
+    overall_read: str,
+    snapshots: dict[str, TimeframeTechnicalSnapshot],
+    ticket_check: TicketCheck,
+    *,
+    capital_structure_indicator: CapitalStructureIndicatorRead | None = None,
+) -> str:
     timing = _preferred_snapshot(snapshots, "timing")
     if "inside normal noise" in ticket_check.stop_quality:
         return "Wait / widen or relocate stop"
+    if capital_structure_indicator is not None:
+        if capital_structure_indicator.read == "supply_absorption":
+            return "Watch for absorption"
+        if capital_structure_indicator.read == "rally_fade_risk" or capital_structure_indicator.chase_risk_score >= 75:
+            return "Avoid chase"
     if ticket_check.entry_quality in {"pullback entry is better", "watch"}:
         return "Pullback / wait"
     if ticket_check.entry_quality in {"breakout entry only", "breakdown entry only"}:
         return "Breakout trigger only"
     if timing and timing.vwap_distance_percent is not None and timing.vwap_distance_percent > 4:
         return "Avoid chase"
+    if capital_structure_indicator is not None:
+        if overall_read == "Bullish" and capital_structure_indicator.technical_score < 58:
+            return "Breakout trigger only"
+        if capital_structure_indicator.read == "verification_needed" and overall_read in {"Bullish", "Mixed"}:
+            return "Verify foreign issuer documents"
     if overall_read == "Bullish":
         return "Defined-risk long only if trigger holds"
     if overall_read == "Bearish":
@@ -3037,6 +3483,8 @@ def _plain_english_plan(
     snapshots: dict[str, TimeframeTechnicalSnapshot],
     ticket_check: TicketCheck,
     triggers: list[ActionTrigger],
+    *,
+    capital_structure_indicator: CapitalStructureIndicatorRead | None = None,
 ) -> list[str]:
     breakout = next((trigger for trigger in triggers if trigger.label == "Breakout trigger"), None)
     invalidation = next((trigger for trigger in triggers if trigger.label == "Invalidation"), None)
@@ -3050,6 +3498,8 @@ def _plain_english_plan(
     plan.append(f"If bearish: losing {_money(invalidation.price if invalidation else None)} weakens the setup and argues for smaller risk or no new risk.")
     if daily is not None:
         plan.append(f"What would change the view: daily trend/EMA alignment changes, volume confirms the opposite direction, or price rejects the key trigger.")
+    if capital_structure_indicator is not None:
+        plan.extend(capital_structure_indicator.recommendation_lines)
     plan.append(f"Ticket verdict: {ticket_check.verdict}")
     return plan
 
