@@ -59,6 +59,10 @@ from app.analytics.options_greeks import (
     rank_greek_contracts,
     theta_offset_moves,
 )
+from app.analytics.recommendation_engine import (
+    RecommendationEngineRead,
+    build_recommendation_engine_read,
+)
 from app.analytics.research_scoring import (
     BadgeReadout,
     ResearchDecisionReadout,
@@ -170,6 +174,7 @@ TAB_PANE_MIN = 440
 DETACH_DRAG_PIXELS = 42
 PRC_PRESSURE_LINE_NOTICE = "PRC Pressure Line is a synthetic internal indicator, not an official price target or exchange price."
 CAPITAL_STRUCTURE_LEVEL_DISCLAIMER = "Filing-derived levels are risk/context modifiers, not support, resistance, targets, or price predictions."
+RECOMMENDATION_ENGINE_ADVICE_BOUNDARY = "This is research support and scenario math, not financial advice, a guarantee, or a forecast."
 
 
 @dataclass(frozen=True)
@@ -198,6 +203,7 @@ class _ResearchPayload:
     market_candles: dict[str, list[Candle]] | None = None
     trade_evidence_report: TradeEvidenceReport | None = None
     command_center_report: TechnicalCommandCenterReport | None = None
+    recommendation_engine_read: RecommendationEngineRead | None = None
 
 
 def install_schwab_research_workspace_extension(app_cls: Type[tk.Tk]) -> None:
@@ -739,15 +745,64 @@ def _overview_tab(notebook: ttk.Notebook) -> ttk.Frame:
     frame.operator = ttk.LabelFrame(frame, text="Operator View", style="Card.TLabelframe")  # type: ignore[attr-defined]
     frame.operator.grid(row=1, column=0, sticky="ew", pady=(8, 0))
     frame.operator.columnconfigure(0, weight=1)  # type: ignore[attr-defined]
+    frame.recommendation = ttk.LabelFrame(frame, text="Recommendation Engine", style="Card.TLabelframe")  # type: ignore[attr-defined]
+    frame.recommendation.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+    frame.recommendation.columnconfigure(0, weight=1)  # type: ignore[attr-defined]
+    frame.recommendation_cards = ttk.Frame(frame.recommendation, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.recommendation_cards.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 0))  # type: ignore[attr-defined]
+    evidence_box = ttk.LabelFrame(frame.recommendation, text="Evidence Components", style="Card.TLabelframe")  # type: ignore[attr-defined]
+    evidence_box.grid(row=1, column=0, sticky="ew", padx=10, pady=(8, 0))
+    evidence_box.columnconfigure(0, weight=1)
+    evidence_tree = ttk.Treeview(
+        evidence_box,
+        columns=("component", "vote", "confidence", "status", "reason"),
+        show="headings",
+        height=7,
+    )
+    _style_research_tree(evidence_tree)
+    for column, label, width, anchor in (
+        ("component", "Component", 190, tk.W),
+        ("vote", "Vote", 82, tk.CENTER),
+        ("confidence", "Confidence", 96, tk.CENTER),
+        ("status", "Status", 110, tk.CENTER),
+        ("reason", "Reason", 660, tk.W),
+    ):
+        evidence_tree.heading(column, text=label)
+        evidence_tree.column(column, width=width, anchor=anchor, stretch=column == "reason")
+    evidence_tree.grid(row=0, column=0, sticky="ew")
+    evidence_scroll = ttk.Scrollbar(evidence_box, orient=tk.VERTICAL, command=evidence_tree.yview)
+    evidence_scroll.grid(row=0, column=1, sticky="ns")
+    evidence_tree.configure(yscrollcommand=evidence_scroll.set)
+    _add_horizontal_tree_scrollbar(evidence_box, evidence_tree, row=1)
+    frame.recommendation_evidence_tree = evidence_tree  # type: ignore[attr-defined]
+    frame.recommendation_evidence_lists = ttk.Frame(frame.recommendation, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.recommendation_evidence_lists.grid(row=2, column=0, sticky="ew", padx=10, pady=(8, 0))  # type: ignore[attr-defined]
+    frame.recommendation_evidence_lists.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    frame.recommendation_planning = ttk.Frame(frame.recommendation, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.recommendation_planning.grid(row=3, column=0, sticky="ew", padx=10, pady=(8, 0))  # type: ignore[attr-defined]
+    frame.recommendation_planning.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    frame.recommendation_triggers = ttk.Frame(frame.recommendation, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.recommendation_triggers.grid(row=4, column=0, sticky="ew", padx=10, pady=(8, 0))  # type: ignore[attr-defined]
+    frame.recommendation_triggers.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    frame.recommendation_followups = ttk.Frame(frame.recommendation, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.recommendation_followups.grid(row=5, column=0, sticky="ew", padx=10, pady=(8, 0))  # type: ignore[attr-defined]
+    frame.recommendation_followups.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    frame.recommendation_detail_text = _readout_launcher(
+        frame.recommendation,
+        title="Recommendation Engine Explanation",
+        button_text="Open Recommendation Engine Explanation",
+        row=6,
+        pady=(8, 10),
+    )  # type: ignore[attr-defined]
     frame.summary = ttk.LabelFrame(frame, text="Plain-English Summary", style="Card.TLabelframe")  # type: ignore[attr-defined]
-    frame.summary.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+    frame.summary.grid(row=3, column=0, sticky="ew", pady=(8, 0))
     frame.summary.columnconfigure(0, weight=1)  # type: ignore[attr-defined]
     frame.checks = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
-    frame.checks.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+    frame.checks.grid(row=4, column=0, sticky="ew", pady=(8, 0))
     frame.checks.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
     frame.freshness = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
-    frame.freshness.grid(row=4, column=0, sticky="ew", pady=(8, 0))
-    frame.detail_text = _readout_launcher(frame, title="Overview Explanation", button_text="Open Overview Explanation", row=5)  # type: ignore[attr-defined]
+    frame.freshness.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+    frame.detail_text = _readout_launcher(frame, title="Overview Explanation", button_text="Open Overview Explanation", row=6)  # type: ignore[attr-defined]
     return frame
 
 
@@ -2013,6 +2068,28 @@ def _build_research_payload(session: Any, portfolio, symbol: str, *, ticket: Tec
     statuses.append(option_chain_status)
     greek_underlying_price = option_chain_underlying_price or context.last_price
     greek_summary = build_greek_summary(option_chain_rows, greek_underlying_price)
+    try:
+        recommendation_fundamental_read = build_fundamental_verdict(
+            fundamentals_text,
+            indicators,
+            decision.macro_backdrop.label,
+        )
+        recommendation_engine_read = build_recommendation_engine_read(
+            symbol=symbol,
+            command_center_report=command_center_report,
+            capital_structure_indicator=command_center_report.capital_structure_indicator,
+            macro_read=decision.macro_backdrop,
+            macro_text=macro_text,
+            fundamental_read=recommendation_fundamental_read,
+            fundamentals_text="\n\n".join(line for line in (fundamentals_text, earnings_text) if line.strip()),
+            option_chain_rows=option_chain_rows,
+            portfolio_context=context,
+            source_statuses=statuses,
+            as_of=datetime.now(timezone.utc),
+        )
+    except Exception as exc:
+        recommendation_engine_read = None
+        statuses.append(DataSourceStatus("Recommendation engine", "error", _now(), str(exc)))
     trade_evidence_report = build_trade_evidence_report(
         symbol=symbol,
         indicators=indicators,
@@ -2055,6 +2132,7 @@ def _build_research_payload(session: Any, portfolio, symbol: str, *, ticket: Tec
         market_candles=market_candles,
         trade_evidence_report=trade_evidence_report,
         command_center_report=command_center_report,
+        recommendation_engine_read=recommendation_engine_read,
     )
 
 
@@ -2482,6 +2560,7 @@ def _overview_text(payload: _ResearchPayload) -> str:
         f"- Risk: {decision.risk_level.label} ({decision.risk_level.why})",
         f"- Action bias: {decision.action_bias.label} ({decision.action_bias.why})",
         f"- Evidence posture: {evidence.posture}; setup type {evidence.setup_type}.",
+        f"- Recommendation engine: {_recommendation_engine_overview_line(payload.recommendation_engine_read)}",
         "",
         "Scenario forecast (model estimate, not a guarantee):",
         *[f"- {row.scenario}: {row.probability:.1f}% / {row.likelihood}. {row.reference}. {row.why}" for row in decision.thesis.forecast],
@@ -2530,6 +2609,7 @@ def _overview_popout_text(payload: _ResearchPayload) -> str:
             f"Overall read: {decision.overall.label} ({decision.overall.why})",
             f"Risk level: {decision.risk_level.label} ({decision.risk_level.why})",
             f"Action bias: {decision.action_bias.label} ({decision.action_bias.why})",
+            f"Recommendation engine: {_recommendation_engine_overview_line(payload.recommendation_engine_read)}",
             *[f"Forecast estimate: {row.scenario} {row.probability:.1f}% ({row.likelihood})" for row in decision.thesis.forecast],
             *decision.summary,
         ],
@@ -2661,6 +2741,7 @@ def _render_overview(self: tk.Tk, payload: _ResearchPayload) -> None:
         adaptive_height=True,
     )
     labeled_value_grid(frame.operator, decision.operator_view, columns=3)  # type: ignore[attr-defined]
+    _render_recommendation_engine(frame, payload)
     clear_children(frame.summary)  # type: ignore[attr-defined]
     for index, sentence in enumerate(decision.summary):
         ttk.Label(frame.summary, text=sentence, style="Subtle.TLabel", wraplength=980, justify=tk.LEFT).grid(row=index, column=0, sticky="ew", padx=10, pady=(6 if index == 0 else 2, 2))  # type: ignore[attr-defined]
@@ -2669,6 +2750,457 @@ def _render_overview(self: tk.Tk, payload: _ResearchPayload) -> None:
     Checklist(frame.checks, "What Would Change The View", decision.changes_view).grid(row=0, column=1, sticky="nsew")  # type: ignore[attr-defined]
     freshness_badges(frame.freshness, payload.statuses)  # type: ignore[attr-defined]
     _set_research_text(self.schwab_research_overview_text, _overview_popout_text(payload))
+
+
+def _render_recommendation_engine(frame: ttk.Frame, payload: _ResearchPayload) -> None:
+    read = getattr(payload, "recommendation_engine_read", None)
+    metric_grid(
+        frame.recommendation_cards,  # type: ignore[attr-defined]
+        _recommendation_engine_cards(read),
+        columns=3,
+        prominent_indexes={0},
+        card_height=132,
+        prominent_height=150,
+        adaptive_height=True,
+    )
+    _replace_tree_rows(frame.recommendation_evidence_tree, _recommendation_evidence_rows(read))  # type: ignore[attr-defined]
+
+    evidence_lists = frame.recommendation_evidence_lists  # type: ignore[attr-defined]
+    clear_children(evidence_lists)
+    Checklist(evidence_lists, "Supporting Evidence", _recommendation_supporting_lines(read)).grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+    Checklist(evidence_lists, "Contradictions", _recommendation_contradiction_lines(read)).grid(row=0, column=1, sticky="nsew")
+
+    planning = frame.recommendation_planning  # type: ignore[attr-defined]
+    clear_children(planning)
+    Checklist(planning, "Reward/Risk + Planning EV", _recommendation_reward_risk_lines(read)).grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+    Checklist(planning, "Position Sizing", _recommendation_position_sizing_lines(read)).grid(row=0, column=1, sticky="nsew")
+
+    triggers = frame.recommendation_triggers  # type: ignore[attr-defined]
+    clear_children(triggers)
+    Checklist(triggers, "Invalidation Lines", _recommendation_field_lines(read, "invalidation_lines", fallback="Invalidation line unavailable.")).grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+    Checklist(triggers, "Confirmation Lines", _recommendation_field_lines(read, "confirmation_lines", fallback="Confirmation line unavailable.")).grid(row=0, column=1, sticky="nsew")
+
+    followups = frame.recommendation_followups  # type: ignore[attr-defined]
+    clear_children(followups)
+    Checklist(followups, "What Would Change", _recommendation_field_lines(read, "what_would_change", fallback="Fresh evidence or cleaner confirmation would change the view.")).grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+    Checklist(followups, "Data Confidence Gaps", _recommendation_data_gap_lines(read)).grid(row=0, column=1, sticky="nsew")
+    Checklist(followups, "Warnings", _recommendation_warning_lines(read)).grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
+
+    _set_research_text(frame.recommendation_detail_text, _recommendation_engine_detail_text(read, payload.symbol))  # type: ignore[attr-defined]
+
+
+def _recommendation_engine_overview_line(read: RecommendationEngineRead | None) -> str:
+    if read is None:
+        return "unavailable; workspace continues without the read."
+    data_confidence = _recommendation_get(read, "data_confidence")
+    return (
+        f"{_recommendation_get(read, 'recommendation_label', 'No-read')}; "
+        f"confidence {_recommendation_get(read, 'confidence', 'Low')} ({_recommendation_score_text(_recommendation_get(read, 'confidence_score'))}); "
+        f"evidence {_recommendation_score_text(_recommendation_get(read, 'evidence_score'))}; "
+        f"data {_recommendation_get(data_confidence, 'grade', 'Unknown')} ({_recommendation_score_text(_recommendation_get(data_confidence, 'score'))})."
+    )
+
+
+def _recommendation_engine_cards(read: RecommendationEngineRead | None) -> list[BadgeReadout]:
+    if read is None:
+        return [
+            _synthetic_badge("Recommendation", "Unavailable", "info", "No recommendation-engine read is attached to this payload."),
+            _synthetic_badge("Confidence", "No Read", "mixed", "The workspace can still render while the read is missing."),
+            _synthetic_badge("Evidence Score", "--", "info", "Evidence score is unavailable."),
+            _synthetic_badge("Data Confidence", "--", "info", "Data confidence is unavailable."),
+            _synthetic_badge("Reward/Risk / EV", "Not Defined", "info", RECOMMENDATION_ENGINE_ADVICE_BOUNDARY),
+            _synthetic_badge("Position Sizing", "Planning Only", "info", "Position-sizing notes are unavailable; no broker/order behavior changes."),
+        ]
+
+    data_confidence = _recommendation_get(read, "data_confidence")
+    reward_risk = _recommendation_get(read, "expected_reward_risk")
+    label = str(_recommendation_get(read, "recommendation_label", "No-read"))
+    confidence = str(_recommendation_get(read, "confidence", "Low"))
+    evidence_score = _recommendation_get(read, "evidence_score")
+    data_score = _recommendation_get(data_confidence, "score")
+    data_grade = str(_recommendation_get(data_confidence, "grade", "Unknown"))
+    reward_label = str(_recommendation_get(reward_risk, "label", "Reward/risk not defined"))
+    reward_summary = _recommendation_with_advice_boundary(str(_recommendation_get(reward_risk, "summary", "") or ""))
+    sizing_notes = _recommendation_position_sizing_lines(read)
+    return [
+        _synthetic_badge("Recommendation", label, _recommendation_label_status(label), _first_nonempty(_recommendation_list(_recommendation_get(read, "why")), "Evidence-weighted readout."), _to_float(evidence_score) or 0.0),
+        _synthetic_badge("Confidence", f"{confidence} ({_recommendation_score_text(_recommendation_get(read, 'confidence_score'))})", _recommendation_confidence_status(confidence), str(_recommendation_get(data_confidence, "reason", "Data confidence unavailable."))),
+        _synthetic_badge("Evidence Score", _recommendation_score_text(evidence_score), _recommendation_evidence_status(evidence_score), f"Evidence vote {_recommendation_signed_number(_recommendation_get(read, 'evidence_vote'))}."),
+        _synthetic_badge("Data Confidence", f"{data_grade} ({_recommendation_score_text(data_score)})", _recommendation_data_status(data_grade, data_score), str(_recommendation_get(data_confidence, "reason", "Data confidence unavailable."))),
+        _synthetic_badge("Reward/Risk / EV", reward_label, _recommendation_reward_status(reward_risk), reward_summary),
+        _synthetic_badge("Position Sizing", _recommendation_position_sizing_label(read), _recommendation_position_sizing_status(sizing_notes), _first_nonempty(sizing_notes, "Planning context only; no broker/order behavior changes.")),
+    ]
+
+
+def _recommendation_evidence_rows(read: Any | None, *, limit: int = 9) -> list[tuple[str, str, str, str, str]]:
+    if read is None:
+        return [("Recommendation Engine", "--", "--", "Missing", "No recommendation-engine read is attached to this payload.")]
+    rows: list[tuple[str, str, str, str, str]] = []
+    for component in _recommendation_list(_recommendation_get(read, "components"))[:limit]:
+        vote = _recommendation_get(component, "vote")
+        status = str(_recommendation_get(component, "status", "unknown") or "unknown")
+        score = _to_float(_recommendation_get(vote, "score"))
+        confidence = _to_float(_recommendation_get(vote, "confidence"))
+        label = _recommendation_get(component, "label") or _recommendation_get(component, "key") or "Unknown"
+        reason = _recommendation_compact_text(_recommendation_get(vote, "reason") or "Evidence is unavailable.", 220)
+        vote_text = "No read" if status == "no_read" else _recommendation_signed_number(score)
+        rows.append(
+            (
+                _recommendation_compact_text(label, 80),
+                vote_text,
+                _recommendation_confidence_text(confidence),
+                _recommendation_status_label(status),
+                reason,
+            )
+        )
+    return rows or [("Recommendation Engine", "--", "--", "No Read", "No evidence components were supplied.")]
+
+
+def _recommendation_supporting_lines(read: Any | None, *, limit: int = 5) -> list[str]:
+    components = [
+        component
+        for component in _recommendation_components(read)
+        if (_to_float(_recommendation_get(_recommendation_get(component, "vote"), "score")) or 0.0) > 0
+        and str(_recommendation_get(component, "status", "")) != "no_read"
+    ]
+    ranked = sorted(components, key=lambda component: _recommendation_component_strength(component), reverse=True)
+    lines = [_recommendation_component_line(component) for component in ranked[:limit]]
+    return lines or ["No positive evidence votes are currently loaded."]
+
+
+def _recommendation_contradiction_lines(read: Any | None, *, limit: int = 5) -> list[str]:
+    components = [
+        component
+        for component in _recommendation_components(read)
+        if (_to_float(_recommendation_get(_recommendation_get(component, "vote"), "score")) or 0.0) < 0
+        and str(_recommendation_get(component, "status", "")) != "no_read"
+    ]
+    ranked = sorted(components, key=lambda component: _to_float(_recommendation_get(_recommendation_get(component, "vote"), "score")) or 0.0)
+    lines = [_recommendation_component_line(component) for component in ranked[:limit]]
+    return lines or ["No negative evidence votes are currently loaded."]
+
+
+def _recommendation_reward_risk_lines(read: Any | None) -> list[str]:
+    if read is None:
+        return [RECOMMENDATION_ENGINE_ADVICE_BOUNDARY, "Reward/risk is unavailable because no recommendation-engine read is attached."]
+    reward_risk = _recommendation_get(read, "expected_reward_risk")
+    if reward_risk is None:
+        return [RECOMMENDATION_ENGINE_ADVICE_BOUNDARY, "Reward/risk is unavailable because the read did not include scenario math."]
+    ratio = _to_float(_recommendation_get(reward_risk, "reward_risk_ratio"))
+    probability = _to_float(_recommendation_get(reward_risk, "planning_probability"))
+    expected_value = _to_float(_recommendation_get(reward_risk, "expected_value_units"))
+    lines = [
+        str(_recommendation_get(reward_risk, "label", "Reward/risk not defined")),
+        _recommendation_with_advice_boundary(str(_recommendation_get(reward_risk, "summary", "") or "")),
+    ]
+    if ratio is not None:
+        lines.append(f"Reward/risk ratio: {ratio:.2f}:1.")
+    if probability is not None:
+        lines.append(f"Planning probability: {probability:.0%}; bounded scenario math, not forecast certainty.")
+    if expected_value is not None:
+        lines.append(f"Planning EV: {expected_value:+.2f}R before fees/slippage.")
+    reward_line = str(_recommendation_get(reward_risk, "reward_line", "") or "").strip()
+    risk_line = str(_recommendation_get(reward_risk, "risk_line", "") or "").strip()
+    if reward_line:
+        lines.append(reward_line)
+    if risk_line:
+        lines.append(risk_line)
+    return _recommendation_dedupe(lines)[:7]
+
+
+def _recommendation_position_sizing_lines(read: Any | None) -> list[str]:
+    if read is None:
+        return ["Position-sizing notes are unavailable; no broker/order behavior changes."]
+    lines = _recommendation_list(_recommendation_get(read, "position_sizing_notes"))
+    return _recommendation_clean_lines(lines, limit=7) or ["Position sizing is planning context only and does not alter broker/order behavior."]
+
+
+def _recommendation_field_lines(read: Any | None, field: str, *, fallback: str, limit: int = 6) -> list[str]:
+    if read is None:
+        return [fallback]
+    return _recommendation_clean_lines(_recommendation_list(_recommendation_get(read, field)), limit=limit) or [fallback]
+
+
+def _recommendation_warning_lines(read: Any | None, *, limit: int = 6) -> list[str]:
+    if read is None:
+        return ["No recommendation-engine read is attached; warnings are unavailable."]
+    warnings = _recommendation_clean_lines(_recommendation_list(_recommendation_get(read, "warnings")), limit=limit)
+    return warnings or ["No recommendation-specific warnings flagged by loaded layers."]
+
+
+def _recommendation_data_gap_lines(read: Any | None, *, limit: int = 7) -> list[str]:
+    if read is None:
+        return ["Recommendation-engine data confidence is unavailable."]
+    data_confidence = _recommendation_get(read, "data_confidence")
+    lines: list[str] = []
+    for source in _recommendation_list(_recommendation_get(data_confidence, "missing")):
+        lines.append(f"Missing/error: {source}")
+    for source in _recommendation_list(_recommendation_get(data_confidence, "stale")):
+        lines.append(f"Stale/limited: {source}")
+    for component in _recommendation_components(read):
+        if str(_recommendation_get(component, "status", "")) == "no_read":
+            vote = _recommendation_get(component, "vote")
+            reason = str(_recommendation_get(vote, "reason", "") or "")
+            lines.append(f"No-read component: {_recommendation_get(component, 'label', 'Unknown')} - {reason}")
+    clean = _recommendation_dedupe(_recommendation_clean_lines(lines, limit=limit))
+    if clean:
+        return clean[:limit]
+    source_count = len(_recommendation_list(_recommendation_get(data_confidence, "sources")))
+    return [f"No major data-confidence gaps flagged across {source_count} source check(s)."]
+
+
+def _recommendation_engine_detail_text(read: Any | None, symbol: str) -> str:
+    title = f"Recommendation Engine Explanation - {symbol.upper()}"
+    if read is None:
+        return "\n".join(
+            [
+                title,
+                "=" * min(len(title), 80),
+                "",
+                "Recommendation read unavailable.",
+                RECOMMENDATION_ENGINE_ADVICE_BOUNDARY,
+                "",
+                "The workspace remains usable because the recommendation-engine read is optional UI/data wiring.",
+            ]
+        )
+
+    data_confidence = _recommendation_get(read, "data_confidence")
+    lines = [
+        title,
+        "=" * min(len(title), 80),
+        "",
+        f"Recommendation: {_recommendation_get(read, 'recommendation_label', 'No-read')}",
+        f"Confidence: {_recommendation_get(read, 'confidence', 'Low')} ({_recommendation_score_text(_recommendation_get(read, 'confidence_score'))})",
+        f"Evidence score: {_recommendation_score_text(_recommendation_get(read, 'evidence_score'))}; vote {_recommendation_signed_number(_recommendation_get(read, 'evidence_vote'))}",
+        f"Data confidence: {_recommendation_get(data_confidence, 'grade', 'Unknown')} ({_recommendation_score_text(_recommendation_get(data_confidence, 'score'))})",
+        RECOMMENDATION_ENGINE_ADVICE_BOUNDARY,
+        "",
+    ]
+    lines.extend(_recommendation_text_section("Why", _recommendation_list(_recommendation_get(read, "why"))))
+    lines.extend(_recommendation_text_section("Evidence Components", [f"{component} | {vote} | {confidence} | {status} | {reason}" for component, vote, confidence, status, reason in _recommendation_evidence_rows(read, limit=20)]))
+    lines.extend(_recommendation_text_section("Supporting Evidence", _recommendation_supporting_lines(read, limit=8)))
+    lines.extend(_recommendation_text_section("Contradictions", _recommendation_contradiction_lines(read, limit=8)))
+    lines.extend(_recommendation_text_section("Expected Reward/Risk + Planning EV", _recommendation_reward_risk_lines(read)))
+    lines.extend(_recommendation_text_section("Invalidation Lines", _recommendation_field_lines(read, "invalidation_lines", fallback="Invalidation line unavailable.", limit=8)))
+    lines.extend(_recommendation_text_section("Confirmation Lines", _recommendation_field_lines(read, "confirmation_lines", fallback="Confirmation line unavailable.", limit=8)))
+    lines.extend(_recommendation_text_section("Position Sizing Notes", _recommendation_position_sizing_lines(read)))
+    lines.extend(_recommendation_text_section("What Would Change", _recommendation_field_lines(read, "what_would_change", fallback="Fresh evidence or cleaner confirmation would change the view.", limit=8)))
+    lines.extend(_recommendation_text_section("Warnings", _recommendation_warning_lines(read, limit=8)))
+    lines.extend(_recommendation_text_section("Data Confidence Gaps", _recommendation_data_gap_lines(read, limit=10)))
+    lines.extend(_recommendation_text_section("Source Confidence Rows", _recommendation_data_source_lines(data_confidence)))
+    return "\n".join(lines)
+
+
+def _recommendation_text_section(title: str, rows: list[str] | tuple[str, ...]) -> list[str]:
+    clean_rows = _recommendation_clean_lines(rows, limit=30)
+    if not clean_rows:
+        clean_rows = ["No rows supplied."]
+    return ["", f"{title}:", *[f"- {row}" for row in clean_rows]]
+
+
+def _recommendation_data_source_lines(data_confidence: Any | None, *, limit: int = 12) -> list[str]:
+    rows: list[str] = []
+    for source in _recommendation_list(_recommendation_get(data_confidence, "sources"))[:limit]:
+        age = _to_float(_recommendation_get(source, "age_hours"))
+        age_text = f", age {age:.1f}h" if age is not None else ""
+        rows.append(
+            (
+                f"{_recommendation_get(source, 'source', 'Unknown')}: "
+                f"{_recommendation_get(source, 'status', 'unknown')} "
+                f"({_recommendation_score_text(_recommendation_get(source, 'score'))}{age_text}) - "
+                f"{_recommendation_get(source, 'reason', '')}"
+            )
+        )
+    return _recommendation_clean_lines(rows, limit=limit) or ["No source-level data-confidence rows supplied."]
+
+
+def _recommendation_label_status(label: str) -> str:
+    lower = label.lower()
+    if "constructive / defined-risk" in lower or "watch for absorption" in lower:
+        return "good"
+    if "avoid or reduce" in lower or "defensive" in lower:
+        return "bad"
+    if "no-read" in lower or "gather data" in lower or "wait" in lower or "avoid chase" in lower:
+        return "mixed"
+    if "constructive" in lower:
+        return "good"
+    return "mixed"
+
+
+def _recommendation_confidence_status(confidence: str) -> str:
+    lower = confidence.lower()
+    if "high" in lower:
+        return "good"
+    if "medium" in lower:
+        return "mixed"
+    if "low" in lower:
+        return "bad"
+    return "info"
+
+
+def _recommendation_evidence_status(score: Any) -> str:
+    value = _to_float(score)
+    if value is None:
+        return "info"
+    if value >= 62:
+        return "good"
+    if value >= 44:
+        return "mixed"
+    return "bad"
+
+
+def _recommendation_data_status(grade: str, score: Any) -> str:
+    lower = grade.lower()
+    value = _to_float(score)
+    if "high" in lower or (value is not None and value >= 75):
+        return "good"
+    if "medium" in lower or (value is not None and value >= 55):
+        return "mixed"
+    if "very low" in lower or (value is not None and value < 40):
+        return "bad"
+    return "info"
+
+
+def _recommendation_reward_status(reward_risk: Any | None) -> str:
+    label = str(_recommendation_get(reward_risk, "label", "") or "").lower()
+    ev = _to_float(_recommendation_get(reward_risk, "expected_value_units"))
+    if "unfavorable" in label or (ev is not None and ev < 0):
+        return "bad"
+    if "favorable" in label or (ev is not None and ev >= 0.25):
+        return "good"
+    if "not defined" in label:
+        return "info"
+    return "mixed"
+
+
+def _recommendation_position_sizing_label(read: Any | None) -> str:
+    if read is None:
+        return "Planning Only"
+    notes = " ".join(_recommendation_position_sizing_lines(read)).lower()
+    if "elevated" in notes or "poor" in notes or "reduce" in notes or "oversizing" in notes:
+        return "Constrained"
+    if "unavailable" in notes:
+        return "Needs Context"
+    return "Planning Only"
+
+
+def _recommendation_position_sizing_status(lines: list[str]) -> str:
+    lower = " ".join(lines).lower()
+    if "poor" in lower or "avoid" in lower or "oversizing" in lower:
+        return "bad"
+    if "elevated" in lower or "unavailable" in lower or "reduce" in lower or "smaller" in lower:
+        return "mixed"
+    return "info"
+
+
+def _recommendation_component_strength(component: Any) -> float:
+    vote = _recommendation_get(component, "vote")
+    score = _to_float(_recommendation_get(vote, "score")) or 0.0
+    confidence = _to_float(_recommendation_get(vote, "confidence")) or 0.0
+    return abs(score) * confidence
+
+
+def _recommendation_component_line(component: Any) -> str:
+    vote = _recommendation_get(component, "vote")
+    score = _to_float(_recommendation_get(vote, "score")) or 0.0
+    reason = str(_recommendation_get(vote, "reason", "") or "Evidence reason unavailable.")
+    return _recommendation_compact_text(f"{_recommendation_get(component, 'label', 'Unknown')}: {score:+.0f} - {reason}", 220)
+
+
+def _recommendation_components(read: Any | None) -> list[Any]:
+    if read is None:
+        return []
+    return _recommendation_list(_recommendation_get(read, "components"))
+
+
+def _recommendation_confidence_text(value: Any) -> str:
+    numeric = _to_float(value)
+    if numeric is None:
+        return "--"
+    if numeric <= 1.0:
+        return f"{numeric:.0%}"
+    return f"{numeric:.0f}%"
+
+
+def _recommendation_score_text(value: Any) -> str:
+    numeric = _to_float(value)
+    return "--" if numeric is None else f"{numeric:.0f}/100"
+
+
+def _recommendation_signed_number(value: Any) -> str:
+    numeric = _to_float(value)
+    return "--" if numeric is None else f"{numeric:+.0f}"
+
+
+def _recommendation_status_label(value: Any) -> str:
+    text = str(value or "unknown").replace("_", " ").strip()
+    return text[:1].upper() + text[1:] if text else "Unknown"
+
+
+def _recommendation_with_advice_boundary(text: str) -> str:
+    clean = " ".join(str(text or "").split())
+    if RECOMMENDATION_ENGINE_ADVICE_BOUNDARY.lower() in clean.lower():
+        return clean
+    if clean:
+        return f"{clean} {RECOMMENDATION_ENGINE_ADVICE_BOUNDARY}"
+    return RECOMMENDATION_ENGINE_ADVICE_BOUNDARY
+
+
+def _recommendation_get(source: Any, key: str, default: Any = None) -> Any:
+    if source is None:
+        return default
+    if isinstance(source, dict):
+        return source.get(key, default)
+    return getattr(source, key, default)
+
+
+def _recommendation_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def _recommendation_clean_lines(values: list[Any] | tuple[Any, ...], *, limit: int) -> list[str]:
+    lines: list[str] = []
+    for value in values:
+        text = _recommendation_compact_text(value, 240)
+        if not text:
+            continue
+        lines.append(text)
+        if len(lines) >= limit:
+            break
+    return lines
+
+
+def _recommendation_dedupe(values: list[Any] | tuple[Any, ...]) -> list[str]:
+    seen: set[str] = set()
+    lines: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        lines.append(text)
+    return lines
+
+
+def _recommendation_compact_text(value: Any, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if limit > 0 and len(text) > limit:
+        return text[: max(0, limit - 3)].rstrip() + "..."
+    return text
+
+
+def _first_nonempty(values: list[Any] | tuple[Any, ...], fallback: str) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return fallback
 
 
 def _render_trade_evidence(self: tk.Tk, payload: _ResearchPayload) -> None:
