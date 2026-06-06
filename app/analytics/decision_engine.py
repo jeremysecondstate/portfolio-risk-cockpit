@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.analytics.stock_research import AdvancedIndicatorSnapshot, PortfolioSymbolContext
@@ -28,6 +28,57 @@ class ScenarioProbability:
 
 
 @dataclass(frozen=True)
+class EvidenceVote:
+    name: str
+    score: float
+    weight: float
+    direction: str
+    why: str
+
+
+@dataclass(frozen=True)
+class DataConfidenceGrade:
+    grade: str
+    score: float
+    available: list[str]
+    missing: list[str]
+    why: str
+
+
+@dataclass(frozen=True)
+class ExpectedValueReadout:
+    label: str
+    expected_value: float
+    expected_value_pct: float
+    win_probability: float
+    reward_per_share: float
+    risk_per_share: float
+    target_price: float | None
+    stop_price: float | None
+    why: str
+
+
+@dataclass(frozen=True)
+class PositionSizingReadout:
+    target_shares: int
+    max_notional: float
+    risk_dollars: float
+    portfolio_weight: float
+    per_share_risk: float | None
+    stop_price: float | None
+    basis: str
+
+
+@dataclass(frozen=True)
+class EvidenceWeightedDecision:
+    evidence_votes: list[EvidenceVote]
+    expected_value: ExpectedValueReadout
+    data_confidence: DataConfidenceGrade
+    position_sizing: PositionSizingReadout
+    regime: str
+
+
+@dataclass(frozen=True)
 class ThesisReadout:
     horizon: str
     setup_type: str
@@ -40,6 +91,11 @@ class ThesisReadout:
     technical_read: str
     trade_judgment: str
     forecast: list[ScenarioProbability]
+    evidence_votes: list[EvidenceVote] = field(default_factory=list)
+    expected_value: ExpectedValueReadout | None = None
+    data_confidence: DataConfidenceGrade | None = None
+    position_sizing: PositionSizingReadout | None = None
+    regime: str = "unknown"
 
 
 def build_thesis_readout(
@@ -82,6 +138,55 @@ def build_thesis_readout(
     if macro_headwind:
         warnings.append("Macro is a headwind, so confirmation matters more than usual.")
 
+    forecast = build_scenario_forecast(indicators, macro_score=macro_score, earnings_risk_score=earnings_risk_score)
+    overlay = build_evidence_weighted_decision(
+        indicators=indicators,
+        context=context,
+        fundamentals_text=fundamentals_text,
+        valuation_score=valuation_score,
+        macro_score=macro_score,
+        earnings_risk_score=earnings_risk_score,
+        technical_score=technical_score,
+        momentum_score=momentum_score,
+        macro_text=macro_text,
+        command_center_report=command_center_report,
+        fundamentals=fundamentals,
+        pullback=pullback,
+        forecast=forecast,
+    )
+
+    def thesis(
+        *,
+        horizon: str,
+        setup_type: str,
+        recommendation: str,
+        confidence: str,
+        why: str,
+        invalidation: str,
+        preferred_vehicle: str,
+        warnings: list[str],
+        technical_read: str,
+        trade_judgment: str,
+    ) -> ThesisReadout:
+        return ThesisReadout(
+            horizon=horizon,
+            setup_type=setup_type,
+            recommendation=recommendation,
+            confidence=_cap_confidence(confidence, overlay.data_confidence),
+            why=why,
+            invalidation=invalidation,
+            preferred_vehicle=preferred_vehicle,
+            warnings=warnings,
+            technical_read=technical_read,
+            trade_judgment=trade_judgment,
+            forecast=forecast,
+            evidence_votes=overlay.evidence_votes,
+            expected_value=overlay.expected_value,
+            data_confidence=overlay.data_confidence,
+            position_sizing=overlay.position_sizing,
+            regime=overlay.regime,
+        )
+
     if support_broken or (below_long_term and indicators.trend == "bearish" and weak_thesis):
         recommendation = "Trim" if context.is_held else "Avoid"
         setup_type = "breakdown"
@@ -96,7 +201,7 @@ def build_thesis_readout(
             ]
         )
         trade_judgment = "Bearish tape and thesis deterioration."
-        return ThesisReadout(
+        return thesis(
             horizon="investment" if weak_thesis else "swing",
             setup_type=setup_type,
             recommendation=recommendation,
@@ -107,7 +212,6 @@ def build_thesis_readout(
             warnings=_dedupe([*warnings, *pullback.rejections]),
             technical_read=technical_read,
             trade_judgment=trade_judgment,
-            forecast=build_scenario_forecast(indicators, macro_score=macro_score, earnings_risk_score=earnings_risk_score),
         )
 
     if pullback.is_candidate:
@@ -121,7 +225,7 @@ def build_thesis_readout(
             + "."
         )
         trade_judgment = "Bearish tape, but constructive pullback candidate."
-        return ThesisReadout(
+        return thesis(
             horizon="investment",
             setup_type="pullback",
             recommendation=recommendation,
@@ -132,7 +236,6 @@ def build_thesis_readout(
             warnings=_dedupe(warnings + pullback.rejections),
             technical_read=technical_read,
             trade_judgment=trade_judgment,
-            forecast=build_scenario_forecast(indicators, macro_score=macro_score, earnings_risk_score=earnings_risk_score),
         )
 
     if context.is_held and (technical_score <= -25 or momentum_score <= -35 or macro_headwind):
@@ -143,7 +246,7 @@ def build_thesis_readout(
             "Held position has visible tape risk, but the practical response depends on exposure size. "
             "For small positions, waiting, trimming shares, or doing nothing is often cleaner than buying a 100-share option contract."
         )
-        return ThesisReadout(
+        return thesis(
             horizon="hedge",
             setup_type="hedge" if size_warrants_option else "chop",
             recommendation=recommendation,
@@ -154,12 +257,11 @@ def build_thesis_readout(
             warnings=_dedupe(warnings + pullback.rejections),
             technical_read=technical_read,
             trade_judgment="Held position: hedge only if exposure justifies contract size.",
-            forecast=build_scenario_forecast(indicators, macro_score=macro_score, earnings_risk_score=earnings_risk_score),
         )
 
     if indicators.trend == "bullish" and indicators.momentum == "improving" and not severe_event and not macro_headwind:
         preferred = "Shares" if context.is_held else "Starter Shares"
-        return ThesisReadout(
+        return thesis(
             horizon="investment",
             setup_type="breakout" if _near_resistance(indicators) else "pullback",
             recommendation="Add Carefully",
@@ -173,11 +275,10 @@ def build_thesis_readout(
             warnings=_dedupe(warnings),
             technical_read=technical_read,
             trade_judgment="Bullish trend with improving momentum; add only with confirmation.",
-            forecast=build_scenario_forecast(indicators, macro_score=macro_score, earnings_risk_score=earnings_risk_score),
         )
 
     no_trade_warnings = _dedupe(warnings + pullback.rejections)
-    return ThesisReadout(
+    return thesis(
         horizon="unknown" if fundamentals["label"] == "Unknown" else "swing",
         setup_type="no-trade" if severe_event or pullback.rejections else "chop",
         recommendation="Wait for Confirmation",
@@ -191,7 +292,74 @@ def build_thesis_readout(
         warnings=no_trade_warnings,
         technical_read=technical_read,
         trade_judgment="Mixed setup; wait for confirmation.",
-        forecast=build_scenario_forecast(indicators, macro_score=macro_score, earnings_risk_score=earnings_risk_score),
+    )
+
+
+def build_evidence_weighted_decision(
+    *,
+    indicators: AdvancedIndicatorSnapshot,
+    context: PortfolioSymbolContext,
+    fundamentals_text: str,
+    valuation_score: float | None,
+    macro_score: float,
+    earnings_risk_score: float,
+    technical_score: float,
+    momentum_score: float,
+    macro_text: str = "",
+    command_center_report: Any | None = None,
+    fundamentals: dict[str, Any] | None = None,
+    pullback: PullbackOpportunity | None = None,
+    forecast: list[ScenarioProbability] | None = None,
+) -> EvidenceWeightedDecision:
+    fundamentals = fundamentals or score_fundamental_thesis(fundamentals_text)
+    pullback = pullback or classify_pullback_opportunity(
+        indicators,
+        fundamentals,
+        valuation_score,
+        macro_text or macro_score,
+        context,
+        command_center_report,
+        earnings_risk_score=earnings_risk_score,
+    )
+    forecast = forecast or build_scenario_forecast(indicators, macro_score=macro_score, earnings_risk_score=earnings_risk_score)
+
+    votes = _build_evidence_votes(
+        indicators=indicators,
+        context=context,
+        fundamentals=fundamentals,
+        valuation_score=valuation_score,
+        macro_score=macro_score,
+        earnings_risk_score=earnings_risk_score,
+        technical_score=technical_score,
+        momentum_score=momentum_score,
+        command_center_report=command_center_report,
+        pullback=pullback,
+    )
+    confidence = _data_confidence(
+        indicators=indicators,
+        context=context,
+        fundamentals_text=fundamentals_text,
+        macro_text=macro_text,
+        macro_score=macro_score,
+        command_center_report=command_center_report,
+    )
+    composite = _weighted_vote_score(votes)
+    regime = _market_regime(indicators, macro_score=macro_score, earnings_risk_score=earnings_risk_score)
+    ev = _expected_value_readout(
+        indicators=indicators,
+        forecast=forecast,
+        composite_score=composite,
+        confidence=confidence,
+        macro_score=macro_score,
+        earnings_risk_score=earnings_risk_score,
+    )
+    sizing = _position_sizing_readout(indicators, context, ev)
+    return EvidenceWeightedDecision(
+        evidence_votes=votes,
+        expected_value=ev,
+        data_confidence=confidence,
+        position_sizing=sizing,
+        regime=regime,
     )
 
 
@@ -358,6 +526,396 @@ def build_scenario_forecast(
         )
     rows.sort(key=lambda row: row.probability, reverse=True)
     return rows
+
+
+def _build_evidence_votes(
+    *,
+    indicators: AdvancedIndicatorSnapshot,
+    context: PortfolioSymbolContext,
+    fundamentals: dict[str, Any],
+    valuation_score: float | None,
+    macro_score: float,
+    earnings_risk_score: float,
+    technical_score: float,
+    momentum_score: float,
+    command_center_report: Any | None,
+    pullback: PullbackOpportunity,
+) -> list[EvidenceVote]:
+    fundamental_score = float(fundamentals.get("score", 0.0) or 0.0)
+    return [
+        _vote(
+            "Chart structure",
+            technical_score,
+            0.22,
+            f"Trend is {indicators.trend}; pullback class is {pullback.classification}.",
+        ),
+        _vote(
+            "Momentum / volume pace",
+            momentum_score,
+            0.14,
+            f"Momentum is {indicators.momentum}; volume pace proxy is {_volume_proxy_label(indicators)}.",
+        ),
+        _vote(
+            "Fundamental quality",
+            fundamental_score,
+            0.18,
+            f"Fundamental thesis is {fundamentals.get('label', 'Unknown')}.",
+        ),
+        _vote(
+            "Valuation context",
+            0.0 if valuation_score is None else valuation_score,
+            0.10,
+            "Valuation source is unavailable." if valuation_score is None else "Valuation score loaded from fundamentals.",
+        ),
+        _vote(
+            "Macro / factor regime",
+            macro_score,
+            0.12,
+            "Macro score is derived from the loaded macro snapshot.",
+        ),
+        _vote(
+            "Event risk",
+            _clamp(50.0 - earnings_risk_score, -100.0, 100.0),
+            0.10,
+            "Near-term event risk is translated into a downside confidence modifier.",
+        ),
+        _vote(
+            "Supply absorption",
+            _supply_absorption_score(indicators, command_center_report, pullback),
+            0.09,
+            "Uses support/resistance position and command-center volume distribution when available.",
+        ),
+        _vote(
+            "Portfolio fit",
+            _position_fit_score(context),
+            0.05,
+            f"Current portfolio weight is {context.portfolio_weight * 100:.1f}%.",
+        ),
+    ]
+
+
+def _vote(name: str, score: float, weight: float, why: str) -> EvidenceVote:
+    clean_score = _clamp(float(score or 0.0), -100.0, 100.0)
+    return EvidenceVote(
+        name=name,
+        score=round(clean_score, 1),
+        weight=weight,
+        direction=_vote_direction(clean_score),
+        why=why,
+    )
+
+
+def _vote_direction(score: float) -> str:
+    if score >= 18:
+        return "Bullish"
+    if score <= -18:
+        return "Bearish"
+    return "Neutral"
+
+
+def _volume_proxy_label(indicators: AdvancedIndicatorSnapshot) -> str:
+    if indicators.volume_average_20 is None:
+        return "unavailable"
+    if indicators.volatility == "elevated" and indicators.momentum == "weakening":
+        return "risk elevated"
+    if indicators.momentum == "improving":
+        return "constructive"
+    return "mixed"
+
+
+def _supply_absorption_score(
+    indicators: AdvancedIndicatorSnapshot,
+    command_center_report: Any | None,
+    pullback: PullbackOpportunity,
+) -> float:
+    if _command_center_distribution(command_center_report):
+        return -65.0
+    command_score = _command_center_volume_score(command_center_report)
+    if command_score is not None:
+        return (command_score - 50.0) * 2.0
+    if _support_broken(indicators):
+        return -45.0
+    if _near_resistance(indicators) and indicators.momentum != "improving":
+        return -25.0
+    if pullback.is_candidate:
+        return 28.0
+    return 0.0
+
+
+def _command_center_volume_score(command_center_report: Any | None) -> float | None:
+    if command_center_report is None:
+        return None
+    scores = getattr(command_center_report, "scores", {}) or {}
+    score = scores.get("Volume") if hasattr(scores, "get") else None
+    if score is None:
+        return None
+    try:
+        return float(getattr(score, "score", 50.0) or 50.0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _position_fit_score(context: PortfolioSymbolContext) -> float:
+    if context.portfolio_weight >= 0.15:
+        return -65.0
+    if context.portfolio_weight >= 0.08:
+        return -30.0
+    if context.cash_available <= 0 and not context.is_held:
+        return -25.0
+    if context.is_held and context.portfolio_weight < 0.03:
+        return 12.0
+    if not context.is_held and context.cash_available > 0:
+        return 18.0
+    return 0.0
+
+
+def _weighted_vote_score(votes: list[EvidenceVote]) -> float:
+    total_weight = sum(vote.weight for vote in votes) or 1.0
+    return sum(vote.score * vote.weight for vote in votes) / total_weight
+
+
+def _data_confidence(
+    *,
+    indicators: AdvancedIndicatorSnapshot,
+    context: PortfolioSymbolContext,
+    fundamentals_text: str,
+    macro_text: str,
+    macro_score: float,
+    command_center_report: Any | None,
+) -> DataConfidenceGrade:
+    score = 100.0
+    available: list[str] = []
+    missing: list[str] = []
+
+    def mark(condition: bool, name: str, penalty: float) -> None:
+        nonlocal score
+        if condition:
+            available.append(name)
+        else:
+            missing.append(name)
+            score -= penalty
+
+    mark(indicators.latest_close is not None and indicators.latest_close > 0, "fresh price history", 35.0)
+    mark((indicators.support or indicators.swing_low or indicators.atr_14) is not None, "support or ATR risk line", 18.0)
+    mark((indicators.resistance or indicators.swing_high or indicators.atr_14) is not None, "resistance or ATR target line", 12.0)
+    mark(_has_fundamental_source(fundamentals_text), "fundamental source", 12.0)
+    mark(bool(macro_text.strip()) or abs(macro_score) > 1, "macro/factor source", 10.0)
+    mark(context.portfolio_value > 0, "portfolio context", 8.0)
+    mark(command_center_report is not None, "capital-structure command-center read", 10.0)
+
+    missing.append("options open-interest / borrow / short-interest feed")
+    score -= 14.0
+
+    score = _clamp(score, 0.0, 100.0)
+    if score >= 78:
+        grade = "High"
+    elif score >= 55:
+        grade = "Medium"
+    else:
+        grade = "Low"
+    return DataConfidenceGrade(
+        grade=grade,
+        score=round(score, 1),
+        available=available,
+        missing=missing,
+        why=f"{grade} confidence from {len(available)} loaded evidence groups and {len(missing)} missing groups.",
+    )
+
+
+def _has_fundamental_source(text: str) -> bool:
+    lower = text.lower()
+    return bool(lower.strip()) and "unavailable" not in lower and ("source:" in lower or "revenue" in lower or "income" in lower)
+
+
+def _expected_value_readout(
+    *,
+    indicators: AdvancedIndicatorSnapshot,
+    forecast: list[ScenarioProbability],
+    composite_score: float,
+    confidence: DataConfidenceGrade,
+    macro_score: float,
+    earnings_risk_score: float,
+) -> ExpectedValueReadout:
+    price = indicators.latest_close
+    if price is None or price <= 0:
+        return ExpectedValueReadout(
+            label="Incomplete",
+            expected_value=0.0,
+            expected_value_pct=0.0,
+            win_probability=0.0,
+            reward_per_share=0.0,
+            risk_per_share=0.0,
+            target_price=None,
+            stop_price=None,
+            why="Expected value cannot be calculated without a valid latest price.",
+        )
+
+    support_broken = _support_broken(indicators)
+    target = _target_price(indicators, support_broken=support_broken)
+    stop = _stop_price(indicators, support_broken=support_broken)
+    risk_per_share = max(0.01, price - stop)
+    reward_per_share = max(0.0, target - price)
+    scenario_win = _scenario_win_probability(forecast)
+    evidence_win = _clamp(0.50 + (composite_score / 220.0), 0.15, 0.78)
+    win_probability = _clamp((scenario_win + evidence_win) / 2.0, 0.15, 0.80)
+
+    if support_broken:
+        win_probability = min(win_probability, 0.28)
+    elif macro_score <= -45:
+        win_probability = min(win_probability, 0.45)
+    if earnings_risk_score >= 75:
+        win_probability = min(win_probability, 0.42)
+    if confidence.grade == "Low":
+        win_probability = min(win_probability, 0.48)
+
+    expected_value = (win_probability * reward_per_share) - ((1.0 - win_probability) * risk_per_share)
+    expected_value_pct = (expected_value / price) * 100.0
+    if expected_value > max(0.05, price * 0.001) and confidence.grade != "Low":
+        label = "Positive EV"
+    elif expected_value > 0:
+        label = "Speculative Positive EV"
+    elif expected_value < -max(0.05, price * 0.001):
+        label = "Negative EV"
+    else:
+        label = "Flat EV"
+    return ExpectedValueReadout(
+        label=label,
+        expected_value=round(expected_value, 2),
+        expected_value_pct=round(expected_value_pct, 2),
+        win_probability=round(win_probability * 100.0, 1),
+        reward_per_share=round(reward_per_share, 2),
+        risk_per_share=round(risk_per_share, 2),
+        target_price=round(target, 2),
+        stop_price=round(stop, 2),
+        why=(
+            f"{label}: win probability {win_probability * 100:.1f}%, "
+            f"reward {_money(reward_per_share)}, risk {_money(risk_per_share)}."
+        ),
+    )
+
+
+def _scenario_win_probability(forecast: list[ScenarioProbability]) -> float:
+    if not forecast:
+        return 0.50
+    win = sum(row.probability for row in forecast if "Rebound" in row.scenario or "Breakout" in row.scenario)
+    return _clamp(win / 100.0, 0.10, 0.85)
+
+
+def _target_price(indicators: AdvancedIndicatorSnapshot, *, support_broken: bool) -> float:
+    price = float(indicators.latest_close or 0.0)
+    atr = _atr_value(indicators)
+    if support_broken:
+        reclaim = indicators.support or indicators.resistance or indicators.swing_high
+        if reclaim is not None and reclaim > price:
+            return float(reclaim)
+        return price + atr
+    target = indicators.resistance or indicators.swing_high
+    if target is not None and target > price:
+        return float(target)
+    return price + max(atr * 2.0, price * 0.04)
+
+
+def _stop_price(indicators: AdvancedIndicatorSnapshot, *, support_broken: bool) -> float:
+    price = float(indicators.latest_close or 0.0)
+    atr = _atr_value(indicators)
+    if support_broken:
+        return max(0.01, price - max(atr * 1.75, price * 0.05))
+    stop = indicators.support or indicators.swing_low
+    if stop is not None and 0 < stop < price:
+        return float(stop)
+    return max(0.01, price - max(atr * 1.5, price * 0.03))
+
+
+def _atr_value(indicators: AdvancedIndicatorSnapshot) -> float:
+    price = float(indicators.latest_close or 0.0)
+    if indicators.atr_14 is not None and indicators.atr_14 > 0:
+        return float(indicators.atr_14)
+    return max(0.01, price * 0.025)
+
+
+def _position_sizing_readout(
+    indicators: AdvancedIndicatorSnapshot,
+    context: PortfolioSymbolContext,
+    ev: ExpectedValueReadout,
+) -> PositionSizingReadout:
+    price = indicators.latest_close
+    portfolio_value = max(float(context.portfolio_value or 0.0), float(context.market_value or 0.0))
+    if price is None or price <= 0 or portfolio_value <= 0 or ev.risk_per_share <= 0:
+        return PositionSizingReadout(0, 0.0, 0.0, 0.0, None, ev.stop_price, "Sizing unavailable without price, portfolio value, and risk line.")
+    if ev.expected_value <= 0:
+        return PositionSizingReadout(0, 0.0, 0.0, 0.0, ev.risk_per_share, ev.stop_price, "No new position size because expected value is not positive.")
+
+    cap_weight = 0.08 if context.is_held else 0.05
+    max_total_notional = portfolio_value * cap_weight
+    current_notional = max(0.0, context.market_value if context.is_held else 0.0)
+    remaining_notional = max(0.0, max_total_notional - current_notional)
+    cash_cap = context.cash_available if context.cash_available > 0 else remaining_notional
+    notional_cap = min(remaining_notional, cash_cap)
+    if notional_cap <= 0:
+        return PositionSizingReadout(
+            0,
+            0.0,
+            0.0,
+            context.portfolio_weight,
+            ev.risk_per_share,
+            ev.stop_price,
+            "Existing exposure or cash cap leaves no room for a risk-sized add.",
+        )
+
+    risk_budget = min(portfolio_value * 0.01, notional_cap * 0.25)
+    shares_by_risk = math.floor(risk_budget / ev.risk_per_share)
+    shares_by_notional = math.floor(notional_cap / price)
+    target_shares = max(0, min(shares_by_risk, shares_by_notional))
+    max_notional = target_shares * price
+    risk_dollars = target_shares * ev.risk_per_share
+    weight = max_notional / portfolio_value if portfolio_value else 0.0
+    return PositionSizingReadout(
+        target_shares=target_shares,
+        max_notional=round(max_notional, 2),
+        risk_dollars=round(risk_dollars, 2),
+        portfolio_weight=round(weight, 4),
+        per_share_risk=round(ev.risk_per_share, 2),
+        stop_price=ev.stop_price,
+        basis=(
+            f"Risk-sized with 1% portfolio budget capped by {cap_weight * 100:.0f}% total exposure; "
+            f"{target_shares} shares risks {_money(risk_dollars)}."
+        ),
+    )
+
+
+def _market_regime(
+    indicators: AdvancedIndicatorSnapshot,
+    *,
+    macro_score: float,
+    earnings_risk_score: float,
+) -> str:
+    if earnings_risk_score >= 75:
+        return "event-risk regime"
+    if _support_broken(indicators):
+        return "breakdown risk"
+    if macro_score <= -45:
+        return "risk-off / macro headwind"
+    if indicators.volatility == "elevated":
+        return "volatility expansion"
+    if indicators.trend == "bullish" and indicators.momentum == "improving" and macro_score >= 0:
+        return "risk-on trend"
+    return "range / mixed evidence"
+
+
+def _cap_confidence(confidence: str, data_confidence: DataConfidenceGrade) -> str:
+    if data_confidence.grade == "Low" and _confidence_rank(confidence) > _confidence_rank("Low"):
+        return "Low"
+    if data_confidence.grade == "Medium" and _confidence_rank(confidence) > _confidence_rank("Medium"):
+        return "Medium"
+    return confidence
+
+
+def _confidence_rank(confidence: str) -> int:
+    return {"Low": 1, "Medium": 2, "High": 3}.get(confidence, 1)
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
 
 
 def score_fundamental_thesis(text: str) -> dict[str, Any]:
