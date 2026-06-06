@@ -113,6 +113,7 @@ from app.analytics.capital_structure_pressure import (
 )
 from app.core.order_models import OrderSide, OrderType, TimeInForce
 from app.analytics.technical_analysis import (
+    CapitalStructureIndicatorRead,
     DEFAULT_COMMAND_CENTER_TIMEFRAMES,
     Candle,
     TechnicalCommandCenterReport,
@@ -168,6 +169,7 @@ SUMMARY_EXPANDED_HEIGHT = 286
 TAB_PANE_MIN = 440
 DETACH_DRAG_PIXELS = 42
 PRC_PRESSURE_LINE_NOTICE = "PRC Pressure Line is a synthetic internal indicator, not an official price target or exchange price."
+CAPITAL_STRUCTURE_LEVEL_DISCLAIMER = "Filing-derived levels are risk/context modifiers, not support, resistance, targets, or price predictions."
 
 
 @dataclass(frozen=True)
@@ -1410,8 +1412,64 @@ def _technicals_tab(notebook: ttk.Notebook) -> ttk.Frame:
     frame.risk_meter = ScoreMeter(frame.meters)  # type: ignore[attr-defined]
     frame.risk_meter.grid(row=0, column=2, sticky="ew")  # type: ignore[attr-defined]
 
+    capital_box = ttk.LabelFrame(frame, text="Capital Structure / Supply", style="Card.TLabelframe")
+    capital_box.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+    capital_box.columnconfigure(0, weight=1)
+    ttk.Label(capital_box, text=CAPITAL_STRUCTURE_LEVEL_DISCLAIMER, style="Subtle.TLabel", wraplength=1120, justify=tk.LEFT).grid(row=0, column=0, sticky="ew", pady=(0, 6))
+    capital_cards = ttk.Frame(capital_box, style="Panel.TFrame")
+    capital_cards.grid(row=1, column=0, sticky="ew")
+    capital_grid = ttk.Frame(capital_box, style="Panel.TFrame")
+    capital_grid.grid(row=2, column=0, sticky="ew", pady=(4, 0))
+    capital_grid.columnconfigure((0, 1), weight=1)
+
+    supply_box = ttk.LabelFrame(capital_grid, text="Supply Level / Recommendation", style="Card.TLabelframe")
+    supply_box.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+    supply_box.columnconfigure(0, weight=1)
+    supply_tree = ttk.Treeview(
+        supply_box,
+        columns=("label", "price", "distance", "read"),
+        show="headings",
+        height=4,
+    )
+    _style_research_tree(supply_tree)
+    for column, label, width, anchor in (
+        ("label", "Level Label", 170, tk.W),
+        ("price", "Price", 95, tk.E),
+        ("distance", "Distance From Latest", 145, tk.E),
+        ("read", "Read / Recommendation", 440, tk.W),
+    ):
+        supply_tree.heading(column, text=label)
+        supply_tree.column(column, width=width, anchor=anchor, stretch=column == "read")
+    supply_tree.grid(row=0, column=0, sticky="ew")
+    supply_scroll = ttk.Scrollbar(supply_box, orient=tk.VERTICAL, command=supply_tree.yview)
+    supply_scroll.grid(row=0, column=1, sticky="ns")
+    supply_tree.configure(yscrollcommand=supply_scroll.set)
+    _add_horizontal_tree_scrollbar(supply_box, supply_tree, row=1)
+
+    capital_note_box = ttk.LabelFrame(capital_grid, text="Explanation / Warnings", style="Card.TLabelframe")
+    capital_note_box.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+    capital_note_box.columnconfigure(0, weight=1)
+    capital_note_tree = ttk.Treeview(
+        capital_note_box,
+        columns=("kind", "detail"),
+        show="headings",
+        height=4,
+    )
+    _style_research_tree(capital_note_tree)
+    for column, label, width, anchor in (
+        ("kind", "Type", 135, tk.W),
+        ("detail", "Detail", 650, tk.W),
+    ):
+        capital_note_tree.heading(column, text=label)
+        capital_note_tree.column(column, width=width, anchor=anchor, stretch=column == "detail")
+    capital_note_tree.grid(row=0, column=0, sticky="ew")
+    capital_note_scroll = ttk.Scrollbar(capital_note_box, orient=tk.VERTICAL, command=capital_note_tree.yview)
+    capital_note_scroll.grid(row=0, column=1, sticky="ns")
+    capital_note_tree.configure(yscrollcommand=capital_note_scroll.set)
+    _add_horizontal_tree_scrollbar(capital_note_box, capital_note_tree, row=1)
+
     timeframe_box = ttk.LabelFrame(frame, text="Timeframe Stack", style="Card.TLabelframe")
-    timeframe_box.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+    timeframe_box.grid(row=3, column=0, sticky="ew", pady=(10, 0))
     timeframe_box.columnconfigure(0, weight=1)
     timeframe_tree = ttk.Treeview(
         timeframe_box,
@@ -1440,7 +1498,7 @@ def _technicals_tab(notebook: ttk.Notebook) -> ttk.Frame:
     _add_horizontal_tree_scrollbar(timeframe_box, timeframe_tree, row=1)
 
     prc_box = ttk.LabelFrame(frame, text="PRC Pressure Line - Synthetic Internal Indicator", style="Card.TLabelframe")
-    prc_box.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+    prc_box.grid(row=4, column=0, sticky="ew", pady=(10, 0))
     prc_box.columnconfigure(0, weight=1)
     ttk.Label(prc_box, text=PRC_PRESSURE_LINE_NOTICE, style="Subtle.TLabel", wraplength=1120, justify=tk.LEFT).grid(row=0, column=0, sticky="ew", pady=(0, 6))
     prc_tree = ttk.Treeview(
@@ -1468,7 +1526,7 @@ def _technicals_tab(notebook: ttk.Notebook) -> ttk.Frame:
     _add_horizontal_tree_scrollbar(prc_box, prc_tree, row=2)
 
     command_grid = ttk.Frame(frame, style="Panel.TFrame")
-    command_grid.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+    command_grid.grid(row=5, column=0, sticky="ew", pady=(10, 0))
     command_grid.columnconfigure((0, 1), weight=1)
 
     score_box = ttk.LabelFrame(command_grid, text="Score Breakdown", style="Card.TLabelframe")
@@ -1508,7 +1566,7 @@ def _technicals_tab(notebook: ttk.Notebook) -> ttk.Frame:
     _add_horizontal_tree_scrollbar(ticket_box, ticket_tree, row=1)
 
     warning_box = ttk.LabelFrame(frame, text="Warnings / Data Quality", style="Card.TLabelframe")
-    warning_box.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+    warning_box.grid(row=6, column=0, sticky="ew", pady=(10, 0))
     warning_box.columnconfigure(0, weight=1)
     warning_tree = ttk.Treeview(warning_box, columns=("source", "warning"), show="headings", height=4)
     _style_research_tree(warning_tree)
@@ -1523,11 +1581,11 @@ def _technicals_tab(notebook: ttk.Notebook) -> ttk.Frame:
     warning_box.grid_remove()
 
     frame.chart_readout = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
-    frame.chart_readout.grid(row=6, column=0, sticky="ew", pady=(10, 0))  # type: ignore[attr-defined]
+    frame.chart_readout.grid(row=7, column=0, sticky="ew", pady=(10, 0))  # type: ignore[attr-defined]
     frame.chart_readout.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
 
     tree_box = ttk.LabelFrame(frame, text="Existing Indicator Readout", style="Card.TLabelframe")
-    tree_box.grid(row=7, column=0, sticky="ew", pady=(10, 0))
+    tree_box.grid(row=8, column=0, sticky="ew", pady=(10, 0))
     tree_box.columnconfigure(0, weight=1)
     tree = ttk.Treeview(tree_box, columns=("metric", "value", "read"), show="headings", height=12)
     _style_research_tree(tree)
@@ -1539,7 +1597,10 @@ def _technicals_tab(notebook: ttk.Notebook) -> ttk.Frame:
     y_scroll.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=y_scroll.set)
     _add_horizontal_tree_scrollbar(tree_box, tree, row=1)
-    text = _readout_launcher(frame, title="Technical Readout", button_text="Open Technical Readout", row=8, pady=(10, 0))
+    text = _readout_launcher(frame, title="Technical Readout", button_text="Open Technical Readout", row=9, pady=(10, 0))
+    frame.capital_cards = capital_cards  # type: ignore[attr-defined]
+    frame.capital_supply_tree = supply_tree  # type: ignore[attr-defined]
+    frame.capital_note_tree = capital_note_tree  # type: ignore[attr-defined]
     frame.timeframe_tree = timeframe_tree  # type: ignore[attr-defined]
     frame.prc_tree = prc_tree  # type: ignore[attr-defined]
     frame.score_tree = score_tree  # type: ignore[attr-defined]
@@ -2737,6 +2798,151 @@ def _technical_setup_cards(report: TechnicalCommandCenterReport | None) -> list[
     ]
 
 
+def _technical_capital_structure_cards(report: TechnicalCommandCenterReport | None) -> list[BadgeReadout]:
+    indicator = _technical_capital_structure_indicator(report)
+    if report is None:
+        return [
+            _synthetic_badge(
+                "Capital Read",
+                "Unavailable",
+                "info",
+                "The command-center report was not built; no filing-derived supply indicator is available.",
+            )
+        ]
+    if indicator is None:
+        return [
+            _synthetic_badge(
+                "Capital Read",
+                "No Parsed Supply",
+                "info",
+                "No capital-structure / supply indicator was returned for this command-center payload.",
+            )
+        ]
+
+    cards = [
+        _synthetic_badge(
+            "Capital Read",
+            _humanize_command_value(getattr(indicator, "read", "")),
+            _capital_structure_read_status(indicator),
+            _capital_structure_read_why(indicator),
+            _safe_float(getattr(indicator, "technical_score", None)),
+        ),
+        _synthetic_badge(
+            "Technical Score",
+            _score_label(getattr(indicator, "technical_score", None)),
+            _capital_structure_direction_status(getattr(indicator, "technical_score", None)),
+            "Higher is cleaner for technical confirmation after filing-derived supply context.",
+        ),
+        _synthetic_badge(
+            "Supply Overhang",
+            _score_label(getattr(indicator, "supply_overhang_score", None)),
+            _capital_structure_risk_status(getattr(indicator, "supply_overhang_score", None)),
+            "Risk score from the filing pressure scan.",
+        ),
+        _synthetic_badge(
+            "Dilution Pressure",
+            _score_label(getattr(indicator, "dilution_pressure_score", None)),
+            _capital_structure_risk_status(getattr(indicator, "dilution_pressure_score", None)),
+            "Preferred, convertible, offering, and dilution-warning terms can weaken clean breakouts.",
+        ),
+        _synthetic_badge(
+            "Level Proximity",
+            _score_label(getattr(indicator, "warrant_conversion_proximity_score", None)),
+            _capital_structure_risk_status(getattr(indicator, "warrant_conversion_proximity_score", None)),
+            _capital_structure_level_why(indicator),
+        ),
+        _synthetic_badge(
+            "Offering / ATM",
+            _score_label(getattr(indicator, "offering_activity_score", None)),
+            _capital_structure_risk_status(getattr(indicator, "offering_activity_score", None)),
+            "ATM, shelf, resale, or offering language raises rally-fade context.",
+        ),
+        _synthetic_badge(
+            "Float Quality",
+            _score_label(getattr(indicator, "float_quality_score", None)),
+            _capital_structure_direction_status(getattr(indicator, "float_quality_score", None)),
+            "Higher score means fewer parsed float, share-class, or ADS/ADR complexity flags.",
+        ),
+        _synthetic_badge(
+            "ADS Confidence",
+            _signed_score_label(getattr(indicator, "foreign_issuer_confidence_modifier", None)),
+            _capital_structure_modifier_status(getattr(indicator, "foreign_issuer_confidence_modifier", None)),
+            "Negative modifier means ADS/ADR or foreign issuer terms need source verification.",
+        ),
+    ]
+    if _safe_float(getattr(indicator, "option_exposure_mismatch_score", None)) > 0:
+        cards.append(
+            _synthetic_badge(
+                "Option Mismatch",
+                _score_label(getattr(indicator, "option_exposure_mismatch_score", None)),
+                _capital_structure_risk_status(getattr(indicator, "option_exposure_mismatch_score", None)),
+                "Modeled option contracts control meaningfully different exposure than modeled shares.",
+            )
+        )
+    cards.append(
+        _synthetic_badge(
+            "Chase Risk",
+            _score_label(getattr(indicator, "chase_risk_score", None)),
+            _capital_structure_risk_status(getattr(indicator, "chase_risk_score", None)),
+            "Composite supply, dilution, proximity, offering, and option-exposure chase risk.",
+        )
+    )
+    return cards
+
+
+def _technical_capital_structure_supply_rows(report: TechnicalCommandCenterReport | None) -> list[tuple[str, str, str, str]]:
+    indicator = _technical_capital_structure_indicator(report)
+    if report is None:
+        return [("Unavailable", "--", "--", "Technical Command Center report was not built.")]
+    if indicator is None:
+        return [("No parsed supply", "--", "--", "No capital-structure / supply indicator was returned.")]
+
+    recommendation_lines = _bounded_clean_lines(getattr(indicator, "recommendation_lines", None), limit=4)
+    read = recommendation_lines[0] if recommendation_lines else _humanize_command_value(getattr(indicator, "read", ""))
+    level_label = str(getattr(indicator, "nearest_supply_level_label", None) or "No nearest filing level")
+    rows = [
+        (
+            level_label,
+            _money(getattr(indicator, "nearest_supply_level", None)),
+            _format_command_percent(getattr(indicator, "nearest_supply_level_distance_percent", None)),
+            read or "Supply-level read unavailable.",
+        )
+    ]
+    for line in recommendation_lines[1:]:
+        rows.append(("Recommendation", "--", "--", line))
+    return rows
+
+
+def _technical_capital_structure_note_rows(report: TechnicalCommandCenterReport | None) -> list[tuple[str, str]]:
+    indicator = _technical_capital_structure_indicator(report)
+    if report is None:
+        return [
+            ("Status", "Technical Command Center report was not built."),
+            ("Disclaimer", CAPITAL_STRUCTURE_LEVEL_DISCLAIMER),
+        ]
+    if indicator is None:
+        return [
+            ("Status", "No parsed capital-structure / supply indicator was returned."),
+            ("Disclaimer", CAPITAL_STRUCTURE_LEVEL_DISCLAIMER),
+        ]
+
+    rows: list[tuple[str, str]] = []
+    rows.extend(("Recommendation", line) for line in _bounded_clean_lines(getattr(indicator, "recommendation_lines", None), limit=4))
+    rows.extend(("Explanation", line) for line in _bounded_clean_lines(getattr(indicator, "explanation_lines", None), limit=5))
+    rows.extend(("Warning", line) for line in _bounded_clean_lines(getattr(indicator, "warnings", None), limit=4))
+    if not rows:
+        rows.append(("Status", "Indicator available; no explanation, warning, or recommendation lines were returned."))
+    rows.append(("Disclaimer", CAPITAL_STRUCTURE_LEVEL_DISCLAIMER))
+    return rows
+
+
+def _technical_capital_structure_indicator(report: TechnicalCommandCenterReport | None) -> CapitalStructureIndicatorRead | None:
+    if report is None:
+        return None
+    indicator = getattr(report, "capital_structure_indicator", None)
+    return indicator if indicator is not None else None
+
+
 def _technical_timeframe_stack_rows(report: TechnicalCommandCenterReport | None) -> list[tuple[str, str, str, str, str, str, str, str, str]]:
     if report is None:
         return [("Unavailable", "--", "--", "--", "--", "--", "--", "--", "Technical Command Center report was not built.")]
@@ -2941,6 +3147,118 @@ def _technical_status(value: Any) -> str:
     return "info"
 
 
+def _capital_structure_read_status(indicator: CapitalStructureIndicatorRead) -> str:
+    text = str(getattr(indicator, "read", "") or "").lower()
+    if any(term in text for term in ("rally", "fade", "dilution", "mismatch", "offering_pressure")):
+        return "bad"
+    if any(term in text for term in ("verification", "watch")):
+        return "mixed"
+    if any(term in text for term in ("clean", "absorption", "low")):
+        return "good"
+    if any(term in text for term in ("context", "supply")):
+        return "info"
+    return _capital_structure_direction_status(getattr(indicator, "technical_score", None))
+
+
+def _capital_structure_read_why(indicator: CapitalStructureIndicatorRead) -> str:
+    recommendation = _bounded_clean_lines(getattr(indicator, "recommendation_lines", None), limit=1)
+    if recommendation:
+        return recommendation[0]
+    return "Filing-derived supply terms modify chart confidence and chase risk."
+
+
+def _capital_structure_level_why(indicator: CapitalStructureIndicatorRead) -> str:
+    level = getattr(indicator, "nearest_supply_level", None)
+    if level is None:
+        return "No nearest filing-derived supply level was returned."
+    label = getattr(indicator, "nearest_supply_level_label", None) or "parsed supply level"
+    distance = _format_command_percent(getattr(indicator, "nearest_supply_level_distance_percent", None))
+    return f"Nearest {label} is {_money(level)} ({distance} from latest); context only."
+
+
+def _capital_structure_risk_status(value: Any) -> str:
+    score = _optional_float(value)
+    if score is None:
+        return "info"
+    if score >= 60:
+        return "bad"
+    if score >= 30:
+        return "mixed"
+    return "good"
+
+
+def _capital_structure_direction_status(value: Any) -> str:
+    score = _optional_float(value)
+    if score is None:
+        return "info"
+    if score >= 70:
+        return "good"
+    if score >= 45:
+        return "mixed"
+    return "bad"
+
+
+def _capital_structure_modifier_status(value: Any) -> str:
+    score = _optional_float(value)
+    if score is None:
+        return "info"
+    if score >= 0:
+        return "good"
+    if score <= -20:
+        return "bad"
+    return "mixed"
+
+
+def _score_label(value: Any) -> str:
+    score = _optional_float(value)
+    return "--" if score is None else f"{score:.0f}/100"
+
+
+def _signed_score_label(value: Any) -> str:
+    score = _optional_float(value)
+    return "--" if score is None else f"{score:+.0f}"
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _safe_float(value: Any) -> float:
+    number = _optional_float(value)
+    return 0.0 if number is None else number
+
+
+def _bounded_clean_lines(lines: Any, *, limit: int) -> list[str]:
+    if not lines or limit <= 0:
+        return []
+    if isinstance(lines, str):
+        iterable = [lines]
+    else:
+        try:
+            iterable = list(lines)
+        except TypeError:
+            return []
+    clean_lines: list[str] = []
+    seen: set[str] = set()
+    for line in iterable:
+        clean = " ".join(str(line or "").split())
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        clean_lines.append(clean)
+        if len(clean_lines) >= limit:
+            break
+    return clean_lines
+
+
 def _humanize_command_value(value: Any) -> str:
     text = " ".join(str(value or "--").replace("_", " ").replace("-", " ").split())
     if text == "--":
@@ -3004,6 +3322,17 @@ def _render_technicals(self: tk.Tk, payload: _ResearchPayload) -> None:
         frame.momentum_meter.set_score(decision.momentum_score, mode="direction", label=f"Momentum: {direction_strength_label(decision.momentum_score)} ({decision.momentum_score:.0f})")  # type: ignore[attr-defined]
         frame.risk_meter.set_score(decision.risk_score, mode="risk", label=f"Risk Heat: {risk_heat_label(decision.risk_score)} ({decision.risk_score:.0f})")  # type: ignore[attr-defined]
 
+    metric_grid(
+        frame.capital_cards,  # type: ignore[attr-defined]
+        _technical_capital_structure_cards(command_report),
+        columns=4,
+        prominent_indexes={0},
+        card_height=124,
+        prominent_height=134,
+        adaptive_height=True,
+    )
+    _replace_tree_rows(frame.capital_supply_tree, _technical_capital_structure_supply_rows(command_report))  # type: ignore[attr-defined]
+    _replace_tree_rows(frame.capital_note_tree, _technical_capital_structure_note_rows(command_report))  # type: ignore[attr-defined]
     _replace_tree_rows(frame.timeframe_tree, _technical_timeframe_stack_rows(command_report))  # type: ignore[attr-defined]
     _replace_tree_rows(frame.prc_tree, _technical_prc_rows(command_report))  # type: ignore[attr-defined]
     _replace_tree_rows(frame.score_tree, _technical_score_breakdown_rows(command_report))  # type: ignore[attr-defined]
