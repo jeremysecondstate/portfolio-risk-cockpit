@@ -75,26 +75,33 @@ def _workspace_holdings_table_with_day_pnl(parent: ttk.Frame, include_custom_pnl
     day_table.tag_configure("cash", foreground=_CASH_FOREGROUND)
 
     table._day_pnl_table = day_table  # type: ignore[attr-defined]
+    table._split_day_pnl_syncing_selection = False  # type: ignore[attr-defined]
+    table._split_day_pnl_syncing_scroll = False  # type: ignore[attr-defined]
     _bind_split_day_pnl_table(table, day_table)
     return table
 
 
 def _bind_split_day_pnl_table(table: ttk.Treeview, day_table: ttk.Treeview) -> None:
     def sync_selection(source: ttk.Treeview, target: ttk.Treeview) -> None:
-        selection = source.selection()
+        if getattr(table, "_split_day_pnl_syncing_selection", False):
+            return
+        table._split_day_pnl_syncing_selection = True  # type: ignore[attr-defined]
         try:
-            target.selection_set(selection)
-            if selection:
+            selection = source.selection()
+            if target.selection() != selection:
+                target.selection_set(selection)
+            if selection and target.focus() != selection[0]:
                 target.focus(selection[0])
         except tk.TclError:
             return
+        finally:
+            table._split_day_pnl_syncing_selection = False  # type: ignore[attr-defined]
 
-    def sync_yview(*args: object) -> None:
-        try:
-            table.yview(*args)
-            day_table.yview(*args)
-        except tk.TclError:
-            return
+    def sync_scroll_from_table(first: str, _last: str) -> None:
+        _sync_scroll(table, day_table, first)
+
+    def sync_scroll_from_day_table(first: str, _last: str) -> None:
+        _sync_scroll(table, table, first)
 
     def on_mousewheel(event: tk.Event) -> str:
         if getattr(event, "num", None) == 4:
@@ -103,17 +110,33 @@ def _bind_split_day_pnl_table(table: ttk.Treeview, day_table: ttk.Treeview) -> N
             direction = 1
         else:
             direction = -1 if getattr(event, "delta", 0) > 0 else 1
-        sync_yview("scroll", direction, "units")
+        try:
+            table.yview_scroll(direction, "units")
+            day_table.yview_scroll(direction, "units")
+        except tk.TclError:
+            return "break"
         return "break"
 
-    table.configure(yscrollcommand=lambda first, last: day_table.yview_moveto(float(first)))
-    day_table.configure(yscrollcommand=lambda first, last: table.yview_moveto(float(first)))
+    table.configure(yscrollcommand=sync_scroll_from_table)
+    day_table.configure(yscrollcommand=sync_scroll_from_day_table)
     table.bind("<<TreeviewSelect>>", lambda _event: sync_selection(table, day_table), add="+")
     day_table.bind("<<TreeviewSelect>>", lambda _event: sync_selection(day_table, table), add="+")
     for widget in (table, day_table):
         widget.bind("<MouseWheel>", on_mousewheel, add="+")
         widget.bind("<Button-4>", on_mousewheel, add="+")
         widget.bind("<Button-5>", on_mousewheel, add="+")
+
+
+def _sync_scroll(owner: ttk.Treeview, target: ttk.Treeview, first: str) -> None:
+    if getattr(owner, "_split_day_pnl_syncing_scroll", False):
+        return
+    owner._split_day_pnl_syncing_scroll = True  # type: ignore[attr-defined]
+    try:
+        target.yview_moveto(float(first))
+    except (tk.TclError, ValueError):
+        return
+    finally:
+        owner._split_day_pnl_syncing_scroll = False  # type: ignore[attr-defined]
 
 
 def _populate_workspace_holdings_table_with_day_pnl(table: ttk.Treeview, rows: list[dict[str, object]]) -> None:
