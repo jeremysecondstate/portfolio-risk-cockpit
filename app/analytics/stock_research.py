@@ -93,6 +93,41 @@ class GeneratedStockPosition:
 
 
 @dataclass(frozen=True)
+class StopTranche:
+    label: str
+    shares: float
+    stop_price: float
+    reason: str
+    max_loss: float
+    portfolio_impact: float | None
+    remaining_shares: float
+
+
+@dataclass(frozen=True)
+class StopLadderPlan:
+    entry_price: float
+    total_shares: float
+    single_stop_price: float
+    single_stop_risk: float
+    single_stop_portfolio_impact: float | None
+    laddered_risk: float
+    laddered_portfolio_impact: float | None
+    savings: float
+    savings_percent: float | None
+    savings_portfolio_impact: float | None
+    savings_label: str
+    tradeoff: str
+    tranches: tuple[StopTranche, ...]
+
+
+@dataclass(frozen=True)
+class _StopCandidate:
+    price: float
+    reason: str
+    priority: int = 0
+
+
+@dataclass(frozen=True)
 class CurrentModelScenarioRow:
     scenario: str
     symbol_price: float
@@ -414,6 +449,317 @@ def build_current_model_scenario_rows(
             )
         )
     return rows
+
+
+def build_stop_ladder_plan(
+    model_position: GeneratedStockPosition | None,
+    indicators: AdvancedIndicatorSnapshot | None = None,
+    *,
+    portfolio_value: float | None = None,
+    technical_report: Any | None = None,
+) -> StopLadderPlan | None:
+    """Build a planning-only scaled stop ladder for a generated stock plan."""
+    if model_position is None:
+        return None
+    total_shares = math.floor(float(model_position.quantity or 0.0))
+    if total_shares < 2:
+        return None
+    entry = _positive_float(model_position.entry_price)
+    single_stop = _positive_float(model_position.stop_price)
+    if entry is None or single_stop is None or single_stop >= entry:
+        return None
+
+    tactical = _select_tactical_stop(entry, single_stop, indicators, technical_report)
+    if tactical is None:
+        return None
+    specs = _stop_ladder_specs(total_shares, entry, single_stop, tactical, indicators, technical_report)
+    if len(specs) < 2:
+        return None
+
+    remaining = float(total_shares)
+    tranches: list[StopTranche] = []
+    for label, shares, candidate in specs:
+        if shares <= 0:
+            continue
+        remaining = max(remaining - shares, 0.0)
+        max_loss = max(entry - candidate.price, 0.0) * shares
+        tranches.append(
+            StopTranche(
+                label=label,
+                shares=float(shares),
+                stop_price=candidate.price,
+                reason=candidate.reason,
+                max_loss=max_loss,
+                portfolio_impact=_loss_portfolio_impact(max_loss, portfolio_value),
+                remaining_shares=remaining,
+            )
+        )
+    if not tranches:
+        return None
+
+    single_stop_risk = max(entry - single_stop, 0.0) * total_shares
+    laddered_risk = sum(tranche.max_loss for tranche in tranches)
+    savings = max(single_stop_risk - laddered_risk, 0.0)
+    savings_percent = savings / single_stop_risk if single_stop_risk > 0 else None
+    savings_label = _stop_ladder_savings_label(savings, single_stop_risk)
+    tradeoff = _stop_ladder_tradeoff(savings_label, savings, tranches, total_shares)
+    return StopLadderPlan(
+        entry_price=entry,
+        total_shares=float(total_shares),
+        single_stop_price=single_stop,
+        single_stop_risk=single_stop_risk,
+        single_stop_portfolio_impact=_loss_portfolio_impact(single_stop_risk, portfolio_value),
+        laddered_risk=laddered_risk,
+        laddered_portfolio_impact=_loss_portfolio_impact(laddered_risk, portfolio_value),
+        savings=savings,
+        savings_percent=savings_percent,
+        savings_portfolio_impact=(savings / portfolio_value if portfolio_value and portfolio_value > 0 else None),
+        savings_label=savings_label,
+        tradeoff=tradeoff,
+        tranches=tuple(tranches),
+    )
+
+
+def _stop_ladder_specs(
+    total_shares: int,
+    entry: float,
+    thesis_stop: float,
+    tactical: _StopCandidate,
+    indicators: AdvancedIndicatorSnapshot | None,
+    technical_report: Any | None,
+) -> list[tuple[str, int, _StopCandidate]]:
+    if total_shares == 2:
+        return [
+            ("Tactical warning stop", 1, tactical),
+            ("Thesis invalidation stop", 1, _StopCandidate(thesis_stop, _thesis_stop_reason(thesis_stop, indicators, technical_report))),
+        ]
+
+    tactical_shares = max(1, total_shares // 3)
+    intermediate_shares = max(1, total_shares // 3)
+    thesis_shares = total_shares - tactical_shares - intermediate_shares
+    if thesis_shares <= 0:
+        thesis_shares = 1
+        intermediate_shares = max(0, total_shares - tactical_shares - thesis_shares)
+    intermediate = _select_intermediate_stop(tactical.price, thesis_stop, indicators, technical_report)
+    specs = [("Tactical warning stop", tactical_shares, tactical)]
+    if intermediate_shares > 0 and intermediate is not None:
+        specs.append(("Intermediate de-risk stop", intermediate_shares, intermediate))
+    else:
+        thesis_shares += intermediate_shares
+    specs.append(("Thesis invalidation stop", thesis_shares, _StopCandidate(thesis_stop, _thesis_stop_reason(thesis_stop, indicators, technical_report))))
+    return specs
+
+
+def _select_tactical_stop(
+    entry: float,
+    thesis_stop: float,
+    indicators: AdvancedIndicatorSnapshot | None,
+    technical_report: Any | None,
+) -> _StopCandidate | None:
+    distance = entry - thesis_stop
+    if distance <= 0:
+        return None
+    min_gap = _stop_ladder_min_gap(entry, thesis_stop)
+    lower = thesis_stop + min_gap
+    upper = entry - min_gap
+    if lower >= upper:
+        return None
+    desired = entry - (distance * 0.55)
+    candidates = [
+        candidate
+        for candidate in _tactical_stop_candidates(entry, thesis_stop, indicators, technical_report)
+        if lower <= candidate.price <= upper
+    ]
+    if candidates:
+        return min(candidates, key=lambda candidate: (candidate.priority, abs(candidate.price - desired)))
+    fallback_price = min(max(desired, lower), upper)
+    return _StopCandidate(fallback_price, "ATR-fraction fallback for an early partial risk cut.", priority=2)
+
+
+def _select_intermediate_stop(
+    tactical_stop: float,
+    thesis_stop: float,
+    indicators: AdvancedIndicatorSnapshot | None,
+    technical_report: Any | None,
+) -> _StopCandidate | None:
+    if tactical_stop <= thesis_stop:
+        return None
+    min_gap = max((tactical_stop - thesis_stop) * 0.08, 0.01)
+    lower = thesis_stop + min_gap
+    upper = tactical_stop - min_gap
+    if lower >= upper:
+        return None
+    desired = thesis_stop + ((tactical_stop - thesis_stop) * 0.50)
+    candidates = [
+        candidate
+        for candidate in _technical_stop_candidates(indicators, technical_report, priority=0)
+        if lower <= candidate.price <= upper
+    ]
+    if candidates:
+        selected = min(candidates, key=lambda candidate: abs(candidate.price - desired))
+        return _StopCandidate(selected.price, f"Intermediate tranche near {selected.reason.lower()}", selected.priority)
+    return _StopCandidate(desired, "Middle tranche between tactical warning and thesis invalidation.", priority=2)
+
+
+def _tactical_stop_candidates(
+    entry: float,
+    thesis_stop: float,
+    indicators: AdvancedIndicatorSnapshot | None,
+    technical_report: Any | None,
+) -> list[_StopCandidate]:
+    candidates = _technical_stop_candidates(indicators, technical_report, priority=0)
+    if indicators is not None and indicators.atr_14 and indicators.atr_14 > 0:
+        candidates.append(_StopCandidate(entry - abs(indicators.atr_14) * 0.50, "ATR fraction warning level.", priority=1))
+        candidates.append(_StopCandidate(entry - abs(indicators.atr_14) * 0.65, "ATR fraction warning level.", priority=1))
+    distance = entry - thesis_stop
+    if distance > 0:
+        candidates.append(_StopCandidate(entry - distance * 0.55, "Distance-to-thesis warning level.", priority=1))
+    return _dedupe_stop_candidates(candidates)
+
+
+def _technical_stop_candidates(
+    indicators: AdvancedIndicatorSnapshot | None,
+    technical_report: Any | None,
+    *,
+    priority: int,
+) -> list[_StopCandidate]:
+    candidates: list[_StopCandidate] = []
+    if indicators is not None:
+        _add_stop_candidate(candidates, indicators.support, "Nearby support.", priority)
+        _add_stop_candidate(candidates, indicators.swing_low, "Prior low.", priority)
+        _add_stop_candidate(candidates, indicators.bollinger_lower, "Lower volatility band.", priority)
+
+    classification = getattr(technical_report, "setup_classification", None)
+    _add_stop_candidate(candidates, getattr(classification, "confirmation_level", None), "Reclaimed trigger.", priority)
+    _add_stop_candidate(candidates, getattr(classification, "invalidation_level", None), "Technical invalidation level.", priority)
+    level_proximity = getattr(classification, "level_proximity", None)
+    support = getattr(level_proximity, "nearest_support", None)
+    _add_stop_candidate(candidates, getattr(support, "high", None), "Nearby support zone.", priority)
+    _add_stop_candidate(candidates, getattr(support, "center", None), "Nearby support zone.", priority)
+
+    for trigger in _iter_values(getattr(technical_report, "key_triggers", None)):
+        label = str(getattr(trigger, "label", "") or "").lower()
+        reason = "Risk-warning level."
+        if "pullback" in label:
+            reason = "Pullback support zone."
+        elif "breakout" in label:
+            reason = "Reclaimed trigger."
+        elif "invalidation" in label:
+            reason = "Technical invalidation level."
+        _add_stop_candidate(candidates, getattr(trigger, "price", None), reason, priority)
+
+    for snapshot in _iter_values(getattr(technical_report, "snapshots", None)):
+        _add_stop_candidate(candidates, getattr(snapshot, "vwap", None), "VWAP.", priority)
+        _add_stop_candidate(candidates, getattr(snapshot, "session_vwap", None), "Session VWAP.", priority)
+        _add_stop_candidate(candidates, getattr(snapshot, "rolling_vwap_20", None), "Rolling VWAP.", priority)
+        _add_stop_candidate(candidates, getattr(snapshot, "multi_day_vwap", None), "Multi-day VWAP.", priority)
+        _add_stop_candidate(candidates, getattr(snapshot, "recent_low", None), "Prior low.", priority)
+        for level in _iter_values(getattr(snapshot, "support_zones", None)):
+            _add_stop_candidate(candidates, getattr(level, "high", None), "Nearby support zone.", priority)
+            _add_stop_candidate(candidates, getattr(level, "center", None), "Nearby support zone.", priority)
+
+    for prc in _iter_values(getattr(technical_report, "prc_indexes", None)):
+        _add_stop_candidate(candidates, getattr(prc, "index_price", None), "Risk-warning level.", priority)
+    capital_read = getattr(technical_report, "capital_structure_indicator", None)
+    _add_stop_candidate(candidates, getattr(capital_read, "nearest_supply_level", None), "Risk-warning level.", priority)
+    return _dedupe_stop_candidates(candidates)
+
+
+def _add_stop_candidate(candidates: list[_StopCandidate], value: Any, reason: str, priority: int) -> None:
+    price = _positive_float(value)
+    if price is not None:
+        candidates.append(_StopCandidate(price, reason, priority))
+
+
+def _dedupe_stop_candidates(candidates: list[_StopCandidate]) -> list[_StopCandidate]:
+    selected: dict[float, _StopCandidate] = {}
+    for candidate in candidates:
+        key = round(candidate.price, 4)
+        current = selected.get(key)
+        if current is None or candidate.priority < current.priority:
+            selected[key] = candidate
+    return list(selected.values())
+
+
+def _iter_values(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return list(value.values())
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return []
+
+
+def _positive_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0:
+        return None
+    return number
+
+
+def _stop_ladder_min_gap(entry: float, thesis_stop: float) -> float:
+    distance = max(entry - thesis_stop, 0.0)
+    return max(distance * 0.05, entry * 0.001, 0.01)
+
+
+def _loss_portfolio_impact(loss: float, portfolio_value: float | None) -> float | None:
+    if portfolio_value is None or portfolio_value <= 0:
+        return None
+    return -loss / portfolio_value
+
+
+def _thesis_stop_reason(
+    thesis_stop: float,
+    indicators: AdvancedIndicatorSnapshot | None,
+    technical_report: Any | None,
+) -> str:
+    classification = getattr(technical_report, "setup_classification", None)
+    invalidation = _positive_float(getattr(classification, "invalidation_level", None))
+    if invalidation is not None and abs(invalidation - thesis_stop) <= max(thesis_stop * 0.005, 0.05):
+        return "Existing model stop near technical invalidation."
+    if indicators is not None:
+        for level, reason in (
+            (indicators.support, "Existing model stop near support/risk line."),
+            (indicators.swing_low, "Existing model stop near prior low/invalidation."),
+            (indicators.bollinger_lower, "Existing model stop near lower volatility band."),
+        ):
+            price = _positive_float(level)
+            if price is not None and abs(price - thesis_stop) <= max(thesis_stop * 0.005, 0.05):
+                return reason
+    return "Existing model stop / thesis invalidation."
+
+
+def _stop_ladder_savings_label(savings: float, single_stop_risk: float) -> str:
+    if savings <= 0.01:
+        return "No savings"
+    threshold = max(5.0, single_stop_risk * 0.05)
+    if savings < threshold:
+        return "Negligible savings"
+    return "Meaningful savings"
+
+
+def _stop_ladder_tradeoff(
+    savings_label: str,
+    savings: float,
+    tranches: list[StopTranche],
+    total_shares: int,
+) -> str:
+    first_remaining = tranches[0].remaining_shares if tranches else float(total_shares)
+    if savings_label == "Meaningful savings":
+        return (
+            f"Ladder saves {_plain_money(savings)} versus one stop, while "
+            f"{_plain_shares(first_remaining)} remain for the deeper thesis stop."
+        )
+    if savings_label == "Negligible savings":
+        return (
+            f"Savings are negligible ({_plain_money(savings)}) before fees/slippage; "
+            "the main tradeoff is an earlier partial exit versus rebound exposure."
+        )
+    return "The ladder does not reduce max loss versus the one-stop plan; treat it only as a behavior-planning view."
 
 
 def technical_scenario_moves(context: PortfolioSymbolContext, indicators: AdvancedIndicatorSnapshot) -> tuple[float, ...]:

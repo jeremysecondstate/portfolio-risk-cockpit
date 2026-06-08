@@ -109,7 +109,9 @@ from app.analytics.stock_research import (
     AdvancedIndicatorSnapshot,
     DataSourceStatus,
     PortfolioSymbolContext,
+    StopLadderPlan,
     build_current_model_scenario_rows,
+    build_stop_ladder_plan,
     build_planned_stock_context,
     build_portfolio_symbol_context,
     build_scenario_rows,
@@ -1843,8 +1845,49 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     ttk.Button(controls, text="Use Model Stock Plan", command=lambda app=self: _use_model_stock_plan(app)).grid(row=0, column=5, sticky="w", padx=(8, 0))
     frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.cards.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+    stop_ladder_box = ttk.LabelFrame(frame, text="Planning-Only Stop Ladder / Tranche Stops", style="Card.TLabelframe")
+    stop_ladder_box.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+    stop_ladder_box.columnconfigure(0, weight=1)
+    ttk.Label(
+        stop_ladder_box,
+        text="Planning context only for the generated model stock scenario position. This does not preview, stage, submit, or create Schwab broker orders.",
+        style="Subtle.TLabel",
+        wraplength=1120,
+        justify=tk.LEFT,
+    ).grid(row=0, column=0, sticky="ew", pady=(0, 6))
+    stop_ladder_cards = ttk.Frame(stop_ladder_box, style="Panel.TFrame")
+    stop_ladder_cards.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+    stop_ladder_tree = ttk.Treeview(
+        stop_ladder_box,
+        columns=("tranche", "shares", "stop", "reason", "max_loss", "impact", "remaining"),
+        show="headings",
+        height=5,
+    )
+    _style_research_tree(stop_ladder_tree)
+    for column, label, width in (
+        ("tranche", "Tranche", 175),
+        ("shares", "Shares", 80),
+        ("stop", "Stop", 95),
+        ("reason", "Reason", 330),
+        ("max_loss", "Max Loss", 105),
+        ("impact", "Portfolio Impact", 125),
+        ("remaining", "Remaining If Hit", 125),
+    ):
+        stop_ladder_tree.heading(column, text=label)
+        stop_ladder_tree.column(column, width=width, anchor=tk.E if column in {"shares", "stop", "max_loss", "impact", "remaining"} else tk.W, stretch=column == "reason")
+    stop_ladder_tree.tag_configure("negative", foreground="#b91c1c")
+    stop_ladder_tree.tag_configure("summary", foreground="#1d4ed8")
+    stop_ladder_tree.grid(row=2, column=0, sticky="ew")
+    stop_ladder_scroll = ttk.Scrollbar(stop_ladder_box, orient=tk.VERTICAL, command=stop_ladder_tree.yview)
+    stop_ladder_scroll.grid(row=2, column=1, sticky="ns")
+    stop_ladder_tree.configure(yscrollcommand=stop_ladder_scroll.set)
+    _add_horizontal_tree_scrollbar(stop_ladder_box, stop_ladder_tree, row=3)
+    stop_ladder_box.grid_remove()
+    frame.stop_ladder_box = stop_ladder_box  # type: ignore[attr-defined]
+    frame.stop_ladder_cards = stop_ladder_cards  # type: ignore[attr-defined]
+    frame.stop_ladder_tree = stop_ladder_tree  # type: ignore[attr-defined]
     planner_box = ttk.LabelFrame(frame, text="Move Planner", style="Card.TLabelframe")
-    planner_box.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+    planner_box.grid(row=3, column=0, sticky="ew", pady=(0, 8))
     planner_box.columnconfigure(0, weight=1)
     move_tree = ttk.Treeview(planner_box, columns=("move", "makes_sense", "protects", "gives_up", "effect"), show="headings", height=9)
     _style_research_tree(move_tree)
@@ -1864,9 +1907,9 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     _add_horizontal_tree_scrollbar(planner_box, move_tree, row=1)
     frame.move_planner_tree = move_tree  # type: ignore[attr-defined]
     frame.impact_bars = ScenarioImpactBars(frame, height=170)  # type: ignore[attr-defined]
-    frame.impact_bars.grid(row=3, column=0, sticky="ew", pady=(0, 8))  # type: ignore[attr-defined]
+    frame.impact_bars.grid(row=4, column=0, sticky="ew", pady=(0, 8))  # type: ignore[attr-defined]
     tree_box = ttk.Frame(frame, style="Panel.TFrame")
-    tree_box.grid(row=4, column=0, sticky="ew")
+    tree_box.grid(row=5, column=0, sticky="ew")
     tree_box.columnconfigure(0, weight=1)
     ttk.Label(
         tree_box,
@@ -1901,11 +1944,11 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     y_scroll.grid(row=1, column=1, sticky="ns")
     tree.configure(yscrollcommand=y_scroll.set)
     _add_horizontal_tree_scrollbar(tree_box, tree, row=2)
-    note = _readout_launcher(frame, title="Risk Scenario Explanation", button_text="Open Risk Scenario Explanation", row=5, pady=(10, 0))
+    note = _readout_launcher(frame, title="Risk Scenario Explanation", button_text="Open Risk Scenario Explanation", row=6, pady=(10, 0))
     frame.scenario_tree = tree  # type: ignore[attr-defined]
     frame.scenario_note_text = note  # type: ignore[attr-defined]
     option_box = ttk.LabelFrame(frame, text="Options Scenario - Expiration Payoff Estimate", style="Card.TLabelframe")
-    option_box.grid(row=6, column=0, sticky="ew", pady=(10, 0))
+    option_box.grid(row=7, column=0, sticky="ew", pady=(10, 0))
     option_box.columnconfigure(0, weight=1)
     option_controls = ttk.Frame(option_box, style="Panel.TFrame")
     option_controls.grid(row=0, column=0, sticky="ew", pady=(0, 6))
@@ -5145,6 +5188,100 @@ def _technical_popout_text(payload: _ResearchPayload, narrative: Any, original_t
     )
 
 
+def _render_stop_ladder(frame: ttk.Frame, plan: StopLadderPlan | None) -> None:
+    box = frame.stop_ladder_box  # type: ignore[attr-defined]
+    cards = frame.stop_ladder_cards  # type: ignore[attr-defined]
+    tree = frame.stop_ladder_tree  # type: ignore[attr-defined]
+    for row_id in tree.get_children():
+        tree.delete(row_id)
+    if plan is None:
+        clear_children(cards)
+        box.grid_remove()
+        return
+
+    box.grid()
+    metric_grid(
+        cards,
+        [
+            _synthetic_badge(
+                "One-Stop Risk",
+                _money(plan.single_stop_risk),
+                "bad" if plan.single_stop_risk > 0 else "info",
+                f"Current single-stop model: all {_shares(plan.total_shares)} at {_money(plan.single_stop_price)}.",
+            ),
+            _synthetic_badge(
+                "Laddered Risk",
+                _money(plan.laddered_risk),
+                "mixed" if plan.laddered_risk > 0 else "info",
+                f"Combined max loss across {len(plan.tranches)} planning tranche(s).",
+            ),
+            _synthetic_badge(
+                "Savings / Tradeoff",
+                _money(plan.savings),
+                _stop_ladder_status(plan),
+                f"{plan.savings_label}. {plan.tradeoff}",
+            ),
+        ],
+        columns=3,
+        card_height=118,
+        prominent_height=128,
+        adaptive_height=True,
+    )
+    for tranche in plan.tranches:
+        tree.insert(
+            "",
+            tk.END,
+            values=(
+                tranche.label,
+                _shares(tranche.shares),
+                _money(tranche.stop_price),
+                tranche.reason,
+                _money(tranche.max_loss),
+                _percent(tranche.portfolio_impact),
+                _shares(tranche.remaining_shares),
+            ),
+            tags=("negative",),
+        )
+    tree.insert(
+        "",
+        tk.END,
+        values=(
+            "Combined ladder",
+            _shares(plan.total_shares),
+            "Mixed stops",
+            f"{plan.savings_label}; one-stop risk {_money(plan.single_stop_risk)}.",
+            _money(plan.laddered_risk),
+            _percent(plan.laddered_portfolio_impact),
+            "--",
+        ),
+        tags=("summary",),
+    )
+
+
+def _stop_ladder_status(plan: StopLadderPlan) -> str:
+    if plan.savings_label == "Meaningful savings":
+        return "good"
+    if plan.savings_label == "Negligible savings":
+        return "mixed"
+    return "neutral"
+
+
+def _stop_ladder_note_lines(plan: StopLadderPlan | None) -> list[str]:
+    if plan is None:
+        return ["- Not shown because the model stock scenario position needs at least 2 shares plus a valid entry and stop."]
+    lines = [
+        "- Planning context only; this is not a Schwab broker order, preview, staged order, or live trading instruction.",
+        f"- Current one-stop model: {_shares(plan.total_shares)} stopped at {_money(plan.single_stop_price)} risks {_money(plan.single_stop_risk)} ({_percent(plan.single_stop_portfolio_impact)} of portfolio).",
+        f"- Laddered max loss: {_money(plan.laddered_risk)} ({_percent(plan.laddered_portfolio_impact)} of portfolio).",
+        f"- Savings: {_money(plan.savings)} ({_percent(plan.savings_percent)} of one-stop risk). {plan.tradeoff}",
+    ]
+    for tranche in plan.tranches:
+        lines.append(
+            f"- {tranche.label}: {_shares(tranche.shares)} at {_money(tranche.stop_price)} risks {_money(tranche.max_loss)}; {tranche.reason} Remaining after hit: {_shares(tranche.remaining_shares)}."
+        )
+    return lines
+
+
 def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
     frame = self.schwab_research_scenarios_frame
     risk_budget = generated_risk_budget(
@@ -5166,6 +5303,13 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
     scenario_moves = technical_scenario_moves(payload.context, payload.indicators)
     scenario_rows = build_scenario_rows(scenario_context, scenario_moves)
     comparison_rows = build_current_model_scenario_rows(payload.context, stock_plan, scenario_moves)
+    stop_ladder_plan = build_stop_ladder_plan(
+        stock_plan,
+        payload.indicators,
+        portfolio_value=payload.context.portfolio_value,
+        technical_report=payload.command_center_report,
+    )
+    self.schwab_research_stop_ladder_plan = stop_ladder_plan
     candidates = getattr(self, "schwab_research_option_candidates", []) or []
     if not candidates:
         rows_map = getattr(self, "schwab_option_chain_rows", {}) or {}
@@ -5214,6 +5358,7 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
         cards.append(_synthetic_badge("Upside Reward", _money(best.position_pnl), "good" if best.position_pnl > 0 else "info", f"{best.scenario} move, {best.portfolio_pnl_impact:+.2%} portfolio impact."))
     cards.extend([payload.decision.position_impact, payload.decision.risk_level])
     metric_grid(frame.cards, cards, columns=4, card_height=144, prominent_height=154, adaptive_height=True)  # type: ignore[attr-defined]
+    _render_stop_ladder(frame, stop_ladder_plan)
     move_tree = frame.move_planner_tree  # type: ignore[attr-defined]
     for row_id in move_tree.get_children():
         move_tree.delete(row_id)
@@ -5272,6 +5417,9 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
         f"- Shares: {_shares(stock_plan.quantity)}; notional: {_money(stock_plan.notional)}; portfolio weight: {stock_plan.portfolio_weight:.2%}.",
         f"- Entry: {_money(stock_plan.entry_price)}; stop: {_money(stock_plan.stop_price)}; per-share risk: {_money(stock_plan.per_share_risk)}.",
         f"- {stock_plan.basis}",
+        "",
+        "Planning-only stop ladder:",
+        *_stop_ladder_note_lines(stop_ladder_plan),
         "",
         "Stock-only scenario notes:",
         f"- Stop distance: {_percent(distance_to_price(payload.context.last_price, stop))}.",
