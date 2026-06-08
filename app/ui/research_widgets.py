@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 import tkinter as tk
 from tkinter import ttk
 from typing import Iterable
@@ -30,11 +32,316 @@ COMPACT_CARD_WHY_LIMIT = 102
 COMPACT_VALUE_LIMIT = 112
 
 
+@dataclass(frozen=True)
+class MarkdownPipeTable:
+    title: str
+    headers: tuple[str, ...]
+    rows: tuple[tuple[str, ...], ...]
+    start_line: int = 0
+    end_line: int = 0
+
+
+@dataclass(frozen=True)
+class VisualReadoutBlock:
+    kind: str
+    title: str
+    rows: tuple[str, ...] = ()
+    headers: tuple[str, ...] = ()
+    table_rows: tuple[tuple[str, ...], ...] = ()
+    secondary: bool = False
+
+
+@dataclass(frozen=True)
+class VisualReadout:
+    title: str
+    hero: str
+    key_values: tuple[tuple[str, str], ...]
+    blocks: tuple[VisualReadoutBlock, ...]
+    raw_text: str
+
+
+@dataclass(frozen=True)
+class TruncatedText:
+    display: str
+    detail: str
+    truncated: bool
+
+
 def _compact_text(value: object, limit: int) -> str:
     text = " ".join(str(value or "").split())
     if limit <= 0 or len(text) <= limit:
         return text
     return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def truncate_with_detail(value: object, limit: int) -> TruncatedText:
+    text = " ".join(str(value or "").split())
+    if limit <= 0 or len(text) <= limit:
+        return TruncatedText(text, "", False)
+    return TruncatedText(text[: max(0, limit - 3)].rstrip() + "...", text, True)
+
+
+def parse_markdown_pipe_table(lines: list[str], start: int = 0, *, title: str = "") -> tuple[MarkdownPipeTable | None, int]:
+    if start >= len(lines) or not _is_markdown_table_line(lines[start].strip()):
+        return None, start
+
+    table_lines: list[str] = []
+    index = start
+    while index < len(lines) and _is_markdown_table_line(lines[index].strip()):
+        table_lines.append(lines[index].strip())
+        index += 1
+    if not table_lines:
+        return None, index
+
+    headers = tuple(_split_table_row(table_lines[0]))
+    rows: list[tuple[str, ...]] = []
+    for line in table_lines[1:]:
+        pieces = _split_table_row(line)
+        if _is_markdown_separator_row(pieces):
+            continue
+        if pieces:
+            rows.append(tuple(pieces))
+    return MarkdownPipeTable(title=title, headers=headers, rows=tuple(rows), start_line=start, end_line=index), index
+
+
+def parse_visual_readout(content: str, *, title_hint: str = "") -> VisualReadout:
+    raw_text = str(content or "").strip()
+    lines = [line.rstrip() for line in raw_text.splitlines()]
+    index = 0
+    title = title_hint.strip()
+    if len(lines) >= 2 and lines[0].strip() and _is_underline(lines[1].strip()):
+        title = lines[0].strip()
+        index = 2
+    elif not title and lines and _looks_like_readout_heading(lines[0].strip()):
+        title = lines[0].strip().rstrip(":")
+        index = 1
+    if not title:
+        title = "Detailed Readout"
+
+    blocks: list[VisualReadoutBlock] = []
+    key_values: list[tuple[str, str]] = []
+    current_title = "Summary"
+    paragraph_rows: list[str] = []
+    bullet_rows: list[str] = []
+
+    def flush() -> None:
+        nonlocal paragraph_rows, bullet_rows
+        secondary = _is_secondary_readout_section(current_title)
+        if bullet_rows:
+            blocks.append(VisualReadoutBlock("bullets", current_title, tuple(bullet_rows), secondary=secondary))
+            bullet_rows = []
+        if paragraph_rows:
+            blocks.append(VisualReadoutBlock("paragraphs", current_title, tuple(paragraph_rows), secondary=secondary))
+            paragraph_rows = []
+
+    while index < len(lines):
+        line = lines[index].strip()
+        next_line = lines[index + 1].strip() if index + 1 < len(lines) else ""
+        if not line:
+            index += 1
+            continue
+        if _is_underline(next_line):
+            flush()
+            current_title = line.rstrip(":")
+            index += 2
+            continue
+        if _looks_like_readout_heading(line):
+            flush()
+            current_title = line.rstrip(":")
+            index += 1
+            continue
+        if _is_markdown_table_line(line):
+            flush()
+            table, next_index = parse_markdown_pipe_table(lines, index, title=current_title)
+            if table is not None:
+                blocks.append(
+                    VisualReadoutBlock(
+                        "table",
+                        table.title or current_title,
+                        headers=table.headers,
+                        table_rows=table.rows,
+                        secondary=_is_secondary_readout_section(current_title),
+                    )
+                )
+            index = max(next_index, index + 1)
+            continue
+
+        clean = _strip_list_marker(line)
+        label, value = _split_label_value(clean)
+        if label and value:
+            key_values.append((label, value))
+        if line.startswith(("-", "*")):
+            bullet_rows.append(clean)
+        else:
+            paragraph_rows.append(clean)
+        index += 1
+
+    flush()
+    hero = _first_hero_line(blocks)
+    return VisualReadout(
+        title=title,
+        hero=hero or "Readable research popout with sections, cards, and native tables.",
+        key_values=tuple(_dedupe_key_values(key_values)),
+        blocks=tuple(block for block in blocks if block.rows or block.table_rows),
+        raw_text=raw_text,
+    )
+
+
+def markdown_tables_from_readout(content: str) -> list[MarkdownPipeTable]:
+    lines = [line.rstrip() for line in str(content or "").splitlines()]
+    tables: list[MarkdownPipeTable] = []
+    title = ""
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        if _looks_like_readout_heading(line):
+            title = line.rstrip(":")
+            index += 1
+            continue
+        if _is_markdown_table_line(line):
+            table, next_index = parse_markdown_pipe_table(lines, index, title=title)
+            if table is not None:
+                tables.append(table)
+            index = max(next_index, index + 1)
+            continue
+        index += 1
+    return tables
+
+
+def _first_hero_line(blocks: list[VisualReadoutBlock]) -> str:
+    for block in blocks:
+        if block.secondary:
+            continue
+        if block.kind == "table" and block.table_rows:
+            return f"{block.title}: {len(block.table_rows)} row(s)."
+        if block.rows:
+            return block.rows[0]
+    return ""
+
+
+def _strip_list_marker(line: str) -> str:
+    return line.lstrip("-* \t").strip()
+
+
+def _split_label_value(text: str) -> tuple[str, str]:
+    if ":" not in text:
+        return "", ""
+    label, value = text.split(":", 1)
+    label = label.strip(" -")
+    value = value.strip()
+    if not label or not value or len(label) > 72:
+        return "", ""
+    return label, value
+
+
+def _dedupe_key_values(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    seen: set[str] = set()
+    result: list[tuple[str, str]] = []
+    for label, value in pairs:
+        key = label.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append((label, value))
+    return result
+
+
+def _is_markdown_table_line(line: str) -> bool:
+    return line.startswith("|") and line.endswith("|") and line.count("|") >= 2
+
+
+def _split_table_row(line: str) -> list[str]:
+    clean = line.strip()
+    if clean.startswith("|"):
+        clean = clean[1:]
+    if clean.endswith("|"):
+        clean = clean[:-1]
+    pieces: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for char in clean:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == "|":
+            pieces.append("".join(current).strip())
+            current = []
+            continue
+        current.append(char)
+    pieces.append("".join(current).strip())
+    return pieces
+
+
+def _is_markdown_separator_row(pieces: Iterable[str]) -> bool:
+    cleaned = ["".join(piece.split()) for piece in pieces]
+    return bool(cleaned) and all(piece and set(piece) <= {"-", ":"} for piece in cleaned)
+
+
+def _is_underline(line: str) -> bool:
+    clean = line.strip()
+    return len(clean) >= 3 and set(clean) <= {"=", "-"}
+
+
+def _looks_like_readout_heading(line: str) -> bool:
+    clean = line.strip().rstrip(":")
+    if not clean or len(clean) > 90 or clean.startswith(("-", "*", "|")):
+        return False
+    if ":" in line and line.split(":", 1)[1].strip():
+        return False
+    lower = clean.lower()
+    known = {
+        "headline",
+        "source freshness",
+        "key financial snapshot",
+        "platform / segment revenue",
+        "financial snapshot",
+        "growth drivers",
+        "what is driving the quarter",
+        "quality of earnings",
+        "risks to watch",
+        "capital return / cash use",
+        "source excerpt",
+        "original / raw generated readout",
+        "original / detailed readout",
+        "operator verdict",
+        "why",
+        "evidence components",
+        "empirical recommendation intelligence",
+        "supporting evidence",
+        "contradictions",
+        "expected reward/risk + planning ev",
+        "reward/risk + planning ev",
+        "position sizing notes",
+        "position sizing",
+        "invalidation lines",
+        "confirmation lines",
+        "data confidence gaps",
+        "source confidence rows",
+        "warnings",
+        "what would change",
+        "what would change the view",
+        "raw details",
+        "source details",
+        "good",
+        "bad / missing",
+        "watch",
+        "key points",
+        "what this means",
+        "why it matters",
+    }
+    if lower in known:
+        return True
+    words = clean.split()
+    return len(words) <= 8 and clean[:1].isupper() and not clean.endswith(".")
+
+
+def _is_secondary_readout_section(title: str) -> bool:
+    lower = title.lower()
+    return any(term in lower for term in ("raw", "source excerpt", "source details", "original / detailed", "original / raw"))
 
 
 def clear_children(parent: tk.Widget) -> None:
@@ -182,6 +489,47 @@ class Checklist(tk.Frame):
                 status = "mixed"
             color = STATUS_COLORS[status]["fg"]
             tk.Label(self, text=row, bg=PANEL_BG, fg=color, font=("Segoe UI", 9), anchor="w", justify=tk.LEFT, wraplength=420).grid(row=index, column=0, sticky="ew", padx=10, pady=2)
+
+
+class RankedRows(tk.Frame):
+    def __init__(self, parent: tk.Widget, title: str, rows: Iterable[str], *, status: str = "info", limit: int = 8) -> None:
+        super().__init__(parent, bg="#ffffff", highlightbackground=BORDER, highlightthickness=1)
+        self.columnconfigure(1, weight=1)
+        colors = STATUS_COLORS.get(status, STATUS_COLORS["info"])
+        tk.Label(self, text=title, bg="#ffffff", fg=TEXT, font=("Segoe UI", 10, "bold"), anchor="w").grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(8, 5))
+        clean_rows = [str(row or "").strip() for row in rows if str(row or "").strip()]
+        if not clean_rows:
+            clean_rows = ["No rows are available yet."]
+        for index, row in enumerate(clean_rows[:limit], start=1):
+            badge = tk.Label(
+                self,
+                text=str(index),
+                bg=colors["bg"],
+                fg=colors["fg"],
+                font=("Segoe UI", 8, "bold"),
+                width=3,
+                anchor="center",
+            )
+            badge.grid(row=index, column=0, sticky="nw", padx=(10, 7), pady=(2 if index > 1 else 4, 3))
+            tk.Label(
+                self,
+                text=row,
+                bg="#ffffff",
+                fg=TEXT,
+                font=("Segoe UI", 9),
+                wraplength=520,
+                justify=tk.LEFT,
+                anchor="nw",
+            ).grid(row=index, column=1, sticky="ew", padx=(0, 10), pady=(2 if index > 1 else 4, 3))
+        if len(clean_rows) > limit:
+            tk.Label(
+                self,
+                text=f"+ {len(clean_rows) - limit} more in the full popout.",
+                bg="#ffffff",
+                fg=MUTED,
+                font=("Segoe UI", 8),
+                anchor="w",
+            ).grid(row=limit + 1, column=1, sticky="ew", padx=(0, 10), pady=(2, 8))
 
 
 class ScenarioImpactBars(tk.Canvas):

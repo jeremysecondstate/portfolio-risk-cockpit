@@ -101,6 +101,9 @@ def parse_earnings_filing_summary_from_readout(
     fundamentals_text: str = "",
     filings_lines: Iterable[str] | None = None,
 ) -> EarningsFilingSummary:
+    table_summary = _summary_from_formatted_tables(symbol, earnings_text)
+    if table_summary.has_structured_data:
+        return table_summary
     combined = "\n".join(
         part
         for part in (
@@ -113,9 +116,6 @@ def parse_earnings_filing_summary_from_readout(
     summary = build_earnings_filing_summary(symbol, combined)
     if summary.has_structured_data:
         return summary
-    table_summary = _summary_from_formatted_tables(symbol, earnings_text)
-    if table_summary.has_structured_data:
-        return table_summary
     return summary
 
 
@@ -508,8 +508,15 @@ def _summary_from_formatted_tables(symbol: str, text: str) -> EarningsFilingSumm
         else:
             metrics.append(row)
     headline = _extract_section_line(text, "Headline") or _headline(symbol, metrics, platforms)
+    source_notes = _extract_bullet_section(text, "Source Freshness")
+    source_label = _extract_bullet_value(source_notes, "Loaded source")
+    source_date = _extract_bullet_value(source_notes, "Source date")
+    source_url = _extract_bullet_value(source_notes, "Source URL")
     return EarningsFilingSummary(
         symbol=symbol.strip().upper(),
+        source_label=source_label,
+        source_date=source_date,
+        source_url=source_url,
         headline=headline,
         metrics=tuple(metrics),
         platform_rows=tuple(platforms),
@@ -517,6 +524,7 @@ def _summary_from_formatted_tables(symbol: str, text: str) -> EarningsFilingSumm
         quality_points=tuple(_extract_bullet_section(text, "Quality of earnings")),
         risks=tuple(_extract_bullet_section(text, "Risks to watch")),
         capital_return=tuple(_extract_bullet_section(text, "Capital return / cash use")),
+        source_notes=tuple(source_notes),
         raw_excerpt=_raw_excerpt(text),
     )
 
@@ -546,3 +554,12 @@ def _extract_bullet_section(text: str, title: str) -> list[str]:
         if active and clean.startswith("-"):
             result.append(clean[1:].strip())
     return result
+
+
+def _extract_bullet_value(rows: list[str], label: str) -> str:
+    prefix = f"{label}:"
+    for row in rows:
+        clean = row.strip()
+        if clean.lower().startswith(prefix.lower()):
+            return clean[len(prefix) :].strip()
+    return ""

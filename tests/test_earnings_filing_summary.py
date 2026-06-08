@@ -45,11 +45,20 @@ def test_nvda_10q_summary_extracts_tables_and_risks() -> None:
 
 
 def test_formatted_summary_round_trips_for_popout_parser() -> None:
-    summary = build_earnings_filing_summary("NVDA", NVDA_10Q_SAMPLE)
+    summary = build_earnings_filing_summary(
+        "NVDA",
+        NVDA_10Q_SAMPLE,
+        source_label="SEC 10-Q fallback",
+        source_date="2026-05-20",
+        source_url="https://www.sec.gov/Archives/test.htm",
+    )
     rendered = format_earnings_filing_summary(summary)
     parsed = parse_earnings_filing_summary_from_readout("NVDA", rendered)
 
     assert parsed.has_structured_data
+    assert parsed.source_label == "SEC 10-Q fallback"
+    assert parsed.source_date == "2026-05-20"
+    assert parsed.source_url == "https://www.sec.gov/Archives/test.htm"
     assert any(row.label == "Revenue" and row.latest_text == "$81.6B" for row in parsed.metrics)
     assert any(row.label == "Data Center" for row in parsed.platform_rows)
     assert "Earnings Filing Readout" in rendered
