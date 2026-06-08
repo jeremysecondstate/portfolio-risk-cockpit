@@ -68,6 +68,11 @@ from app.analytics.recommendation_engine import (
     RecommendationEngineRead,
     build_recommendation_engine_read,
 )
+from app.analytics.operator_verdict import (
+    OperatorActionLine,
+    OperatorVerdict,
+    build_operator_verdict,
+)
 from app.analytics.research_scoring import (
     BadgeReadout,
     ResearchDecisionReadout,
@@ -210,6 +215,7 @@ class _ResearchPayload:
     trade_evidence_report: TradeEvidenceReport | None = None
     command_center_report: TechnicalCommandCenterReport | None = None
     recommendation_engine_read: RecommendationEngineRead | None = None
+    operator_verdict: OperatorVerdict | None = None
 
 
 def install_schwab_research_workspace_extension(app_cls: Type[tk.Tk]) -> None:
@@ -633,22 +639,24 @@ def _refresh_summary_tearout(self: tk.Tk, payload: _ResearchPayload) -> None:
     technical_read = build_technical_at_glance_read(decision, payload.command_center_report)
     fundamental_verdict = build_fundamental_verdict(payload.fundamentals_text, payload.indicators, decision.macro_backdrop.label)
     conflict_read = build_cross_read_conflict_badge(fundamental_verdict.verdict, decision.macro_backdrop.label, technical_read)
+    operator_read = _operator_verdict_at_glance_badge(payload.operator_verdict)
     metric_grid(
         cards,
-        [decision.overall, technical_read, _thesis_read_badge(decision), _preferred_vehicle_badge(decision), decision.risk_level, conflict_read, decision.macro_backdrop, decision.action_bias],
+        [operator_read, decision.overall, technical_read, _thesis_read_badge(decision), _preferred_vehicle_badge(decision), decision.risk_level, conflict_read, decision.action_bias],
         columns=3,
         card_height=132,
         prominent_height=142,
-        prominent_indexes={0, 1, 5},
+        prominent_indexes={0, 2, 6},
     )
     labeled_value_grid(
         strip,
         {
+            "Operator verdict": _operator_verdict_summary_line(payload.operator_verdict),
             "Best thing": decision.top_things[0],
             "Biggest risk": decision.top_things[1],
             "Key trigger": decision.top_things[2],
         },
-        columns=3,
+        columns=4,
     )
     bull_meter.set_score(technical_read.score, mode="direction", label=f"Technical: {technical_read.label} ({technical_read.score:.0f})")
     risk_meter.set_score(decision.risk_score, mode="risk", label=f"Risk Heat: {risk_heat_label(decision.risk_score)} ({decision.risk_score:.0f}/100)")
@@ -748,7 +756,7 @@ def _overview_tab(notebook: ttk.Notebook) -> ttk.Frame:
     frame.columnconfigure(0, weight=1)
     frame.cards = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.cards.grid(row=0, column=0, sticky="ew")
-    frame.operator = ttk.LabelFrame(frame, text="Operator View", style="Card.TLabelframe")  # type: ignore[attr-defined]
+    frame.operator = ttk.LabelFrame(frame, text="Operator Verdict", style="Card.TLabelframe")  # type: ignore[attr-defined]
     frame.operator.grid(row=1, column=0, sticky="ew", pady=(8, 0))
     frame.operator.columnconfigure(0, weight=1)  # type: ignore[attr-defined]
     frame.recommendation = ttk.LabelFrame(frame, text="Recommendation Engine", style="Card.TLabelframe")  # type: ignore[attr-defined]
@@ -826,8 +834,11 @@ def _evidence_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     frame.verdict = ttk.LabelFrame(frame, text="Verdict", style="Card.TLabelframe")  # type: ignore[attr-defined]
     frame.verdict.grid(row=2, column=0, sticky="ew", pady=(8, 0))
     frame.verdict.columnconfigure(0, weight=1)  # type: ignore[attr-defined]
+    frame.operator_plan = ttk.LabelFrame(frame, text="Operator Plan / Self-Critique", style="Card.TLabelframe")  # type: ignore[attr-defined]
+    frame.operator_plan.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+    frame.operator_plan.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
     score_box = ttk.LabelFrame(frame, text="Courtroom Scorecard", style="Card.TLabelframe")
-    score_box.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+    score_box.grid(row=4, column=0, sticky="ew", pady=(8, 0))
     score_box.columnconfigure(0, weight=1)
     tree = ttk.Treeview(score_box, columns=("category", "grade", "read"), show="headings", height=12)
     _style_research_tree(tree)
@@ -845,15 +856,15 @@ def _evidence_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     _add_horizontal_tree_scrollbar(score_box, tree, row=1)
     frame.score_tree = tree  # type: ignore[attr-defined]
     frame.evidence_columns = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
-    frame.evidence_columns.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+    frame.evidence_columns.grid(row=5, column=0, sticky="ew", pady=(8, 0))
     frame.evidence_columns.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
     frame.risk_columns = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
-    frame.risk_columns.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+    frame.risk_columns.grid(row=6, column=0, sticky="ew", pady=(8, 0))
     frame.risk_columns.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
     frame.decision_columns = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
-    frame.decision_columns.grid(row=6, column=0, sticky="ew", pady=(8, 0))
+    frame.decision_columns.grid(row=7, column=0, sticky="ew", pady=(8, 0))
     frame.decision_columns.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
-    frame.detail_text = _readout_launcher(frame, title="Trade Evidence Report", button_text="Open Full Evidence Report", row=7, pady=(10, 0))  # type: ignore[attr-defined]
+    frame.detail_text = _readout_launcher(frame, title="Trade Evidence Report", button_text="Open Full Evidence Report", row=8, pady=(10, 0))  # type: ignore[attr-defined]
     return frame
 
 
@@ -2095,6 +2106,16 @@ def _build_research_payload(session: Any, portfolio, symbol: str, *, ticket: Tec
     except Exception as exc:
         recommendation_engine_read = None
         statuses.append(DataSourceStatus("Recommendation engine", "error", _now(), str(exc)))
+    try:
+        operator_verdict = build_operator_verdict(
+            symbol=symbol,
+            recommendation_read=recommendation_engine_read,
+            command_center_report=command_center_report,
+            portfolio_context=context,
+        )
+    except Exception as exc:
+        operator_verdict = None
+        statuses.append(DataSourceStatus("Operator verdict", "error", _now(), str(exc)))
     trade_evidence_report = build_trade_evidence_report(
         symbol=symbol,
         indicators=indicators,
@@ -2138,6 +2159,7 @@ def _build_research_payload(session: Any, portfolio, symbol: str, *, ticket: Tec
         trade_evidence_report=trade_evidence_report,
         command_center_report=command_center_report,
         recommendation_engine_read=recommendation_engine_read,
+        operator_verdict=operator_verdict,
     )
 
 
@@ -2662,7 +2684,11 @@ def _overview_text(payload: _ResearchPayload) -> str:
         f"- Risk: {decision.risk_level.label} ({decision.risk_level.why})",
         f"- Action bias: {decision.action_bias.label} ({decision.action_bias.why})",
         f"- Evidence posture: {evidence.posture}; setup type {evidence.setup_type}.",
+        f"- Operator verdict: {_operator_verdict_summary_line(payload.operator_verdict)}",
         f"- Recommendation engine: {_recommendation_engine_overview_line(payload.recommendation_engine_read)}",
+        "",
+        "Operator Verdict:",
+        *_operator_verdict_text_lines(payload.operator_verdict),
         "",
         "Scenario forecast (model estimate, not a guarantee):",
         *[f"- {row.scenario}: {row.probability:.1f}% / {row.likelihood}. {row.reference}. {row.why}" for row in decision.thesis.forecast],
@@ -2711,6 +2737,7 @@ def _overview_popout_text(payload: _ResearchPayload) -> str:
             f"Overall read: {decision.overall.label} ({decision.overall.why})",
             f"Risk level: {decision.risk_level.label} ({decision.risk_level.why})",
             f"Action bias: {decision.action_bias.label} ({decision.action_bias.why})",
+            f"Operator verdict: {_operator_verdict_summary_line(payload.operator_verdict)}",
             f"Recommendation engine: {_recommendation_engine_overview_line(payload.recommendation_engine_read)}",
             *[f"Forecast estimate: {row.scenario} {row.probability:.1f}% ({row.likelihood})" for row in decision.thesis.forecast],
             *decision.summary,
@@ -2764,31 +2791,32 @@ def _render_at_glance(self: tk.Tk, payload: _ResearchPayload) -> None:
     technical_read = build_technical_at_glance_read(decision, payload.command_center_report)
     fundamental_verdict = build_fundamental_verdict(payload.fundamentals_text, payload.indicators, decision.macro_backdrop.label)
     conflict_read = build_cross_read_conflict_badge(fundamental_verdict.verdict, decision.macro_backdrop.label, technical_read)
+    operator_read = _operator_verdict_at_glance_badge(payload.operator_verdict)
     expanded = bool(getattr(self, "schwab_research_summary_expanded", tk.BooleanVar(value=False)).get())
     if expanded:
         cards = [
+            operator_read,
             decision.overall,
             technical_read,
             _thesis_read_badge(decision),
             _preferred_vehicle_badge(decision),
             decision.risk_level,
             conflict_read,
-            decision.macro_backdrop,
             decision.action_bias,
         ]
         columns = 4
-        prominent = {0, 2, 7}
+        prominent = {0, 3, 7}
         card_height = 104
         prominent_height = 112
     else:
         cards = [
+            operator_read,
             technical_read,
             _thesis_read_badge(decision),
-            _preferred_vehicle_badge(decision),
             decision.action_bias,
         ]
         columns = 4
-        prominent = {1, 3}
+        prominent = {0, 3}
         card_height = 96
         prominent_height = 104
     metric_grid(
@@ -2802,13 +2830,14 @@ def _render_at_glance(self: tk.Tk, payload: _ResearchPayload) -> None:
     labeled_value_grid(
         self.schwab_research_top_strip,
         {
+            "Operator verdict": _operator_verdict_summary_line(payload.operator_verdict),
             "Technical Read": technical_read.label,
             "Thesis Read": decision.thesis.trade_judgment,
             "Preferred Vehicle": decision.thesis.preferred_vehicle,
             "Confidence": decision.thesis.confidence,
             "What proves it wrong": decision.thesis.invalidation,
         },
-        columns=5,
+        columns=3,
     )
     self.schwab_research_bull_bear_meter.set_score(technical_read.score, mode="direction", label=f"Technical: {technical_read.label} ({technical_read.score:.0f})")
     self.schwab_research_risk_meter.set_score(decision.risk_score, mode="risk", label=f"Risk Heat: {risk_heat_label(decision.risk_score)} ({decision.risk_score:.0f}/100)")
@@ -2842,7 +2871,15 @@ def _render_overview(self: tk.Tk, payload: _ResearchPayload) -> None:
         prominent_indexes={1, 3, 7},
         adaptive_height=True,
     )
-    labeled_value_grid(frame.operator, decision.operator_view, columns=3)  # type: ignore[attr-defined]
+    metric_grid(
+        frame.operator,  # type: ignore[attr-defined]
+        _operator_verdict_cards(payload.operator_verdict),
+        columns=4,
+        prominent_indexes={0, 5},
+        card_height=150,
+        prominent_height=166,
+        adaptive_height=True,
+    )
     _render_recommendation_engine(frame, payload)
     clear_children(frame.summary)  # type: ignore[attr-defined]
     for index, sentence in enumerate(decision.summary):
@@ -2888,7 +2925,177 @@ def _render_recommendation_engine(frame: ttk.Frame, payload: _ResearchPayload) -
     Checklist(followups, "Data Confidence Gaps", _recommendation_data_gap_lines(read)).grid(row=0, column=1, sticky="nsew")
     Checklist(followups, "Warnings", _recommendation_warning_lines(read)).grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
 
-    _set_research_text(frame.recommendation_detail_text, _recommendation_engine_detail_text(read, payload.symbol))  # type: ignore[attr-defined]
+    _set_research_text(frame.recommendation_detail_text, _recommendation_engine_detail_text(read, payload.symbol, payload.operator_verdict))  # type: ignore[attr-defined]
+
+
+def _operator_verdict_at_glance_badge(verdict: OperatorVerdict | None) -> BadgeReadout:
+    if verdict is None:
+        return _synthetic_badge(
+            "Operator Verdict",
+            "WAIT / NO TRADE",
+            "info",
+            "No Operator Verdict is attached yet; fallback posture is defensive.",
+        )
+    return _synthetic_badge(
+        "Operator Verdict",
+        verdict.primary_action,
+        _operator_action_status(verdict.primary_action, getattr(verdict.right_now, "severity", "info")),
+        verdict.summary,
+        _to_float(getattr(verdict, "confidence_score", None)) or 0.0,
+    )
+
+
+def _operator_verdict_cards(verdict: OperatorVerdict | None) -> list[BadgeReadout]:
+    if verdict is None:
+        return [
+            _synthetic_badge("Right Now", "WAIT / NO TRADE", "info", "No Operator Verdict is attached to this payload."),
+            _synthetic_badge("If Confirms", "WAIT FOR TRIGGER", "mixed", "Confirmation line unavailable until the verdict is built."),
+            _synthetic_badge("If Breaks Down", "AVOID BELOW RISK", "bad", "Invalidation line unavailable until the verdict is built."),
+            _synthetic_badge("Best Hedge", "None", "info", "No hedge read is attached."),
+            _synthetic_badge("Preferred Vehicle", "No trade", "mixed", "Fallback posture does not prefer a vehicle."),
+            _synthetic_badge("Worst Tempting Trade", "Do not invent a trade", "mixed", "Forcing action when the readout says wait."),
+            _synthetic_badge("Size Guidance", "Planning only", "info", "No ticket fields are changed."),
+            _synthetic_badge("Confidence / Why", "Low (--)", "info", "Missing verdict payload."),
+        ]
+    return [
+        _operator_action_card(verdict.right_now),
+        _operator_action_card(verdict.if_confirms),
+        _operator_action_card(verdict.if_breaks_down),
+        _operator_action_card(verdict.best_hedge),
+        _operator_action_card(verdict.preferred_vehicle),
+        _operator_action_card(verdict.worst_tempting_trade),
+        _operator_action_card(verdict.size_guidance),
+        _synthetic_badge(
+            "Confidence / Why",
+            f"{verdict.confidence} ({_recommendation_score_text(verdict.confidence_score)})",
+            _operator_confidence_status(verdict.confidence, verdict.confidence_score),
+            _first_nonempty(list(verdict.reasons), verdict.summary),
+            _to_float(verdict.confidence_score) or 0.0,
+        ),
+    ]
+
+
+def _operator_action_card(line: OperatorActionLine) -> BadgeReadout:
+    return _synthetic_badge(
+        line.label,
+        line.action,
+        _operator_action_status(line.action, line.severity),
+        line.detail,
+    )
+
+
+def _operator_verdict_summary_line(verdict: OperatorVerdict | None) -> str:
+    if verdict is None:
+        return "WAIT / NO TRADE; no Operator Verdict attached."
+    return f"{verdict.primary_action}; {verdict.summary}"
+
+
+def _operator_verdict_text_lines(verdict: OperatorVerdict | None) -> list[str]:
+    if verdict is None:
+        return [
+            "- Right now: WAIT / NO TRADE - no Operator Verdict is attached.",
+            "- If confirms: wait for a cleaner trigger.",
+            "- If breaks down: avoid below the risk line.",
+            "- Best hedge: none.",
+            "- Preferred vehicle: no trade.",
+            "- Worst tempting trade to avoid: forcing action without a verdict.",
+            "- Size guidance: planning only; no ticket-field changes.",
+            "- What would make this dumb: ignoring missing evidence.",
+            "- What would change the verdict: load the recommendation-engine read.",
+        ]
+    rows = [
+        verdict.right_now,
+        verdict.if_confirms,
+        verdict.if_breaks_down,
+        verdict.best_hedge,
+        verdict.preferred_vehicle,
+        verdict.worst_tempting_trade,
+        verdict.size_guidance,
+    ]
+    lines = [f"- {row.label}: {row.action} - {row.detail}" for row in rows]
+    lines.extend(f"- What would make this dumb: {line}" for line in verdict.dumb_reasons[:4])
+    lines.extend(f"- What would change the verdict: {line}" for line in verdict.what_would_change[:4])
+    return lines
+
+
+def _operator_plan_lines(verdict: OperatorVerdict | None) -> list[str]:
+    if verdict is None:
+        return ["Right now: WAIT / NO TRADE.", "No Operator Verdict is attached yet."]
+    return [
+        f"Right now: {verdict.right_now.action} - {verdict.right_now.detail}",
+        f"If confirms: {verdict.if_confirms.action} - {verdict.if_confirms.detail}",
+        f"If breaks down: {verdict.if_breaks_down.action} - {verdict.if_breaks_down.detail}",
+        f"Best hedge: {verdict.best_hedge.action} - {verdict.best_hedge.detail}",
+        f"Preferred vehicle: {verdict.preferred_vehicle.action} - {verdict.preferred_vehicle.detail}",
+    ]
+
+
+def _operator_self_critique_lines(verdict: OperatorVerdict | None) -> list[str]:
+    if verdict is None:
+        return ["No Operator Verdict is attached; do not infer an action plan from missing evidence."]
+    return _recommendation_clean_lines(
+        [
+            f"Worst tempting trade: {verdict.worst_tempting_trade.detail}",
+            *verdict.dumb_reasons,
+            *verdict.warnings,
+        ],
+        limit=8,
+    )
+
+
+def _operator_verdict_detail_lines(verdict: OperatorVerdict | None) -> list[str]:
+    if verdict is None:
+        return ["Operator Verdict unavailable; fallback posture is WAIT / NO TRADE."]
+    lines = [
+        f"Primary action: {verdict.primary_action}",
+        f"Confidence: {verdict.confidence} ({_recommendation_score_text(verdict.confidence_score)})",
+        verdict.summary,
+    ]
+    for row in (
+        verdict.right_now,
+        verdict.if_confirms,
+        verdict.if_breaks_down,
+        verdict.best_hedge,
+        verdict.preferred_vehicle,
+        verdict.worst_tempting_trade,
+        verdict.size_guidance,
+        verdict.confirmation,
+        verdict.invalidation,
+    ):
+        lines.append(f"{row.label}: {row.action} - {row.detail}")
+    lines.extend(f"Reason: {line}" for line in verdict.reasons[:8])
+    lines.extend(f"What would make this dumb: {line}" for line in verdict.dumb_reasons[:8])
+    lines.extend(f"What would change the verdict: {line}" for line in verdict.what_would_change[:8])
+    lines.extend(f"Warning: {line}" for line in verdict.warnings[:8])
+    return _recommendation_clean_lines(lines, limit=40)
+
+
+def _operator_action_status(action: str, severity: str = "info") -> str:
+    if severity in {"good", "mixed", "bad", "info"}:
+        return severity
+    upper = str(action or "").upper()
+    if "ALLOW" in upper:
+        return "good"
+    if "AVOID" in upper or "REDUCE" in upper or "WORST" in upper:
+        return "bad"
+    if "WAIT" in upper or "HOLD" in upper or "HEDGE" in upper:
+        return "mixed"
+    return "info"
+
+
+def _operator_confidence_status(confidence: str, score: Any) -> str:
+    numeric = _to_float(score)
+    lower = str(confidence or "").lower()
+    if numeric is not None:
+        if numeric >= 75:
+            return "good"
+        if numeric < 55:
+            return "bad"
+    if "high" in lower:
+        return "good"
+    if "low" in lower:
+        return "bad"
+    return "mixed"
 
 
 def _recommendation_engine_overview_line(read: RecommendationEngineRead | None) -> str:
@@ -3173,7 +3380,7 @@ def _source_remediation_line(source: str, *, status: str = "", reason: str = "")
     return ""
 
 
-def _recommendation_engine_detail_text(read: Any | None, symbol: str) -> str:
+def _recommendation_engine_detail_text(read: Any | None, symbol: str, operator_verdict: OperatorVerdict | None = None) -> str:
     title = f"Recommendation Engine Explanation - {symbol.upper()}"
     if read is None:
         return "\n".join(
@@ -3183,6 +3390,9 @@ def _recommendation_engine_detail_text(read: Any | None, symbol: str) -> str:
                 "",
                 "Recommendation read unavailable.",
                 RECOMMENDATION_ENGINE_ADVICE_BOUNDARY,
+                "",
+                "Operator Verdict:",
+                *[f"- {line}" for line in _operator_verdict_detail_lines(operator_verdict)],
                 "",
                 "The workspace remains usable because the recommendation-engine read is optional UI/data wiring.",
             ]
@@ -3200,6 +3410,7 @@ def _recommendation_engine_detail_text(read: Any | None, symbol: str) -> str:
         RECOMMENDATION_ENGINE_ADVICE_BOUNDARY,
         "",
     ]
+    lines.extend(_recommendation_text_section("Operator Verdict", _operator_verdict_detail_lines(operator_verdict)))
     lines.extend(_recommendation_text_section("Why", _recommendation_list(_recommendation_get(read, "why"))))
     lines.extend(_recommendation_text_section("Evidence Components", [f"{component} | {vote} | {confidence} | {status} | {reason}" for component, vote, confidence, status, reason in _recommendation_evidence_rows(read, limit=20)]))
     lines.extend(_recommendation_text_section("Empirical Recommendation Intelligence", _empirical_recommendation_detail_lines(read)))
@@ -3465,6 +3676,10 @@ def _render_trade_evidence(self: tk.Tk, payload: _ResearchPayload) -> None:
         justify=tk.LEFT,
     ).grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))  # type: ignore[attr-defined]
 
+    clear_children(frame.operator_plan)  # type: ignore[attr-defined]
+    Checklist(frame.operator_plan, "Operator Plan", _operator_plan_lines(payload.operator_verdict)).grid(row=0, column=0, sticky="nsew", padx=(10, 8), pady=8)  # type: ignore[attr-defined]
+    Checklist(frame.operator_plan, "Self-Critique", _operator_self_critique_lines(payload.operator_verdict)).grid(row=0, column=1, sticky="nsew", padx=(0, 10), pady=8)  # type: ignore[attr-defined]
+
     tree = frame.score_tree  # type: ignore[attr-defined]
     for row_id in tree.get_children():
         tree.delete(row_id)
@@ -3505,7 +3720,8 @@ def _trade_evidence_report(payload: _ResearchPayload) -> TradeEvidenceReport:
 
 
 def _trade_evidence_text(payload: _ResearchPayload) -> str:
-    return format_trade_evidence_report(_trade_evidence_report(payload))
+    operator_lines = ["", "Operator Verdict:", *_operator_verdict_text_lines(payload.operator_verdict)]
+    return format_trade_evidence_report(_trade_evidence_report(payload)) + "\n" + "\n".join(operator_lines)
 
 
 def _save_trade_evidence_snapshot(self: tk.Tk) -> None:
@@ -4265,6 +4481,18 @@ def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
             setattr(self, "schwab_research_option_candidates", candidates)
     selected_candidate = _selected_option_candidate(self)
     top_candidate = selected_candidate if selected_candidate is not None and selected_candidate.option_type in {"call", "put"} else next((item for item in candidates if item.option_type in {"call", "put"}), None)
+    try:
+        updated_payload = _payload_with_operator_verdict(
+            payload,
+            option_candidates=candidates,
+            selected_option_candidate=top_candidate,
+            stock_plan=stock_plan,
+        )
+        if updated_payload.operator_verdict != payload.operator_verdict:
+            payload = updated_payload
+            _refresh_operator_verdict_surfaces(self, payload)
+    except Exception:
+        pass
     fundamental_verdict = build_fundamental_verdict(payload.fundamentals_text, payload.indicators, payload.decision.macro_backdrop.label)
     risk_plan = build_risk_plan(payload.indicators, payload.context, payload.decision.macro_backdrop.label, fundamental_verdict.verdict, top_candidate, max_risk)
     negative_rows = [row for row in scenario_rows if row.position_pnl < 0]
@@ -4447,6 +4675,35 @@ def _render_options_strategy(self: tk.Tk) -> None:
     _render_scenarios(self, payload)
 
 
+def _payload_with_operator_verdict(
+    payload: _ResearchPayload,
+    *,
+    option_candidates: list[OptionCandidate] | None = None,
+    selected_option_candidate: OptionCandidate | None = None,
+    stock_plan: Any | None = None,
+) -> _ResearchPayload:
+    verdict = build_operator_verdict(
+        symbol=payload.symbol,
+        recommendation_read=payload.recommendation_engine_read,
+        command_center_report=payload.command_center_report,
+        portfolio_context=payload.context,
+        stock_plan=stock_plan,
+        option_candidates=option_candidates,
+        selected_option_candidate=selected_option_candidate,
+    )
+    return replace(payload, operator_verdict=verdict)
+
+
+def _refresh_operator_verdict_surfaces(self: tk.Tk, payload: _ResearchPayload) -> None:
+    self.schwab_research_last_payload = payload
+    if getattr(self, "schwab_research_glance_cards", None) is not None:
+        _render_at_glance(self, payload)
+    if getattr(self, "schwab_research_overview_frame", None) is not None:
+        _render_overview(self, payload)
+    if getattr(self, "schwab_trade_evidence_frame", None) is not None:
+        _render_trade_evidence(self, payload)
+
+
 def _refresh_payload_empirical_option_context(
     self: tk.Tk,
     payload: _ResearchPayload,
@@ -4472,11 +4729,20 @@ def _refresh_payload_empirical_option_context(
         as_of=datetime.now(timezone.utc),
     )
     updated_read = _recommendation_read_with_empirical_overlay(read, empirical)
-    updated_payload = replace(payload, recommendation_engine_read=updated_read)
+    updated_payload = _payload_with_operator_verdict(
+        replace(payload, recommendation_engine_read=updated_read),
+        option_candidates=candidates,
+        selected_option_candidate=selected,
+        stock_plan=getattr(self, "schwab_research_stock_plan", None),
+    )
     self.schwab_research_last_payload = updated_payload
     overview_frame = getattr(self, "schwab_research_overview_frame", None)
     if overview_frame is not None:
-        _render_recommendation_engine(overview_frame, updated_payload)
+        _render_overview(self, updated_payload)
+    if getattr(self, "schwab_trade_evidence_frame", None) is not None:
+        _render_trade_evidence(self, updated_payload)
+    if getattr(self, "schwab_research_glance_cards", None) is not None:
+        _render_at_glance(self, updated_payload)
     if getattr(self, "schwab_research_overview_text", None) is not None:
         _set_research_text(self.schwab_research_overview_text, _overview_popout_text(updated_payload))
     if getattr(self, "schwab_research_technicals_frame", None) is not None:
@@ -4689,6 +4955,15 @@ def _refresh_payload_option_chain_evidence(self: tk.Tk) -> None:
         greek_summary=greek_summary,
         trade_evidence_report=trade_evidence_report,
     )
+    try:
+        updated = _payload_with_operator_verdict(
+            updated,
+            option_candidates=getattr(self, "schwab_research_option_candidates", []) or [],
+            selected_option_candidate=_selected_option_candidate(self),
+            stock_plan=getattr(self, "schwab_research_stock_plan", None),
+        )
+    except Exception:
+        pass
     self.schwab_research_last_payload = updated
     _render_trade_evidence(self, updated)
 
