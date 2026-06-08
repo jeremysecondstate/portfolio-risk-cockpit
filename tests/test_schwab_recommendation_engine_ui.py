@@ -320,12 +320,12 @@ class SchwabRecommendationEngineUiTests(unittest.TestCase):
         )
         detail = _recommendation_engine_detail_text(read, "TEST", payload=payload)
 
-        self.assertTrue(any("Already above $106.00" in line for line in lines))
+        self.assertTrue(any("Prior trigger cleared at $106.00" in line for line in lines))
         self.assertTrue(any("not a pending reclaim" in line for line in lines))
         self.assertTrue(any("timing improves from early" in line for line in lines))
         self.assertFalse(any("Needs reclaim above $106.00" in line for line in lines))
         self.assertIn("Current quote: $120.00", detail)
-        self.assertIn("Already above $106.00", detail)
+        self.assertIn("Prior trigger cleared at $106.00", detail)
 
         change_lines = _state_aware_recommendation_lines(
             payload,
@@ -335,7 +335,33 @@ class SchwabRecommendationEngineUiTests(unittest.TestCase):
             fallback="Fresh evidence or cleaner confirmation would change the view.",
             limit=5,
         )
-        self.assertTrue(any("Because price is already above $106.00" in line for line in change_lines))
+        self.assertTrue(any("Prior trigger cleared at $106.00" in line for line in change_lines))
+
+    def test_duplicate_cleared_trigger_rows_are_consolidated(self) -> None:
+        read = _read()
+        object.__setattr__(
+            read,
+            "confirmation_lines",
+            (
+                "Confirmation: reclaiming $106.00 improves the setup.",
+                "Breakout trigger: $106.00 - move above resistance improves confirmation.",
+            ),
+        )
+        payload = _payload(price=120.0)
+
+        lines = _state_aware_recommendation_lines(
+            payload,
+            read,
+            "confirmation_lines",
+            kind="confirmation",
+            fallback="Confirmation line unavailable.",
+            limit=5,
+        )
+
+        self.assertEqual(sum("Prior triggers cleared at $106.00" in line for line in lines), 1)
+        self.assertTrue(any(line.startswith("Source 1: Confirmation") for line in lines))
+        self.assertTrue(any(line.startswith("Source 2: Breakout trigger") for line in lines))
+        self.assertFalse(any("Already above" in line for line in lines))
 
     def test_invalidation_lines_are_state_aware_when_price_is_below_risk_line(self) -> None:
         read = _read()

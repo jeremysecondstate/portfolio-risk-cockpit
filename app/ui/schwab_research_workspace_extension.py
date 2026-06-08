@@ -3648,15 +3648,22 @@ def _state_aware_recommendation_lines(
 def _state_aware_operator_rows(rows: Iterable[str], payload: Any | None) -> list[str]:
     current_price = _payload_current_price(payload)
     report = _payload_command_center(payload)
-    result: list[str] = []
+    passthrough: list[str] = []
+    confirmation_rows: list[str] = []
+    invalidation_rows: list[str] = []
     for row in rows:
         lower = str(row or "").lower()
         if "if confirms" in lower or lower.startswith("confirmation:"):
-            result.extend(_state_aware_trigger_lines([row], kind="confirmation", current_price=current_price, command_center_report=report))
+            confirmation_rows.append(str(row or "").strip())
         elif "if breaks" in lower or "invalidation" in lower or "risk line" in lower:
-            result.extend(_state_aware_trigger_lines([row], kind="invalidation", current_price=current_price, command_center_report=report))
+            invalidation_rows.append(str(row or "").strip())
         else:
-            result.append(str(row or "").strip())
+            passthrough.append(str(row or "").strip())
+    result: list[str] = [*passthrough]
+    if confirmation_rows:
+        result.extend(_state_aware_trigger_lines(confirmation_rows, kind="confirmation", current_price=current_price, command_center_report=report))
+    if invalidation_rows:
+        result.extend(_state_aware_trigger_lines(invalidation_rows, kind="invalidation", current_price=current_price, command_center_report=report))
     return _recommendation_dedupe(_recommendation_clean_lines(result, limit=20))
 
 
@@ -3672,10 +3679,12 @@ def _state_aware_trigger_lines(
     if current_price is None:
         return clean_rows
     result: list[str] = []
+    pending: list[tuple[str, float | None]] = []
     for row in clean_rows:
-        level = _first_price_level(row)
-        if level is None:
-            level = _inferred_trigger_level(command_center_report, kind)
+        level = _trigger_level_for_row(row, kind, command_center_report)
+        if _is_cleared_prior_trigger(row, kind=kind, current_price=current_price, level=level):
+            pending.append((row, level))
+            continue
         if level is None:
             result.append(row)
             continue
@@ -3685,6 +3694,11 @@ def _state_aware_trigger_lines(
             result.append(_state_aware_change_line(row, current_price=current_price, level=level, command_center_report=command_center_report))
         else:
             result.append(_state_aware_confirmation_line(row, current_price=current_price, level=level, command_center_report=command_center_report))
+    if pending:
+        result = [
+            *_cleared_prior_trigger_lines(pending, kind=kind, current_price=current_price, command_center_report=command_center_report),
+            *result,
+        ]
     return _recommendation_dedupe(result)[:limit]
 
 
@@ -3693,7 +3707,7 @@ def _state_aware_confirmation_line(row: str, *, current_price: float, level: flo
     original = _compact_original_trigger(row)
     if current_price > level + tolerance:
         return (
-            f"Already above {_money(level)} (current {_money(current_price)}); this is cleared, not a pending reclaim. "
+            f"Prior trigger cleared at {_money(level)} (current {_money(current_price)}); this is not a pending reclaim. "
             f"Next confirmation: {_next_confirmation_condition(command_center_report, level)} {original}"
         )
     if current_price < level - tolerance:
@@ -3721,7 +3735,7 @@ def _state_aware_change_line(row: str, *, current_price: float, level: float, co
     lower = row.lower()
     if current_price > level and any(term in lower for term in ("trigger", "reclaim", "above", "breakout", "confirmation")):
         return (
-            f"Because price is already above {_money(level)} (current {_money(current_price)}), the change condition is failure to hold/reject back below that level. "
+            f"Prior trigger cleared at {_money(level)} (current {_money(current_price)}); the change condition is failure to hold/reject back below that level. "
             f"Next quality check: {_next_confirmation_condition(command_center_report, level)} {_compact_original_trigger(row, label='Original change line')}"
         )
     if current_price < level and any(term in lower for term in ("trigger", "reclaim", "above", "breakout", "confirmation")):
@@ -3729,6 +3743,82 @@ def _state_aware_change_line(row: str, *, current_price: float, level: float, co
     if current_price < level and any(term in lower for term in ("losing", "below", "invalidation", "breakdown")):
         return f"Below {_money(level)} (current {_money(current_price)}); this change/risk condition is already active. {_compact_original_trigger(row, label='Original change line')}"
     return row
+
+
+def _trigger_level_for_row(row: str, kind: str, command_center_report: Any | None) -> float | None:
+    level = _first_price_level(row)
+    if level is not None:
+        return level
+    return _inferred_trigger_level(command_center_report, kind)
+
+
+def _is_cleared_prior_trigger(row: str, *, kind: str, current_price: float, level: float | None) -> bool:
+    if level is None or kind == "invalidation":
+        return False
+    tolerance = max(level * 0.001, 0.01)
+    if current_price <= level + tolerance:
+        return False
+    if kind == "confirmation":
+        return True
+    lower = row.lower()
+    return any(term in lower for term in ("trigger", "reclaim", "above", "breakout", "confirmation"))
+
+
+def _cleared_prior_trigger_lines(
+    rows_with_levels: list[tuple[str, float | None]],
+    *,
+    kind: str,
+    current_price: float,
+    command_center_report: Any | None,
+) -> list[str]:
+    grouped: dict[float, list[str]] = {}
+    level_order: list[float] = []
+    for row, level in rows_with_levels:
+        if level is None:
+            continue
+        key = round(level, 4)
+        if key not in grouped:
+            grouped[key] = []
+            level_order.append(key)
+        grouped[key].append(row)
+
+    lines: list[str] = []
+    for key in level_order:
+        source_rows = grouped.get(key, [])
+        level = _to_float(key)
+        if level is None:
+            continue
+        plural = "triggers" if len(source_rows) > 1 else "trigger"
+        if kind == "change":
+            summary = (
+                f"Prior {plural} cleared at {_money(level)} (current {_money(current_price)}); "
+                "what would change now is a failure to hold or a rejection back below that level. "
+                f"Next quality check: {_next_confirmation_condition(command_center_report, level)}"
+            )
+        else:
+            summary = (
+                f"Prior {plural} cleared at {_money(level)} (current {_money(current_price)}); "
+                "this is not a pending reclaim. "
+                f"Next confirmation: {_next_confirmation_condition(command_center_report, level)}"
+            )
+        lines.append(summary)
+        if len(source_rows) > 1:
+            for index, source in enumerate(_trigger_source_rows(source_rows), start=1):
+                lines.append(f"Source {index}: {source}")
+    return lines
+
+
+def _trigger_source_rows(rows: Iterable[str]) -> list[str]:
+    sources: list[str] = []
+    for row in rows:
+        clean = " ".join(str(row or "").split())
+        if not clean:
+            continue
+        if len(clean) > 140:
+            clean = clean[:137].rstrip() + "..."
+        if clean not in sources:
+            sources.append(clean)
+    return sources
 
 
 def _next_confirmation_condition(command_center_report: Any | None, cleared_level: float) -> str:
@@ -4232,7 +4322,7 @@ def _risk_lines(payload: _ResearchPayload) -> list[str]:
     return lines
 
 
-def _technical_setup_cards(report: TechnicalCommandCenterReport | None) -> list[BadgeReadout]:
+def _technical_setup_cards(report: TechnicalCommandCenterReport | None, current_price: float | None = None) -> list[BadgeReadout]:
     if report is None:
         return [
             _synthetic_badge(
@@ -4249,9 +4339,69 @@ def _technical_setup_cards(report: TechnicalCommandCenterReport | None) -> list[
         _synthetic_badge("Setup", _humanize_command_value(classification.setup), _technical_status(classification.setup), reason),
         _synthetic_badge("Timing", _humanize_command_value(classification.timing), _technical_status(classification.timing), reason),
         _synthetic_badge("Action Quality", _humanize_command_value(classification.action_quality), _technical_status(classification.action_quality), f"Confidence: {classification.confidence}. {reason}"),
-        _synthetic_badge("Confirmation", _money(classification.confirmation_level), "info" if classification.confirmation_level is None else "mixed", "Price level the setup needs to confirm."),
-        _synthetic_badge("Invalidation", _money(classification.invalidation_level), "info" if classification.invalidation_level is None else "bad", "Price level that weakens or invalidates the visible setup."),
+        _technical_confirmation_badge(report, current_price),
+        _technical_invalidation_badge(report, current_price),
     ]
+
+
+def _technical_confirmation_badge(report: TechnicalCommandCenterReport, current_price: float | None) -> BadgeReadout:
+    classification = report.setup_classification
+    level = _to_float(classification.confirmation_level)
+    if level is None:
+        return _synthetic_badge("Confirmation", "--", "info", "Confirmation level is unavailable; use the timeframe table and source detail before upgrading the setup.")
+    if current_price is None:
+        return _synthetic_badge("Confirmation", _money(level), "mixed", "Price level the setup needs to confirm.")
+    tolerance = max(level * 0.001, 0.01)
+    if current_price > level + tolerance:
+        return _synthetic_badge(
+            "Confirmation",
+            "Prior trigger cleared",
+            "good",
+            f"Current quote {_money(current_price)} is above the prior trigger {_money(level)}. Next confirmation: {_next_confirmation_condition(report, level)}",
+        )
+    if current_price < level - tolerance:
+        return _synthetic_badge(
+            "Confirmation",
+            f"Needs reclaim {_money(level)}",
+            "mixed",
+            f"Current quote {_money(current_price)} remains below the confirmation trigger; wait for a reclaim above {_money(level)} before upgrading the setup.",
+        )
+    return _synthetic_badge(
+        "Confirmation",
+        "Testing trigger",
+        "mixed",
+        f"Current quote {_money(current_price)} is testing {_money(level)}; confirmation requires holding above it with clean volume/VWAP follow-through.",
+    )
+
+
+def _technical_invalidation_badge(report: TechnicalCommandCenterReport, current_price: float | None) -> BadgeReadout:
+    classification = report.setup_classification
+    level = _to_float(classification.invalidation_level)
+    if level is None:
+        return _synthetic_badge("Invalidation", "--", "info", "Invalidation level is unavailable; define a risk line before using this setup for sizing context.")
+    if current_price is None:
+        return _synthetic_badge("Invalidation", _money(level), "bad", "Price level that weakens or invalidates the visible setup.")
+    tolerance = max(level * 0.001, 0.01)
+    if current_price < level - tolerance:
+        return _synthetic_badge(
+            "Invalidation",
+            "Invalidated / avoid",
+            "bad",
+            f"Current quote {_money(current_price)} is below the invalidation line {_money(level)}; avoid or reduce until the setup repairs.",
+        )
+    if abs(current_price - level) <= tolerance:
+        return _synthetic_badge(
+            "Invalidation",
+            "Testing risk line",
+            "bad",
+            f"Current quote {_money(current_price)} is testing {_money(level)}; a clean loss of this level invalidates or weakens the setup.",
+        )
+    return _synthetic_badge(
+        "Invalidation",
+        "Risk line below",
+        "mixed",
+        f"Current quote {_money(current_price)} is above invalidation {_money(level)}; the setup weakens if price loses that level.",
+    )
 
 
 def _technical_capital_structure_cards(report: TechnicalCommandCenterReport | None) -> list[BadgeReadout]:
@@ -4884,7 +5034,7 @@ def _render_technicals(self: tk.Tk, payload: _ResearchPayload) -> None:
     narrative = build_technical_narrative(indicators, payload.context, decision.macro_backdrop.label)
     metric_grid(
         frame.cards,  # type: ignore[attr-defined]
-        _technical_setup_cards(command_report),
+        _technical_setup_cards(command_report, _payload_current_price(payload)),
         columns=3,
         card_height=132,
         prominent_height=142,

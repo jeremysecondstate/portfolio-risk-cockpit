@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from app.analytics.earnings_visual_patch import _evidence_detail_fields
 from app.ui.research_widgets import parse_markdown_pipe_table, parse_visual_readout, truncate_with_detail
 
 
@@ -60,3 +61,19 @@ def test_truncate_with_detail_preserves_original_text() -> None:
     assert len(result.display) <= 80
     assert result.detail == " ".join(original.split())
 
+
+def test_evidence_detail_fields_split_long_component_rows() -> None:
+    row = (
+        "Chart setup: +42 - Finding: breakout is constructive. "
+        "Signals: price reclaimed VWAP; relative volume improved. "
+        "Missing: option chain. Action: verify next close above $106.00."
+    )
+
+    fields = dict(_evidence_detail_fields(row))
+
+    assert fields["Component"] == "Chart setup"
+    assert fields["Vote"] == "+42"
+    assert fields["Finding"] == "breakout is constructive"
+    assert "relative volume improved" in fields["Signals"]
+    assert fields["Missing"] == "option chain"
+    assert fields["Action / Verify next"] == "verify next close above $106.00"
