@@ -7,7 +7,7 @@ from urllib.parse import quote_plus, urljoin
 
 import requests
 
-from app.data.sec_edgar import SecEarningsRelease, html_to_text
+from app.data.sec_edgar import SecEarningsRelease, SecEarningsReport, html_to_text
 
 MAX_SNIPPET_CHARS = 260
 NASDAQ_EARNINGS_CALENDAR_URL = "https://api.nasdaq.com/api/calendar/earnings?date={date}"
@@ -31,11 +31,13 @@ DOMESTIC_METRIC_KEYWORDS: dict[str, tuple[str, ...]] = {
     "revenue": ("revenue", "net revenue", "sales"),
     "eps": ("diluted net eps", "diluted eps", "earnings per share", "eps"),
     "net_income": ("net income", "net earnings"),
-    "margins": ("gross margin", "operating margin", "profit margin"),
-    "free_cash_flow": ("free cash flow", "operating cash flow", "cash flow"),
+    "margins": ("gross margin", "operating margin", "profit margin", "gross profit", "operating income"),
+    "liquidity_cashflow": ("liquidity", "cash flow", "free cash flow", "operating cash flow", "net cash provided by operating activities", "cash and cash equivalents"),
     "guidance": ("guidance", "outlook", "expects", "forecast", "fiscal year"),
-    "dividend_buyback": ("dividend", "share repurchase", "repurchases", "buyback"),
-    "segments": ("segment", "networking", "server", "servers", "hybrid cloud", "cloud & ai", "ai systems", "backlog", "orders"),
+    "dividend_buyback": ("dividend", "dividends", "share repurchase", "share repurchases", "repurchased", "repurchases", "buyback"),
+    "segments": ("segment revenue", "platform revenue", "segment", "platform", "data center", "gaming", "automotive", "networking", "server", "servers", "hybrid cloud", "cloud & ai", "ai systems", "backlog", "orders"),
+    "mdna_growth_drivers": ("management's discussion", "md&a", "driven by", "primarily due to", "growth was attributable", "increase was due", "demand", "shipments"),
+    "risks": ("risk", "risks", "demand", "supply", "export controls", "customer concentration", "tariffs", "inventory", "margin pressure"),
 }
 
 
@@ -180,6 +182,7 @@ def analyze_earnings_sources(
     *,
     calendar_event: EarningsCalendarEvent | None = None,
     company_release: CompanyEarningsRelease | None = None,
+    sec_report: SecEarningsReport | None = None,
     company_name: str = "",
     latest_sec_filing_date: str = "",
     today: date | None = None,
@@ -189,11 +192,21 @@ def analyze_earnings_sources(
         calendar_event=calendar_event,
         company_release=company_release,
         sec_release=release,
+        sec_report=sec_report,
         latest_sec_filing_date=latest_sec_filing_date,
         today=today,
     )
     use_company_release = company_release is not None and freshness.source_kind in {"company_ir", "company_press"}
-    source_text = company_release.text if use_company_release else (release.text if release else "")
+    use_sec_release = release is not None and freshness.source_kind == "sec_8k"
+    use_sec_report = sec_report is not None and freshness.source_kind == sec_report.source_kind
+    if use_company_release:
+        source_text = company_release.text
+    elif use_sec_release:
+        source_text = release.text
+    elif use_sec_report:
+        source_text = sec_report.text
+    else:
+        source_text = release.text if release else sec_report.text if sec_report else ""
     if not source_text.strip() and not calendar_event:
         return analyze_earnings_release(release)
 
@@ -249,12 +262,39 @@ def analyze_earnings_sources(
         calendar_event=calendar_event,
         company_release=company_release,
         sec_release=release,
+        sec_report=sec_report,
     )
-    filing_date = release.filing.filing_date if release else "--"
-    filing_items = release.filing.items if release else "--"
-    exhibit_type = release.document.type or release.document.description if release else "--"
-    source_url = company_release.url if use_company_release and company_release else (release.source_url if release else "")
-    company = company_name or (release.company.title if release else calendar_event.company_name if calendar_event else normalized_symbol)
+    active_sec_source = release if use_sec_release else sec_report if use_sec_report else release or sec_report
+    filing_date = active_sec_source.filing.filing_date if active_sec_source else "--"
+    filing_items = release.filing.items if release else "Formal report" if sec_report else "--"
+    if use_sec_release and release:
+        exhibit_type = release.document.type or release.document.description
+    elif sec_report:
+        exhibit_type = sec_report.document.type or sec_report.filing.form
+    else:
+        exhibit_type = "--"
+    source_url = (
+        company_release.url
+        if use_company_release and company_release
+        else release.source_url
+        if use_sec_release and release
+        else sec_report.source_url
+        if use_sec_report and sec_report
+        else release.source_url
+        if release
+        else sec_report.source_url
+        if sec_report
+        else ""
+    )
+    company = company_name or (
+        release.company.title
+        if release
+        else sec_report.company.title
+        if sec_report
+        else calendar_event.company_name
+        if calendar_event
+        else normalized_symbol
+    )
 
     return EarningsReleaseDigest(
         title=title,
@@ -293,6 +333,7 @@ def build_earnings_freshness(
     calendar_event: EarningsCalendarEvent | None = None,
     company_release: CompanyEarningsRelease | None = None,
     sec_release: SecEarningsRelease | None = None,
+    sec_report: SecEarningsReport | None = None,
     latest_sec_filing_date: str = "",
     today: date | None = None,
 ) -> EarningsFreshness:
@@ -302,7 +343,8 @@ def build_earnings_freshness(
     event_relation = _event_relation(event_date, today_value) if calendar_event else "unknown"
     event_timing = calendar_event.timing if calendar_event else ""
     sec_source_date = sec_release.filing.filing_date if sec_release else ""
-    sec_date = latest_sec_filing_date or sec_source_date
+    sec_report_date = sec_report.filing.filing_date if sec_report else ""
+    sec_date = latest_sec_filing_date or sec_source_date or sec_report_date
     company_date = company_release.date if company_release else ""
 
     if company_release is not None and _date_is_fresh_for_event(company_date, event_date, today_value):
@@ -338,7 +380,23 @@ def build_earnings_freshness(
         )
 
     near_term_event = event_relation in {"today", "imminent"}
-    loaded_date = company_date or sec_source_date or "--"
+    loaded_date = company_date or sec_source_date or sec_report_date or "--"
+    if sec_report is not None:
+        return EarningsFreshness(
+            event_label=event_relation,
+            event_date=event_date or "--",
+            event_timing=event_timing,
+            latest_loaded_source_date=sec_report_date,
+            latest_sec_filing_date=sec_date or sec_report_date,
+            latest_company_ir_release_date=company_date or "--",
+            source_label=sec_report.source_label,
+            source_kind=sec_report.source_kind,
+            status="sec_report_fallback",
+            card_label=sec_report.analyzed_label,
+            card_status="mixed" if near_term_event else "info",
+            verdict=_formal_report_fallback_verdict(sec_report),
+        )
+
     if near_term_event and company_release is None and sec_release is None:
         event_text = "today" if event_relation == "today" else f"on {event_date}"
         return EarningsFreshness(
@@ -493,6 +551,7 @@ def source_detail_rows(
     calendar_event: EarningsCalendarEvent | None,
     company_release: CompanyEarningsRelease | None,
     sec_release: SecEarningsRelease | None,
+    sec_report: SecEarningsReport | None = None,
 ) -> list[tuple[str, str, str]]:
     rows: list[tuple[str, str, str]] = []
     if calendar_event is not None:
@@ -502,6 +561,8 @@ def source_detail_rows(
     rows.extend(company_source_links(symbol, today=today))
     if sec_release is not None:
         rows.append(("SEC 8-K earnings exhibit", sec_release.filing.filing_date, sec_release.source_url))
+    if sec_report is not None:
+        rows.append((sec_report.source_label, sec_report.filing.filing_date, sec_report.source_url))
     return _dedupe_source_rows(rows)
 
 
@@ -517,6 +578,7 @@ def format_earnings_release_digest(digest: EarningsReleaseDigest | None) -> str:
                 "",
                 "Freshness Check",
                 "- Earnings event: unknown",
+                "- Loaded source: --",
                 "- Latest loaded source date: --",
                 "- Latest SEC filing date: --",
                 "- Latest company IR release date: --",
@@ -528,7 +590,8 @@ def format_earnings_release_digest(digest: EarningsReleaseDigest | None) -> str:
         )
 
     symbol = digest.symbol or ""
-    title = f"Earnings Release Explanation - {symbol}".strip(" -")
+    title_prefix = _digest_title_prefix(digest)
+    title = f"{title_prefix} - {symbol}".strip(" -")
     lines = [
         title,
         "=" * len(title),
@@ -539,6 +602,7 @@ def format_earnings_release_digest(digest: EarningsReleaseDigest | None) -> str:
         "Freshness Check",
         f"- Earnings event: {digest.freshness_event_label}",
         f"- Expected earnings date/time: {_display_date_time(digest.calendar_event_date, digest.calendar_event_timing)}",
+        f"- Loaded source: {digest.source_label or '--'}",
         f"- Latest loaded source date: {digest.source_date or '--'}",
         f"- Latest SEC filing date: {digest.latest_sec_filing_date or digest.filing_date or '--'}",
         f"- Latest company IR release date: {digest.company_ir_release_date or '--'}",
@@ -550,10 +614,12 @@ def format_earnings_release_digest(digest: EarningsReleaseDigest | None) -> str:
         f"- EPS: {_metric_value(digest.metric_snippets, 'eps')}",
         f"- Net income: {_metric_value(digest.metric_snippets, 'net_income')}",
         f"- Gross margin / operating margin: {_metric_value(digest.metric_snippets, 'margins')}",
-        f"- Free cash flow: {_metric_value(digest.metric_snippets, 'free_cash_flow')}",
+        f"- Liquidity / cash flow: {_metric_value(digest.metric_snippets, 'liquidity_cashflow')}",
         f"- Guidance: {_metric_value(digest.metric_snippets, 'guidance')}",
-        f"- Dividend / buyback: {_metric_value(digest.metric_snippets, 'dividend_buyback')}",
-        f"- Segment highlights: {_metric_value(digest.metric_snippets, 'segments')}",
+        f"- Buybacks / dividends: {_metric_value(digest.metric_snippets, 'dividend_buyback')}",
+        f"- Segment / platform revenue: {_metric_value(digest.metric_snippets, 'segments')}",
+        f"- MD&A growth drivers: {_metric_value(digest.metric_snippets, 'mdna_growth_drivers')}",
+        f"- Relevant risks: {_metric_value(digest.metric_snippets, 'risks')}",
         "",
         "Good",
         *_prefixed_or_fallback(digest.good_bullets, "No clean positive earnings bullet was extracted from the loaded source."),
@@ -578,12 +644,7 @@ def format_earnings_release_digest(digest: EarningsReleaseDigest | None) -> str:
     raw_sections = _raw_source_excerpt_lines(digest)
     if raw_sections:
         lines.extend(["", "Raw excerpts:", *raw_sections])
-    lines.extend(
-        [
-            "",
-            "Use this as a fast official-source earnings layer. Reconcile against the formal 10-Q/10-K and XBRL facts when those are available.",
-        ]
-    )
+    lines.extend(["", _digest_closing_note(digest)])
     return "\n".join(lines)
 
 
@@ -843,6 +904,12 @@ def _date_is_fresh_for_event(source_date: str, event_date: str, today: date) -> 
     return parsed_source >= today
 
 
+def _formal_report_fallback_verdict(report: SecEarningsReport) -> str:
+    form = report.filing.form.upper()
+    report_context = "quarterly report" if form == "10-Q" else "annual report" if form == "10-K" else "formal report"
+    return f"No 8-K earnings-release exhibit found; using recent SEC {form} financial statements and MD&A as earnings context ({report_context} filed {report.filing.filing_date})."
+
+
 def _parse_iso_date(value: str) -> date | None:
     try:
         return datetime.strptime(value, "%Y-%m-%d").date()
@@ -855,7 +922,7 @@ def _date_sort_value(value: str) -> date:
 
 
 def _source_priority(source_kind: str) -> int:
-    return {"company_ir": 4, "company_press": 3, "sec_8k": 2, "transcript": 1}.get(source_kind, 0)
+    return {"company_ir": 4, "company_press": 3, "sec_8k": 2, "sec_10q_fallback": 2, "sec_10k_fallback": 2, "transcript": 1}.get(source_kind, 0)
 
 
 def _dedupe_source_rows(rows: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
@@ -891,10 +958,12 @@ def _good_lines(metrics: dict[str, list[str]]) -> list[str]:
         lines.append("Growth or improvement language appears in the loaded earnings source.")
     if metrics.get("guidance") and any(term in " ".join(metrics["guidance"]).lower() for term in ("raise", "raised", "reaffirm", "higher", "growth")):
         lines.append("Guidance language leans constructive.")
-    if metrics.get("free_cash_flow"):
-        lines.append("Cash-flow detail was found; verify whether free cash flow is positive or improving.")
+    if metrics.get("liquidity_cashflow"):
+        lines.append("Liquidity or cash-flow detail was found; verify whether free cash flow is positive or improving.")
     if metrics.get("segments"):
         lines.append("Segment detail was found, including at least one operating segment or demand indicator.")
+    if metrics.get("mdna_growth_drivers"):
+        lines.append("MD&A growth-driver language was found in the formal filing context.")
     return lines
 
 
@@ -907,8 +976,9 @@ def _bad_missing_lines(metrics: dict[str, list[str]]) -> list[str]:
         ("revenue", "Revenue"),
         ("eps", "EPS"),
         ("net_income", "Net income"),
-        ("guidance", "Guidance"),
         ("margins", "Margin"),
+        ("liquidity_cashflow", "Liquidity / cash flow"),
+        ("segments", "Segment / platform revenue"),
     ):
         if not metrics.get(key):
             lines.append(f"{label} was not cleanly extracted from the loaded source.")
@@ -923,8 +993,10 @@ def _watch_lines(symbol: str, metrics: dict[str, list[str]]) -> list[str]:
     ]
     if metrics.get("segments") or normalized_symbol == "HPE":
         lines.append("For infrastructure names, watch networking, servers, hybrid cloud, AI systems, backlog, and orders.")
-    if metrics.get("free_cash_flow"):
+    if metrics.get("liquidity_cashflow"):
         lines.append("Free cash flow and buyback/dividend language can change balance-sheet read-through.")
+    if metrics.get("risks"):
+        lines.append("Review filing risk language for demand, supply, export controls, concentration, tariffs, inventory, and margin pressure.")
     return lines
 
 
@@ -938,7 +1010,24 @@ def _bottom_line(digest: EarningsReleaseDigest) -> str:
     if digest.source_kind == "sec_8k":
         read = _quality_read(digest.metric_snippets)
         return f"- {read}: latest loaded read comes from SEC 8-K source data. Confirm whether a newer company IR release exists before trading around earnings."
+    if digest.source_kind in {"sec_10q_fallback", "sec_10k_fallback"}:
+        read = _quality_read(digest.metric_snippets)
+        return f"- {read}: {digest.freshness_verdict}"
     return "- Mixed: source data is incomplete; use this as a starting point, not a final earnings read."
+
+
+def _digest_title_prefix(digest: EarningsReleaseDigest) -> str:
+    if digest.source_kind == "sec_10q_fallback":
+        return "SEC 10-Q Earnings Context"
+    if digest.source_kind == "sec_10k_fallback":
+        return "SEC 10-K Earnings Context"
+    return "Earnings Release Explanation"
+
+
+def _digest_closing_note(digest: EarningsReleaseDigest) -> str:
+    if digest.source_kind in {"sec_10q_fallback", "sec_10k_fallback"}:
+        return "Use this as formal SEC filing earnings context. It is not an 8-K earnings-release exhibit; reconcile against any later company IR release, 8-K, or call transcript."
+    return "Use this as a fast official-source earnings layer. Reconcile against the formal 10-Q/10-K and XBRL facts when those are available."
 
 
 def _quality_read(metrics: dict[str, list[str]]) -> str:

@@ -230,7 +230,8 @@ def score_macro_text(text: str) -> float:
 
 def score_earnings_risk(text: str) -> float:
     lower = text.lower()
-    if "unavailable" in lower or "unknown" in lower or not lower.strip():
+    has_official_source = any(term in lower for term in ("sec 8-k earnings exhibit", "sec 10-q fallback", "sec 10-k fallback", "sec 10-q analyzed", "sec 10-k analyzed"))
+    if not lower.strip() or "unavailable" in lower or ("unknown" in lower and not has_official_source):
         return 50.0
     if "earnings today" in lower or "earnings event: today" in lower or "awaiting release" in lower or "potentially stale" in lower:
         return 82.0
@@ -238,6 +239,8 @@ def score_earnings_risk(text: str) -> float:
         return 78.0
     if "within 10" in lower or "soon" in lower or "next earnings" in lower:
         return 75.0
+    if "sec 10-q fallback" in lower or "sec 10-k fallback" in lower or "sec 10-q analyzed" in lower or "sec 10-k analyzed" in lower:
+        return 45.0
     if "earnings release" in lower or "8-k" in lower:
         return 45.0
     return 35.0
@@ -569,14 +572,17 @@ def _risk_why(
 
 def _earnings_why(text: str) -> str:
     lower = text.lower()
-    if "unavailable" in lower or "unknown" in lower:
-        return "earnings source is unavailable or incomplete."
+    has_formal_fallback = any(term in lower for term in ("sec 10-q fallback", "sec 10-k fallback", "sec 10-q analyzed", "sec 10-k analyzed"))
     if "earnings today" in lower or "earnings event: today" in lower or "awaiting release" in lower:
         return "earnings event is today and the release may still be pending."
     if "potentially stale" in lower:
         return "loaded earnings source may be stale versus a near-term event."
     if "earnings imminent" in lower or "earnings event: imminent" in lower:
         return "earnings event is near enough to affect risk and options premium."
+    if has_formal_fallback:
+        return "recent SEC 10-Q/10-K filing context is loaded because no 8-K earnings exhibit was found."
+    if "unavailable" in lower or "unknown" in lower:
+        return "earnings source is unavailable or incomplete."
     if "soon" in lower or "next earnings" in lower:
         return "next earnings timing may be near."
     return "no near-term earnings shock detected in loaded text."

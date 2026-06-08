@@ -955,6 +955,8 @@ def _score_status_text(status: str) -> tuple[float, str]:
         return 45.0, "limited"
     if "limited" in lower or "supplemental" in lower:
         return 55.0, "limited"
+    if "fallback" in lower:
+        return 64.0, "cached"
     if "cached" in lower or "cache" in lower:
         return 64.0, "cached"
     if "fresh" in lower or "loaded" in lower or "ok" in lower or "success" in lower:

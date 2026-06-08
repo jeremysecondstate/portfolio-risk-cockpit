@@ -899,6 +899,8 @@ def build_earnings_workspace_summary(
     foreign_mode = "foreign issuer" in f"{earnings_text}\n{fundamentals_text}".lower()
     freshness = _earnings_freshness_fields(earnings_text)
     card_label, card_status, card_why = _earnings_card_from_freshness(freshness, latest_8k)
+    freshness_label = _source_freshness_label(freshness)
+    formal_fallback_label = _formal_report_fallback_snapshot_label(freshness, latest_qk)
     source_links = _source_links_from_earnings_text(earnings_text)
     for line in filings_lines[:8]:
         label, url = _split_source_line(line)
@@ -922,13 +924,15 @@ def build_earnings_workspace_summary(
     )
     if foreign_mode:
         interpretation.append("Foreign issuer mode is active, so official IR results, 6-K, 20-F, and annual reports are the primary source stack.")
+    elif formal_fallback_label:
+        interpretation.append("No 8-K earnings-release exhibit was found; the recent SEC 10-Q/10-K filing is being used as earnings context.")
     elif "no recent 8-k earnings-release exhibit" in earnings_text.lower() or "unavailable" in earnings_text.lower():
         interpretation.append("The latest filing scan does not appear to include a fresh earnings release.")
     risks = _earnings_risks(earnings_text, fundamentals_text)
     return EarningsWorkspaceSummary(
         snapshot={
             "Company": symbol.upper(),
-            "Latest earnings release": latest_8k or ("Latest foreign issuer results" if foreign_mode else "No earnings exhibit found"),
+            "Latest earnings release": latest_8k or formal_fallback_label or ("Latest foreign issuer results" if foreign_mode else "No earnings exhibit found"),
             "Latest 10-Q / 10-K": latest_qk or "No 10-Q/10-K fallback found",
             "Reporting period": _reporting_period_from_line(latest_qk or latest_8k) or "--",
             "Source": "Foreign issuer IR / 6-K / 20-F" if foreign_mode else "SEC filings and companyfacts",
@@ -947,7 +951,7 @@ def build_earnings_workspace_summary(
         earnings_card_label=card_label,
         earnings_card_status=card_status,
         earnings_card_why=card_why,
-        freshness_label=freshness["event"],
+        freshness_label=freshness_label,
         freshness_status=card_status,
         freshness_verdict=freshness["verdict"],
     )
@@ -2391,12 +2395,14 @@ def _trend_from_text(text: str, *terms: str) -> str:
 
 def _earnings_risks(earnings_text: str, fundamentals_text: str) -> list[str]:
     risks: list[str] = []
+    earnings_lower = earnings_text.lower()
     lower = f"{earnings_text}\n{fundamentals_text}".lower()
+    formal_fallback = "sec 10-q fallback" in lower or "sec 10-k fallback" in lower or "sec 10-q analyzed" in lower or "sec 10-k analyzed" in lower
     if "guidance" not in lower and "outlook" not in lower:
         risks.append("Guidance detail is limited in the loaded source.")
     if "margin" in lower or "pressure" in lower:
         risks.append("Margin pressure appears in the loaded text; verify the filing context.")
-    if "unavailable" in lower:
+    if "unavailable" in earnings_lower and not formal_fallback:
         risks.append("Some earnings data is unavailable, so avoid over-reading the snapshot.")
     return risks or ["No obvious earnings risk bullet was found; verify the filing before trading around earnings."]
 
@@ -2447,6 +2453,7 @@ def _format_plain_number(value: float) -> str:
 def _earnings_freshness_fields(earnings_text: str) -> dict[str, str]:
     fields = {
         "event": "unknown",
+        "source": "--",
         "loaded_date": "--",
         "sec_date": "--",
         "ir_date": "--",
@@ -2457,6 +2464,8 @@ def _earnings_freshness_fields(earnings_text: str) -> dict[str, str]:
         lower = line.lower()
         if lower.startswith("earnings event:"):
             fields["event"] = line.split(":", 1)[1].strip() or "unknown"
+        elif lower.startswith("loaded source:"):
+            fields["source"] = line.split(":", 1)[1].strip() or "--"
         elif lower.startswith("latest loaded source date:"):
             fields["loaded_date"] = line.split(":", 1)[1].strip() or "--"
         elif lower.startswith("latest sec filing date:"):
@@ -2472,6 +2481,12 @@ def _earnings_card_from_freshness(fields: dict[str, str], latest_8k: str) -> tup
     verdict = fields.get("verdict", "--")
     lower = verdict.lower()
     event = fields.get("event", "unknown").lower()
+    source = fields.get("source", "--").lower()
+    fallback_status = "mixed" if event in {"today", "imminent"} else "info"
+    if "sec 10-q" in source or "sec 10-q" in lower:
+        return "SEC 10-Q analyzed", fallback_status, verdict
+    if "sec 10-k" in source or "sec 10-k" in lower:
+        return "SEC 10-K analyzed", fallback_status, verdict
     if "fresh earnings release found" in lower:
         return "Fresh Release", "good", verdict
     if "potentially stale" in lower:
@@ -2485,6 +2500,26 @@ def _earnings_card_from_freshness(fields: dict[str, str], latest_8k: str) -> tup
     if latest_8k:
         return "SEC Scan", "info", latest_8k
     return "No Fresh Release", "info", verdict
+
+
+def _source_freshness_label(fields: dict[str, str]) -> str:
+    source = fields.get("source", "--").lower()
+    verdict = fields.get("verdict", "--").lower()
+    combined = f"{source} {verdict}"
+    if "sec 10-q" in combined:
+        return "SEC 10-Q / recent quarterly report"
+    if "sec 10-k" in combined:
+        return "SEC 10-K / recent annual report"
+    return fields.get("event", "unknown")
+
+
+def _formal_report_fallback_snapshot_label(fields: dict[str, str], latest_qk: str) -> str:
+    combined = f"{fields.get('source', '')} {fields.get('verdict', '')} {latest_qk}".lower()
+    if "sec 10-q" in combined:
+        return "No 8-K; SEC 10-Q fallback"
+    if "sec 10-k" in combined:
+        return "No 8-K; SEC 10-K fallback"
+    return ""
 
 
 def _labeled_source_links(rows: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
