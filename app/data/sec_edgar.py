@@ -142,6 +142,30 @@ class SecEarningsRelease:
 
 
 @dataclass(frozen=True)
+class SecEarningsReport:
+    company: SecCompany
+    filing: SecFiling
+    document: SecFilingDocument
+    text: str
+
+    @property
+    def source_url(self) -> str:
+        return self.document.url
+
+    @property
+    def source_label(self) -> str:
+        return f"SEC {self.filing.form} fallback"
+
+    @property
+    def analyzed_label(self) -> str:
+        return f"SEC {self.filing.form} analyzed"
+
+    @property
+    def source_kind(self) -> str:
+        return f"sec_{self.filing.form.lower().replace('-', '')}_fallback"
+
+
+@dataclass(frozen=True)
 class SecForeignIssuerRelease:
     company: SecCompany
     filing: SecFiling
@@ -375,6 +399,27 @@ class SecEdgarClient:
             return SecEarningsRelease(company=filing.company, filing=filing, document=document, text=text)
         return None
 
+    def latest_formal_earnings_report(self, ticker: str) -> SecEarningsReport | None:
+        filings = self.recent_filings(ticker, forms=("10-Q", "10-K"), limit=12)
+        for filing in sorted(filings, key=_formal_report_filing_rank):
+            documents = self.filing_documents(filing)
+            document = choose_primary_filing_document(documents, filing)
+            if document is None and filing.primary_document:
+                document = SecFilingDocument(
+                    filing=filing,
+                    document=filing.primary_document,
+                    description=filing.description,
+                    type=filing.form,
+                    sequence="",
+                )
+            if document is None:
+                continue
+            text = self.document_text(document)
+            if not text.strip():
+                continue
+            return SecEarningsReport(company=filing.company, filing=filing, document=document, text=text)
+        return None
+
     def latest_foreign_issuer_release(self, ticker: str) -> SecForeignIssuerRelease | None:
         filings = self.recent_filings(ticker, forms=("6-K", "20-F", "20-F/A", "40-F", "40-F/A"), limit=40)
         prioritized = sorted(filings, key=_foreign_results_filing_rank)
@@ -466,6 +511,37 @@ def choose_earnings_exhibit(documents: list[SecFilingDocument]) -> SecFilingDocu
     if primary_candidates:
         return sorted(primary_candidates, key=_document_rank)[0]
     return None
+
+
+def choose_primary_filing_document(
+    documents: list[SecFilingDocument],
+    filing: SecFiling | None = None,
+) -> SecFilingDocument | None:
+    if not documents:
+        return None
+    if filing is not None and filing.primary_document:
+        for document in documents:
+            if document.document == filing.primary_document:
+                return document
+
+    candidates: list[tuple[int, SecFilingDocument]] = []
+    filing_form = (filing.form if filing else "").upper()
+    form_slug = filing_form.lower().replace("-", "")
+    for document in documents:
+        if not _looks_like_text_filing_document(document.document):
+            continue
+        haystack = f"{document.type} {document.document} {document.description}".lower()
+        score = 5
+        if filing_form and document.type.upper() == filing_form:
+            score = 0
+        elif form_slug and form_slug in haystack.replace("-", ""):
+            score = 1
+        elif "complete submission text" in haystack:
+            score = 4
+        candidates.append((score, document))
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda row: (row[0], row[1].document))[0][1]
 
 
 def choose_foreign_results_document(
@@ -671,6 +747,12 @@ def _foreign_results_filing_rank(filing: SecFiling) -> tuple[int, str]:
     return score, _reverse_date_sort_key(filing.filing_date)
 
 
+def _formal_report_filing_rank(filing: SecFiling) -> tuple[str, int]:
+    form = filing.form.upper()
+    form_score = 0 if form == "10-Q" else 1 if form == "10-K" else 9
+    return _reverse_date_sort_key(filing.filing_date), form_score
+
+
 def _foreign_document_rank(document: SecFilingDocument) -> tuple[int, str]:
     haystack = f"{document.type} {document.document} {document.description}".lower()
     score = 10
@@ -714,6 +796,11 @@ def _reverse_date_sort_key(value: str) -> str:
     except (TypeError, ValueError):
         return "9999-99-99"
     return f"{9999 - date.year:04d}-{12 - date.month:02d}-{31 - date.day:02d}"
+
+
+def _looks_like_text_filing_document(name: str) -> bool:
+    lower = name.lower()
+    return lower.endswith((".htm", ".html", ".txt")) and not lower.endswith("-index.htm")
 
 
 def _safe_cache_filename(value: str) -> str:

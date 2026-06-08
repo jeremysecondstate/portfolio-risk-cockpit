@@ -214,6 +214,43 @@ class ResearchWorkspaceInsightTests(unittest.TestCase):
         search_rows = [row for row in summary.source_links if "google.com/search" in row[2]]
         self.assertTrue(all(row[0].startswith("Search helper:") for row in search_rows))
 
+    def test_earnings_summary_labels_sec_10q_fallback_source(self) -> None:
+        earnings_text = "\n".join(
+            [
+                "Earnings Release Explanation - NVDA",
+                "",
+                "Freshness Check",
+                "- Earnings event: unknown",
+                "- Loaded source: SEC 10-Q fallback",
+                "- Latest loaded source date: 2026-05-28",
+                "- Latest SEC filing date: 2026-05-28",
+                "- Latest company IR release date: --",
+                "- Freshness verdict: No 8-K earnings-release exhibit found; using recent SEC 10-Q financial statements and MD&A as earnings context (quarterly report filed 2026-05-28).",
+                "",
+                "Latest Quarter Snapshot",
+                "- Revenue: Revenue was $44.1 billion, up 69% from a year ago.",
+                "- EPS: Diluted earnings per share was $0.76.",
+                "- Gross margin / operating margin: Gross margin was 60.5%, and operating margin was 49.5%.",
+                "- Segment / platform revenue: Data Center platform revenue was $39.1 billion.",
+                "",
+                "Source Details",
+                "- SEC 10-Q fallback (2026-05-28): https://www.sec.gov/Archives/nvda-10q.htm",
+            ]
+        )
+
+        summary = build_earnings_workspace_summary(
+            "NVDA",
+            earnings_text,
+            "Source: SEC companyfacts XBRL JSON.",
+            ["10-Q filed 2026-05-28 period 2026-04-27: https://www.sec.gov/Archives/nvda-10q.htm"],
+        )
+
+        self.assertEqual(summary.earnings_card_label, "SEC 10-Q analyzed")
+        self.assertEqual(summary.freshness_label, "SEC 10-Q / recent quarterly report")
+        self.assertEqual(summary.snapshot["Latest earnings release"], "No 8-K; SEC 10-Q fallback")
+        self.assertTrue(any("SEC 10-Q fallback" in row[0] for row in summary.source_links))
+        self.assertTrue(any("recent SEC 10-Q/10-K filing is being used" in line for line in summary.interpretation))
+
     def test_fundamental_verdict_uses_structured_metrics_and_caps_pressure(self) -> None:
         verdict = build_fundamental_verdict(_structured_fundamentals(with_pressure=True), _indicators(), "Tailwind")
 

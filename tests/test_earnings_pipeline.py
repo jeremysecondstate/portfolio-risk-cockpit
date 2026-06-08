@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from datetime import date
+from unittest.mock import patch
 
+from app.analytics.earnings_release import analyze_earnings_sources, format_earnings_release_digest
 from app.analytics.earnings_pipeline import (
     EARNINGS_DROP_KIND,
     FORMAL_REPORT_KIND,
@@ -17,8 +20,23 @@ from app.analytics.earnings_pipeline import (
     is_likely_earnings_current_filing,
     parse_earnings_release_text,
 )
+from app.analytics.research_scoring import score_earnings_risk
 from app.data.earnings_calendar import UpcomingEarningsRecord
-from app.data.sec_edgar import SecCurrentFiling
+from app.data.sec_edgar import SecCompany, SecCurrentFiling, SecEarningsReport, SecFiling, SecFilingDocument
+
+
+NVDA_LIKE_10Q_FIXTURE = """
+NVIDIA CORP Quarterly Report on Form 10-Q
+Quarter ended April 27, 2026
+Revenue was $44.1 billion, up 69% from a year ago.
+Diluted earnings per share was $0.76. Net income was $18.8 billion.
+Gross margin was 60.5%, and operating margin was 49.5%.
+Data Center platform revenue was $39.1 billion as demand for accelerated computing remained strong.
+Management's Discussion and Analysis says growth was driven by Blackwell platform shipments and cloud service provider demand.
+Liquidity remained strong; net cash provided by operating activities was $27.4 billion for the first quarter.
+The company returned capital through $14.1 billion of share repurchases and $244 million of cash dividends.
+Risks include demand variability, supply constraints, export controls, customer concentration, tariffs, inventory levels, and margin pressure.
+"""
 
 
 def _filing(
@@ -84,6 +102,44 @@ def _recent_record(
     )
 
 
+def _sec_10q_report(text: str = NVDA_LIKE_10Q_FIXTURE) -> SecEarningsReport:
+    company = SecCompany(ticker="NVDA", cik="0001045810", title="NVIDIA CORP")
+    filing = SecFiling(
+        company=company,
+        accession_number="0001045810-26-000091",
+        filing_date="2026-05-28",
+        report_date="2026-04-27",
+        form="10-Q",
+        primary_document="nvda-20260427.htm",
+        description="10-Q",
+    )
+    document = SecFilingDocument(
+        filing=filing,
+        document="nvda-20260427.htm",
+        description="Form 10-Q",
+        type="10-Q",
+        sequence="1",
+    )
+    return SecEarningsReport(company=company, filing=filing, document=document, text=text)
+
+
+class _No8KFakeSecClient:
+    def __init__(self, report: SecEarningsReport) -> None:
+        self.report = report
+
+    def recent_filings(self, symbol: str, *, forms: tuple[str, ...], limit: int) -> list[SecFiling]:
+        return [self.report.filing]
+
+    def latest_earnings_release(self, symbol: str) -> None:
+        return None
+
+    def latest_formal_earnings_report(self, symbol: str) -> SecEarningsReport:
+        return self.report
+
+    def get_companyfacts(self, symbol: str) -> tuple[SecCompany, dict]:
+        raise RuntimeError("companyfacts offline in deterministic test")
+
+
 class EarningsPipelineTests(unittest.TestCase):
     def test_8k_item_202_is_classified_as_recent_earnings(self) -> None:
         filing = _filing("8-K")
@@ -136,6 +192,16 @@ class EarningsPipelineTests(unittest.TestCase):
         self.assertEqual(parsed.net_income, 20_000_000.0)
         self.assertTrue(parsed.guidance_flag)
 
+    def test_parsing_extracts_nvda_like_10q_financial_fields(self) -> None:
+        parsed = parse_earnings_release_text(NVDA_LIKE_10Q_FIXTURE)
+
+        self.assertEqual(parsed.report_date, "2026-04-27")
+        self.assertEqual(parsed.fiscal_period, "Quarter ended April 27, 2026")
+        self.assertEqual(parsed.revenue, 44_100_000_000.0)
+        self.assertEqual(parsed.revenue_growth, 69.0)
+        self.assertEqual(parsed.eps, 0.76)
+        self.assertEqual(parsed.net_income, 18_800_000_000.0)
+
     def test_parsing_sets_risk_flags_for_declines_and_losses(self) -> None:
         parsed = parse_earnings_release_text(
             """
@@ -187,6 +253,53 @@ class EarningsPipelineTests(unittest.TestCase):
         self.assertEqual(records[0].release_title, "Earnings Release")
         self.assertEqual(records[0].revenue, 10_000_000.0)
         self.assertTrue(records[0].guidance_flag)
+
+    def test_no_8k_uses_10q_fallback_digest_with_metrics(self) -> None:
+        report = _sec_10q_report()
+
+        digest = analyze_earnings_sources(
+            "NVDA",
+            None,
+            sec_report=report,
+            company_name="NVIDIA CORP",
+            latest_sec_filing_date="2026-05-28",
+            today=date(2026, 6, 7),
+        )
+        rendered = format_earnings_release_digest(digest)
+
+        self.assertIsNotNone(digest)
+        self.assertEqual(digest.source_label, "SEC 10-Q fallback")  # type: ignore[union-attr]
+        self.assertEqual(digest.source_kind, "sec_10q_fallback")  # type: ignore[union-attr]
+        self.assertEqual(digest.freshness_card_label, "SEC 10-Q analyzed")  # type: ignore[union-attr]
+        self.assertIn("Loaded source: SEC 10-Q fallback", rendered)
+        self.assertIn("No 8-K earnings-release exhibit found; using recent SEC 10-Q financial statements and MD&A as earnings context", rendered)
+        self.assertIn("$44.1 billion", rendered)
+        self.assertIn("Diluted earnings per share was $0.76", rendered)
+        self.assertIn("Gross margin was 60.5%", rendered)
+        self.assertIn("Net income was $18.8 billion", rendered)
+        self.assertIn("Data Center platform revenue", rendered)
+        self.assertIn("growth was driven by", rendered)
+        self.assertIn("net cash provided by operating activities", rendered)
+        self.assertIn("share repurchases", rendered)
+        self.assertIn("export controls", rendered)
+        self.assertNotIn("earnings source unavailable", rendered.lower())
+        self.assertLess(score_earnings_risk(rendered), 50.0)
+
+    def test_schwab_refresh_path_uses_10q_when_no_8k_exists(self) -> None:
+        from app.analytics.stock_research import DataSourceStatus
+        from app.ui import schwab_research_workspace_extension as workspace
+
+        report = _sec_10q_report()
+        fake_client = _No8KFakeSecClient(report)
+        calendar_status = DataSourceStatus("Upcoming earnings calendar", "no upcoming event", "2026-06-07 12:00 UTC", "No upcoming event in deterministic test.")
+
+        with patch.object(workspace, "_upcoming_earnings_calendar_status", return_value=calendar_status), patch.object(workspace, "fetch_earnings_calendar_event", return_value=None):
+            earnings_text, _fundamentals_text, filings_lines, statuses = workspace._fetch_us_domestic_sec_layers("NVDA", fake_client)
+
+        self.assertIn("Loaded source: SEC 10-Q fallback", earnings_text)
+        self.assertIn("using recent SEC 10-Q financial statements and MD&A as earnings context", earnings_text)
+        self.assertTrue(any(line.startswith("10-Q filed 2026-05-28") for line in filings_lines))
+        self.assertTrue(any(status.source == "Recent EDGAR earnings" and status.status == "fallback" for status in statuses))
 
     def test_cache_read_write_round_trip(self) -> None:
         recent = _recent_record()

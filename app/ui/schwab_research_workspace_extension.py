@@ -2557,7 +2557,14 @@ def _fetch_us_domestic_sec_layers(
         active_client = client or SecEdgarClient(timeout_seconds=12)
         filings = active_client.recent_filings(symbol, forms=REPORT_FORMS, limit=10)
         release = active_client.latest_earnings_release(symbol)
-        company_name = release.company.title if release else filings[0].company.title if filings else symbol
+        sec_report = None
+        sec_report_error = ""
+        if release is None:
+            try:
+                sec_report = active_client.latest_formal_earnings_report(symbol)
+            except Exception as exc:
+                sec_report_error = str(exc)
+        company_name = release.company.title if release else sec_report.company.title if sec_report else filings[0].company.title if filings else symbol
         statuses.append(_upcoming_earnings_calendar_status(symbol))
         calendar_event = fetch_earnings_calendar_event(symbol)
         if calendar_event is not None:
@@ -2573,6 +2580,18 @@ def _fetch_us_domestic_sec_layers(
             statuses.append(DataSourceStatus("Earnings calendar", "no event found", _now(), "No same-day or next-trading-day earnings event found."))
         if release is not None:
             statuses.append(DataSourceStatus("Recent EDGAR earnings", "fresh/cache", _now(), f"{release.filing.form} earnings source filed {release.filing.filing_date}."))
+        elif sec_report is not None:
+            statuses.append(
+                DataSourceStatus(
+                    "Recent EDGAR earnings",
+                    "fallback",
+                    _now(),
+                    f"No recent 8-K earnings-release exhibit found; using {sec_report.filing.form} filed {sec_report.filing.filing_date} as earnings context.",
+                )
+            )
+        elif sec_report_error:
+            statuses.append(DataSourceStatus("SEC 10-Q/10-K fallback", "error", _now(), f"Formal report fallback failed: {sec_report_error}"))
+            statuses.append(DataSourceStatus("Recent EDGAR earnings", "no recent earnings found", _now(), "No recent 8-K earnings-release exhibit was found in the SEC scan."))
         else:
             statuses.append(DataSourceStatus("Recent EDGAR earnings", "no recent earnings found", _now(), "No recent 8-K earnings-release exhibit was found in the SEC scan."))
         company_release = (
@@ -2593,6 +2612,7 @@ def _fetch_us_domestic_sec_layers(
             release,
             calendar_event=calendar_event,
             company_release=company_release,
+            sec_report=sec_report,
             company_name=company_name,
             latest_sec_filing_date=filings[0].filing_date if filings else "",
         )
@@ -5910,7 +5930,7 @@ def _refresh_earnings_sources(self: tk.Tk) -> None:
     self.schwab_research_status_var.set(f"Refreshing earnings sources for {symbol}...")
     _set_research_text(
         self.schwab_research_earnings_text,
-        f"Refreshing earnings sources for {symbol}...\n\nChecking earnings calendar, company IR / press releases, recent SEC 8-K filings, and companyfacts.",
+        f"Refreshing earnings sources for {symbol}...\n\nChecking earnings calendar, company IR / press releases, recent SEC 8-K filings, SEC 10-Q/10-K fallback reports, and companyfacts.",
     )
 
     def worker() -> None:
@@ -6236,7 +6256,7 @@ def _earnings_news_text(payload: _ResearchPayload) -> str:
         lines.extend(f"- {line}" for line in payload.filings_lines)
     else:
         lines.append("- No SEC filing headlines were available.")
-    lines.extend(["", "News provider note:", "- Same-day events check the earnings calendar first, then company IR / press releases, then SEC 8-K exhibits. Market/news sources remain fallback context only."])
+    lines.extend(["", "News provider note:", "- Same-day events check the earnings calendar first, then company IR / press releases, then SEC 8-K exhibits; if no earnings-release exhibit is found, recent SEC 10-Q/10-K financial statements and MD&A are used as fallback earnings context. Market/news sources remain fallback context only."])
     return "\n".join(lines)
 
 
