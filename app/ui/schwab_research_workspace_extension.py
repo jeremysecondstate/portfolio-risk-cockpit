@@ -791,13 +791,67 @@ def _overview_tab(notebook: ttk.Notebook) -> ttk.Frame:
     frame.recommendation_evidence_tree = evidence_tree  # type: ignore[attr-defined]
     frame.recommendation_evidence_lists = ttk.Frame(frame.recommendation, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.recommendation_evidence_lists.grid(row=2, column=0, sticky="ew", padx=10, pady=(8, 0))  # type: ignore[attr-defined]
-    frame.recommendation_evidence_lists.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    frame.recommendation_evidence_lists.columnconfigure((0, 1), weight=0)  # type: ignore[attr-defined]
+    frame.recommendation_supporting_text = _readout_launcher(  # type: ignore[attr-defined]
+        frame.recommendation_evidence_lists,
+        title="Supporting Evidence",
+        button_text="Supporting Evidence",
+        row=0,
+        column=0,
+        sticky="w",
+        pady=(0, 0),
+    )
+    frame.recommendation_contradictions_text = _readout_launcher(  # type: ignore[attr-defined]
+        frame.recommendation_evidence_lists,
+        title="Contradictions",
+        button_text="Contradictions",
+        row=0,
+        column=1,
+        sticky="w",
+        pady=(0, 0),
+    )
     frame.recommendation_planning = ttk.Frame(frame.recommendation, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.recommendation_planning.grid(row=3, column=0, sticky="ew", padx=10, pady=(8, 0))  # type: ignore[attr-defined]
-    frame.recommendation_planning.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    frame.recommendation_planning.columnconfigure((0, 1), weight=0)  # type: ignore[attr-defined]
+    frame.recommendation_reward_risk_text = _readout_launcher(  # type: ignore[attr-defined]
+        frame.recommendation_planning,
+        title="Reward/Risk + Planning EV",
+        button_text="Reward/Risk + Planning EV",
+        row=0,
+        column=0,
+        sticky="w",
+        pady=(0, 0),
+    )
+    frame.recommendation_position_sizing_text = _readout_launcher(  # type: ignore[attr-defined]
+        frame.recommendation_planning,
+        title="Position Sizing",
+        button_text="Position Sizing",
+        row=0,
+        column=1,
+        sticky="w",
+        pady=(0, 0),
+    )
     frame.recommendation_triggers = ttk.Frame(frame.recommendation, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.recommendation_triggers.grid(row=4, column=0, sticky="ew", padx=10, pady=(8, 0))  # type: ignore[attr-defined]
-    frame.recommendation_triggers.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    frame.recommendation_triggers.columnconfigure((0, 1), weight=0)  # type: ignore[attr-defined]
+    frame.recommendation_invalidation_text = _readout_launcher(  # type: ignore[attr-defined]
+        frame.recommendation_triggers,
+        title="Invalidation Lines",
+        button_text="Invalidation Lines",
+        row=0,
+        column=0,
+        sticky="w",
+        pady=(0, 0),
+    )
+    frame.recommendation_confirmation_text = _readout_launcher(  # type: ignore[attr-defined]
+        frame.recommendation_triggers,
+        title="Confirmation Lines",
+        button_text="Confirmation Lines",
+        row=0,
+        column=1,
+        sticky="w",
+        pady=(0, 0),
+    )
     frame.recommendation_followups = ttk.Frame(frame.recommendation, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.recommendation_followups.grid(row=5, column=0, sticky="ew", padx=10, pady=(8, 0))  # type: ignore[attr-defined]
     frame.recommendation_followups.columnconfigure((0, 1, 2), weight=0)  # type: ignore[attr-defined]
@@ -2987,20 +3041,36 @@ def _render_recommendation_engine(frame: ttk.Frame, payload: _ResearchPayload) -
     )
     _replace_tree_rows(frame.recommendation_evidence_tree, _recommendation_evidence_rows(read))  # type: ignore[attr-defined]
 
-    evidence_lists = frame.recommendation_evidence_lists  # type: ignore[attr-defined]
-    clear_children(evidence_lists)
-    Checklist(evidence_lists, "Supporting Evidence", _recommendation_supporting_lines(read)).grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-    Checklist(evidence_lists, "Contradictions", _recommendation_contradiction_lines(read)).grid(row=0, column=1, sticky="nsew")
-
-    planning = frame.recommendation_planning  # type: ignore[attr-defined]
-    clear_children(planning)
-    Checklist(planning, "Reward/Risk + Planning EV", _recommendation_reward_risk_lines(read)).grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-    Checklist(planning, "Position Sizing", _recommendation_position_sizing_lines(read)).grid(row=0, column=1, sticky="nsew")
-
-    triggers = frame.recommendation_triggers  # type: ignore[attr-defined]
-    clear_children(triggers)
-    Checklist(triggers, "Invalidation Lines", _recommendation_field_lines(read, "invalidation_lines", fallback="Invalidation line unavailable.")).grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-    Checklist(triggers, "Confirmation Lines", _recommendation_field_lines(read, "confirmation_lines", fallback="Confirmation line unavailable.")).grid(row=0, column=1, sticky="nsew")
+    _set_research_text(  # type: ignore[attr-defined]
+        frame.recommendation_supporting_text,
+        _detail_button_text("Supporting Evidence", _recommendation_supporting_lines(read, limit=30)),
+    )
+    _set_research_text(  # type: ignore[attr-defined]
+        frame.recommendation_contradictions_text,
+        _detail_button_text("Contradictions", _recommendation_contradiction_lines(read, limit=30)),
+    )
+    _set_research_text(  # type: ignore[attr-defined]
+        frame.recommendation_reward_risk_text,
+        _detail_button_text("Reward/Risk + Planning EV", _recommendation_reward_risk_lines(read)),
+    )
+    _set_research_text(  # type: ignore[attr-defined]
+        frame.recommendation_position_sizing_text,
+        _detail_button_text("Position Sizing", _recommendation_position_sizing_lines(read)),
+    )
+    _set_research_text(  # type: ignore[attr-defined]
+        frame.recommendation_invalidation_text,
+        _detail_button_text(
+            "Invalidation Lines",
+            _recommendation_field_lines(read, "invalidation_lines", fallback="Invalidation line unavailable.", limit=30),
+        ),
+    )
+    _set_research_text(  # type: ignore[attr-defined]
+        frame.recommendation_confirmation_text,
+        _detail_button_text(
+            "Confirmation Lines",
+            _recommendation_field_lines(read, "confirmation_lines", fallback="Confirmation line unavailable.", limit=30),
+        ),
+    )
 
     _set_research_text(  # type: ignore[attr-defined]
         frame.recommendation_what_change_text,

@@ -23,6 +23,7 @@ from app.ui.schwab_research_workspace_extension import (
     _current_research_tab_detail,
     _detail_button_text,
     _open_readout_popout,
+    _overview_tab,
     _readout_launcher,
     _set_research_text,
     _technical_capital_structure_cards,
@@ -35,6 +36,7 @@ from app.ui.schwab_research_workspace_extension import (
     _technical_timeframe_stack_rows,
     _technical_warning_rows,
 )
+from app.ui.research_widgets import Checklist
 
 
 def _candles(count: int, *, start: float = 100.0, step: float = 0.20) -> list[Candle]:
@@ -302,6 +304,45 @@ class SchwabTechnicalCommandCenterUiTests(unittest.TestCase):
             self.assertIs(_current_research_tab_detail(root), detail)
             _bind_notebook_tab_detach_drag(root, notebook)
             self.assertTrue(notebook.bind("<B1-Motion>"))
+        finally:
+            root.destroy()
+
+    def test_overview_narrative_sections_are_launchers_not_inline_checklists(self) -> None:
+        root = _tk_root(self)
+        try:
+            notebook = ttk.Notebook(root)
+            notebook.grid()
+            frame = _overview_tab(notebook)
+
+            for container_name in (
+                "recommendation_evidence_lists",
+                "recommendation_planning",
+                "recommendation_triggers",
+                "recommendation_followups",
+            ):
+                container = getattr(frame, container_name)
+                self.assertGreater(len(container.winfo_children()), 0)
+                self.assertFalse(any(isinstance(child, Checklist) for child in container.winfo_children()))
+
+            launcher_buttons = [
+                frame.recommendation_supporting_text._readout_button.cget("text"),  # type: ignore[attr-defined]
+                frame.recommendation_contradictions_text._readout_button.cget("text"),  # type: ignore[attr-defined]
+                frame.recommendation_reward_risk_text._readout_button.cget("text"),  # type: ignore[attr-defined]
+                frame.recommendation_position_sizing_text._readout_button.cget("text"),  # type: ignore[attr-defined]
+                frame.recommendation_invalidation_text._readout_button.cget("text"),  # type: ignore[attr-defined]
+                frame.recommendation_confirmation_text._readout_button.cget("text"),  # type: ignore[attr-defined]
+            ]
+            self.assertEqual(
+                launcher_buttons,
+                [
+                    "Supporting Evidence",
+                    "Contradictions",
+                    "Reward/Risk + Planning EV",
+                    "Position Sizing",
+                    "Invalidation Lines",
+                    "Confirmation Lines",
+                ],
+            )
         finally:
             root.destroy()
 
