@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import threading
 import tkinter as tk
 from dataclasses import dataclass, replace
@@ -1097,6 +1098,19 @@ def _detail_button_text(title: str, rows: Any, *, fallback: str = "No detail row
     if not clean:
         clean = [fallback]
     return "\n".join([title, "=" * min(len(title), 80), "", *[f"- {line}" for line in clean]])
+
+
+def _contextual_detail_button_text(title: str, rows: Any, payload: Any | None, *, fallback: str = "No detail rows are available.") -> str:
+    clean = _bounded_clean_lines(rows, limit=80)
+    if not clean:
+        clean = [fallback]
+    context = _recommendation_readout_context_lines(payload)
+    lines = [title, "=" * min(len(title), 80), ""]
+    if context:
+        lines.extend(context)
+        lines.append("")
+    lines.extend(f"- {line}" for line in clean)
+    return "\n".join(lines)
 
 
 def _readout_storage_text(parent: ttk.Frame) -> tk.Text:
@@ -3037,7 +3051,7 @@ def _render_overview(self: tk.Tk, payload: _ResearchPayload) -> None:
     )
     metric_grid(
         frame.operator,  # type: ignore[attr-defined]
-        _operator_verdict_cards(payload.operator_verdict),
+        _operator_verdict_cards(payload.operator_verdict, payload),
         columns=4,
         prominent_indexes={0, 5},
         card_height=150,
@@ -3089,29 +3103,27 @@ def _render_recommendation_engine(frame: ttk.Frame, payload: _ResearchPayload) -
     )
     _set_research_text(  # type: ignore[attr-defined]
         frame.recommendation_invalidation_text,
-        _detail_button_text(
+        _contextual_detail_button_text(
             "Invalidation Lines",
-            _recommendation_field_lines(read, "invalidation_lines", fallback="Invalidation line unavailable.", limit=30),
+            _state_aware_recommendation_lines(payload, read, "invalidation_lines", kind="invalidation", fallback="Invalidation line unavailable.", limit=30),
+            payload,
         ),
     )
     _set_research_text(  # type: ignore[attr-defined]
         frame.recommendation_confirmation_text,
-        _detail_button_text(
+        _contextual_detail_button_text(
             "Confirmation Lines",
-            _recommendation_field_lines(read, "confirmation_lines", fallback="Confirmation line unavailable.", limit=30),
+            _state_aware_recommendation_lines(payload, read, "confirmation_lines", kind="confirmation", fallback="Confirmation line unavailable.", limit=30),
+            payload,
         ),
     )
 
     _set_research_text(  # type: ignore[attr-defined]
         frame.recommendation_what_change_text,
-        _detail_button_text(
+        _contextual_detail_button_text(
             "What Would Change",
-            _recommendation_field_lines(
-                read,
-                "what_would_change",
-                fallback="Fresh evidence or cleaner confirmation would change the view.",
-                limit=30,
-            ),
+            _state_aware_recommendation_lines(payload, read, "what_would_change", kind="change", fallback="Fresh evidence or cleaner confirmation would change the view.", limit=30),
+            payload,
         ),
     )
     _set_research_text(  # type: ignore[attr-defined]
@@ -3123,7 +3135,7 @@ def _render_recommendation_engine(frame: ttk.Frame, payload: _ResearchPayload) -
         _detail_button_text("Warnings", _recommendation_warning_lines(read, limit=30)),
     )
 
-    _set_research_text(frame.recommendation_detail_text, _recommendation_engine_detail_text(read, payload.symbol, payload.operator_verdict))  # type: ignore[attr-defined]
+    _set_research_text(frame.recommendation_detail_text, _recommendation_engine_detail_text(read, payload.symbol, payload.operator_verdict, payload=payload))  # type: ignore[attr-defined]
 
 
 def _operator_verdict_at_glance_badge(verdict: OperatorVerdict | None) -> BadgeReadout:
@@ -3143,7 +3155,7 @@ def _operator_verdict_at_glance_badge(verdict: OperatorVerdict | None) -> BadgeR
     )
 
 
-def _operator_verdict_cards(verdict: OperatorVerdict | None) -> list[BadgeReadout]:
+def _operator_verdict_cards(verdict: OperatorVerdict | None, payload: Any | None = None) -> list[BadgeReadout]:
     if verdict is None:
         return [
             _synthetic_badge("Right Now", "WAIT / NO TRADE", "info", "No Operator Verdict is attached to this payload."),
@@ -3156,13 +3168,13 @@ def _operator_verdict_cards(verdict: OperatorVerdict | None) -> list[BadgeReadou
             _synthetic_badge("Confidence / Why", "Low (--)", "info", "Missing verdict payload."),
         ]
     return [
-        _operator_action_card(verdict.right_now),
-        _operator_action_card(verdict.if_confirms),
-        _operator_action_card(verdict.if_breaks_down),
-        _operator_action_card(verdict.best_hedge),
-        _operator_action_card(verdict.preferred_vehicle),
-        _operator_action_card(verdict.worst_tempting_trade),
-        _operator_action_card(verdict.size_guidance),
+        _operator_action_card(verdict.right_now, payload),
+        _operator_action_card(verdict.if_confirms, payload),
+        _operator_action_card(verdict.if_breaks_down, payload),
+        _operator_action_card(verdict.best_hedge, payload),
+        _operator_action_card(verdict.preferred_vehicle, payload),
+        _operator_action_card(verdict.worst_tempting_trade, payload),
+        _operator_action_card(verdict.size_guidance, payload),
         _synthetic_badge(
             "Confidence / Why",
             f"{verdict.confidence} ({_recommendation_score_text(verdict.confidence_score)})",
@@ -3173,12 +3185,17 @@ def _operator_verdict_cards(verdict: OperatorVerdict | None) -> list[BadgeReadou
     ]
 
 
-def _operator_action_card(line: OperatorActionLine) -> BadgeReadout:
+def _operator_action_card(line: OperatorActionLine, payload: Any | None = None) -> BadgeReadout:
+    detail = line.detail
+    if line.label in {"If Confirms", "If Breaks Down", "Confirmation", "Invalidation"}:
+        contextual = _state_aware_operator_rows([f"{line.label}: {line.action} - {line.detail}"], payload)
+        if contextual:
+            detail = contextual[0]
     return _synthetic_badge(
         line.label,
         line.action,
         _operator_action_status(line.action, line.severity),
-        line.detail,
+        detail,
     )
 
 
@@ -3188,7 +3205,7 @@ def _operator_verdict_summary_line(verdict: OperatorVerdict | None) -> str:
     return f"{verdict.primary_action}; {verdict.summary}"
 
 
-def _operator_verdict_text_lines(verdict: OperatorVerdict | None) -> list[str]:
+def _operator_verdict_text_lines(verdict: OperatorVerdict | None, payload: Any | None = None) -> list[str]:
     if verdict is None:
         return [
             "- Right now: WAIT / NO TRADE - no Operator Verdict is attached.",
@@ -3210,22 +3227,27 @@ def _operator_verdict_text_lines(verdict: OperatorVerdict | None) -> list[str]:
         verdict.worst_tempting_trade,
         verdict.size_guidance,
     ]
-    lines = [f"- {row.label}: {row.action} - {row.detail}" for row in rows]
+    lines = [f"{row.label}: {row.action} - {row.detail}" for row in rows]
+    lines = [f"- {line}" for line in _state_aware_operator_rows(lines, payload)]
     lines.extend(f"- What would make this dumb: {line}" for line in verdict.dumb_reasons[:4])
-    lines.extend(f"- What would change the verdict: {line}" for line in verdict.what_would_change[:4])
+    change_lines = _state_aware_trigger_lines(verdict.what_would_change[:4], kind="change", current_price=_payload_current_price(payload), command_center_report=_payload_command_center(payload))
+    lines.extend(f"- What would change the verdict: {line}" for line in change_lines)
     return lines
 
 
-def _operator_plan_lines(verdict: OperatorVerdict | None) -> list[str]:
+def _operator_plan_lines(verdict: OperatorVerdict | None, payload: Any | None = None) -> list[str]:
     if verdict is None:
         return ["Right now: WAIT / NO TRADE.", "No Operator Verdict is attached yet."]
-    return [
+    return _state_aware_operator_rows(
+        [
         f"Right now: {verdict.right_now.action} - {verdict.right_now.detail}",
         f"If confirms: {verdict.if_confirms.action} - {verdict.if_confirms.detail}",
         f"If breaks down: {verdict.if_breaks_down.action} - {verdict.if_breaks_down.detail}",
         f"Best hedge: {verdict.best_hedge.action} - {verdict.best_hedge.detail}",
         f"Preferred vehicle: {verdict.preferred_vehicle.action} - {verdict.preferred_vehicle.detail}",
-    ]
+        ],
+        payload,
+    )
 
 
 def _operator_self_critique_lines(verdict: OperatorVerdict | None) -> list[str]:
@@ -3241,7 +3263,7 @@ def _operator_self_critique_lines(verdict: OperatorVerdict | None) -> list[str]:
     )
 
 
-def _operator_verdict_detail_lines(verdict: OperatorVerdict | None) -> list[str]:
+def _operator_verdict_detail_lines(verdict: OperatorVerdict | None, payload: Any | None = None) -> list[str]:
     if verdict is None:
         return ["Operator Verdict unavailable; fallback posture is WAIT / NO TRADE."]
     lines = [
@@ -3249,6 +3271,7 @@ def _operator_verdict_detail_lines(verdict: OperatorVerdict | None) -> list[str]
         f"Confidence: {verdict.confidence} ({_recommendation_score_text(verdict.confidence_score)})",
         verdict.summary,
     ]
+    action_rows = []
     for row in (
         verdict.right_now,
         verdict.if_confirms,
@@ -3260,10 +3283,12 @@ def _operator_verdict_detail_lines(verdict: OperatorVerdict | None) -> list[str]
         verdict.confirmation,
         verdict.invalidation,
     ):
-        lines.append(f"{row.label}: {row.action} - {row.detail}")
+        action_rows.append(f"{row.label}: {row.action} - {row.detail}")
+    lines.extend(_state_aware_operator_rows(action_rows, payload))
     lines.extend(f"Reason: {line}" for line in verdict.reasons[:8])
     lines.extend(f"What would make this dumb: {line}" for line in verdict.dumb_reasons[:8])
-    lines.extend(f"What would change the verdict: {line}" for line in verdict.what_would_change[:8])
+    change_lines = _state_aware_trigger_lines(verdict.what_would_change[:8], kind="change", current_price=_payload_current_price(payload), command_center_report=_payload_command_center(payload))
+    lines.extend(f"What would change the verdict: {line}" for line in change_lines)
     lines.extend(f"Warning: {line}" for line in verdict.warnings[:8])
     return _recommendation_clean_lines(lines, limit=40)
 
@@ -3578,23 +3603,252 @@ def _source_remediation_line(source: str, *, status: str = "", reason: str = "")
     return ""
 
 
-def _recommendation_engine_detail_text(read: Any | None, symbol: str, operator_verdict: OperatorVerdict | None = None) -> str:
+def _recommendation_readout_context_lines(payload: Any | None) -> list[str]:
+    if payload is None:
+        return []
+    price = _payload_current_price(payload)
+    report = _payload_command_center(payload)
+    classification = _recommendation_get(report, "setup_classification")
+    lines: list[str] = []
+    if price is not None:
+        lines.append(f"Current quote: {_money(price)}")
+    if report is not None:
+        lines.append(
+            "Command Center: "
+            f"{_recommendation_get(report, 'overall_read', '--')} "
+            f"({_recommendation_score_text(_recommendation_get(report, 'overall_score'))}); "
+            f"best action {_recommendation_get(report, 'best_action', '--')}."
+        )
+    if classification is not None:
+        lines.append(
+            "Setup state: "
+            f"{_humanize_command_value(_recommendation_get(classification, 'setup'))}; "
+            f"timing {_humanize_command_value(_recommendation_get(classification, 'timing'))}; "
+            f"action quality {_humanize_command_value(_recommendation_get(classification, 'action_quality'))}."
+        )
+    as_of = _payload_as_of_line(payload)
+    if as_of:
+        lines.append(as_of)
+    return lines
+
+
+def _state_aware_recommendation_lines(
+    payload: Any | None,
+    read: Any | None,
+    field: str,
+    *,
+    kind: str,
+    fallback: str,
+    limit: int,
+) -> list[str]:
+    raw = _recommendation_field_lines(read, field, fallback=fallback, limit=limit)
+    return _state_aware_trigger_lines(raw, kind=kind, current_price=_payload_current_price(payload), command_center_report=_payload_command_center(payload), limit=limit)
+
+
+def _state_aware_operator_rows(rows: Iterable[str], payload: Any | None) -> list[str]:
+    current_price = _payload_current_price(payload)
+    report = _payload_command_center(payload)
+    result: list[str] = []
+    for row in rows:
+        lower = str(row or "").lower()
+        if "if confirms" in lower or lower.startswith("confirmation:"):
+            result.extend(_state_aware_trigger_lines([row], kind="confirmation", current_price=current_price, command_center_report=report))
+        elif "if breaks" in lower or "invalidation" in lower or "risk line" in lower:
+            result.extend(_state_aware_trigger_lines([row], kind="invalidation", current_price=current_price, command_center_report=report))
+        else:
+            result.append(str(row or "").strip())
+    return _recommendation_dedupe(_recommendation_clean_lines(result, limit=20))
+
+
+def _state_aware_trigger_lines(
+    rows: Iterable[Any],
+    *,
+    kind: str,
+    current_price: float | None,
+    command_center_report: Any | None = None,
+    limit: int = 8,
+) -> list[str]:
+    clean_rows = _recommendation_clean_lines(list(rows), limit=limit)
+    if current_price is None:
+        return clean_rows
+    result: list[str] = []
+    for row in clean_rows:
+        level = _first_price_level(row)
+        if level is None:
+            level = _inferred_trigger_level(command_center_report, kind)
+        if level is None:
+            result.append(row)
+            continue
+        if kind == "invalidation":
+            result.append(_state_aware_invalidation_line(row, current_price=current_price, level=level))
+        elif kind == "change":
+            result.append(_state_aware_change_line(row, current_price=current_price, level=level, command_center_report=command_center_report))
+        else:
+            result.append(_state_aware_confirmation_line(row, current_price=current_price, level=level, command_center_report=command_center_report))
+    return _recommendation_dedupe(result)[:limit]
+
+
+def _state_aware_confirmation_line(row: str, *, current_price: float, level: float, command_center_report: Any | None) -> str:
+    tolerance = max(level * 0.001, 0.01)
+    original = _compact_original_trigger(row)
+    if current_price > level + tolerance:
+        return (
+            f"Already above {_money(level)} (current {_money(current_price)}); this is cleared, not a pending reclaim. "
+            f"Next confirmation: {_next_confirmation_condition(command_center_report, level)} {original}"
+        )
+    if current_price < level - tolerance:
+        return (
+            f"Needs reclaim above {_money(level)} (current {_money(current_price)}) before upgrading the setup. "
+            f"{original}"
+        )
+    return (
+        f"Testing {_money(level)} (current {_money(current_price)}); confirmation requires holding above it with clean follow-through. "
+        f"{original}"
+    )
+
+
+def _state_aware_invalidation_line(row: str, *, current_price: float, level: float) -> str:
+    tolerance = max(level * 0.001, 0.01)
+    original = _compact_original_trigger(row, label="Original risk line")
+    if current_price < level - tolerance:
+        return f"Invalidated / avoid below {_money(level)} (current {_money(current_price)}). {original}"
+    if abs(current_price - level) <= tolerance:
+        return f"Testing invalidation {_money(level)} (current {_money(current_price)}); a loss of this level invalidates or reduces the setup. {original}"
+    return f"Above invalidation {_money(level)} (current {_money(current_price)}); risk line remains active if price loses {_money(level)}. {original}"
+
+
+def _state_aware_change_line(row: str, *, current_price: float, level: float, command_center_report: Any | None) -> str:
+    lower = row.lower()
+    if current_price > level and any(term in lower for term in ("trigger", "reclaim", "above", "breakout", "confirmation")):
+        return (
+            f"Because price is already above {_money(level)} (current {_money(current_price)}), the change condition is failure to hold/reject back below that level. "
+            f"Next quality check: {_next_confirmation_condition(command_center_report, level)} {_compact_original_trigger(row, label='Original change line')}"
+        )
+    if current_price < level and any(term in lower for term in ("trigger", "reclaim", "above", "breakout", "confirmation")):
+        return f"Still below {_money(level)} (current {_money(current_price)}); view improves only after a reclaim. {_compact_original_trigger(row, label='Original change line')}"
+    if current_price < level and any(term in lower for term in ("losing", "below", "invalidation", "breakdown")):
+        return f"Below {_money(level)} (current {_money(current_price)}); this change/risk condition is already active. {_compact_original_trigger(row, label='Original change line')}"
+    return row
+
+
+def _next_confirmation_condition(command_center_report: Any | None, cleared_level: float) -> str:
+    classification = _recommendation_get(command_center_report, "setup_classification")
+    timing = str(_recommendation_get(classification, "timing", "") or "").replace("_", " ")
+    action_quality = str(_recommendation_get(classification, "action_quality", "") or "").replace("_", " ")
+    conditions: list[str] = []
+    if timing and timing not in {"confirmed", "unknown"}:
+        conditions.append(f"timing improves from {timing}")
+    if action_quality and action_quality not in {"good entry", "unknown"}:
+        conditions.append(f"action quality improves from {action_quality}")
+    conditions.append(f"hold above {_money(cleared_level)} with volume/VWAP follow-through")
+    return "; ".join(conditions[:2]) + "."
+
+
+def _compact_original_trigger(row: str, *, label: str = "Original trigger") -> str:
+    clean = " ".join(str(row or "").split())
+    if not clean:
+        return ""
+    if len(clean) > 150:
+        clean = clean[:147].rstrip() + "..."
+    return f"{label}: {clean}"
+
+
+def _first_price_level(text: str) -> float | None:
+    match = re.search(r"\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)", str(text or ""))
+    if not match:
+        return None
+    return _to_float(match.group(1))
+
+
+def _inferred_trigger_level(command_center_report: Any | None, kind: str) -> float | None:
+    classification = _recommendation_get(command_center_report, "setup_classification")
+    if kind == "invalidation":
+        level = _to_float(_recommendation_get(classification, "invalidation_level"))
+        if level is not None:
+            return level
+    else:
+        level = _to_float(_recommendation_get(classification, "confirmation_level"))
+        if level is not None:
+            return level
+    for trigger in _recommendation_list(_recommendation_get(command_center_report, "key_triggers")):
+        label = str(_recommendation_get(trigger, "label", "") or "").lower()
+        price = _to_float(_recommendation_get(trigger, "price"))
+        if price is None:
+            continue
+        if kind == "invalidation" and ("invalid" in label or "risk" in label):
+            return price
+        if kind != "invalidation" and ("confirm" in label or "breakout" in label or "trigger" in label):
+            return price
+    return None
+
+
+def _payload_current_price(payload: Any | None) -> float | None:
+    if payload is None:
+        return None
+    context = _recommendation_get(payload, "context")
+    price = _to_float(_recommendation_get(context, "last_price"))
+    if price is not None and price > 0:
+        return price
+    quote_price = _last_price_from_quote(_recommendation_get(payload, "quote"))
+    if quote_price is not None and quote_price > 0:
+        return quote_price
+    report = _payload_command_center(payload)
+    snapshot = _preferred_report_snapshot(report)
+    price = _to_float(_recommendation_get(snapshot, "latest_close"))
+    return price if price is not None and price > 0 else None
+
+
+def _payload_command_center(payload: Any | None) -> Any | None:
+    return _recommendation_get(payload, "command_center_report")
+
+
+def _preferred_report_snapshot(report: Any | None) -> Any | None:
+    snapshots = _recommendation_get(report, "snapshots")
+    if isinstance(snapshots, dict):
+        for key in ("timing_5m", "timing_1m", "setup_30m", "daily_1y"):
+            snapshot = snapshots.get(key)
+            if snapshot is not None and _to_float(_recommendation_get(snapshot, "latest_close")) is not None:
+                return snapshot
+        for snapshot in snapshots.values():
+            if snapshot is not None and _to_float(_recommendation_get(snapshot, "latest_close")) is not None:
+                return snapshot
+    return None
+
+
+def _payload_as_of_line(payload: Any | None) -> str:
+    statuses = _recommendation_list(_recommendation_get(payload, "statuses"))
+    quote_status = next((status for status in statuses if "quote" in str(_recommendation_get(status, "source", "")).lower()), None)
+    if quote_status is not None:
+        return f"As-of: {_recommendation_get(quote_status, 'source', 'Quote')} {_recommendation_get(quote_status, 'fetched_at', '--')} ({_recommendation_get(quote_status, 'status', '--')})."
+    first_status = statuses[0] if statuses else None
+    if first_status is not None:
+        return f"As-of: {_recommendation_get(first_status, 'fetched_at', '--')} from latest payload source status."
+    return ""
+
+
+def _recommendation_engine_detail_text(read: Any | None, symbol: str, operator_verdict: OperatorVerdict | None = None, *, payload: Any | None = None) -> str:
     title = f"Recommendation Engine Explanation - {symbol.upper()}"
     if read is None:
-        return "\n".join(
-            [
+        lines = [
                 title,
                 "=" * min(len(title), 80),
                 "",
                 "Recommendation read unavailable.",
                 RECOMMENDATION_ENGINE_ADVICE_BOUNDARY,
                 "",
+        ]
+        context_lines = _recommendation_readout_context_lines(payload)
+        if context_lines:
+            lines.extend(["Readout Context:", *[f"- {line}" for line in context_lines], ""])
+        lines.extend(
+            [
                 "Operator Verdict:",
-                *[f"- {line}" for line in _operator_verdict_detail_lines(operator_verdict)],
+                *[f"- {line}" for line in _operator_verdict_detail_lines(operator_verdict, payload)],
                 "",
                 "The workspace remains usable because the recommendation-engine read is optional UI/data wiring.",
             ]
         )
+        return "\n".join(lines)
 
     data_confidence = _recommendation_get(read, "data_confidence")
     lines = [
@@ -3608,7 +3862,10 @@ def _recommendation_engine_detail_text(read: Any | None, symbol: str, operator_v
         RECOMMENDATION_ENGINE_ADVICE_BOUNDARY,
         "",
     ]
-    lines.extend(_recommendation_text_section("Operator Verdict", _operator_verdict_detail_lines(operator_verdict)))
+    context_lines = _recommendation_readout_context_lines(payload)
+    if context_lines:
+        lines.extend(_recommendation_text_section("Readout Context", context_lines))
+    lines.extend(_recommendation_text_section("Operator Verdict", _operator_verdict_detail_lines(operator_verdict, payload)))
     lines.extend(_recommendation_text_section("Why", _recommendation_list(_recommendation_get(read, "why"))))
     lines.extend(
         _recommendation_markdown_table_section(
@@ -3621,10 +3878,10 @@ def _recommendation_engine_detail_text(read: Any | None, symbol: str, operator_v
     lines.extend(_recommendation_text_section("Supporting Evidence", _recommendation_supporting_lines(read, limit=8)))
     lines.extend(_recommendation_text_section("Contradictions", _recommendation_contradiction_lines(read, limit=8)))
     lines.extend(_recommendation_text_section("Expected Reward/Risk + Planning EV", _recommendation_reward_risk_lines(read)))
-    lines.extend(_recommendation_text_section("Invalidation Lines", _recommendation_field_lines(read, "invalidation_lines", fallback="Invalidation line unavailable.", limit=8)))
-    lines.extend(_recommendation_text_section("Confirmation Lines", _recommendation_field_lines(read, "confirmation_lines", fallback="Confirmation line unavailable.", limit=8)))
+    lines.extend(_recommendation_text_section("Invalidation Lines", _state_aware_recommendation_lines(payload, read, "invalidation_lines", kind="invalidation", fallback="Invalidation line unavailable.", limit=8)))
+    lines.extend(_recommendation_text_section("Confirmation Lines", _state_aware_recommendation_lines(payload, read, "confirmation_lines", kind="confirmation", fallback="Confirmation line unavailable.", limit=8)))
     lines.extend(_recommendation_text_section("Position Sizing Notes", _recommendation_position_sizing_lines(read)))
-    lines.extend(_recommendation_text_section("What Would Change", _recommendation_field_lines(read, "what_would_change", fallback="Fresh evidence or cleaner confirmation would change the view.", limit=8)))
+    lines.extend(_recommendation_text_section("What Would Change", _state_aware_recommendation_lines(payload, read, "what_would_change", kind="change", fallback="Fresh evidence or cleaner confirmation would change the view.", limit=8)))
     lines.extend(_recommendation_text_section("Warnings", _recommendation_warning_lines(read, limit=8)))
     lines.extend(_recommendation_text_section("Data Confidence Gaps", _recommendation_data_gap_lines(read, limit=10)))
     lines.extend(_recommendation_text_section("Source Confidence Rows", _recommendation_data_source_lines(data_confidence)))
@@ -3896,7 +4153,7 @@ def _render_trade_evidence(self: tk.Tk, payload: _ResearchPayload) -> None:
     ).grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))  # type: ignore[attr-defined]
 
     clear_children(frame.operator_plan)  # type: ignore[attr-defined]
-    RankedRows(frame.operator_plan, "Operator Plan", _operator_plan_lines(payload.operator_verdict), status="info").grid(row=0, column=0, sticky="nsew", padx=(10, 8), pady=8)  # type: ignore[attr-defined]
+    RankedRows(frame.operator_plan, "Operator Plan", _operator_plan_lines(payload.operator_verdict, payload), status="info").grid(row=0, column=0, sticky="nsew", padx=(10, 8), pady=8)  # type: ignore[attr-defined]
     RankedRows(frame.operator_plan, "Self-Critique", _operator_self_critique_lines(payload.operator_verdict), status="mixed").grid(row=0, column=1, sticky="nsew", padx=(0, 10), pady=8)  # type: ignore[attr-defined]
 
     tree = frame.score_tree  # type: ignore[attr-defined]
@@ -3939,7 +4196,7 @@ def _trade_evidence_report(payload: _ResearchPayload) -> TradeEvidenceReport:
 
 
 def _trade_evidence_text(payload: _ResearchPayload) -> str:
-    operator_lines = ["", "Operator Verdict:", *_operator_verdict_text_lines(payload.operator_verdict)]
+    operator_lines = ["", "Operator Verdict:", *_operator_verdict_text_lines(payload.operator_verdict, payload)]
     return format_trade_evidence_report(_trade_evidence_report(payload)) + "\n" + "\n".join(operator_lines)
 
 

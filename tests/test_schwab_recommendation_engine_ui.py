@@ -26,6 +26,7 @@ from app.ui.schwab_research_workspace_extension import (
     _recommendation_engine_detail_text,
     _recommendation_evidence_rows,
     _recommendation_reward_risk_lines,
+    _state_aware_recommendation_lines,
     _recommendation_supporting_lines,
 )
 
@@ -160,6 +161,28 @@ def _empirical_read() -> EmpiricalRecommendationIntelligenceRead:
     )
 
 
+def _payload(*, price: float = 120.0) -> SimpleNamespace:
+    classification = SimpleNamespace(
+        setup="breakout",
+        timing="early",
+        action_quality="wait_for_trigger",
+        confirmation_level=106.0,
+        invalidation_level=98.0,
+    )
+    report = SimpleNamespace(
+        overall_read="Bullish",
+        overall_score=82.0,
+        best_action="Defined-risk long only if trigger holds",
+        setup_classification=classification,
+    )
+    return SimpleNamespace(
+        context=SimpleNamespace(last_price=price),
+        quote=None,
+        command_center_report=report,
+        statuses=(SimpleNamespace(source="Schwab quote", status="fresh", fetched_at="2026-06-08T20:15:00+00:00"),),
+    )
+
+
 class SchwabRecommendationEngineUiTests(unittest.TestCase):
     def test_missing_read_returns_safe_placeholder_cards_and_rows(self) -> None:
         cards = _recommendation_engine_cards(None)
@@ -282,6 +305,52 @@ class SchwabRecommendationEngineUiTests(unittest.TestCase):
         self.assertIn("Supply Absorption", titles)
         self.assertIn("Empirical Recommendation Intelligence", detail)
         self.assertIn("Confidence-adjusted score", detail)
+
+    def test_confirmation_lines_are_state_aware_when_price_already_above_trigger(self) -> None:
+        read = _read()
+        payload = _payload(price=120.0)
+
+        lines = _state_aware_recommendation_lines(
+            payload,
+            read,
+            "confirmation_lines",
+            kind="confirmation",
+            fallback="Confirmation line unavailable.",
+            limit=5,
+        )
+        detail = _recommendation_engine_detail_text(read, "TEST", payload=payload)
+
+        self.assertTrue(any("Already above $106.00" in line for line in lines))
+        self.assertTrue(any("not a pending reclaim" in line for line in lines))
+        self.assertTrue(any("timing improves from early" in line for line in lines))
+        self.assertFalse(any("Needs reclaim above $106.00" in line for line in lines))
+        self.assertIn("Current quote: $120.00", detail)
+        self.assertIn("Already above $106.00", detail)
+
+        change_lines = _state_aware_recommendation_lines(
+            payload,
+            read,
+            "what_would_change",
+            kind="change",
+            fallback="Fresh evidence or cleaner confirmation would change the view.",
+            limit=5,
+        )
+        self.assertTrue(any("Because price is already above $106.00" in line for line in change_lines))
+
+    def test_invalidation_lines_are_state_aware_when_price_is_below_risk_line(self) -> None:
+        read = _read()
+        payload = _payload(price=94.0)
+
+        lines = _state_aware_recommendation_lines(
+            payload,
+            read,
+            "invalidation_lines",
+            kind="invalidation",
+            fallback="Invalidation line unavailable.",
+            limit=5,
+        )
+
+        self.assertTrue(any("Invalidated / avoid below $98.00" in line for line in lines))
 
 
 if __name__ == "__main__":
