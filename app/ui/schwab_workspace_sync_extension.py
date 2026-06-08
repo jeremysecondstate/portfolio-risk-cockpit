@@ -143,7 +143,7 @@ def _set_schwab_workspace_intro(self: tk.Tk) -> None:
     )
 
 
-def _select_options_lab(self: tk.Tk) -> None:
+def _select_trading_workspace(self: tk.Tk) -> None:
     embedded = getattr(self, "_schwab_trading_workspace_frame", None)
     if embedded is not None:
         try:

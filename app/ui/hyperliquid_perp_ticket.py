@@ -93,13 +93,13 @@ def _patch_hyperliquid_tab_builder() -> None:
 
 
 def _patch_options_layout_builder() -> None:
-    original_build_layout = trading_workspace_extension._build_layout_with_options_lab
+    original_build_layout = trading_workspace_extension._build_layout_with_trading_workspace
 
     def build_layout_then_remove_delete_me(self: tk.Tk) -> None:
         original_build_layout(self)
         self.after_idle(lambda: _remove_delete_me_controls(self))
 
-    trading_workspace_extension._build_layout_with_options_lab = build_layout_then_remove_delete_me
+    trading_workspace_extension._build_layout_with_trading_workspace = build_layout_then_remove_delete_me
 
 
 def _patch_layout_after_build(app_cls: type[tk.Tk]) -> None:

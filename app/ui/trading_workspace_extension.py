@@ -26,7 +26,7 @@ SIDE_NEUTRAL_COMBOBOX_STYLE = "NeutralSide.TCombobox"
 def install_trading_workspace_extension(app_cls: Type[tk.Tk]) -> None:
     """Add the Options What-If Lab and Schwab/Hyperliquid cockpit layout."""
 
-    app_cls._build_layout = _build_layout_with_options_lab  # type: ignore[method-assign]
+    app_cls._build_layout = _build_layout_with_trading_workspace  # type: ignore[method-assign]
     app_cls.load_trading_workspace_technical_context = _load_trading_workspace_technical_context  # type: ignore[attr-defined]
     app_cls.use_current_cockpit_source_portfolio = _use_current_cockpit_source_portfolio  # type: ignore[attr-defined]
     app_cls.use_hyperliquid_mid_market = _use_hyperliquid_mid_market  # type: ignore[attr-defined]
@@ -37,7 +37,7 @@ def install_trading_workspace_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls.set_hyperliquid_sync_status = _set_hyperliquid_sync_status  # type: ignore[attr-defined]
 
 
-def _build_layout_with_options_lab(self: tk.Tk) -> None:
+def _build_layout_with_trading_workspace(self: tk.Tk) -> None:
     root = ttk.Frame(self, style="Canvas.TFrame", padding=18)
     root.pack(fill=tk.BOTH, expand=True)
 
