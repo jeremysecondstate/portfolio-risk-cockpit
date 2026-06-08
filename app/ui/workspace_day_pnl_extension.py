@@ -7,6 +7,10 @@ from typing import Any, Type
 from app.ui import options_lab_extension as workspace
 
 _ORIGINAL_WORKSPACE_HOLDING_ROWS = workspace._workspace_holding_rows
+_NEUTRAL_FOREGROUND = "#0f172a"
+_CASH_FOREGROUND = "#334155"
+_POSITIVE_FOREGROUND = "#047857"
+_NEGATIVE_FOREGROUND = "#b91c1c"
 
 
 def install_workspace_day_pnl_extension(app_cls: Type[tk.Tk]) -> None:
@@ -28,8 +32,22 @@ def install_workspace_day_pnl_extension(app_cls: Type[tk.Tk]) -> None:
 
 
 def _workspace_holdings_table_with_day_pnl(parent: ttk.Frame, include_custom_pnl: bool = False) -> ttk.Treeview:
-    columns = ("symbol", "type", "qty", "last", "value", "pnl", "day_pnl")
-    table = ttk.Treeview(parent, columns=columns, show="headings", height=6, selectmode="browse")
+    """Build a holdings table with an independently colored Day P&L lane.
+
+    ttk.Treeview applies row tags to every visible cell, so a single tree cannot
+    color total P&L and Day P&L independently. Keep the normal holdings table as
+    the returned/clickable widget, and render Day P&L as a narrow synced tree on
+    the right so its red/green state can follow the daily value only.
+    """
+
+    shell = ttk.Frame(parent, style="Panel.TFrame")
+    shell.pack(fill=tk.BOTH, expand=True)
+    shell.columnconfigure(0, weight=1)
+    shell.columnconfigure(1, weight=0)
+    shell.rowconfigure(0, weight=1)
+
+    columns = ("symbol", "type", "qty", "last", "value", "pnl")
+    table = ttk.Treeview(shell, columns=columns, show="headings", height=6, selectmode="browse")
     headings = {
         "symbol": ("Symbol", 86, tk.W),
         "type": ("Type", 78, tk.W),
@@ -37,22 +55,75 @@ def _workspace_holdings_table_with_day_pnl(parent: ttk.Frame, include_custom_pnl
         "last": ("Last", 86, tk.E),
         "value": ("Value", 96, tk.E),
         "pnl": ("P&L", 104 if include_custom_pnl else 96, tk.E),
-        "day_pnl": ("Day P&L", 96, tk.E),
     }
     for column in tuple(str(column) for column in table["columns"]):
         label, width, anchor = headings[column]
         table.heading(column, text=label)
         table.column(column, width=width, anchor=anchor, stretch=True)
-    table.pack(fill=tk.BOTH, expand=True)
-    table.tag_configure("positive", foreground="#047857")
-    table.tag_configure("negative", foreground="#b91c1c")
-    table.tag_configure("cash", foreground="#334155")
+    table.grid(row=0, column=0, sticky="nsew")
+    table.tag_configure("positive", foreground=_POSITIVE_FOREGROUND)
+    table.tag_configure("negative", foreground=_NEGATIVE_FOREGROUND)
+    table.tag_configure("cash", foreground=_CASH_FOREGROUND)
+
+    day_table = ttk.Treeview(shell, columns=("day_pnl",), show="headings", height=6, selectmode="browse")
+    day_table.heading("day_pnl", text="Day P&L")
+    day_table.column("day_pnl", width=96, minwidth=82, anchor=tk.E, stretch=False)
+    day_table.grid(row=0, column=1, sticky="ns")
+    day_table.tag_configure("positive", foreground=_POSITIVE_FOREGROUND)
+    day_table.tag_configure("negative", foreground=_NEGATIVE_FOREGROUND)
+    day_table.tag_configure("neutral", foreground=_NEUTRAL_FOREGROUND)
+    day_table.tag_configure("cash", foreground=_CASH_FOREGROUND)
+
+    table._day_pnl_table = day_table  # type: ignore[attr-defined]
+    _bind_split_day_pnl_table(table, day_table)
     return table
 
 
+def _bind_split_day_pnl_table(table: ttk.Treeview, day_table: ttk.Treeview) -> None:
+    def sync_selection(source: ttk.Treeview, target: ttk.Treeview) -> None:
+        selection = source.selection()
+        try:
+            target.selection_set(selection)
+            if selection:
+                target.focus(selection[0])
+        except tk.TclError:
+            return
+
+    def sync_yview(*args: object) -> None:
+        try:
+            table.yview(*args)
+            day_table.yview(*args)
+        except tk.TclError:
+            return
+
+    def on_mousewheel(event: tk.Event) -> str:
+        if getattr(event, "num", None) == 4:
+            direction = -1
+        elif getattr(event, "num", None) == 5:
+            direction = 1
+        else:
+            direction = -1 if getattr(event, "delta", 0) > 0 else 1
+        sync_yview("scroll", direction, "units")
+        return "break"
+
+    table.configure(yscrollcommand=lambda first, last: day_table.yview_moveto(float(first)))
+    day_table.configure(yscrollcommand=lambda first, last: table.yview_moveto(float(first)))
+    table.bind("<<TreeviewSelect>>", lambda _event: sync_selection(table, day_table), add="+")
+    day_table.bind("<<TreeviewSelect>>", lambda _event: sync_selection(day_table, table), add="+")
+    for widget in (table, day_table):
+        widget.bind("<MouseWheel>", on_mousewheel, add="+")
+        widget.bind("<Button-4>", on_mousewheel, add="+")
+        widget.bind("<Button-5>", on_mousewheel, add="+")
+
+
 def _populate_workspace_holdings_table_with_day_pnl(table: ttk.Treeview, rows: list[dict[str, object]]) -> None:
+    day_table = getattr(table, "_day_pnl_table", None)
     for row_id in table.get_children():
         table.delete(row_id)
+    if day_table is not None:
+        for row_id in day_table.get_children():
+            day_table.delete(row_id)
+
     for index, row in enumerate(rows):
         pnl = row.get("pnl")
         tag = (
@@ -71,18 +142,38 @@ def _populate_workspace_holdings_table_with_day_pnl(table: ttk.Treeview, rows: l
             "last": row.get("last", ""),
             "value": row.get("value", ""),
             "pnl": row.get("pnl_text", ""),
-            "day_pnl": row.get("day_pnl_text", ""),
             "raw_pnl": row.get("raw_pnl_text", ""),
             "custom_pnl": row.get("custom_pnl_text", ""),
             "basis_status": row.get("basis_status", ""),
         }
+        row_id = f"holding_{index}"
         table.insert(
             "",
             tk.END,
-            iid=f"holding_{index}",
+            iid=row_id,
             values=tuple(values_by_column.get(str(column), "") for column in table["columns"]),
             tags=(tag,) if tag else (),
         )
+        if day_table is not None:
+            day_table.insert(
+                "",
+                tk.END,
+                iid=row_id,
+                values=(row.get("day_pnl_text", ""),),
+                tags=(_day_pnl_tag(row),),
+            )
+
+
+def _day_pnl_tag(row: dict[str, object]) -> str:
+    if str(row.get("type", "")).lower() == "cash":
+        return "cash"
+    day_pnl = row.get("day_pnl")
+    if isinstance(day_pnl, (int, float)):
+        if day_pnl > 0:
+            return "positive"
+        if day_pnl < 0:
+            return "negative"
+    return "neutral"
 
 
 def _workspace_holding_rows_with_day_pnl(portfolio: Any, venue: str) -> list[dict[str, object]]:
