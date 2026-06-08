@@ -56,7 +56,7 @@ def _polish_schwab_workspace(self: tk.Tk) -> None:
     _set_schwab_workspace_intro(self)
 
 
-def _embed_options_lab_under_schwab(self: tk.Tk) -> None:
+def _embed_trading_workspace_under_schwab(self: tk.Tk) -> None:
     """Keep Schwab stock and option planning in one top-level Schwab tab.
 
     The base options extension still creates an Options What-If Lab tab for backward
@@ -65,7 +65,7 @@ def _embed_options_lab_under_schwab(self: tk.Tk) -> None:
     options while Hyperliquid stays perp-only.
     """
 
-    if getattr(self, "_schwab_options_lab_embedded", False):
+    if getattr(self, "_schwab_trading_workspace_embedded", False):
         _hide_top_level_options_tab(self)
         return
 
@@ -91,12 +91,12 @@ def _embed_options_lab_under_schwab(self: tk.Tk) -> None:
     embedded.columnconfigure(1, weight=1)
     embedded.rowconfigure(1, weight=1)
 
-    trading_workspace_extension.build_options_lab_tab(self, embedded)
-    trading_workspace_extension._build_options_lab_market_loader(self, embedded)
+    trading_workspace_extension.build_trading_workspace_tab(self, embedded)
+    trading_workspace_extension._build_trading_workspace_market_loader(self, embedded)
 
     schwab_tab.rowconfigure(2, weight=1)
-    self._schwab_options_lab_embedded = True
-    self._schwab_options_lab_frame = embedded
+    self._schwab_trading_workspace_embedded = True
+    self._schwab_trading_workspace_frame = embedded
     _hide_top_level_options_tab(self)
 
 
@@ -144,7 +144,7 @@ def _set_schwab_workspace_intro(self: tk.Tk) -> None:
 
 
 def _select_options_lab(self: tk.Tk) -> None:
-    embedded = getattr(self, "_schwab_options_lab_frame", None)
+    embedded = getattr(self, "_schwab_trading_workspace_frame", None)
     if embedded is not None:
         try:
             embedded.focus_set()

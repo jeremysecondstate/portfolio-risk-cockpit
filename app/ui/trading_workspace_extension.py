@@ -14,7 +14,7 @@ from app.analytics.trade_setup import calculate_support_resistance
 from app.brokers.hyperliquid.client import HyperliquidInfoClient
 from app.brokers.hyperliquid.trading import normalize_hyperliquid_coin
 from app.core.order_models import SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, OrderSide, OrderType, TimeInForce
-from app.ui.trading_workspace import build_options_lab_tab, run_options_what_if
+from app.ui.trading_workspace import build_trading_workspace_tab, run_options_what_if
 from app.ui.polished_theme import _make_paned
 
 
@@ -23,11 +23,11 @@ SIDE_SELL_COMBOBOX_STYLE = "SellSide.TCombobox"
 SIDE_NEUTRAL_COMBOBOX_STYLE = "NeutralSide.TCombobox"
 
 
-def install_options_lab_extension(app_cls: Type[tk.Tk]) -> None:
+def install_trading_workspace_extension(app_cls: Type[tk.Tk]) -> None:
     """Add the Options What-If Lab and Schwab/Hyperliquid cockpit layout."""
 
     app_cls._build_layout = _build_layout_with_options_lab  # type: ignore[method-assign]
-    app_cls.load_options_lab_technical_context = _load_options_lab_technical_context  # type: ignore[attr-defined]
+    app_cls.load_trading_workspace_technical_context = _load_trading_workspace_technical_context  # type: ignore[attr-defined]
     app_cls.use_current_cockpit_source_portfolio = _use_current_cockpit_source_portfolio  # type: ignore[attr-defined]
     app_cls.use_hyperliquid_mid_market = _use_hyperliquid_mid_market  # type: ignore[attr-defined]
     app_cls.run_hyperliquid_perp_what_if = _run_hyperliquid_perp_what_if  # type: ignore[attr-defined]
@@ -78,8 +78,8 @@ def _build_layout_with_options_lab(self: tk.Tk) -> None:
     _build_schwab_trading_tab(self, schwab_tab, tabs, options_tab)
     _build_hyperliquid_trading_tab(self, hyperliquid_tab)
 
-    build_options_lab_tab(self, options_tab)
-    _build_options_lab_market_loader(self, options_tab)
+    build_trading_workspace_tab(self, options_tab)
+    _build_trading_workspace_market_loader(self, options_tab)
 
 
 def _ensure_execution_workspace_vars(self: tk.Tk) -> None:
@@ -1982,7 +1982,7 @@ def _build_account_sources_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     ttk.Label(status, textvariable=self.active_portfolio_source_var, style="Chip.TLabel").grid(row=0, column=0, sticky="ew")
 
 
-def _build_options_lab_market_loader(self: tk.Tk, parent: ttk.Frame) -> None:
+def _build_trading_workspace_market_loader(self: tk.Tk, parent: ttk.Frame) -> None:
     loader = ttk.LabelFrame(parent, text="Optional Schwab Technical Context Loader", style="Card.TLabelframe")
     loader.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
     loader.columnconfigure(0, weight=1)
@@ -1999,7 +1999,7 @@ def _build_options_lab_market_loader(self: tk.Tk, parent: ttk.Frame) -> None:
     ttk.Button(
         loader,
         text="Load Schwab Technicals",
-        command=self.load_options_lab_technical_context,
+        command=self.load_trading_workspace_technical_context,
         style="Accent.TButton",
     ).grid(row=0, column=1, sticky="e")
 
@@ -2052,7 +2052,7 @@ def _sync_options_values_from_active_portfolio(self: tk.Tk) -> None:
         return
 
 
-def _load_options_lab_technical_context(self: tk.Tk) -> None:
+def _load_trading_workspace_technical_context(self: tk.Tk) -> None:
     symbol = self.options_symbol_var.get().strip().upper()
     if not symbol:
         messagebox.showerror("Options lab technicals failed", "Enter a symbol first.")

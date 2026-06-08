@@ -24,7 +24,7 @@ from app.ui.earnings_radar_extension import install_earnings_radar_extension
 from app.ui.ipo_pipeline_extension import install_ipo_pipeline_extension
 from app.ui.options_candidate_actionability_extension import install_options_candidate_actionability_extension
 from app.ui.options_core_math_extension import install_options_core_math_extension
-from app.ui.trading_workspace_extension import install_options_lab_extension
+from app.ui.trading_workspace_extension import install_trading_workspace_extension
 from app.ui.options_resizable_layout_extension import install_options_resizable_layout_extension
 from app.ui.options_what_if_enhancement_extension import install_options_what_if_enhancement_extension
 from app.ui.polished_theme import install_polished_cockpit_theme
@@ -66,7 +66,7 @@ def install_ui_extensions(app_cls: Type[tk.Tk]) -> None:
     install_hyperliquid_trading_extension(app_cls)
     install_unified_refresh_extension(app_cls)
     install_hyperliquid_notifications(app_cls)
-    install_options_lab_extension(app_cls)
+    install_trading_workspace_extension(app_cls)
     install_hyperliquid_chain_health_extension(app_cls)
     install_options_what_if_enhancement_extension(app_cls)
     install_hyperliquid_perp_ticket(app_cls)

@@ -76,7 +76,7 @@ class PortfolioContext:
     projected_portfolio_floor: float
 
 
-def build_options_lab_tab(app: tk.Tk, parent: ttk.Frame) -> None:
+def build_trading_workspace_tab(app: tk.Tk, parent: ttk.Frame) -> None:
     """Build a safe, hypothetical options/stock what-if tab.
 
     This tab deliberately does not place, preview, or recommend trades. It only models

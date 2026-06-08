@@ -16,10 +16,10 @@ def install_options_resizable_layout_extension() -> None:
     if _installed:
         return
 
-    trading_workspace.build_options_lab_tab = _build_resizable_options_lab_tab
-    trading_workspace_extension.build_options_lab_tab = _build_resizable_options_lab_tab
-    schwab_trading_tab.build_options_lab_tab = _build_resizable_options_lab_tab
-    schwab_trading_tab._build_options_lab_market_loader = _skip_bottom_options_loader
+    trading_workspace.build_trading_workspace_tab = _build_resizable_trading_workspace_tab
+    trading_workspace_extension.build_trading_workspace_tab = _build_resizable_trading_workspace_tab
+    schwab_trading_tab.build_trading_workspace_tab = _build_resizable_trading_workspace_tab
+    schwab_trading_tab._build_trading_workspace_market_loader = _skip_bottom_options_loader
     _installed = True
 
 
@@ -35,7 +35,7 @@ def _skip_bottom_options_loader(app: tk.Tk, parent: ttk.Frame) -> None:
     return
 
 
-def _build_resizable_options_lab_tab(app: tk.Tk, parent: ttk.Frame) -> None:
+def _build_resizable_trading_workspace_tab(app: tk.Tk, parent: ttk.Frame) -> None:
     """Build the options lab with draggable horizontal and vertical splitters."""
 
     trading_workspace._init_options_vars(app)
@@ -43,7 +43,7 @@ def _build_resizable_options_lab_tab(app: tk.Tk, parent: ttk.Frame) -> None:
     parent.columnconfigure(0, weight=1)
     parent.rowconfigure(1, weight=1)
 
-    _build_options_lab_header(app, parent)
+    _build_trading_workspace_header(app, parent)
 
     body = _make_paned(parent, tk.HORIZONTAL)
     body.grid(row=1, column=0, sticky="nsew")
@@ -59,7 +59,7 @@ def _build_resizable_options_lab_tab(app: tk.Tk, parent: ttk.Frame) -> None:
     trading_workspace.run_options_what_if(app)
 
 
-def _build_options_lab_header(app: tk.Tk, parent: ttk.Frame) -> None:
+def _build_trading_workspace_header(app: tk.Tk, parent: ttk.Frame) -> None:
     banner = ttk.LabelFrame(parent, text="Options What-If Lab", style="Card.TLabelframe")
     banner.grid(row=0, column=0, sticky="ew", pady=(0, 10))
     banner.columnconfigure(0, weight=1)
@@ -84,7 +84,7 @@ def _build_options_lab_header(app: tk.Tk, parent: ttk.Frame) -> None:
     ttk.Button(
         actions,
         text="Load Schwab Technicals",
-        command=getattr(app, "load_options_lab_technical_context"),
+        command=getattr(app, "load_trading_workspace_technical_context"),
         style="Accent.TButton",
     ).pack(side=tk.LEFT, padx=(8, 0))
 
