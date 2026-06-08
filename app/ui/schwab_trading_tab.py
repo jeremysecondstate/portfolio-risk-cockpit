@@ -580,19 +580,20 @@ def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
     def schwab_action(*names: str) -> Callable[[], None]:
         return lambda: _run_schwab_workspace_action(self, *names)
 
-    _add_action_button(actions, row=0, column=0, text="Connect Schwab", command=schwab_action("connect_schwab", "run_schwab_preview"))
-    _add_action_button(actions, row=0, column=1, text="Refresh Account", command=schwab_action("refresh_schwab_account", "refresh_portfolio"))
-    _add_action_button(actions, row=0, column=2, text="Tech Analysis", command=schwab_action("show_technical_analysis"))
-    _add_action_button(actions, row=0, column=3, text="Preview Risk", command=schwab_action("preview_order"), style="Accent.TButton")
-    _add_action_button(actions, row=1, column=0, text="Preview Schwab", command=schwab_action("run_schwab_preview"))
-    _add_action_button(actions, row=1, column=1, text="Position Size", command=schwab_action("show_position_size"))
-    _add_action_button(actions, row=1, column=2, text="Recent Orders", command=lambda app=self: _refresh_schwab_recent_orders_tab(app))
-    _add_action_button(actions, row=1, column=3, text="Open Only", command=schwab_action("load_selected_open_orders_only", "load_schwab_open_orders_only"))
-    _add_action_button(actions, row=2, column=0, text="Order Checklist", command=schwab_action("show_manual_checklist"))
+    _add_action_button(actions, row=0, column=3, text="Tech Analysis", command=schwab_action("show_technical_analysis"))
+    _add_action_button(actions, row=1, column=3, text="Preview Schwab", command=schwab_action("run_schwab_preview"))
+    _add_action_button(actions, row=0, column=2, text="Recent Orders", command=lambda app=self: _refresh_schwab_recent_orders_tab(app))
+    _add_action_button(actions, row=1, column=2, text="Open Only", command=schwab_action("load_selected_open_orders_only", "load_schwab_open_orders_only"))
+
+    # _add_action_button(actions, row=0, column=2, text="Preview Risk", command=schwab_action("preview_order"), style="Accent.TButton")
+    # _add_action_button(actions, row=0, column=0, text="Connect Schwab", command=schwab_action("connect_schwab", "run_schwab_preview"))
+    # _add_action_button(actions, row=0, column=1, text="Refresh Account", command=schwab_action("refresh_schwab_account", "refresh_portfolio"))
+    # _add_action_button(actions, row=1, column=1, text="Position Size", command=schwab_action("show_position_size"))
+    # _add_action_button(actions, row=2, column=0, text="Order Checklist", command=schwab_action("show_manual_checklist"))
 
     show_ipo_pipeline = getattr(self, "show_ipo_pipeline", None)
     if callable(show_ipo_pipeline):
-        _add_action_button(actions, row=2, column=1, text="IPO Pipeline", command=show_ipo_pipeline, style="Accent.TButton")
+        _add_action_button(actions, row=3, column=3, text="IPO Pipeline", command=show_ipo_pipeline, style="Accent.TButton")
         setattr(actions, "_ipo_pipeline_button_installed", True)
 
     _add_action_button(actions, row=2, column=2, text="Cancel Order", command=schwab_action("cancel_selected_order", "show_cancel_order_placeholder"), style="Danger.TButton")
