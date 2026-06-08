@@ -1069,11 +1069,21 @@ def _detail_text(parent: ttk.Frame) -> tk.Text:
     return text
 
 
-def _readout_launcher(parent: ttk.Frame, *, title: str, button_text: str, row: int, column: int = 0, sticky: str = "ew", pady: tuple[int, int] = (8, 0)) -> tk.Text:
+def _readout_launcher(
+    parent: ttk.Frame,
+    *,
+    title: str,
+    button_text: str,
+    row: int,
+    column: int = 0,
+    sticky: str = "ew",
+    pady: tuple[int, int] = (8, 0),
+    padx: tuple[int, int] = (0, 10),
+) -> tk.Text:
     text = _readout_storage_text(parent)
     text._readout_title = title  # type: ignore[attr-defined]
     launcher = ttk.Frame(parent, style="Panel.TFrame")
-    launcher.grid(row=row, column=column, sticky=sticky, pady=pady)
+    launcher.grid(row=row, column=column, sticky=sticky, padx=padx, pady=pady)
     launcher.columnconfigure(1, weight=1)
     button = ttk.Button(launcher, text=button_text, command=lambda widget=text: _open_readout_popout(widget), style="Accent.TButton")
     button.grid(row=0, column=0, sticky="w")
