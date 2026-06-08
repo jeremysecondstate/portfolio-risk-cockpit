@@ -800,7 +800,34 @@ def _overview_tab(notebook: ttk.Notebook) -> ttk.Frame:
     frame.recommendation_triggers.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
     frame.recommendation_followups = ttk.Frame(frame.recommendation, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.recommendation_followups.grid(row=5, column=0, sticky="ew", padx=10, pady=(8, 0))  # type: ignore[attr-defined]
-    frame.recommendation_followups.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    frame.recommendation_followups.columnconfigure((0, 1, 2), weight=0)  # type: ignore[attr-defined]
+    frame.recommendation_what_change_text = _readout_launcher(  # type: ignore[attr-defined]
+        frame.recommendation_followups,
+        title="What Would Change",
+        button_text="What Would Change",
+        row=0,
+        column=0,
+        sticky="w",
+        pady=(0, 0),
+    )
+    frame.recommendation_data_gaps_text = _readout_launcher(  # type: ignore[attr-defined]
+        frame.recommendation_followups,
+        title="Data Confidence Gaps",
+        button_text="Data Confidence Gaps",
+        row=0,
+        column=1,
+        sticky="w",
+        pady=(0, 0),
+    )
+    frame.recommendation_warnings_text = _readout_launcher(  # type: ignore[attr-defined]
+        frame.recommendation_followups,
+        title="Warnings",
+        button_text="Warnings",
+        row=0,
+        column=2,
+        sticky="w",
+        pady=(0, 0),
+    )
     frame.recommendation_detail_text = _readout_launcher(
         frame.recommendation,
         title="Recommendation Engine Explanation",
@@ -813,7 +840,19 @@ def _overview_tab(notebook: ttk.Notebook) -> ttk.Frame:
     frame.summary.columnconfigure(0, weight=1)  # type: ignore[attr-defined]
     frame.checks = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.checks.grid(row=4, column=0, sticky="ew", pady=(8, 0))
-    frame.checks.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    frame.checks.columnconfigure(0, weight=1)  # type: ignore[attr-defined]
+    frame.checks.columnconfigure(1, weight=0)  # type: ignore[attr-defined]
+    frame.what_matters_panel = ttk.Frame(frame.checks, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.what_matters_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 8))  # type: ignore[attr-defined]
+    frame.overview_change_text = _readout_launcher(  # type: ignore[attr-defined]
+        frame.checks,
+        title="What Would Change The View",
+        button_text="What Would Change",
+        row=0,
+        column=1,
+        sticky="nw",
+        pady=(0, 0),
+    )
     frame.freshness = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.freshness.grid(row=5, column=0, sticky="ew", pady=(8, 0))
     frame.detail_text = _readout_launcher(frame, title="Overview Explanation", button_text="Open Overview Explanation", row=6)  # type: ignore[attr-defined]
@@ -982,9 +1021,18 @@ def _readout_launcher(parent: ttk.Frame, *, title: str, button_text: str, row: i
     launcher = ttk.Frame(parent, style="Panel.TFrame")
     launcher.grid(row=row, column=column, sticky=sticky, pady=pady)
     launcher.columnconfigure(1, weight=1)
-    ttk.Button(launcher, text=button_text, command=lambda widget=text: _open_readout_popout(widget), style="Accent.TButton").grid(row=0, column=0, sticky="w")
+    button = ttk.Button(launcher, text=button_text, command=lambda widget=text: _open_readout_popout(widget), style="Accent.TButton")
+    button.grid(row=0, column=0, sticky="w")
     text._readout_launcher = launcher  # type: ignore[attr-defined]
+    text._readout_button = button  # type: ignore[attr-defined]
     return text
+
+
+def _detail_button_text(title: str, rows: Any, *, fallback: str = "No detail rows are available.") -> str:
+    clean = _bounded_clean_lines(rows, limit=80)
+    if not clean:
+        clean = [fallback]
+    return "\n".join([title, "=" * min(len(title), 80), "", *[f"- {line}" for line in clean]])
 
 
 def _readout_storage_text(parent: ttk.Frame) -> tk.Text:
@@ -1654,7 +1702,25 @@ def _technicals_tab(notebook: ttk.Notebook) -> ttk.Frame:
 
     frame.chart_readout = ttk.Frame(frame, style="Panel.TFrame")  # type: ignore[attr-defined]
     frame.chart_readout.grid(row=7, column=0, sticky="ew", pady=(10, 0))  # type: ignore[attr-defined]
-    frame.chart_readout.columnconfigure((0, 1), weight=1)  # type: ignore[attr-defined]
+    frame.chart_readout.columnconfigure((0, 1), weight=0)  # type: ignore[attr-defined]
+    frame.chart_read_text = _readout_launcher(  # type: ignore[attr-defined]
+        frame.chart_readout,
+        title="What The Chart Is Saying",
+        button_text="Chart Read",
+        row=0,
+        column=0,
+        sticky="w",
+        pady=(0, 0),
+    )
+    frame.position_terms_text = _readout_launcher(  # type: ignore[attr-defined]
+        frame.chart_readout,
+        title="Position + Key Terms",
+        button_text="Position + Key Terms",
+        row=0,
+        column=1,
+        sticky="w",
+        pady=(0, 0),
+    )
 
     tree_box = ttk.LabelFrame(frame, text="Existing Indicator Readout", style="Card.TLabelframe")
     tree_box.grid(row=8, column=0, sticky="ew", pady=(10, 0))
@@ -2176,6 +2242,17 @@ def _capital_structure_pressure_status(report: Any | None) -> DataSourceStatus:
     if getattr(report, "read", "") != "Unknown":
         level_count = len(getattr(report, "possible_supply_levels", []) or [])
         parsed_count = _capital_pressure_parsed_term_count(report)
+        signal_count = len(getattr(report, "signals", []) or [])
+        if level_count == 0 and signal_count:
+            return DataSourceStatus(
+                "SEC capital structure pressure",
+                "fresh/cache",
+                _now(),
+                (
+                    f"{getattr(report, 'read', 'Unknown')} pressure; score {getattr(report, 'supply_overhang_score', '--')}/100; "
+                    "no source-backed supply price level was parsed."
+                ),
+            )
         if level_count == 0 and parsed_count == 0:
             return DataSourceStatus(
                 "SEC capital structure pressure",
@@ -2187,7 +2264,10 @@ def _capital_structure_pressure_status(report: Any | None) -> DataSourceStatus:
             "SEC capital structure pressure",
             "fresh/cache",
             _now(),
-            f"{getattr(report, 'read', 'Unknown')} pressure; score {getattr(report, 'supply_overhang_score', '--')}/100.",
+            (
+                f"{getattr(report, 'read', 'Unknown')} pressure; score {getattr(report, 'supply_overhang_score', '--')}/100"
+                + ("; no source-backed supply price level was parsed." if level_count == 0 else ".")
+            ),
         )
     if "no recent capital-structure sec filing forms" in warning_text:
         return DataSourceStatus(
@@ -2884,9 +2964,12 @@ def _render_overview(self: tk.Tk, payload: _ResearchPayload) -> None:
     clear_children(frame.summary)  # type: ignore[attr-defined]
     for index, sentence in enumerate(decision.summary):
         ttk.Label(frame.summary, text=sentence, style="Subtle.TLabel", wraplength=980, justify=tk.LEFT).grid(row=index, column=0, sticky="ew", padx=10, pady=(6 if index == 0 else 2, 2))  # type: ignore[attr-defined]
-    clear_children(frame.checks)  # type: ignore[attr-defined]
-    Checklist(frame.checks, "What Matters Most", decision.matters).grid(row=0, column=0, sticky="nsew", padx=(0, 8))  # type: ignore[attr-defined]
-    Checklist(frame.checks, "What Would Change The View", decision.changes_view).grid(row=0, column=1, sticky="nsew")  # type: ignore[attr-defined]
+    clear_children(frame.what_matters_panel)  # type: ignore[attr-defined]
+    Checklist(frame.what_matters_panel, "What Matters Most", decision.matters).grid(row=0, column=0, sticky="nsew")  # type: ignore[attr-defined]
+    _set_research_text(  # type: ignore[attr-defined]
+        frame.overview_change_text,
+        _detail_button_text("What Would Change The View", decision.changes_view, fallback="No change-view details are available."),
+    )
     freshness_badges(frame.freshness, payload.statuses)  # type: ignore[attr-defined]
     _set_research_text(self.schwab_research_overview_text, _overview_popout_text(payload))
 
@@ -2919,11 +3002,26 @@ def _render_recommendation_engine(frame: ttk.Frame, payload: _ResearchPayload) -
     Checklist(triggers, "Invalidation Lines", _recommendation_field_lines(read, "invalidation_lines", fallback="Invalidation line unavailable.")).grid(row=0, column=0, sticky="nsew", padx=(0, 8))
     Checklist(triggers, "Confirmation Lines", _recommendation_field_lines(read, "confirmation_lines", fallback="Confirmation line unavailable.")).grid(row=0, column=1, sticky="nsew")
 
-    followups = frame.recommendation_followups  # type: ignore[attr-defined]
-    clear_children(followups)
-    Checklist(followups, "What Would Change", _recommendation_field_lines(read, "what_would_change", fallback="Fresh evidence or cleaner confirmation would change the view.")).grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-    Checklist(followups, "Data Confidence Gaps", _recommendation_data_gap_lines(read)).grid(row=0, column=1, sticky="nsew")
-    Checklist(followups, "Warnings", _recommendation_warning_lines(read)).grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
+    _set_research_text(  # type: ignore[attr-defined]
+        frame.recommendation_what_change_text,
+        _detail_button_text(
+            "What Would Change",
+            _recommendation_field_lines(
+                read,
+                "what_would_change",
+                fallback="Fresh evidence or cleaner confirmation would change the view.",
+                limit=30,
+            ),
+        ),
+    )
+    _set_research_text(  # type: ignore[attr-defined]
+        frame.recommendation_data_gaps_text,
+        _detail_button_text("Data Confidence Gaps", _recommendation_data_gap_lines(read, limit=30)),
+    )
+    _set_research_text(  # type: ignore[attr-defined]
+        frame.recommendation_warnings_text,
+        _detail_button_text("Warnings", _recommendation_warning_lines(read, limit=30)),
+    )
 
     _set_research_text(frame.recommendation_detail_text, _recommendation_engine_detail_text(read, payload.symbol, payload.operator_verdict))  # type: ignore[attr-defined]
 
@@ -3780,6 +3878,7 @@ def _technical_setup_cards(report: TechnicalCommandCenterReport | None) -> list[
 
 def _technical_capital_structure_cards(report: TechnicalCommandCenterReport | None) -> list[BadgeReadout]:
     indicator = _technical_capital_structure_indicator(report)
+    pressure = _technical_capital_structure_pressure(report)
     if report is None:
         return [
             _synthetic_badge(
@@ -3790,12 +3889,13 @@ def _technical_capital_structure_cards(report: TechnicalCommandCenterReport | No
             )
         ]
     if indicator is None:
+        reason = _capital_structure_no_level_reason(pressure)
         return [
             _synthetic_badge(
                 "Capital Read",
-                "No Parsed Supply",
+                "No Source Level" if pressure is not None else "No Parsed Supply",
                 "info",
-                "No capital-structure / supply indicator was returned for this command-center payload.",
+                reason or "No capital-structure / supply indicator was returned for this command-center payload.",
             )
         ]
 
@@ -3872,14 +3972,24 @@ def _technical_capital_structure_cards(report: TechnicalCommandCenterReport | No
 
 def _technical_capital_structure_supply_rows(report: TechnicalCommandCenterReport | None) -> list[tuple[str, str, str, str]]:
     indicator = _technical_capital_structure_indicator(report)
+    pressure = _technical_capital_structure_pressure(report)
     if report is None:
         return [("Unavailable", "--", "--", "Technical Command Center report was not built.")]
     if indicator is None:
-        return [("No parsed supply", "--", "--", "No capital-structure / supply indicator was returned.")]
+        return [("No source-backed level", "--", "--", _capital_structure_no_level_reason(pressure))]
 
     recommendation_lines = _bounded_clean_lines(getattr(indicator, "recommendation_lines", None), limit=4)
-    read = recommendation_lines[0] if recommendation_lines else _humanize_command_value(getattr(indicator, "read", ""))
-    level_label = str(getattr(indicator, "nearest_supply_level_label", None) or "No nearest filing level")
+    no_level = getattr(indicator, "nearest_supply_level", None) is None
+    read = (
+        _capital_structure_no_level_reason(pressure, indicator)
+        if no_level
+        else recommendation_lines[0] if recommendation_lines else _humanize_command_value(getattr(indicator, "read", ""))
+    )
+    level_label = (
+        "No source-backed level"
+        if no_level
+        else str(getattr(indicator, "nearest_supply_level_label", None) or "Parsed filing level")
+    )
     rows = [
         (
             level_label,
@@ -3895,18 +4005,23 @@ def _technical_capital_structure_supply_rows(report: TechnicalCommandCenterRepor
 
 def _technical_capital_structure_note_rows(report: TechnicalCommandCenterReport | None) -> list[tuple[str, str]]:
     indicator = _technical_capital_structure_indicator(report)
+    pressure = _technical_capital_structure_pressure(report)
     if report is None:
         return [
             ("Status", "Technical Command Center report was not built."),
             ("Disclaimer", CAPITAL_STRUCTURE_LEVEL_DISCLAIMER),
         ]
     if indicator is None:
-        return [
-            ("Status", "No parsed capital-structure / supply indicator was returned."),
-            ("Disclaimer", CAPITAL_STRUCTURE_LEVEL_DISCLAIMER),
-        ]
+        rows = [("Status", _capital_structure_no_level_reason(pressure))]
+        if pressure is not None:
+            rows.extend(("Explanation", line) for line in _bounded_clean_lines(getattr(pressure, "explanation_lines", None), limit=3))
+            rows.extend(("Warning", line) for line in _bounded_clean_lines(getattr(pressure, "warnings", None), limit=3))
+        rows.append(("Disclaimer", CAPITAL_STRUCTURE_LEVEL_DISCLAIMER))
+        return rows
 
     rows: list[tuple[str, str]] = []
+    if getattr(indicator, "nearest_supply_level", None) is None:
+        rows.append(("Supply level", _capital_structure_no_level_reason(pressure, indicator)))
     rows.extend(("Recommendation", line) for line in _bounded_clean_lines(getattr(indicator, "recommendation_lines", None), limit=4))
     rows.extend(("Explanation", line) for line in _bounded_clean_lines(getattr(indicator, "explanation_lines", None), limit=5))
     rows.extend(("Warning", line) for line in _bounded_clean_lines(getattr(indicator, "warnings", None), limit=4))
@@ -3972,6 +4087,59 @@ def _technical_capital_structure_indicator(report: TechnicalCommandCenterReport 
         return None
     indicator = getattr(report, "capital_structure_indicator", None)
     return indicator if indicator is not None else None
+
+
+def _technical_capital_structure_pressure(report: TechnicalCommandCenterReport | None) -> Any | None:
+    if report is None:
+        return None
+    return getattr(report, "capital_structure_pressure", None)
+
+
+def _capital_structure_no_level_reason(report: Any | None, indicator: CapitalStructureIndicatorRead | None = None) -> str:
+    if report is None:
+        if indicator is not None:
+            indicator_lines = _bounded_clean_lines(getattr(indicator, "explanation_lines", None), limit=6)
+            for line in indicator_lines:
+                if "no supply level is inferred" in line.lower() or "no supported" in line.lower():
+                    return line
+        return "No capital-structure pressure report was attached, so no filing-derived supply level can be shown."
+
+    levels = getattr(report, "possible_supply_levels", None) or []
+    if levels:
+        return "A source-backed filing price level was parsed."
+    warnings = _bounded_clean_lines(getattr(report, "warnings", None), limit=3)
+    read = str(getattr(report, "read", "") or "")
+    filings = getattr(report, "filings_analyzed", 0)
+    if read == "Unknown":
+        if warnings:
+            return f"SEC capital-structure scan was unavailable: {warnings[0]}"
+        return "SEC capital-structure scan was unavailable; no filing-derived supply level can be shown."
+
+    parsed_count = _capital_pressure_parsed_term_count(report)
+    signals = _capital_structure_signal_labels(report)
+    if signals:
+        return (
+            f"SEC scan found filing-derived pressure signal(s) ({', '.join(signals[:4])}) but no supported warrant exercise, "
+            "conversion, offering, purchase, or resale price level was parsed; no supply level is inferred."
+        )
+    if parsed_count:
+        return (
+            f"SEC scan parsed {parsed_count} source-backed capital-structure term(s), but none included a supported "
+            "exercise, conversion, offering, purchase, or resale price level; no supply level is inferred."
+        )
+    return (
+        f"SEC scan reviewed {filings} filing(s), but no supported capital-structure terms or filing-derived price levels "
+        "were detected; no supply level is inferred."
+    )
+
+
+def _capital_structure_signal_labels(report: Any | None) -> list[str]:
+    labels: list[str] = []
+    for signal in getattr(report, "signals", []) or []:
+        label = str(getattr(signal, "label", "") or "").strip()
+        if label and label not in labels:
+            labels.append(label)
+    return labels
 
 
 def _technical_timeframe_stack_rows(report: TechnicalCommandCenterReport | None) -> list[tuple[str, str, str, str, str, str, str, str, str]]:
@@ -4201,6 +4369,10 @@ def _capital_structure_read_why(indicator: CapitalStructureIndicatorRead) -> str
 def _capital_structure_level_why(indicator: CapitalStructureIndicatorRead) -> str:
     level = getattr(indicator, "nearest_supply_level", None)
     if level is None:
+        for line in _bounded_clean_lines(getattr(indicator, "explanation_lines", None), limit=6):
+            lower = line.lower()
+            if "no supply level is inferred" in lower or "no supported" in lower:
+                return line
         return "No nearest filing-derived supply level was returned."
     label = getattr(indicator, "nearest_supply_level_label", None) or "parsed supply level"
     distance = _format_command_percent(getattr(indicator, "nearest_supply_level_distance_percent", None))
@@ -4382,19 +4554,21 @@ def _render_technicals(self: tk.Tk, payload: _ResearchPayload) -> None:
     _replace_tree_rows(frame.ticket_tree, _technical_ticket_check_rows(command_report))  # type: ignore[attr-defined]
     _render_warning_panel(frame, _technical_warning_rows(command_report))
 
-    clear_children(frame.chart_readout)  # type: ignore[attr-defined]
     chart_rows = [f"{label}: {text}" for label, text in narrative.rows.items()]
-    Checklist(frame.chart_readout, "What The Chart Is Saying", chart_rows).grid(row=0, column=0, sticky="nsew", padx=(0, 8))  # type: ignore[attr-defined]
-    Checklist(
-        frame.chart_readout,
-        "Position + Key Terms",
-        [
-            narrative.position_meaning,
-            TERM_HELPERS["Confirmation"],
-            TERM_HELPERS["Risk line"],
-            TERM_HELPERS["Fibonacci retracement"],
-        ],
-    ).grid(row=0, column=1, sticky="nsew")  # type: ignore[attr-defined]
+    position_terms = [
+        narrative.position_meaning,
+        TERM_HELPERS["Confirmation"],
+        TERM_HELPERS["Risk line"],
+        TERM_HELPERS["Fibonacci retracement"],
+    ]
+    _set_research_text(  # type: ignore[attr-defined]
+        frame.chart_read_text,
+        _detail_button_text("What The Chart Is Saying", chart_rows, fallback="No chart-read details are available."),
+    )
+    _set_research_text(  # type: ignore[attr-defined]
+        frame.position_terms_text,
+        _detail_button_text("Position + Key Terms", position_terms, fallback="No position-term details are available."),
+    )
     tree = frame.indicator_tree  # type: ignore[attr-defined]
     _replace_tree_rows(tree, _legacy_indicator_rows(indicators))
     command_text = (

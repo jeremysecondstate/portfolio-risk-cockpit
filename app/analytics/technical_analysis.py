@@ -1468,7 +1468,8 @@ def build_capital_structure_indicator_read(
 
     parsed_count = _capital_structure_parsed_term_count(report)
     option_mismatch_score, option_lines, option_warnings = _option_exposure_mismatch_read(ticket)
-    if parsed_count == 0 and not report.possible_supply_levels and option_mismatch_score <= 0:
+    has_pressure_context = bool(report.signals) or _clamp_score(report.supply_overhang_score) > 0
+    if parsed_count == 0 and not report.possible_supply_levels and option_mismatch_score <= 0 and not has_pressure_context:
         return None
 
     parsed = report.parsed_terms
@@ -1515,7 +1516,10 @@ def build_capital_structure_indicator_read(
         f"Float quality score {float_quality_score:.0f}/100 reflects parsed share-class and ADS/ADR complexity.",
     ]
     if source_labels:
-        explanation_lines.append(f"Source-backed filing terms came from: {', '.join(source_labels[:4])}.")
+        explanation_lines.append(f"Filing sources in this read came from: {', '.join(source_labels[:4])}.")
+    no_level_reason = _capital_structure_no_level_explanation(report)
+    if nearest_level is None:
+        explanation_lines.append(no_level_reason)
     explanation_lines.extend(proximity_lines)
     explanation_lines.extend(option_lines)
     if foreign_modifier < 0:
@@ -1531,6 +1535,7 @@ def build_capital_structure_indicator_read(
 
     read = _capital_structure_indicator_read_label(
         technical_score=technical_score,
+        supply_overhang_score=supply_overhang_score,
         dilution_pressure_score=dilution_pressure_score,
         offering_activity_score=offering_activity_score,
         proximity_score=proximity_score,
@@ -1546,6 +1551,7 @@ def build_capital_structure_indicator_read(
         nearest_level=nearest_level,
         nearest_level_label=nearest_level_label,
         nearest_level_distance=nearest_level_distance,
+        no_level_reason=no_level_reason if nearest_level is None else None,
     )
 
     return CapitalStructureIndicatorRead(
@@ -1689,6 +1695,7 @@ def _option_exposure_mismatch_read(ticket: TechnicalTicket | None) -> tuple[floa
 def _capital_structure_indicator_read_label(
     *,
     technical_score: float,
+    supply_overhang_score: float,
     dilution_pressure_score: float,
     offering_activity_score: float,
     proximity_score: float,
@@ -1712,6 +1719,8 @@ def _capital_structure_indicator_read_label(
         return "verification_needed"
     if float_quality_score <= 62:
         return "float_quality_watch"
+    if supply_overhang_score >= 25:
+        return "supply_context"
     if technical_score >= 72:
         return "clean"
     return "supply_context"
@@ -1724,6 +1733,7 @@ def _capital_structure_recommendation_lines(
     nearest_level: float | None,
     nearest_level_label: str | None,
     nearest_level_distance: float | None,
+    no_level_reason: str | None = None,
 ) -> list[str]:
     level_text = ""
     if nearest_level is not None:
@@ -1731,10 +1741,16 @@ def _capital_structure_recommendation_lines(
     if read == "supply_absorption":
         return [f"Watch for absorption{level_text}; require volume/VWAP hold and do not treat the filing level as a price target."]
     if read == "rally_fade_risk":
+        if no_level_reason and nearest_level is None:
+            return [f"Avoid chase while filing pressure is active. {no_level_reason} Wait for stronger volume/VWAP confirmation before trusting a breakout."]
         return [f"Avoid chase{level_text}; wait for stronger volume/VWAP confirmation before trusting a breakout."]
     if read == "dilution_sensitive":
+        if no_level_reason and nearest_level is None:
+            return [f"Treat the setup as dilution-sensitive. {no_level_reason} Bullish reads need stronger participation and clean VWAP behavior."]
         return ["Treat the setup as dilution-sensitive; bullish reads need stronger participation and clean VWAP behavior."]
     if read == "offering_pressure":
+        if no_level_reason and nearest_level is None:
+            return [f"Breakout trigger only while offering pressure is active. {no_level_reason}"]
         return ["Breakout trigger only while ATM, shelf, resale, or offering pressure is active."]
     if read == "option_size_mismatch":
         return ["Hedge/speculation sizing mismatch detected; option contract exposure is large versus modeled stock exposure."]
@@ -1742,6 +1758,8 @@ def _capital_structure_recommendation_lines(
         return ["Verify foreign issuer, ADS/ADR, and ordinary-share documents before raising confidence from U.S. filing text alone."]
     if read == "clean":
         return [f"Capital-structure indicator is clean enough to preserve chart confidence ({technical_score:.0f}/100), subject to normal confirmation."]
+    if no_level_reason:
+        return [f"{no_level_reason} Use the filing-pressure read as context only; do not infer a supply level."]
     return ["Use filing-derived supply terms as context only; they modify confidence and chase risk, not price direction."]
 
 
@@ -1773,6 +1791,11 @@ def _capital_structure_source_labels(report: CapitalStructurePressureReport) -> 
                 labels.append(f"{form or 'filing'} filed {source_date or '--'}")
     for level in report.possible_supply_levels:
         labels.append(level.source)
+    for signal in report.signals:
+        form = getattr(signal, "source_form", "")
+        source_date = getattr(signal, "source_date", "")
+        if form or source_date:
+            labels.append(f"{form or 'filing'} filed {source_date or '--'}")
     return _dedupe(labels)
 
 
@@ -1785,6 +1808,27 @@ def _capital_structure_parsed_term_count(report: CapitalStructurePressureReport)
         + len(parsed.convertibles)
         + len(parsed.offering_programs)
         + len(parsed.ads_adr_structures)
+    )
+
+
+def _capital_structure_no_level_explanation(report: CapitalStructurePressureReport) -> str:
+    if report.possible_supply_levels:
+        return "A source-backed filing price level was parsed."
+    parsed_count = _capital_structure_parsed_term_count(report)
+    if report.signals:
+        labels = ", ".join(_dedupe([signal.label for signal in report.signals])[:4])
+        return (
+            f"SEC scan found filing-derived pressure signal(s) ({labels}) but no supported warrant exercise, "
+            "conversion, offering, purchase, or resale price level was parsed; no supply level is inferred."
+        )
+    if parsed_count:
+        return (
+            f"SEC scan parsed {parsed_count} source-backed capital-structure term(s), but none included a supported "
+            "exercise, conversion, offering, purchase, or resale price level; no supply level is inferred."
+        )
+    return (
+        f"SEC scan reviewed {report.filings_analyzed} filing(s), but no supported capital-structure terms or "
+        "filing-derived price levels were detected; no supply level is inferred."
     )
 
 

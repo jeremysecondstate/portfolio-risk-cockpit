@@ -493,6 +493,48 @@ class TechnicalCommandCenterTests(unittest.TestCase):
         self.assertEqual(report.best_action, "Avoid chase")
         self.assertTrue(any("rally-fade risk" in warning for warning in indicator.warnings))
 
+    def test_parseable_capital_supply_fixture_reaches_command_center_indicator(self) -> None:
+        rows = _range_breakout_candles(100, base=105.0, breakout=112.0)
+        capital = _capital_report(
+            "The company issued Common Warrants exercisable for 1,000,000 shares of common stock "
+            "at an exercise price of $111.50 per share. The Series A Preferred Stock is convertible "
+            "into common stock at a conversion price of $109.25 per share."
+        )
+        report = build_technical_command_center_report(
+            "TST",
+            {"daily_1y": _trend_candles(), "setup_30m": rows, "timing_5m": rows},
+            capital_structure_pressure=capital,
+        )
+
+        indicator = report.capital_structure_indicator
+        self.assertIsNotNone(indicator)
+        assert indicator is not None
+        self.assertEqual(indicator.nearest_supply_level, 111.5)
+        self.assertEqual(indicator.nearest_supply_level_label, "Possible warrant strike")
+        self.assertTrue(any(level.price == 109.25 for level in capital.possible_supply_levels))
+        self.assertIn("Capital Structure / Supply", report.scores)
+
+    def test_signal_only_capital_pressure_has_no_level_but_explains_why(self) -> None:
+        capital = _capital_report(
+            "The company filed a shelf registration statement and prospectus supplement for an at-the-market ATM program. "
+            "Selling stockholders may resell shares under a resale prospectus. The filing describes preferred stock, "
+            "convertible notes, substantial dilution, future dilution, and possible reverse stock split risk."
+        )
+        report = build_technical_command_center_report(
+            "TST",
+            {"daily_1y": _trend_candles(), "setup_30m": _range_breakout_candles(), "timing_5m": _range_breakout_candles()},
+            capital_structure_pressure=capital,
+        )
+
+        indicator = report.capital_structure_indicator
+        self.assertIsNotNone(indicator)
+        assert indicator is not None
+        self.assertIsNone(indicator.nearest_supply_level)
+        self.assertEqual(indicator.read, "rally_fade_risk")
+        self.assertTrue(any("no supply level is inferred" in line for line in indicator.explanation_lines))
+        self.assertTrue(any("no supply level is inferred" in line for line in indicator.recommendation_lines))
+        self.assertIn("Capital Structure / Supply", report.scores)
+
     def test_capital_indicator_uses_warrant_breakout_as_supply_absorption_input(self) -> None:
         rows = _range_breakout_candles(100, base=105.0, breakout=112.0)
         capital = _capital_report(
