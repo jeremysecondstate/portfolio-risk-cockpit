@@ -13,6 +13,9 @@ from app.analytics.technical_analysis import (
 from app.ui.schwab_research_workspace_extension import (
     PRC_PRESSURE_LINE_NOTICE,
     CAPITAL_STRUCTURE_LEVEL_DISCLAIMER,
+    _capital_structure_empirical_cards,
+    _capital_structure_empirical_note_rows,
+    _capital_structure_empirical_supply_rows,
     _technical_capital_structure_cards,
     _technical_capital_structure_note_rows,
     _technical_capital_structure_supply_rows,
@@ -132,6 +135,35 @@ class SchwabTechnicalCommandCenterUiTests(unittest.TestCase):
         self.assertEqual(status_by_title["Option Mismatch"], "bad")
         self.assertEqual(status_by_title["Chase Risk"], "bad")
         self.assertIn(("Warning", "Price is near parsed supply without confirmation."), _technical_capital_structure_note_rows(report))
+
+    def test_empirical_supply_helpers_surface_absorption_read(self) -> None:
+        read = SimpleNamespace(
+            empirical_intelligence=SimpleNamespace(
+                supply_absorption=SimpleNamespace(
+                    read="absorption",
+                    label="Supply absorption",
+                    score=78.0,
+                    level=5.0,
+                    level_label="warrant strike",
+                    distance_percent=2.5,
+                    evidence_lines=("Nearest warrant strike: $5.00; latest close is above the level.",),
+                    confirmation_lines=("Confirmation: hold above $5.00 with normal volume.",),
+                    invalidation_lines=("Invalidation: lose $5.00 after testing it.",),
+                    warnings=(),
+                )
+            )
+        )
+
+        cards = _capital_structure_empirical_cards(read)
+        supply_rows = _capital_structure_empirical_supply_rows(read)
+        note_rows = _capital_structure_empirical_note_rows(read)
+
+        self.assertEqual(cards[0].title, "Empirical Supply")
+        self.assertEqual(cards[0].status, "good")
+        self.assertEqual(supply_rows[0][0], "Empirical: warrant strike")
+        self.assertEqual(supply_rows[0][1], "$5.00")
+        self.assertEqual(supply_rows[0][2], "+2.50%")
+        self.assertTrue(any(row[0] == "Empirical supply" for row in note_rows))
 
     def test_command_center_rows_surface_existing_report_data(self) -> None:
         report = build_technical_command_center_report(

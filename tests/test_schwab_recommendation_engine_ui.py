@@ -11,6 +11,13 @@ from app.analytics.recommendation_engine import (
     ExpectedRewardRiskSummary,
     RecommendationEngineRead,
 )
+from app.analytics.empirical_recommendation import (
+    CatalystCollisionRead,
+    ConfidenceShrinkageRead,
+    EmpiricalRecommendationIntelligenceRead,
+    SetupReplayRead,
+    SupplyAbsorptionRead,
+)
 from app.ui.schwab_research_workspace_extension import (
     RECOMMENDATION_ENGINE_ADVICE_BOUNDARY,
     _recommendation_contradiction_lines,
@@ -70,6 +77,7 @@ def _read(
     data_confidence: DataConfidenceRead | None = None,
     reward_risk: ExpectedRewardRiskSummary | None = None,
     components: tuple[EvidenceComponent, ...] | None = None,
+    empirical_intelligence: EmpiricalRecommendationIntelligenceRead | None = None,
 ) -> RecommendationEngineRead:
     active_components = components or (
         _component("Chart setup", 48.0),
@@ -93,6 +101,62 @@ def _read(
         what_would_change=("Volume rejects the breakout.",),
         why=("Chart setup is supportive.",),
         warnings=("Data gap warning.",),
+        confidence_adjusted_score=empirical_intelligence.confidence_adjusted_score if empirical_intelligence is not None else evidence_score,
+        empirical_intelligence=empirical_intelligence,
+    )
+
+
+def _empirical_read() -> EmpiricalRecommendationIntelligenceRead:
+    replay = SetupReplayRead(
+        sample_count=14,
+        lookback=20,
+        horizon=5,
+        median_forward_return=0.035,
+        win_rate=0.64,
+        average_similarity=0.78,
+        raw_score=68.0,
+        confidence=0.72,
+        label="Replay supportive",
+        summary="14 similar same-symbol windows; median forward return +3.5%.",
+    )
+    catalyst = CatalystCollisionRead(
+        score=28.0,
+        label="Moderate collision",
+        events=("Upcoming earnings context is present.",),
+        warnings=(),
+        summary="Moderate collision: 28/100 from loaded catalyst inputs.",
+    )
+    supply = SupplyAbsorptionRead(
+        read="absorption",
+        label="Supply absorption",
+        score=76.0,
+        level=5.0,
+        level_label="warrant strike",
+        distance_percent=2.4,
+        evidence_lines=("Nearest warrant strike: $5.00; latest close is above the level.",),
+        confirmation_lines=("Confirmation: hold above $5.00 with normal volume.",),
+        invalidation_lines=("Invalidation: lose $5.00 after testing it.",),
+    )
+    shrinkage = ConfidenceShrinkageRead(
+        raw_evidence_score=76.0,
+        confidence_adjusted_score=68.0,
+        shrink_factor=0.69,
+        factors=("data confidence 82/100 x0.82", "setup replay confidence x0.81"),
+    )
+    return EmpiricalRecommendationIntelligenceRead(
+        symbol="TEST",
+        raw_evidence_score=76.0,
+        confidence_adjusted_score=68.0,
+        setup_replay=replay,
+        catalyst_collision=catalyst,
+        option_required_move=None,
+        supply_absorption=supply,
+        shrinkage=shrinkage,
+        regime_label="bullish / breakout / early",
+        regime_warnings=(),
+        recommendation_lines=("Raw evidence shrinks to adjusted evidence after empirical confidence controls.",),
+        confirmation_lines=supply.confirmation_lines,
+        invalidation_lines=supply.invalidation_lines,
     )
 
 
@@ -183,6 +247,19 @@ class SchwabRecommendationEngineUiTests(unittest.TestCase):
 
         self.assertIn(RECOMMENDATION_ENGINE_ADVICE_BOUNDARY, "\n".join(_recommendation_reward_risk_lines(read)))
         self.assertIn(RECOMMENDATION_ENGINE_ADVICE_BOUNDARY, _recommendation_engine_detail_text(read, "TEST"))
+
+    def test_empirical_intelligence_cards_and_detail_render(self) -> None:
+        read = _read(empirical_intelligence=_empirical_read())
+
+        titles = {card.title for card in _recommendation_engine_cards(read)}
+        detail = _recommendation_engine_detail_text(read, "TEST")
+
+        self.assertIn("Adjusted Score", titles)
+        self.assertIn("Setup Replay", titles)
+        self.assertIn("Catalyst Collision", titles)
+        self.assertIn("Supply Absorption", titles)
+        self.assertIn("Empirical Recommendation Intelligence", detail)
+        self.assertIn("Confidence-adjusted score", detail)
 
 
 if __name__ == "__main__":

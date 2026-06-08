@@ -4,6 +4,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable, Sequence
 
+from app.analytics.empirical_recommendation import (
+    EmpiricalRecommendationIntelligenceRead,
+    build_empirical_recommendation_intelligence,
+)
 from app.analytics.research_scoring import score_macro_text
 
 
@@ -87,6 +91,8 @@ class RecommendationEngineRead:
     what_would_change: tuple[str, ...]
     why: tuple[str, ...]
     warnings: tuple[str, ...] = field(default_factory=tuple)
+    confidence_adjusted_score: float | None = None
+    empirical_intelligence: EmpiricalRecommendationIntelligenceRead | None = None
 
 
 def build_recommendation_engine_read(
@@ -100,6 +106,10 @@ def build_recommendation_engine_read(
     fundamentals_text: str = "",
     option_candidates: Sequence[Any] | Any | None = None,
     option_chain_rows: Sequence[dict[str, Any]] | None = None,
+    historical_candles: Sequence[Any] | None = None,
+    earnings_text: str = "",
+    filings_lines: Sequence[str] | None = None,
+    macro_snapshot: Any | None = None,
     portfolio_context: Any | None = None,
     stock_plan: Any | None = None,
     source_statuses: Sequence[Any] | None = None,
@@ -139,10 +149,26 @@ def build_recommendation_engine_read(
         data_confidence=data_confidence,
     )
     evidence_score, evidence_vote = score_evidence_components(components)
+    empirical_read = _build_empirical_read_if_available(
+        symbol=clean_symbol or "UNKNOWN",
+        historical_candles=historical_candles,
+        evidence_score=evidence_score,
+        data_confidence=data_confidence,
+        command_center_report=command_center_report,
+        option_candidates=option_candidates,
+        earnings_text=earnings_text,
+        filings_lines=filings_lines,
+        macro_snapshot=macro_snapshot,
+        capital_structure_indicator=active_capital_indicator,
+        as_of=as_of,
+    )
     confidence, confidence_score = _recommendation_confidence(components, data_confidence, evidence_vote)
     label = _recommendation_label(evidence_score, data_confidence, components, command_center_report, active_capital_indicator)
     reward_risk = build_expected_reward_risk_summary(command_center_report, evidence_score=evidence_score)
     invalidation, confirmation = _trigger_lines(command_center_report)
+    if empirical_read is not None:
+        invalidation = _dedupe([*invalidation, *empirical_read.invalidation_lines])[:6]
+        confirmation = _dedupe([*confirmation, *empirical_read.confirmation_lines])[:6]
     sizing_notes = _position_sizing_notes(
         portfolio_context=portfolio_context,
         command_center_report=command_center_report,
@@ -157,11 +183,16 @@ def build_recommendation_engine_read(
         macro_read=macro_read,
         fundamental_read=fundamental_read,
     )
+    if empirical_read is not None:
+        changes = _dedupe([*empirical_read.recommendation_lines[:3], *changes])[:8]
     why = _why_lines(components)
+    if empirical_read is not None:
+        why = _dedupe([f"Empirical intelligence: raw {empirical_read.raw_evidence_score:.0f}/100, adjusted {empirical_read.confidence_adjusted_score:.0f}/100 after replay/catalyst/regime checks.", *why])[:6]
     warnings = _dedupe(
         [
             *_list(_get(command_center_report, "warnings")),
             *_list(_get(active_capital_indicator, "warnings")),
+            *(_list(_get(empirical_read, "warnings")) if empirical_read is not None else []),
             *data_confidence.missing[:3],
         ]
     )[:8]
@@ -182,6 +213,8 @@ def build_recommendation_engine_read(
         what_would_change=tuple(changes),
         why=tuple(why),
         warnings=tuple(warnings),
+        confidence_adjusted_score=empirical_read.confidence_adjusted_score if empirical_read is not None else evidence_score,
+        empirical_intelligence=empirical_read,
     )
 
 
@@ -280,6 +313,47 @@ def build_data_confidence_read(
         missing=missing,
         stale=stale,
         reason=reason,
+    )
+
+
+def _build_empirical_read_if_available(
+    *,
+    symbol: str,
+    historical_candles: Sequence[Any] | None,
+    evidence_score: float,
+    data_confidence: DataConfidenceRead,
+    command_center_report: Any | None,
+    option_candidates: Sequence[Any] | Any | None,
+    earnings_text: str,
+    filings_lines: Sequence[str] | None,
+    macro_snapshot: Any | None,
+    capital_structure_indicator: Any | None,
+    as_of: datetime | None,
+) -> EmpiricalRecommendationIntelligenceRead | None:
+    has_empirical_inputs = any(
+        (
+            bool(historical_candles),
+            bool(str(earnings_text or "").strip()),
+            bool(filings_lines),
+            macro_snapshot is not None,
+            option_candidates is not None,
+            capital_structure_indicator is not None,
+        )
+    )
+    if not has_empirical_inputs:
+        return None
+    return build_empirical_recommendation_intelligence(
+        symbol=symbol,
+        historical_candles=historical_candles or (),
+        current_evidence_score=evidence_score,
+        data_confidence_score=data_confidence.score,
+        command_center_report=command_center_report,
+        option_candidates=option_candidates,
+        earnings_text=earnings_text,
+        filings_lines=filings_lines or (),
+        macro_snapshot=macro_snapshot,
+        capital_structure_indicator=capital_structure_indicator,
+        as_of=as_of,
     )
 
 

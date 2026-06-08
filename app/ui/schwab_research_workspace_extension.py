@@ -15,6 +15,11 @@ from app.analytics.earnings_release import (
     fetch_official_company_earnings_release,
     format_earnings_release_digest,
 )
+from app.analytics.empirical_recommendation import (
+    build_empirical_recommendation_intelligence,
+    build_option_required_move_read,
+    empirical_readout_lines,
+)
 from app.analytics.etf_analysis import (
     ETF_SEC_FORMS,
     ETF_SECURITY_KINDS,
@@ -2083,6 +2088,10 @@ def _build_research_payload(session: Any, portfolio, symbol: str, *, ticket: Tec
             fundamental_read=recommendation_fundamental_read,
             fundamentals_text="\n\n".join(line for line in (fundamentals_text, earnings_text) if line.strip()),
             option_chain_rows=option_chain_rows,
+            historical_candles=candles,
+            earnings_text=earnings_text,
+            filings_lines=filings_lines,
+            macro_snapshot=macro_snapshot,
             portfolio_context=context,
             source_statuses=statuses,
             as_of=datetime.now(timezone.utc),
@@ -2822,7 +2831,7 @@ def _recommendation_engine_cards(read: RecommendationEngineRead | None) -> list[
     reward_label = str(_recommendation_get(reward_risk, "label", "Reward/risk not defined"))
     reward_summary = _recommendation_with_advice_boundary(str(_recommendation_get(reward_risk, "summary", "") or ""))
     sizing_notes = _recommendation_position_sizing_lines(read)
-    return [
+    cards = [
         _synthetic_badge("Recommendation", label, _recommendation_label_status(label), _first_nonempty(_recommendation_list(_recommendation_get(read, "why")), "Evidence-weighted readout."), _to_float(evidence_score) or 0.0),
         _synthetic_badge("Confidence", f"{confidence} ({_recommendation_score_text(_recommendation_get(read, 'confidence_score'))})", _recommendation_confidence_status(confidence), str(_recommendation_get(data_confidence, "reason", "Data confidence unavailable."))),
         _synthetic_badge("Evidence Score", _recommendation_score_text(evidence_score), _recommendation_evidence_status(evidence_score), f"Evidence vote {_recommendation_signed_number(_recommendation_get(read, 'evidence_vote'))}."),
@@ -2830,6 +2839,57 @@ def _recommendation_engine_cards(read: RecommendationEngineRead | None) -> list[
         _synthetic_badge("Reward/Risk / EV", reward_label, _recommendation_reward_status(reward_risk), reward_summary),
         _synthetic_badge("Position Sizing", _recommendation_position_sizing_label(read), _recommendation_position_sizing_status(sizing_notes), _first_nonempty(sizing_notes, "Planning context only; no broker/order behavior changes.")),
     ]
+    cards.extend(_empirical_recommendation_cards(read))
+    return cards
+
+
+def _empirical_recommendation_cards(read: Any | None) -> list[BadgeReadout]:
+    empirical = _recommendation_get(read, "empirical_intelligence")
+    if empirical is None:
+        return []
+    replay = _recommendation_get(empirical, "setup_replay")
+    catalyst = _recommendation_get(empirical, "catalyst_collision")
+    supply = _recommendation_get(empirical, "supply_absorption")
+    option_move = _recommendation_get(empirical, "option_required_move")
+    adjusted = _recommendation_get(empirical, "confidence_adjusted_score")
+    raw = _recommendation_get(empirical, "raw_evidence_score")
+    cards = [
+        _synthetic_badge(
+            "Adjusted Score",
+            _recommendation_score_text(adjusted),
+            _recommendation_evidence_status(adjusted),
+            f"Raw evidence {_recommendation_score_text(raw)} after confidence shrinkage.",
+            _to_float(adjusted) or 0.0,
+        ),
+        _synthetic_badge(
+            "Setup Replay",
+            str(_recommendation_get(replay, "label", "Replay unavailable")),
+            _empirical_replay_status(replay),
+            str(_recommendation_get(replay, "summary", "Same-symbol replay unavailable.")),
+        ),
+        _synthetic_badge(
+            "Catalyst Collision",
+            str(_recommendation_get(catalyst, "label", "Unknown")),
+            _empirical_catalyst_status(catalyst),
+            str(_recommendation_get(catalyst, "summary", "Catalyst collision unavailable.")),
+        ),
+        _synthetic_badge(
+            "Supply Absorption",
+            str(_recommendation_get(supply, "label", "Supply unavailable")),
+            _empirical_supply_status(supply),
+            _first_nonempty(_recommendation_list(_recommendation_get(supply, "evidence_lines")), "Supply absorption read unavailable."),
+        ),
+    ]
+    if option_move is not None:
+        cards.append(
+            _synthetic_badge(
+                "Option Move",
+                str(_recommendation_get(option_move, "label", "Move unavailable")),
+                str(_recommendation_get(option_move, "status", "info")),
+                _first_nonempty(_recommendation_list(_recommendation_get(option_move, "lines")), "Required-vs-implied move read unavailable."),
+            )
+        )
+    return cards
 
 
 def _recommendation_evidence_rows(read: Any | None, *, limit: int = 9) -> list[tuple[str, str, str, str, str]]:
@@ -2854,6 +2914,39 @@ def _recommendation_evidence_rows(read: Any | None, *, limit: int = 9) -> list[t
             )
         )
     return rows or [("Recommendation Engine", "--", "--", "No Read", "No evidence components were supplied.")]
+
+
+def _empirical_replay_status(replay: Any | None) -> str:
+    score = _to_float(_recommendation_get(replay, "raw_score"))
+    if score is None:
+        return "info"
+    if score >= 60:
+        return "good"
+    if score <= 42:
+        return "bad"
+    return "mixed"
+
+
+def _empirical_catalyst_status(catalyst: Any | None) -> str:
+    score = _to_float(_recommendation_get(catalyst, "score"))
+    if score is None:
+        return "info"
+    if score >= 70:
+        return "bad"
+    if score >= 35:
+        return "mixed"
+    return "good"
+
+
+def _empirical_supply_status(supply: Any | None) -> str:
+    read = str(_recommendation_get(supply, "read", "") or "").lower()
+    if read == "absorption":
+        return "good"
+    if read == "rejection":
+        return "bad"
+    if read in {"watch", "below_level", "low_sample"}:
+        return "mixed"
+    return "info"
 
 
 def _recommendation_supporting_lines(read: Any | None, *, limit: int = 5) -> list[str]:
@@ -2978,6 +3071,7 @@ def _recommendation_engine_detail_text(read: Any | None, symbol: str) -> str:
     ]
     lines.extend(_recommendation_text_section("Why", _recommendation_list(_recommendation_get(read, "why"))))
     lines.extend(_recommendation_text_section("Evidence Components", [f"{component} | {vote} | {confidence} | {status} | {reason}" for component, vote, confidence, status, reason in _recommendation_evidence_rows(read, limit=20)]))
+    lines.extend(_recommendation_text_section("Empirical Recommendation Intelligence", _empirical_recommendation_detail_lines(read)))
     lines.extend(_recommendation_text_section("Supporting Evidence", _recommendation_supporting_lines(read, limit=8)))
     lines.extend(_recommendation_text_section("Contradictions", _recommendation_contradiction_lines(read, limit=8)))
     lines.extend(_recommendation_text_section("Expected Reward/Risk + Planning EV", _recommendation_reward_risk_lines(read)))
@@ -2989,6 +3083,13 @@ def _recommendation_engine_detail_text(read: Any | None, symbol: str) -> str:
     lines.extend(_recommendation_text_section("Data Confidence Gaps", _recommendation_data_gap_lines(read, limit=10)))
     lines.extend(_recommendation_text_section("Source Confidence Rows", _recommendation_data_source_lines(data_confidence)))
     return "\n".join(lines)
+
+
+def _empirical_recommendation_detail_lines(read: Any | None) -> list[str]:
+    empirical = _recommendation_get(read, "empirical_intelligence")
+    if empirical is None:
+        return ["Empirical Recommendation Intelligence is unavailable; load local candles and catalyst inputs to populate it."]
+    return _recommendation_clean_lines(empirical_readout_lines(empirical), limit=18)
 
 
 def _recommendation_text_section(title: str, rows: list[str] | tuple[str, ...]) -> list[str]:
@@ -3468,6 +3569,57 @@ def _technical_capital_structure_note_rows(report: TechnicalCommandCenterReport 
     return rows
 
 
+def _capital_structure_empirical_cards(read: RecommendationEngineRead | None) -> list[BadgeReadout]:
+    empirical = _recommendation_get(read, "empirical_intelligence")
+    supply = _recommendation_get(empirical, "supply_absorption")
+    if supply is None:
+        return []
+    return [
+        _synthetic_badge(
+            "Empirical Supply",
+            str(_recommendation_get(supply, "label", "Supply unavailable")),
+            _empirical_supply_status(supply),
+            _first_nonempty(_recommendation_list(_recommendation_get(supply, "evidence_lines")), "Supply absorption read unavailable."),
+            _safe_float(_recommendation_get(supply, "score")),
+        )
+    ]
+
+
+def _capital_structure_empirical_supply_rows(read: RecommendationEngineRead | None) -> list[tuple[str, str, str, str]]:
+    empirical = _recommendation_get(read, "empirical_intelligence")
+    supply = _recommendation_get(empirical, "supply_absorption")
+    if supply is None:
+        return []
+    label = f"Empirical: {_recommendation_get(supply, 'level_label', 'filing-derived supply level')}"
+    distance = _recommendation_get(supply, "distance_percent")
+    rows = [
+        (
+            label,
+            _money(_recommendation_get(supply, "level")),
+            _format_command_percent(distance),
+            _first_nonempty(_recommendation_list(_recommendation_get(supply, "evidence_lines")), "Supply absorption read unavailable."),
+        )
+    ]
+    for line in _recommendation_list(_recommendation_get(supply, "confirmation_lines"))[:2]:
+        rows.append(("Empirical confirmation", "--", "--", str(line)))
+    for line in _recommendation_list(_recommendation_get(supply, "invalidation_lines"))[:2]:
+        rows.append(("Empirical invalidation", "--", "--", str(line)))
+    return rows
+
+
+def _capital_structure_empirical_note_rows(read: RecommendationEngineRead | None) -> list[tuple[str, str]]:
+    empirical = _recommendation_get(read, "empirical_intelligence")
+    supply = _recommendation_get(empirical, "supply_absorption")
+    if supply is None:
+        return []
+    rows: list[tuple[str, str]] = []
+    rows.extend(("Empirical supply", line) for line in _recommendation_list(_recommendation_get(supply, "evidence_lines"))[:4])
+    rows.extend(("Empirical warning", line) for line in _recommendation_list(_recommendation_get(supply, "warnings"))[:3])
+    if not rows:
+        rows.append(("Empirical supply", "Supply absorption detector returned no detail rows."))
+    return rows
+
+
 def _technical_capital_structure_indicator(report: TechnicalCommandCenterReport | None) -> CapitalStructureIndicatorRead | None:
     if report is None:
         return None
@@ -3854,17 +4006,29 @@ def _render_technicals(self: tk.Tk, payload: _ResearchPayload) -> None:
         frame.momentum_meter.set_score(decision.momentum_score, mode="direction", label=f"Momentum: {direction_strength_label(decision.momentum_score)} ({decision.momentum_score:.0f})")  # type: ignore[attr-defined]
         frame.risk_meter.set_score(decision.risk_score, mode="risk", label=f"Risk Heat: {risk_heat_label(decision.risk_score)} ({decision.risk_score:.0f})")  # type: ignore[attr-defined]
 
+    capital_cards = [
+        *_technical_capital_structure_cards(command_report),
+        *_capital_structure_empirical_cards(payload.recommendation_engine_read),
+    ]
+    capital_supply_rows = [
+        *_technical_capital_structure_supply_rows(command_report),
+        *_capital_structure_empirical_supply_rows(payload.recommendation_engine_read),
+    ]
+    capital_note_rows = [
+        *_technical_capital_structure_note_rows(command_report),
+        *_capital_structure_empirical_note_rows(payload.recommendation_engine_read),
+    ]
     metric_grid(
         frame.capital_cards,  # type: ignore[attr-defined]
-        _technical_capital_structure_cards(command_report),
+        capital_cards,
         columns=4,
         prominent_indexes={0},
         card_height=124,
         prominent_height=134,
         adaptive_height=True,
     )
-    _replace_tree_rows(frame.capital_supply_tree, _technical_capital_structure_supply_rows(command_report))  # type: ignore[attr-defined]
-    _replace_tree_rows(frame.capital_note_tree, _technical_capital_structure_note_rows(command_report))  # type: ignore[attr-defined]
+    _replace_tree_rows(frame.capital_supply_tree, capital_supply_rows)  # type: ignore[attr-defined]
+    _replace_tree_rows(frame.capital_note_tree, capital_note_rows)  # type: ignore[attr-defined]
     _replace_tree_rows(frame.timeframe_tree, _technical_timeframe_stack_rows(command_report))  # type: ignore[attr-defined]
     _replace_tree_rows(frame.prc_tree, _technical_prc_rows(command_report))  # type: ignore[attr-defined]
     _replace_tree_rows(frame.score_tree, _technical_score_breakdown_rows(command_report))  # type: ignore[attr-defined]
@@ -4126,6 +4290,7 @@ def _render_options_strategy(self: tk.Tk) -> None:
         frame.status_var.set("No usable option candidates found in the loaded chain.")  # type: ignore[attr-defined]
         _set_research_text(frame.detail_text, _basic_popout_text("Options Strategy Explanation", "The loaded chain did not include usable bid/ask/mark data for calls or puts."))  # type: ignore[attr-defined]
         return
+    payload = _refresh_payload_empirical_option_context(self, payload, candidates, candidates[0])
     for index, candidate in enumerate(candidates):
         tree.insert(
             "",
@@ -4149,6 +4314,83 @@ def _render_options_strategy(self: tk.Tk) -> None:
     frame.status_var.set(f"{len(candidates)} candidates generated from loaded {payload.symbol} chain. Select one and click Use This Option to fill fields only.")  # type: ignore[attr-defined]
     _show_selected_option_candidate(self)
     _render_scenarios(self, payload)
+
+
+def _refresh_payload_empirical_option_context(
+    self: tk.Tk,
+    payload: _ResearchPayload,
+    candidates: list[OptionCandidate],
+    selected: OptionCandidate | None,
+) -> _ResearchPayload:
+    read = payload.recommendation_engine_read
+    if read is None:
+        return payload
+    empirical = build_empirical_recommendation_intelligence(
+        symbol=payload.symbol,
+        historical_candles=payload.daily_candles or (),
+        current_evidence_score=read.evidence_score,
+        data_confidence_score=getattr(read.data_confidence, "score", None),
+        command_center_report=payload.command_center_report,
+        option_candidates=candidates,
+        selected_option_candidate=selected,
+        earnings_text=payload.earnings_text,
+        filings_lines=payload.filings_lines,
+        macro_snapshot=payload.macro_snapshot,
+        capital_structure_indicator=getattr(payload.command_center_report, "capital_structure_indicator", None),
+        as_of=datetime.now(timezone.utc),
+    )
+    updated_read = _recommendation_read_with_empirical_overlay(read, empirical)
+    updated_payload = replace(payload, recommendation_engine_read=updated_read)
+    self.schwab_research_last_payload = updated_payload
+    overview_frame = getattr(self, "schwab_research_overview_frame", None)
+    if overview_frame is not None:
+        _render_recommendation_engine(overview_frame, updated_payload)
+    if getattr(self, "schwab_research_overview_text", None) is not None:
+        _set_research_text(self.schwab_research_overview_text, _overview_popout_text(updated_payload))
+    if getattr(self, "schwab_research_technicals_frame", None) is not None:
+        _render_technicals(self, updated_payload)
+    return updated_payload
+
+
+def _recommendation_read_with_empirical_overlay(
+    read: RecommendationEngineRead,
+    empirical: Any,
+) -> RecommendationEngineRead:
+    base_why = _remove_empirical_overlay_lines(_recommendation_list(getattr(read, "why", ())))
+    base_changes = _remove_empirical_overlay_lines(_recommendation_list(getattr(read, "what_would_change", ())))
+    why = _recommendation_dedupe(
+        [
+            f"Empirical intelligence: raw {empirical.raw_evidence_score:.0f}/100, adjusted {empirical.confidence_adjusted_score:.0f}/100 after replay/catalyst/regime checks.",
+            *base_why,
+        ]
+    )[:6]
+    changes = _recommendation_dedupe([*empirical.recommendation_lines[:3], *base_changes])[:8]
+    invalidation = _recommendation_dedupe([*_recommendation_list(read.invalidation_lines), *empirical.invalidation_lines])[:8]
+    confirmation = _recommendation_dedupe([*_recommendation_list(read.confirmation_lines), *empirical.confirmation_lines])[:8]
+    warnings = _recommendation_dedupe([*_recommendation_list(read.warnings), *empirical.warnings])[:10]
+    return replace(
+        read,
+        confidence_adjusted_score=empirical.confidence_adjusted_score,
+        empirical_intelligence=empirical,
+        invalidation_lines=tuple(invalidation),
+        confirmation_lines=tuple(confirmation),
+        what_would_change=tuple(changes),
+        why=tuple(why),
+        warnings=tuple(warnings),
+    )
+
+
+def _remove_empirical_overlay_lines(lines: list[Any]) -> list[Any]:
+    prefixes = (
+        "Empirical intelligence:",
+        "Raw evidence ",
+        "Setup replay:",
+        "Catalyst collision:",
+        "Regime context:",
+        "Option hurdle:",
+        "Supply read:",
+    )
+    return [line for line in lines if not any(str(line or "").startswith(prefix) for prefix in prefixes)]
 
 
 def _render_option_strategy_cards(
@@ -4192,6 +4434,9 @@ def _render_option_strategy_cards(
     position_readout = option_position_readout(position_candidate, context, model_position)
     if position_readout is not None:
         cards.append(_synthetic_badge(position_readout.title, position_readout.label, position_readout.status, position_readout.detail))
+    required_move_card = _option_required_move_card(selected)
+    if required_move_card is not None:
+        cards.append(required_move_card)
     if selected.practical_warnings:
         warning_text = " ".join(selected.practical_warnings[:2])
         cards.append(_synthetic_badge("Option Warning", "Check Fit", "bad", warning_text))
@@ -4204,6 +4449,24 @@ def _render_option_strategy_cards(
         prominent_height=172,
         adaptive_height=True,
     )
+
+
+def _option_required_move_card(candidate: OptionCandidate | None) -> BadgeReadout | None:
+    read = build_option_required_move_read(candidate)
+    if read is None:
+        return None
+    return _synthetic_badge(
+        "Required vs Implied",
+        read.label,
+        _option_required_move_status(read.status),
+        _first_nonempty(list(read.lines), "Required-vs-implied move read unavailable."),
+    )
+
+
+def _option_required_move_status(status: str) -> str:
+    if status in {"good", "bad", "mixed", "info"}:
+        return status
+    return "info"
 
 
 def _best_actionable_contract(candidates: list[OptionCandidate]) -> OptionCandidate | None:
@@ -4620,6 +4883,7 @@ def _show_selected_option_candidate(self: tk.Tk) -> None:
 
 def _render_candidate_score_breakdown(frame: ttk.Frame, candidate: OptionCandidate) -> None:
     move = _percent(candidate.expected_move_required) if candidate.expected_move_required is not None else "--"
+    move_read = build_option_required_move_read(candidate)
     if _is_actionable_contract(candidate):
         rows = {
             "Technical Fit": f"{candidate.technical_fit_score:.0f}/100",
@@ -4627,6 +4891,8 @@ def _render_candidate_score_breakdown(frame: ttk.Frame, candidate: OptionCandida
             "Greek Fit": f"{candidate.greek_score:.0f}/100; delta {_number(candidate.delta)}; IV {_percent(candidate.iv) if candidate.iv is not None else '--'}",
             "Risk-Budget Fit": f"{candidate.risk_budget_score:.0f}/100; max loss {_money(candidate.max_loss)}",
             "Move To Breakeven": move,
+            "Implied Move": _percent(move_read.implied_move_pct) if move_read is not None and move_read.implied_move_pct is not None else "--",
+            "Required vs Implied": _option_required_move_summary(move_read),
             "Stock Comparison": candidate.better_than_stock or "No stock-only comparison was available.",
         }
     else:
@@ -4636,6 +4902,8 @@ def _render_candidate_score_breakdown(frame: ttk.Frame, candidate: OptionCandida
             "Greek Fit": "Not scored; no delta/theta/IV exposure.",
             "Risk-Budget Fit": "Not scored; no option capital committed.",
             "Move To Breakeven": "Not applicable.",
+            "Implied Move": _percent(move_read.implied_move_pct) if move_read is not None and move_read.implied_move_pct is not None else "--",
+            "Required vs Implied": _option_required_move_summary(move_read),
             "Stock Comparison": candidate.better_than_stock or "Waiting keeps the stock plan optional.",
         }
     if candidate.avoid_reason:
@@ -4645,6 +4913,18 @@ def _render_candidate_score_breakdown(frame: ttk.Frame, candidate: OptionCandida
     breakdown = getattr(frame, "score_breakdown", None)
     if breakdown is not None:
         labeled_value_grid(breakdown, rows, columns=3)
+
+
+def _option_required_move_summary(read: Any | None) -> str:
+    if read is None:
+        return "Unavailable."
+    required = _recommendation_get(read, "required_move_pct")
+    implied = _recommendation_get(read, "implied_move_pct")
+    excess = _recommendation_get(read, "excess_move_pct")
+    label = str(_recommendation_get(read, "label", "Move comparison unavailable"))
+    if required is None:
+        return label
+    return f"{label}; required {_percent(required)}, implied {_percent(implied)}, difference {_percent(excess)}."
 
 
 def _basic_popout_text(title: str, original_text: str) -> str:
@@ -4681,6 +4961,11 @@ def _options_strategy_popout_text(
         f"Better/worse than stock: {candidate.better_than_stock or 'No stock-only comparison was available.'}",
     ]
     key_points.extend(candidate.score_breakdown)
+    move_read = build_option_required_move_read(candidate)
+    if move_read is not None:
+        key_points.append(f"Required-vs-implied move: {move_read.label}.")
+        key_points.extend(move_read.lines)
+        key_points.extend(f"Move warning: {warning}" for warning in move_read.warnings)
     if candidate.avoid_reason:
         key_points.append(candidate.avoid_reason)
     if candidate.coverage_note:

@@ -15,8 +15,10 @@ from app.analytics.research_workspace_insights import (
     option_strategy_scenario_moves,
     suggest_option_candidates,
 )
+from app.analytics.empirical_recommendation import build_option_required_move_read
 from app.analytics.stock_research import AdvancedIndicatorSnapshot, GeneratedStockPosition, PortfolioSymbolContext
 from app.ui.schwab_research_workspace_extension import _normalized_candidate_bar_rows
+from app.ui.schwab_research_workspace_extension import _option_required_move_card, _option_required_move_summary
 
 
 def _context(*, quantity: float, is_held: bool = True, last_price: float = 10.0) -> PortfolioSymbolContext:
@@ -217,6 +219,29 @@ class OptionScenarioMathTests(unittest.TestCase):
         self.assertEqual(wait.greek_score, 0.0)
         self.assertEqual(wait.risk_budget_score, 0.0)
         self.assertIn("not credited with perfect liquidity", " ".join(wait.score_breakdown).lower())
+
+    def test_required_move_card_surfaces_long_option_hurdle(self) -> None:
+        candidate = replace(_candidate(option_type="call"), underlying_price=10.0, breakeven=11.20, iv=0.20, dte=30)
+
+        card = _option_required_move_card(candidate)
+
+        self.assertIsNotNone(card)
+        assert card is not None
+        self.assertEqual(card.title, "Required vs Implied")
+        self.assertEqual(card.status, "bad")
+        self.assertIn("exceeds implied", card.label.lower())
+
+    def test_required_move_summary_uses_covered_call_wording(self) -> None:
+        candidate = replace(_candidate(covered=True), iv=0.30, dte=30)
+
+        card = _option_required_move_card(candidate)
+        summary = _option_required_move_summary(build_option_required_move_read(candidate))
+
+        self.assertIsNotNone(card)
+        assert card is not None
+        self.assertIn("covered-call", card.label.lower())
+        self.assertIn("not a long-debit required-move hurdle", card.why.lower())
+        self.assertIn("covered-call", summary.lower())
 
     def test_wait_candidate_explains_when_it_outranks_weak_actionable_contract(self) -> None:
         candidates = suggest_option_candidates([_weak_call_chain_row()], _indicators(), _context(quantity=0, is_held=False))
