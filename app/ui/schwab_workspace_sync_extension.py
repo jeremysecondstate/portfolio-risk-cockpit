@@ -35,7 +35,7 @@ def _polish_schwab_workspace(self: tk.Tk) -> None:
 
     for button in _walk_buttons(self):
         label = str(button.cget("text"))
-        if label == "Open Options Lab" and _inside_labelframe(button, "Schwab Trading Workspace"):
+        if label == "Open Trading Workspace" and _inside_labelframe(button, "Schwab Trading Workspace"):
             button.configure(
                 text="Sync Schwab",
                 command=lambda: _run_schwab_workspace_action(self, "refresh_schwab_account", "connect_schwab"),
@@ -59,7 +59,7 @@ def _polish_schwab_workspace(self: tk.Tk) -> None:
 def _embed_trading_workspace_under_schwab(self: tk.Tk) -> None:
     """Keep Schwab stock and option planning in one top-level Schwab tab.
 
-    The base options extension still creates an Schwab Options Lab tab for backward
+    The base options extension still creates an Schwab Trading Workspace tab for backward
     compatibility. This polish pass hides that separate top-level tab and builds the
     same lab at the bottom of the Schwab workspace so Schwab owns stocks, ETFs, and
     options while Hyperliquid stays perp-only.
@@ -83,7 +83,7 @@ def _embed_trading_workspace_under_schwab(self: tk.Tk) -> None:
 
     embedded = ttk.LabelFrame(
         schwab_tab,
-        text="Schwab Options Lab",
+        text="Schwab Trading Workspace",
         style="Card.TLabelframe",
     )
     embedded.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
@@ -105,7 +105,7 @@ def _hide_top_level_options_tab(self: tk.Tk) -> None:
     if notebook is None:
         return
     for tab_id in notebook.tabs():
-        if notebook.tab(tab_id, "text") == "Schwab Options Lab":
+        if notebook.tab(tab_id, "text") == "Schwab Trading Workspace":
             notebook.hide(tab_id)
             return
 
@@ -157,7 +157,7 @@ def _select_trading_workspace(self: tk.Tk) -> None:
     if notebook is None:
         return
     for tab_id in notebook.tabs():
-        if notebook.tab(tab_id, "text") == "Schwab Options Lab":
+        if notebook.tab(tab_id, "text") == "Schwab Trading Workspace":
             notebook.select(tab_id)
             return
 

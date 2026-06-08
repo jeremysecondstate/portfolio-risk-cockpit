@@ -10,7 +10,7 @@ _installed = False
 
 
 def install_options_resizable_layout_extension() -> None:
-    """Give the Schwab Options Lab cockpit-style draggable panes."""
+    """Give the Schwab Trading Workspace cockpit-style draggable panes."""
 
     global _installed
     if _installed:
@@ -31,12 +31,12 @@ def _safe_sash_place(pane: tk.PanedWindow, index: int, x: int, y: int) -> None:
 
 
 def _skip_bottom_options_loader(app: tk.Tk, parent: ttk.Frame) -> None:
-    """The loader now lives in the Options Lab header to preserve vertical space."""
+    """The loader now lives in the Trading Workspace header to preserve vertical space."""
     return
 
 
 def _build_resizable_trading_workspace_tab(app: tk.Tk, parent: ttk.Frame) -> None:
-    """Build the options lab with draggable horizontal and vertical splitters."""
+    """Build the trading workspace with draggable horizontal and vertical splitters."""
 
     trading_workspace._init_options_vars(app)
 
@@ -60,7 +60,7 @@ def _build_resizable_trading_workspace_tab(app: tk.Tk, parent: ttk.Frame) -> Non
 
 
 def _build_trading_workspace_header(app: tk.Tk, parent: ttk.Frame) -> None:
-    banner = ttk.LabelFrame(parent, text="Schwab Options Lab", style="Card.TLabelframe")
+    banner = ttk.LabelFrame(parent, text="Schwab Trading Workspace", style="Card.TLabelframe")
     banner.grid(row=0, column=0, sticky="ew", pady=(0, 10))
     banner.columnconfigure(0, weight=1)
 

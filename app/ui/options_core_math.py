@@ -7,7 +7,7 @@ CONTRACT_MULTIPLIER = 100
 
 @dataclass(frozen=True)
 class OptionCoreMetrics:
-    """Fundamental option math for the What-If Options Lab.
+    """Fundamental option math for the What-If Trading Workspace.
 
     Premium values are per share. Dollar values multiply by the standard
     100-share contract multiplier and the user-entered contract count.
@@ -35,7 +35,7 @@ def calculate_core_option_metrics(
     option_type: str,
     fees: float = 0.0,
 ) -> OptionCoreMetrics:
-    """Calculate the core long call/put metrics used by the options lab."""
+    """Calculate the core long call/put metrics used by the trading workspace."""
 
     safe_contracts = max(int(contracts), 1)
     contract_cost = premium * CONTRACT_MULTIPLIER * safe_contracts

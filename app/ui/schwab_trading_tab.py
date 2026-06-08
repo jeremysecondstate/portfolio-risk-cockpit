@@ -97,7 +97,7 @@ def _install_schwab_options_feature(self: tk.Tk, schwab_tab: ttk.Frame) -> None:
 
     for button in _walk_buttons(schwab_tab):
         label = str(button.cget("text"))
-        if label == "Open Options Lab" and _inside_labelframe(button, "Schwab Trading Workspace"):
+        if label == "Open Trading Workspace" and _inside_labelframe(button, "Schwab Trading Workspace"):
             button.configure(
                 text="Sync Schwab",
                 command=lambda app=self: _run_schwab_workspace_action(app, "refresh_schwab_account", "connect_schwab"),

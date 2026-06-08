@@ -130,7 +130,7 @@ def _init_options_vars(app: tk.Tk) -> None:
 
 
 def _build_options_disclaimer(parent: ttk.Frame) -> None:
-    banner = ttk.LabelFrame(parent, text="Schwab Options Lab", style="Card.TLabelframe")
+    banner = ttk.LabelFrame(parent, text="Schwab Trading Workspace", style="Card.TLabelframe")
     banner.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
     ttk.Label(
         banner,

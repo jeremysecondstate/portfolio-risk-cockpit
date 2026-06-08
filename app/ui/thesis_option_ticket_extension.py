@@ -52,7 +52,7 @@ def _use_current_thesis_option_ticket(self: tk.Tk) -> None:
 
 
 def _ensure_options_vars_exist(self: tk.Tk) -> None:
-    # Options Lab normally creates these. Keep this defensive so the button never
+    # Trading Workspace normally creates these. Keep this defensive so the button never
     # crashes if the layout order changes.
     defaults = {
         "options_symbol_var": "",

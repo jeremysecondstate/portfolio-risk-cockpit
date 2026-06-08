@@ -16,7 +16,7 @@ _VERTICAL_SPREADS = {"Vertical Debit Spread", "Vertical Credit Spread"}
 
 
 def install_options_core_math_extension() -> None:
-    """Make simple option fundamentals the core of the What-If Options Lab."""
+    """Make simple option fundamentals the core of the What-If Trading Workspace."""
 
     global _installed
     if _installed:
