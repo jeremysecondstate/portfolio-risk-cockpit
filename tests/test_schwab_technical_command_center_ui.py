@@ -271,6 +271,7 @@ class SchwabTechnicalCommandCenterUiTests(unittest.TestCase):
             frame.grid()
             source = _readout_launcher(frame, title="Warnings", button_text="Warnings", row=0)
             self.assertEqual(source._readout_button.cget("text"), "Warnings")  # type: ignore[attr-defined]
+            self.assertEqual(source._readout_launcher.grid_info().get("padx"), (0, 10))  # type: ignore[attr-defined]
 
             _set_research_text(source, "First warning")
             _open_readout_popout(source)
