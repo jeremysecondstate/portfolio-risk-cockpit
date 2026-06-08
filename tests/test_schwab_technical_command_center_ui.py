@@ -370,6 +370,23 @@ class SchwabTechnicalCommandCenterUiTests(unittest.TestCase):
         self.assertTrue(any(row[0] == "Entry location" for row in ticket_rows))
         self.assertTrue(any(row[0] == "Verdict" for row in ticket_rows))
 
+    def test_setup_cards_mark_prior_confirmation_trigger_cleared(self) -> None:
+        report = build_technical_command_center_report(
+            "TST",
+            {"daily_1y": _candles(90), "timing_5m": _candles(80, start=118.0, step=0.05)},
+            quote_snapshot=QuoteSnapshot("TST", bid=121.95, ask=122.05, last=122.0, mark=122.0),
+            ticket=TechnicalTicket(side="buy", quantity=25, entry_price=122.0, stop_price=119.0, portfolio_value=100_000),
+        )
+        confirmation_level = report.setup_classification.confirmation_level
+        self.assertIsNotNone(confirmation_level)
+
+        cards = {card.title: card for card in _technical_setup_cards(report, float(confirmation_level or 0) + 5.0)}
+
+        self.assertEqual(cards["Confirmation"].label, "Prior trigger cleared")
+        self.assertEqual(cards["Confirmation"].status, "good")
+        self.assertIn("Next confirmation", cards["Confirmation"].why)
+        self.assertNotIn("Price level the setup needs to confirm", cards["Confirmation"].why)
+
     def test_missing_candles_and_warnings_shape_without_crashing(self) -> None:
         report = build_technical_command_center_report("TST", {"daily_1y": []}, warnings=["5m fetch failed"])
 

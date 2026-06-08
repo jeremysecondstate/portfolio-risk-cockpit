@@ -380,12 +380,183 @@ def _ranked_rows_panel(parent: ttk.Frame, title: str, rows: list[str], *, status
         text = truncate_with_detail(row, 320)
         if text.truncated:
             full_detail.append(text.detail)
+        fields = _evidence_detail_fields(row)
         tk.Label(box, text=str(index), bg=colors["bg"], fg=colors["fg"], font=("Segoe UI", 8, "bold"), width=3).grid(row=index - 1, column=0, sticky="nw", padx=(10, 8), pady=(8 if index == 1 else 4, 4))
         tk.Frame(box, bg=colors["bar"], width=4).grid(row=index - 1, column=1, sticky="nsw", pady=(8 if index == 1 else 4, 4))
-        ttk.Label(box, text=text.display, style="Subtle.TLabel", wraplength=1060, justify=tk.LEFT).grid(row=index - 1, column=2, sticky="ew", padx=(10, 12), pady=(8 if index == 1 else 4, 4))
+        if fields:
+            _evidence_field_grid(box, fields).grid(row=index - 1, column=2, sticky="ew", padx=(10, 12), pady=(8 if index == 1 else 4, 4))
+        else:
+            ttk.Label(box, text=text.display, style="Subtle.TLabel", wraplength=1060, justify=tk.LEFT).grid(row=index - 1, column=2, sticky="ew", padx=(10, 12), pady=(8 if index == 1 else 4, 4))
     if full_detail:
         _collapsible_detail(box, "Untruncated Row Detail", "\n\n".join(full_detail)).grid(row=len(rows) + 1, column=0, columnspan=3, sticky="ew", padx=10, pady=(6, 10))
     return box
+
+
+def _evidence_field_grid(parent: ttk.Frame, fields: list[tuple[str, str]]) -> ttk.Frame:
+    frame = ttk.Frame(parent, style="Panel.TFrame")
+    frame.columnconfigure(1, weight=1)
+    for row_index, (label, value) in enumerate(fields):
+        clean_value = " ".join(str(value or "").split())
+        clipped = truncate_with_detail(clean_value, 260)
+        tk.Label(
+            frame,
+            text=label.upper(),
+            bg=PANEL_BG,
+            fg=MUTED,
+            font=("Segoe UI", 8, "bold"),
+            anchor="w",
+            width=16,
+        ).grid(row=row_index, column=0, sticky="nw", padx=(0, 10), pady=(0 if row_index == 0 else 3, 3))
+        ttk.Label(
+            frame,
+            text=clipped.display,
+            style="Subtle.TLabel",
+            wraplength=900,
+            justify=tk.LEFT,
+        ).grid(row=row_index, column=1, sticky="ew", pady=(0 if row_index == 0 else 3, 3))
+    return frame
+
+
+def _evidence_detail_fields(row: str) -> list[tuple[str, str]]:
+    text = " ".join(str(row or "").split())
+    if not text:
+        return []
+
+    pipe_parts = [part.strip() for part in text.split(" | ") if part.strip()]
+    if len(pipe_parts) >= 5:
+        return _trim_evidence_fields(
+            [
+                ("Component", pipe_parts[0]),
+                ("Vote", pipe_parts[1]),
+                ("Confidence", pipe_parts[2]),
+                ("Read", pipe_parts[3]),
+                ("Finding", " | ".join(pipe_parts[4:])),
+            ]
+        )
+    if len(pipe_parts) == 4:
+        return _trim_evidence_fields(
+            [
+                ("Component", pipe_parts[0]),
+                ("Vote", pipe_parts[1]),
+                ("Read", pipe_parts[2]),
+                ("Finding", pipe_parts[3]),
+            ]
+        )
+    if len(pipe_parts) == 3 and re.match(r"^[+\-]?\d", pipe_parts[1]):
+        return _trim_evidence_fields([("Component", pipe_parts[0]), ("Vote", pipe_parts[1]), ("Finding", pipe_parts[2])])
+
+    component_vote = re.match(
+        r"^(?P<component>[^:\n]{2,90}):\s*(?P<vote>[+\-]?\d+(?:\.\d+)?(?:\s*/\s*100|%)?)\s*(?:[-:]\s*)?(?P<tail>.*)$",
+        text,
+    )
+    if component_vote:
+        fields = [
+            ("Component", component_vote.group("component").strip()),
+            ("Vote", component_vote.group("vote").strip()),
+        ]
+        tail = component_vote.group("tail").strip()
+        fields.extend(_keyed_evidence_fields(tail) or _heuristic_evidence_fields(tail))
+        return _trim_evidence_fields(fields)
+
+    keyed = _keyed_evidence_fields(text)
+    if keyed:
+        return _trim_evidence_fields(keyed)
+
+    if len(text) >= 140 and ":" in text:
+        component, finding = text.split(":", 1)
+        return _trim_evidence_fields([("Component", component), *_heuristic_evidence_fields(finding)])
+    return []
+
+
+def _keyed_evidence_fields(text: str) -> list[tuple[str, str]]:
+    labels = (
+        "Component",
+        "Vote",
+        "Finding",
+        "Signals",
+        "Signal",
+        "Missing",
+        "Read",
+        "Action / Verify next",
+        "Action",
+        "Verify next",
+        "Status",
+        "Confidence",
+        "Reason",
+    )
+    pattern = re.compile(r"\b(" + "|".join(re.escape(label) for label in labels) + r")\s*:\s*", re.IGNORECASE)
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return []
+    fields: list[tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        label = _normalize_evidence_label(match.group(1))
+        value = text[start:end].strip(" .;-")
+        if value:
+            fields.append((label, value))
+    return fields
+
+
+def _heuristic_evidence_fields(text: str) -> list[tuple[str, str]]:
+    clean = text.strip(" .;-")
+    if not clean:
+        return []
+    fields: list[tuple[str, str]] = []
+    finding: list[str] = []
+    signals: list[str] = []
+    missing: list[str] = []
+    actions: list[str] = []
+    for sentence in re.split(r"(?<=[.;])\s+", clean):
+        part = sentence.strip(" .;")
+        if not part:
+            continue
+        lower = part.lower()
+        if lower.startswith("missing") or " no " in lower or "unavailable" in lower or "not loaded" in lower:
+            missing.append(part)
+        elif lower.startswith("action") or lower.startswith("verify") or "refresh" in lower or "verify" in lower:
+            actions.append(part)
+        elif "signal" in lower or "volume" in lower or "vwap" in lower or "price" in lower or "trend" in lower:
+            signals.append(part)
+        else:
+            finding.append(part)
+    if finding:
+        fields.append(("Finding", " ".join(finding)))
+    if signals:
+        fields.append(("Signals", " ".join(signals)))
+    if missing:
+        fields.append(("Missing", " ".join(missing)))
+    if actions:
+        fields.append(("Action / Verify next", " ".join(actions)))
+    return fields or [("Finding", clean)]
+
+
+def _normalize_evidence_label(label: str) -> str:
+    lower = label.lower()
+    if lower == "signal":
+        return "Signals"
+    if lower in {"action", "verify next", "action / verify next"}:
+        return "Action / Verify next"
+    if lower == "reason":
+        return "Finding"
+    return label[:1].upper() + label[1:].lower()
+
+
+def _trim_evidence_fields(fields: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
+    result: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for label, value in fields:
+        clean_label = _normalize_evidence_label(str(label or "").strip())
+        clean_value = " ".join(str(value or "").split())
+        if not clean_label or not clean_value:
+            continue
+        key = f"{clean_label}:{clean_value}"
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append((clean_label, clean_value))
+    return result[:7]
 
 
 def _collapsible_detail(parent: ttk.Frame, title: str, text: str) -> ttk.LabelFrame:
