@@ -16,6 +16,16 @@ def install_workspace_day_pnl_extension(app_cls: Type[tk.Tk]) -> None:
     workspace._workspace_holding_rows = _workspace_holding_rows_with_day_pnl
     workspace._populate_workspace_holdings_table = _populate_workspace_holdings_table_with_day_pnl
 
+    # schwab_trading_tab imports the holdings-table builder directly, then rebuilds
+    # the Schwab account area into Holdings/Open Orders/Recent Orders tabs. Patch
+    # that imported reference too so the Schwab Account > Holdings table gets the
+    # same Day P&L column as the Hyperliquid balances table.
+    try:
+        from app.ui import schwab_trading_tab as schwab_workspace
+    except Exception:
+        return
+    schwab_workspace._workspace_holdings_table = _workspace_holdings_table_with_day_pnl
+
 
 def _workspace_holdings_table_with_day_pnl(parent: ttk.Frame, include_custom_pnl: bool = False) -> ttk.Treeview:
     columns = ("symbol", "type", "qty", "last", "value", "pnl", "day_pnl")
