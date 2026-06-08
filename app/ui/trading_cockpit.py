@@ -96,8 +96,6 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         ttk.Button(button_bar, text="NOT UNIQUE BUTTON", command=self.show_live_submit_safety_review).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="LIVE Submit", command=self.submit_live_schwab_order).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Position Size", command=self.show_position_size).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(button_bar, text="Order Checklist", command=self.show_manual_checklist).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(button_bar, text="Submit Paper Order", command=self.submit_order).pack(side=tk.RIGHT)
 
         ttk.Label(ticket, textvariable=self.schwab_status_var, style="Subtle.TLabel").grid(row=6, column=0, columnspan=4, sticky="w", pady=(8, 0))
 

@@ -589,7 +589,6 @@ def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
     # _add_action_button(actions, row=0, column=0, text="Connect Schwab", command=schwab_action("connect_schwab", "run_schwab_preview"))
     # _add_action_button(actions, row=0, column=1, text="Refresh Account", command=schwab_action("refresh_schwab_account", "refresh_portfolio"))
     # _add_action_button(actions, row=1, column=1, text="Position Size", command=schwab_action("show_position_size"))
-    # _add_action_button(actions, row=2, column=0, text="Order Checklist", command=schwab_action("show_manual_checklist"))
 
     show_ipo_pipeline = getattr(self, "show_ipo_pipeline", None)
     if callable(show_ipo_pipeline):

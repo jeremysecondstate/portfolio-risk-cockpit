@@ -1441,9 +1441,7 @@ def _build_schwab_trading_tab(
     _add_workspace_button(actions, row=1, column=2, text="Position Size", command=schwab_action("show_position_size"))
     _add_workspace_button(actions, row=2, column=0, text="Recent Orders", command=schwab_action("load_selected_recent_orders", "load_schwab_open_orders"))
     _add_workspace_button(actions, row=2, column=1, text="Open Only", command=schwab_action("load_selected_open_orders_only", "load_schwab_open_orders_only"))
-    _add_workspace_button(actions, row=2, column=2, text="Order Checklist", command=schwab_action("show_manual_checklist"))
     _add_workspace_button(actions, row=3, column=0, text="Cancel Order", command=schwab_action("cancel_selected_order", "show_cancel_order_placeholder"), style="Danger.TButton")
-    _add_workspace_button(actions, row=3, column=1, text="NOT UNIQUE BUTTON", command=schwab_action("show_live_submit_safety_review"))
     _add_workspace_button(actions, row=3, column=2, text="LIVE Submit", command=schwab_action("submit_live_schwab_order"), style="Danger.TButton")
 
     _set_workspace_text(

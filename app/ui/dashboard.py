@@ -15,7 +15,6 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 from app.brokers.paper import PaperBroker
-from app.core.order_checklist import build_manual_order_checklist
 from app.core.order_models import (
     SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES,
     OrderRequest,
@@ -169,7 +168,6 @@ class PortfolioRiskCockpitApp(tk.Tk):
         ttk.Button(button_bar, text="Open Only", command=self.load_schwab_open_orders_only).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Cancel Order", command=self.show_cancel_order_placeholder).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Position Size", command=self.show_position_size).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(button_bar, text="Order Checklist", command=self.show_manual_checklist).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Button(button_bar, text="Submit Paper Order", command=self.submit_order).pack(side=tk.RIGHT)
 
         results = ttk.LabelFrame(parent, text="Risk Preview + Instructions", style="Card.TLabelframe")
@@ -896,14 +894,6 @@ class PortfolioRiskCockpitApp(tk.Tk):
         )
         self.quantity_var.set(str(plan.suggested_quantity))
         self._set_preview_text(text)
-
-    def show_manual_checklist(self) -> None:
-        if self.last_preview is None:
-            self.preview_order()
-        if self.last_preview is None:
-            return
-        checklist = build_manual_order_checklist(self.last_preview)
-        self._set_preview_text(checklist)
 
     def submit_order(self) -> None:
         try:
