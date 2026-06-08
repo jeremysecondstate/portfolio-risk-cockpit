@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import tkinter as tk
+from tkinter import ttk
 from types import SimpleNamespace
 import unittest
 
@@ -17,6 +19,12 @@ from app.ui.schwab_research_workspace_extension import (
     _capital_structure_empirical_cards,
     _capital_structure_empirical_note_rows,
     _capital_structure_empirical_supply_rows,
+    _bind_notebook_tab_detach_drag,
+    _current_research_tab_detail,
+    _detail_button_text,
+    _open_readout_popout,
+    _readout_launcher,
+    _set_research_text,
     _technical_capital_structure_cards,
     _technical_capital_structure_note_rows,
     _technical_capital_structure_supply_rows,
@@ -73,6 +81,26 @@ def _capital_indicator(**overrides: object) -> CapitalStructureIndicatorRead:
     return CapitalStructureIndicatorRead(**values)  # type: ignore[arg-type]
 
 
+def _empty_terms() -> SimpleNamespace:
+    return SimpleNamespace(
+        common_share_classes=[],
+        preferred_series=[],
+        warrants=[],
+        convertibles=[],
+        offering_programs=[],
+        ads_adr_structures=[],
+    )
+
+
+def _tk_root(testcase: unittest.TestCase) -> tk.Tk:
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        testcase.skipTest(f"Tk display unavailable: {exc}")
+    root.withdraw()
+    return root
+
+
 class SchwabTechnicalCommandCenterUiTests(unittest.TestCase):
     def test_command_center_rows_tolerate_missing_report(self) -> None:
         setup_cards = _technical_setup_cards(None)
@@ -93,6 +121,28 @@ class SchwabTechnicalCommandCenterUiTests(unittest.TestCase):
         self.assertEqual(_technical_capital_structure_cards(report)[0].label, "No Parsed Supply")
         self.assertIn("No capital-structure", _technical_capital_structure_supply_rows(report)[0][-1])
         self.assertEqual(_technical_capital_structure_note_rows(report)[0][0], "Status")
+
+    def test_capital_structure_no_level_rows_explain_pressure_report(self) -> None:
+        pressure = SimpleNamespace(
+            read="High",
+            filings_analyzed=3,
+            supply_overhang_score=67,
+            possible_supply_levels=[],
+            parsed_terms=_empty_terms(),
+            signals=[SimpleNamespace(label="Shelf / registration capacity")],
+            warnings=[],
+            explanation_lines=["High pressure came from recent registration and resale language."],
+        )
+        report = SimpleNamespace(capital_structure_indicator=None, capital_structure_pressure=pressure)
+
+        cards = _technical_capital_structure_cards(report)
+        supply_rows = _technical_capital_structure_supply_rows(report)
+        note_rows = _technical_capital_structure_note_rows(report)
+
+        self.assertEqual(cards[0].label, "No Source Level")
+        self.assertIn("no supported warrant exercise", supply_rows[0][-1])
+        self.assertIn("no supply level is inferred", supply_rows[0][-1])
+        self.assertIn(("Explanation", "High pressure came from recent registration and resale language."), note_rows)
 
     def test_capital_structure_cards_and_rows_surface_clean_indicator(self) -> None:
         report = SimpleNamespace(capital_structure_indicator=_capital_indicator())
@@ -167,20 +217,12 @@ class SchwabTechnicalCommandCenterUiTests(unittest.TestCase):
         self.assertTrue(any(row[0] == "Empirical supply" for row in note_rows))
 
     def test_capital_structure_pressure_status_distinguishes_no_level_from_failure(self) -> None:
-        empty_terms = SimpleNamespace(
-            common_share_classes=[],
-            preferred_series=[],
-            warrants=[],
-            convertibles=[],
-            offering_programs=[],
-            ads_adr_structures=[],
-        )
         no_level = SimpleNamespace(
             read="Low",
             filings_analyzed=2,
             supply_overhang_score=0,
             possible_supply_levels=[],
-            parsed_terms=empty_terms,
+            parsed_terms=_empty_terms(),
             signals=[],
             warnings=[],
         )
@@ -189,13 +231,79 @@ class SchwabTechnicalCommandCenterUiTests(unittest.TestCase):
             filings_analyzed=0,
             supply_overhang_score=0,
             possible_supply_levels=[],
-            parsed_terms=empty_terms,
+            parsed_terms=_empty_terms(),
             signals=[],
             warnings=["Capital structure overlay unavailable: SEC recent filings fetch failed."],
         )
 
         self.assertEqual(_capital_structure_pressure_status(no_level).status, "no parsed supply level")
         self.assertEqual(_capital_structure_pressure_status(failed).status, "error")
+
+    def test_capital_structure_pressure_status_keeps_signal_context_fresh(self) -> None:
+        signal_no_level = SimpleNamespace(
+            read="High",
+            filings_analyzed=4,
+            supply_overhang_score=67,
+            possible_supply_levels=[],
+            parsed_terms=_empty_terms(),
+            signals=[SimpleNamespace(label="Shelf / registration capacity")],
+            warnings=[],
+        )
+
+        status = _capital_structure_pressure_status(signal_no_level)
+
+        self.assertEqual(status.status, "fresh/cache")
+        self.assertIn("no source-backed supply price level", status.message)
+
+    def test_detail_button_text_formats_popout_content(self) -> None:
+        text = _detail_button_text("Warnings", ["First warning", "Second warning"])
+
+        self.assertIn("Warnings", text)
+        self.assertIn("- First warning", text)
+        self.assertIn("- Second warning", text)
+
+    def test_readout_launcher_reuses_and_refreshes_popout(self) -> None:
+        root = _tk_root(self)
+        try:
+            frame = ttk.Frame(root)
+            frame.grid()
+            source = _readout_launcher(frame, title="Warnings", button_text="Warnings", row=0)
+            self.assertEqual(source._readout_button.cget("text"), "Warnings")  # type: ignore[attr-defined]
+
+            _set_research_text(source, "First warning")
+            _open_readout_popout(source)
+            window = source._readout_window  # type: ignore[attr-defined]
+            target = source._readout_popout_text  # type: ignore[attr-defined]
+            self.assertTrue(window.winfo_exists())
+            self.assertIn("First warning", target.get("1.0", tk.END))
+
+            _set_research_text(source, "Updated warning")
+            self.assertIn("Updated warning", target.get("1.0", tk.END))
+            _open_readout_popout(source)
+            self.assertIs(source._readout_window, window)  # type: ignore[attr-defined]
+        finally:
+            root.destroy()
+
+    def test_focus_current_tab_detail_and_detach_binding_still_work(self) -> None:
+        root = _tk_root(self)
+        try:
+            notebook = ttk.Notebook(root)
+            notebook.grid()
+            tab = ttk.Frame(notebook)
+            notebook.add(tab, text="Technicals")
+            notebook.select(tab)
+            root.schwab_research_tabs = notebook  # type: ignore[attr-defined]
+
+            technical_frame = ttk.Frame(root)
+            detail = tk.Text(technical_frame)
+            technical_frame.detail_text = detail  # type: ignore[attr-defined]
+            root.schwab_research_technicals_frame = technical_frame  # type: ignore[attr-defined]
+
+            self.assertIs(_current_research_tab_detail(root), detail)
+            _bind_notebook_tab_detach_drag(root, notebook)
+            self.assertTrue(notebook.bind("<B1-Motion>"))
+        finally:
+            root.destroy()
 
     def test_command_center_rows_surface_existing_report_data(self) -> None:
         report = build_technical_command_center_report(
