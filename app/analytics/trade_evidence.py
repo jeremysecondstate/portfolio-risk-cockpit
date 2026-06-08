@@ -544,6 +544,10 @@ def event_risk_layer(
     missing: list[str] = ["Forward CPI/FOMC/jobs/Fed-speaker/Treasury-auction calendar hooks are not configured in this v1."]
     if any(status.source == "SEC filings/earnings" and status.status == "error" for status in statuses):
         missing.append("SEC earnings/filing layer errored.")
+    if any(status.source in {"Earnings calendar", "Upcoming earnings calendar"} and status.status == "not configured" for status in statuses):
+        missing.append("Upcoming earnings calendar not configured. Set ALPHA_VANTAGE_API_KEY to enable.")
+    if any(status.source == "Recent EDGAR earnings" and status.status == "error" for status in statuses):
+        missing.append("Recent EDGAR earnings source failed; run / refresh Earnings Radar.")
     label = _layer_label(supportive_score, good="Event risk manageable", mixed="Event risk needs caution", bad="Event risk dominates", none="Event risk no-read")
     return EvidenceLayer(label, _status_from_score(supportive_score), supportive_score, lines, missing)
 
@@ -1042,10 +1046,25 @@ def _missing_from_statuses(statuses: list[DataSourceStatus]) -> list[str]:
     missing: list[str] = []
     for status in statuses:
         if status.status == "error":
-            missing.append(f"{status.source} error: {status.message or 'unavailable'}.")
+            missing.append(f"{status.source} error: {status.message or 'unavailable'}. {_status_action(status)}")
+        elif status.status == "not configured":
+            missing.append(f"{status.source} not configured. {_status_action(status)}")
         elif status.status in {"cached", "stale"}:
             missing.append(f"{status.source} is {status.status}; confidence is lower than fresh data.")
+        elif status.status in {"no upcoming event", "no event found", "no recent earnings found", "no parsed supply level"}:
+            missing.append(f"{status.source}: {status.status}; {status.message or 'no actionable item found'}.")
     return missing
+
+
+def _status_action(status: DataSourceStatus) -> str:
+    text = f"{status.source} {status.status} {status.message}".lower()
+    if "earnings calendar" in text:
+        return "Set ALPHA_VANTAGE_API_KEY to enable upcoming earnings calendar."
+    if "edgar" in text or "sec filings/earnings" in text:
+        return "Run / refresh Earnings Radar to populate recent EDGAR earnings context."
+    if "capital structure" in text:
+        return "Run SEC capital-structure scan or verify ticker has filings with parsed supply levels."
+    return ""
 
 
 def _extend_section(lines: list[str], title: str, rows: list[str]) -> None:

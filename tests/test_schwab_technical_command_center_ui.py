@@ -13,6 +13,7 @@ from app.analytics.technical_analysis import (
 from app.ui.schwab_research_workspace_extension import (
     PRC_PRESSURE_LINE_NOTICE,
     CAPITAL_STRUCTURE_LEVEL_DISCLAIMER,
+    _capital_structure_pressure_status,
     _capital_structure_empirical_cards,
     _capital_structure_empirical_note_rows,
     _capital_structure_empirical_supply_rows,
@@ -164,6 +165,37 @@ class SchwabTechnicalCommandCenterUiTests(unittest.TestCase):
         self.assertEqual(supply_rows[0][1], "$5.00")
         self.assertEqual(supply_rows[0][2], "+2.50%")
         self.assertTrue(any(row[0] == "Empirical supply" for row in note_rows))
+
+    def test_capital_structure_pressure_status_distinguishes_no_level_from_failure(self) -> None:
+        empty_terms = SimpleNamespace(
+            common_share_classes=[],
+            preferred_series=[],
+            warrants=[],
+            convertibles=[],
+            offering_programs=[],
+            ads_adr_structures=[],
+        )
+        no_level = SimpleNamespace(
+            read="Low",
+            filings_analyzed=2,
+            supply_overhang_score=0,
+            possible_supply_levels=[],
+            parsed_terms=empty_terms,
+            signals=[],
+            warnings=[],
+        )
+        failed = SimpleNamespace(
+            read="Unknown",
+            filings_analyzed=0,
+            supply_overhang_score=0,
+            possible_supply_levels=[],
+            parsed_terms=empty_terms,
+            signals=[],
+            warnings=["Capital structure overlay unavailable: SEC recent filings fetch failed."],
+        )
+
+        self.assertEqual(_capital_structure_pressure_status(no_level).status, "no parsed supply level")
+        self.assertEqual(_capital_structure_pressure_status(failed).status, "error")
 
     def test_command_center_rows_surface_existing_report_data(self) -> None:
         report = build_technical_command_center_report(

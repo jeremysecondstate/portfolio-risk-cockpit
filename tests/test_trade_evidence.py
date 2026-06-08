@@ -3,9 +3,9 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from app.analytics.stock_research import AdvancedIndicatorSnapshot
+from app.analytics.stock_research import AdvancedIndicatorSnapshot, DataSourceStatus
 from app.analytics.technical_analysis import Candle, TimeframeSpec, build_timeframe_technical_snapshot
-from app.analytics.trade_evidence import multi_timeframe_layer
+from app.analytics.trade_evidence import _missing_from_statuses, multi_timeframe_layer
 
 
 def _market_ms(year: int, month: int, day: int, hour: int, minute: int) -> int:
@@ -90,6 +90,21 @@ class TradeEvidenceTests(unittest.TestCase):
         self.assertTrue(any("Intraday timing" in line for line in layer.lines))
         self.assertFalse(any("Intraday 5m/15m technical context" in item for item in layer.missing))
         self.assertIsNotNone(layer.score)
+
+    def test_missing_from_statuses_distinguishes_provider_states(self) -> None:
+        rows = _missing_from_statuses(
+            [
+                DataSourceStatus("Upcoming earnings calendar", "not configured", "2026-06-06T17:45:00+00:00", "Set ALPHA_VANTAGE_API_KEY to enable."),
+                DataSourceStatus("Earnings calendar", "no event found", "2026-06-06T17:45:00+00:00", "No same-day event."),
+                DataSourceStatus("SEC capital structure pressure", "no parsed supply level", "2026-06-06T17:45:00+00:00", "Scan loaded but no level parsed."),
+                DataSourceStatus("Recent EDGAR earnings", "error", "2026-06-06T17:45:00+00:00", "SEC source failed."),
+            ]
+        )
+
+        self.assertTrue(any("ALPHA_VANTAGE_API_KEY" in row for row in rows))
+        self.assertTrue(any("no event found" in row for row in rows))
+        self.assertTrue(any("no parsed supply level" in row for row in rows))
+        self.assertTrue(any("Earnings Radar" in row for row in rows))
 
 
 if __name__ == "__main__":

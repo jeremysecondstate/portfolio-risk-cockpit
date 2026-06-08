@@ -4,6 +4,7 @@ import math
 import statistics
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Iterable, Sequence
 
 
@@ -107,6 +108,7 @@ def build_empirical_recommendation_intelligence(
     filings_lines: Sequence[str] | None = None,
     macro_snapshot: Any | None = None,
     capital_structure_indicator: Any | None = None,
+    capital_structure_pressure: Any | None = None,
     as_of: datetime | date | None = None,
 ) -> EmpiricalRecommendationIntelligenceRead:
     """Build deterministic empirical recommendation context.
@@ -119,7 +121,11 @@ def build_empirical_recommendation_intelligence(
     clean_symbol = str(symbol or "UNKNOWN").strip().upper() or "UNKNOWN"
     candles = list(historical_candles or ())
     option = selected_option_candidate or _best_option_candidate(_normalise_candidates(option_candidates))
-    active_capital = capital_structure_indicator or _get(command_center_report, "capital_structure_indicator")
+    active_capital = (
+        capital_structure_indicator
+        or _get(command_center_report, "capital_structure_indicator")
+        or _capital_pressure_context_indicator(capital_structure_pressure or _get(command_center_report, "capital_structure_pressure"))
+    )
 
     replay = build_setup_replay_read(candles)
     catalyst = build_catalyst_collision_read(
@@ -900,6 +906,55 @@ def _normalise_candidates(value: Sequence[Any] | Any | None) -> list[Any]:
         return list(value)
     except TypeError:
         return [value]
+
+
+def _capital_pressure_context_indicator(report: Any | None) -> Any | None:
+    if report is None:
+        return None
+    read = str(_get(report, "read") or "").strip()
+    if read.lower() == "unknown" and not _capital_pressure_is_no_parsed_context(report):
+        return None
+    levels = _list(_get(report, "possible_supply_levels"))
+    nearest = levels[0] if levels else None
+    level = _to_float(_get(nearest, "price"))
+    level_label = _get(nearest, "label") if nearest is not None else None
+    parsed_count = _capital_pressure_parsed_term_count(report)
+    if parsed_count == 0 and not levels:
+        context_read = "no_parsed_level"
+    elif read.lower() == "high":
+        context_read = "dilution_sensitive"
+    elif read.lower() == "low":
+        context_read = "clean"
+    else:
+        context_read = "supply_context"
+    return SimpleNamespace(
+        read=context_read,
+        chase_risk_score=0.0,
+        nearest_supply_level=level,
+        nearest_supply_level_label=level_label,
+        warnings=() if context_read == "no_parsed_level" else tuple(_list(_get(report, "warnings"))),
+    )
+
+
+def _capital_pressure_is_no_parsed_context(report: Any | None) -> bool:
+    warnings = " ".join(str(item or "").lower() for item in _list(_get(report, "warnings")))
+    return "no recent capital-structure sec filing forms" in warnings or (_to_float(_get(report, "filings_analyzed")) or 0.0) > 0
+
+
+def _capital_pressure_parsed_term_count(report: Any | None) -> int:
+    parsed = _get(report, "parsed_terms")
+    total = 0
+    for key in (
+        "common_share_classes",
+        "preferred_series",
+        "warrants",
+        "convertibles",
+        "offering_programs",
+        "ads_adr_structures",
+    ):
+        total += len(_list(_get(parsed, key)))
+    total += len(_list(_get(report, "signals")))
+    return total
 
 
 def _candle_row(candle: Any) -> dict[str, float] | None:

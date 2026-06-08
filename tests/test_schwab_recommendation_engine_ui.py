@@ -242,6 +242,28 @@ class SchwabRecommendationEngineUiTests(unittest.TestCase):
         self.assertTrue(any("Macro backdrop" in line for line in gap_lines))
         self.assertTrue(any("source check" in line for line in empty_lines))
 
+    def test_data_confidence_gaps_include_source_remediation(self) -> None:
+        read = _read(
+            data_confidence=DataConfidenceRead(
+                "Medium",
+                62.0,
+                (
+                    DataSourceConfidence("Upcoming earnings calendar", "not-configured", 50.0, "Set ALPHA_VANTAGE_API_KEY to enable.", weight=0.4),
+                    DataSourceConfidence("SEC filings/earnings", "error", 15.0, "SEC source failed.", weight=0.4),
+                    DataSourceConfidence("SEC capital structure pressure", "informational", 62.0, "No parsed supply level.", weight=0.4),
+                ),
+                missing=("SEC filings/earnings",),
+                stale=("Upcoming earnings calendar",),
+                reason="Provider states are mixed.",
+            )
+        )
+
+        lines = _recommendation_data_gap_lines(read, limit=5)
+
+        self.assertTrue(any("Set ALPHA_VANTAGE_API_KEY" in line for line in lines))
+        self.assertTrue(any("Run / refresh Earnings Radar" in line for line in lines))
+        self.assertFalse(any(line.startswith("Missing/error: SEC capital structure pressure") for line in lines))
+
     def test_reward_risk_and_detail_text_include_advice_boundary(self) -> None:
         read = _read(reward_risk=_reward_risk(summary="Reward/risk is not defined yet.", ev=None))
 

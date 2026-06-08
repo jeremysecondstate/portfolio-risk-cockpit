@@ -221,6 +221,70 @@ class RecommendationEngineTests(unittest.TestCase):
         self.assertIn("Broken feed", confidence.missing)
         self.assertLess(confidence.score, 80)
 
+    def test_data_confidence_distinguishes_provider_source_states(self) -> None:
+        confidence = build_data_confidence_read(
+            command_center_report=_supportive_report(),
+            capital_structure_indicator=_capital(),
+            macro_text="Official Macro Snapshot\nNeutral/mixed.",
+            fundamentals_text="Latest reported fundamentals: revenue growth and cash flow.",
+            option_candidates=[_option()],
+            portfolio_context=_context(),
+            source_statuses=[
+                SimpleNamespace(source="Upcoming earnings calendar", status="not configured", fetched_at="2026-06-06T17:45:00+00:00", message="Set ALPHA_VANTAGE_API_KEY to enable."),
+                SimpleNamespace(source="Earnings calendar", status="no event found", fetched_at="2026-06-06T17:45:00+00:00", message="No same-day event."),
+                SimpleNamespace(source="SEC capital structure pressure", status="no parsed supply level", fetched_at="2026-06-06T17:45:00+00:00", message="Scan loaded but no level parsed."),
+                SimpleNamespace(source="SEC filings/earnings", status="error", fetched_at="2026-06-06T17:45:00+00:00", message="Failed."),
+            ],
+            as_of=AS_OF,
+        )
+
+        by_source = {source.source: source for source in confidence.sources}
+        self.assertEqual(by_source["Upcoming earnings calendar"].status, "not-configured")
+        self.assertEqual(by_source["Earnings calendar"].status, "informational")
+        self.assertEqual(by_source["SEC capital structure pressure"].status, "informational")
+        self.assertEqual(by_source["SEC filings/earnings"].status, "error")
+        self.assertIn("Upcoming earnings calendar", confidence.stale)
+        self.assertNotIn("Earnings calendar", confidence.missing)
+        self.assertNotIn("SEC capital structure pressure", confidence.missing)
+        self.assertIn("SEC filings/earnings", confidence.missing)
+
+    def test_capital_pressure_fallback_prevents_false_missing_capital_read(self) -> None:
+        empty_terms = SimpleNamespace(
+            common_share_classes=[],
+            preferred_series=[],
+            warrants=[],
+            convertibles=[],
+            offering_programs=[],
+            ads_adr_structures=[],
+        )
+        pressure = SimpleNamespace(
+            read="Low",
+            filings_analyzed=3,
+            supply_overhang_score=0.0,
+            possible_supply_levels=[],
+            parsed_terms=empty_terms,
+            signals=[],
+            warnings=[],
+            explanation_lines=["Capital-structure scan loaded with no parsed supply level."],
+            what_would_change=[],
+        )
+
+        read = build_recommendation_engine_read(
+            command_center_report=_supportive_report(),
+            capital_structure_pressure=pressure,
+            macro_text="Official Macro Snapshot\nNeutral/mixed.",
+            fundamentals_text="Latest reported fundamentals: revenue growth and cash flow.",
+            option_candidates=[_option()],
+            portfolio_context=_context(),
+            as_of=AS_OF,
+        )
+
+        by_key = {component.key: component for component in read.components}
+        by_source = {source.source: source for source in read.data_confidence.sources}
+        self.assertNotEqual(by_key["capital_structure_supply"].status, "no_read")
+        self.assertEqual(by_source["Capital structure"].status, "informational")
+        self.assertNotIn("Capital structure", read.data_confidence.missing)
+
     def test_evidence_scoring_is_bounded(self) -> None:
         read = build_recommendation_engine_read(
             command_center_report=SimpleNamespace(

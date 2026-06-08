@@ -139,6 +139,7 @@ from app.analytics.trade_evidence import (
     evidence_scorecards,
     format_trade_evidence_report,
 )
+from app.data.earnings_calendar import AlphaVantageEarningsCalendarClient, MISSING_API_KEY_MESSAGE
 from app.data.sec_edgar import SecEdgarClient, normalize_ticker
 from app.macro.analysis import format_macro_report
 from app.macro.models import MacroSnapshot
@@ -2011,13 +2012,7 @@ def _build_research_payload(session: Any, portfolio, symbol: str, *, ticket: Tec
             symbol,
             warnings=[f"Capital structure overlay unavailable: {exc}"],
         )
-    capital_status = "fresh/cache" if capital_structure_pressure.read != "Unknown" else "limited"
-    capital_message = (
-        f"{capital_structure_pressure.read} pressure; score {capital_structure_pressure.supply_overhang_score}/100."
-        if capital_structure_pressure.read != "Unknown"
-        else "; ".join(capital_structure_pressure.warnings[:2]) or "Capital structure overlay unavailable."
-    )
-    statuses.append(DataSourceStatus("SEC capital structure pressure", capital_status, _now(), capital_message))
+    statuses.append(_capital_structure_pressure_status(capital_structure_pressure))
     command_center_report = build_technical_command_center_report(
         symbol,
         command_timeframes,
@@ -2083,6 +2078,7 @@ def _build_research_payload(session: Any, portfolio, symbol: str, *, ticket: Tec
             symbol=symbol,
             command_center_report=command_center_report,
             capital_structure_indicator=command_center_report.capital_structure_indicator,
+            capital_structure_pressure=capital_structure_pressure,
             macro_read=decision.macro_backdrop,
             macro_text=macro_text,
             fundamental_read=recommendation_fundamental_read,
@@ -2143,6 +2139,70 @@ def _build_research_payload(session: Any, portfolio, symbol: str, *, ticket: Tec
         command_center_report=command_center_report,
         recommendation_engine_read=recommendation_engine_read,
     )
+
+
+def _capital_structure_pressure_status(report: Any | None) -> DataSourceStatus:
+    if report is None:
+        return DataSourceStatus(
+            "SEC capital structure pressure",
+            "error",
+            _now(),
+            "Capital-structure scan failed before a pressure report was created. Run SEC capital-structure scan or verify ticker filings.",
+        )
+    warnings = [str(warning or "") for warning in getattr(report, "warnings", [])]
+    warning_text = " ".join(warnings).lower()
+    if getattr(report, "read", "") != "Unknown":
+        level_count = len(getattr(report, "possible_supply_levels", []) or [])
+        parsed_count = _capital_pressure_parsed_term_count(report)
+        if level_count == 0 and parsed_count == 0:
+            return DataSourceStatus(
+                "SEC capital structure pressure",
+                "no parsed supply level",
+                _now(),
+                f"{getattr(report, 'filings_analyzed', 0)} filing(s) scanned; no filing-derived supply level was parsed.",
+            )
+        return DataSourceStatus(
+            "SEC capital structure pressure",
+            "fresh/cache",
+            _now(),
+            f"{getattr(report, 'read', 'Unknown')} pressure; score {getattr(report, 'supply_overhang_score', '--')}/100.",
+        )
+    if "no recent capital-structure sec filing forms" in warning_text:
+        return DataSourceStatus(
+            "SEC capital structure pressure",
+            "no parsed supply level",
+            _now(),
+            "No recent capital-structure SEC filing forms were found; no filing-derived supply level was parsed.",
+        )
+    if any(term in warning_text for term in ("fetch failed", "could not be loaded", "unavailable", "error")):
+        return DataSourceStatus(
+            "SEC capital structure pressure",
+            "error",
+            _now(),
+            "; ".join(warnings[:2]) or "Capital-structure scan failed.",
+        )
+    return DataSourceStatus(
+        "SEC capital structure pressure",
+        "limited",
+        _now(),
+        "; ".join(warnings[:2]) or "Capital-structure scan returned no actionable pressure read.",
+    )
+
+
+def _capital_pressure_parsed_term_count(report: Any | None) -> int:
+    parsed = getattr(report, "parsed_terms", None)
+    total = 0
+    for key in (
+        "common_share_classes",
+        "preferred_series",
+        "warrants",
+        "convertibles",
+        "offering_programs",
+        "ads_adr_structures",
+    ):
+        total += len(getattr(parsed, key, []) or [])
+    total += len(getattr(report, "signals", []) or [])
+    return total
 
 
 def _fetch_quote(session: Any, symbol: str) -> tuple[dict[str, Any] | None, DataSourceStatus]:
@@ -2332,6 +2392,7 @@ def _fetch_us_domestic_sec_layers(
         filings = active_client.recent_filings(symbol, forms=REPORT_FORMS, limit=10)
         release = active_client.latest_earnings_release(symbol)
         company_name = release.company.title if release else filings[0].company.title if filings else symbol
+        statuses.append(_upcoming_earnings_calendar_status(symbol))
         calendar_event = fetch_earnings_calendar_event(symbol)
         if calendar_event is not None:
             statuses.append(
@@ -2343,7 +2404,11 @@ def _fetch_us_domestic_sec_layers(
                 )
             )
         else:
-            statuses.append(DataSourceStatus("Earnings calendar", "not found", _now(), "No same-day or next-trading-day earnings event found."))
+            statuses.append(DataSourceStatus("Earnings calendar", "no event found", _now(), "No same-day or next-trading-day earnings event found."))
+        if release is not None:
+            statuses.append(DataSourceStatus("Recent EDGAR earnings", "fresh/cache", _now(), f"{release.filing.form} earnings source filed {release.filing.filing_date}."))
+        else:
+            statuses.append(DataSourceStatus("Recent EDGAR earnings", "no recent earnings found", _now(), "No recent 8-K earnings-release exhibit was found in the SEC scan."))
         company_release = (
             fetch_official_company_earnings_release(
                 symbol,
@@ -2369,6 +2434,8 @@ def _fetch_us_domestic_sec_layers(
         filings_lines = [f"{filing.form} filed {filing.filing_date} period {filing.report_date or '--'}: {filing.filing_url}" for filing in filings[:8]]
         statuses.append(DataSourceStatus("SEC filings/earnings", "fresh/cache", _now(), f"{len(filings)} recent filings scanned."))
     except Exception as exc:
+        statuses.append(_upcoming_earnings_calendar_status(symbol))
+        statuses.append(DataSourceStatus("Recent EDGAR earnings", "error", _now(), f"SEC earnings source failed: {exc}"))
         statuses.append(DataSourceStatus("SEC filings/earnings", "error", _now(), str(exc)))
         filings_lines = [f"SEC filings unavailable/error: {exc}"]
 
@@ -2381,6 +2448,32 @@ def _fetch_us_domestic_sec_layers(
         statuses.append(DataSourceStatus("SEC companyfacts", "error", _now(), str(exc)))
         fundamentals_text = f"Fundamentals\n\nSEC companyfacts unavailable/error: {exc}\n\nFor ETFs, issuer holdings, expense ratio, AUM, and sector exposure remain a future provider hook."
     return earnings_text, fundamentals_text, filings_lines, statuses
+
+
+def _upcoming_earnings_calendar_status(symbol: str) -> DataSourceStatus:
+    try:
+        client = AlphaVantageEarningsCalendarClient(timeout_seconds=6)
+        records = client.upcoming_earnings(horizon="3month", symbols=[symbol])
+    except Exception as exc:
+        return DataSourceStatus("Upcoming earnings calendar", "error", _now(), f"Calendar refresh failed: {exc}")
+
+    status_text = str(getattr(client, "last_status", "") or "")
+    if status_text == MISSING_API_KEY_MESSAGE or "not configured" in status_text.lower():
+        return DataSourceStatus("Upcoming earnings calendar", "not configured", _now(), MISSING_API_KEY_MESSAGE)
+    if records:
+        first = sorted(records, key=lambda item: item.report_date)[0]
+        return DataSourceStatus(
+            "Upcoming earnings calendar",
+            "fresh/cache",
+            _now(),
+            f"{first.symbol} upcoming report {first.report_date}; {len(records)} provider row(s) loaded.",
+        )
+    return DataSourceStatus(
+        "Upcoming earnings calendar",
+        "no upcoming event",
+        _now(),
+        status_text or "Provider configured but no upcoming earnings event was found for this symbol.",
+    )
 
 
 def _fetch_foreign_issuer_layers(
@@ -3025,11 +3118,18 @@ def _recommendation_data_gap_lines(read: Any | None, *, limit: int = 7) -> list[
     if read is None:
         return ["Recommendation-engine data confidence is unavailable."]
     data_confidence = _recommendation_get(read, "data_confidence")
+    source_rows = {
+        str(_recommendation_get(source, "source", "")): source
+        for source in _recommendation_list(_recommendation_get(data_confidence, "sources"))
+    }
     lines: list[str] = []
     for source in _recommendation_list(_recommendation_get(data_confidence, "missing")):
-        lines.append(f"Missing/error: {source}")
+        lines.append(_recommendation_data_gap_line("Missing/error", str(source), source_rows.get(str(source))))
     for source in _recommendation_list(_recommendation_get(data_confidence, "stale")):
-        lines.append(f"Stale/limited: {source}")
+        row = source_rows.get(str(source))
+        status = str(_recommendation_get(row, "status", "") or "")
+        prefix = "Not configured" if status == "not-configured" else "Stale/cache" if status in {"stale", "cached"} else "Limited"
+        lines.append(_recommendation_data_gap_line(prefix, str(source), row))
     for component in _recommendation_components(read):
         if str(_recommendation_get(component, "status", "")) == "no_read":
             vote = _recommendation_get(component, "vote")
@@ -3040,6 +3140,37 @@ def _recommendation_data_gap_lines(read: Any | None, *, limit: int = 7) -> list[
         return clean[:limit]
     source_count = len(_recommendation_list(_recommendation_get(data_confidence, "sources")))
     return [f"No major data-confidence gaps flagged across {source_count} source check(s)."]
+
+
+def _recommendation_data_gap_line(prefix: str, source: str, row: Any | None) -> str:
+    status = str(_recommendation_get(row, "status", "") or "").strip()
+    reason = str(_recommendation_get(row, "reason", "") or "").strip()
+    action = _source_remediation_line(source, status=status, reason=reason)
+    state = f" ({status})" if status else ""
+    reason_text = f" {reason}" if reason else ""
+    action_text = f" Action: {action}" if action else ""
+    return f"{prefix}: {source}{state}.{reason_text}{action_text}".strip()
+
+
+def _source_remediation_line(source: str, *, status: str = "", reason: str = "") -> str:
+    text = f"{source} {status} {reason}".lower()
+    if "upcoming earnings calendar" in text or "earnings calendar" in text:
+        if "not configured" in text or "alpha_vantage_api_key" in text:
+            return "Set ALPHA_VANTAGE_API_KEY to enable upcoming earnings calendar."
+        if "no event" in text or "no upcoming" in text:
+            return "No operator action is required unless an event is expected; refresh Earnings Radar/calendar after provider updates."
+        return "Refresh Earnings Radar or verify the upcoming earnings calendar provider."
+    if "recent edgar earnings" in text or "sec filings/earnings" in text or "sec earnings" in text:
+        return "Run / refresh Earnings Radar to populate recent EDGAR earnings context."
+    if "capital structure" in text:
+        return "Run SEC capital-structure scan or verify ticker has filings with parsed supply levels."
+    if "option" in text:
+        return "Load or refresh the Schwab option chain before using option-fit reads."
+    if "macro" in text:
+        return "Refresh the official macro feed; cached macro rows lower confidence."
+    if "price history" in text:
+        return "Refresh Schwab price history before upgrading the technical read."
+    return ""
 
 
 def _recommendation_engine_detail_text(read: Any | None, symbol: str) -> str:
@@ -4337,6 +4468,7 @@ def _refresh_payload_empirical_option_context(
         filings_lines=payload.filings_lines,
         macro_snapshot=payload.macro_snapshot,
         capital_structure_indicator=getattr(payload.command_center_report, "capital_structure_indicator", None),
+        capital_structure_pressure=getattr(payload.command_center_report, "capital_structure_pressure", None),
         as_of=datetime.now(timezone.utc),
     )
     updated_read = _recommendation_read_with_empirical_overlay(read, empirical)
@@ -5861,7 +5993,12 @@ def _source_status_text(statuses: list[DataSourceStatus]) -> str:
 
 
 def _source_status_lines(statuses: list[DataSourceStatus]) -> list[str]:
-    return [f"- {status.source}: {status.status}; fetched {status.fetched_at}; {status.message}" for status in statuses]
+    lines: list[str] = []
+    for status in statuses:
+        action = _source_remediation_line(status.source, status=status.status, reason=status.message)
+        action_text = f" Action: {action}" if action else ""
+        lines.append(f"- {status.source}: {status.status}; fetched {status.fetched_at}; {status.message}{action_text}")
+    return lines
 
 
 def _show_research_error(self: tk.Tk, symbol: str, error: Exception) -> None:

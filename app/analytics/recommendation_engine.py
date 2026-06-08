@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any, Iterable, Sequence
 
 from app.analytics.empirical_recommendation import (
@@ -100,6 +101,7 @@ def build_recommendation_engine_read(
     symbol: str | None = None,
     command_center_report: Any | None = None,
     capital_structure_indicator: Any | None = None,
+    capital_structure_pressure: Any | None = None,
     macro_read: Any | None = None,
     macro_text: str = "",
     fundamental_read: Any | None = None,
@@ -122,7 +124,12 @@ def build_recommendation_engine_read(
     """
 
     clean_symbol = _clean_symbol(symbol or _get(command_center_report, "symbol") or _get(portfolio_context, "symbol") or "")
-    active_capital_indicator = capital_structure_indicator or _get(command_center_report, "capital_structure_indicator")
+    active_capital_pressure = capital_structure_pressure or _get(command_center_report, "capital_structure_pressure")
+    active_capital_indicator = (
+        capital_structure_indicator
+        or _get(command_center_report, "capital_structure_indicator")
+        or _capital_pressure_context_indicator(active_capital_pressure)
+    )
     data_confidence = build_data_confidence_read(
         command_center_report=command_center_report,
         capital_structure_indicator=active_capital_indicator,
@@ -304,8 +311,8 @@ def build_data_confidence_read(
     score = _clamp(weighted_total / total_weight if total_weight else 0.0, 0.0, 100.0)
     grade = _data_confidence_grade(score)
     missing = tuple(row.source for row in rows if row.score < 45 or row.status in {"missing", "error", "unavailable"})
-    stale = tuple(row.source for row in rows if row.status in {"stale", "cached", "limited"} or (row.age_hours is not None and row.age_hours > 24))
-    reason = f"{grade} data confidence from {len(rows)} source checks; {len(missing)} missing/error and {len(stale)} stale/cached/limited."
+    stale = tuple(row.source for row in rows if row.status in {"stale", "cached", "limited", "not-configured"} or (row.age_hours is not None and row.age_hours > 24))
+    reason = f"{grade} data confidence from {len(rows)} source checks; {len(missing)} missing/error and {len(stale)} stale/cached/limited/not-configured."
     return DataConfidenceRead(
         grade=grade,
         score=round(score, 2),
@@ -353,6 +360,7 @@ def _build_empirical_read_if_available(
         filings_lines=filings_lines or (),
         macro_snapshot=macro_snapshot,
         capital_structure_indicator=capital_structure_indicator,
+        capital_structure_pressure=_get(command_center_report, "capital_structure_pressure"),
         as_of=as_of,
     )
 
@@ -764,11 +772,100 @@ def _prc_source_confidence(report: Any | None) -> DataSourceConfidence:
 
 def _capital_source_confidence(indicator: Any | None) -> DataSourceConfidence:
     if indicator is None:
-        return DataSourceConfidence("Capital structure", "missing", 38.0, "Capital-structure indicator is not loaded.", weight=0.70)
+        return DataSourceConfidence(
+            "Capital structure",
+            "missing",
+            38.0,
+            "Capital-structure indicator is not loaded. Run SEC capital-structure scan or verify ticker has filings with parsed supply levels.",
+            weight=0.70,
+        )
+    read = str(_get(indicator, "read") or "").lower()
+    if read == "no_parsed_level":
+        return DataSourceConfidence(
+            "Capital structure",
+            "informational",
+            62.0,
+            "Capital-structure scan loaded, but no filing-derived supply level was parsed. This is informational, not a scan failure.",
+            weight=0.70,
+        )
     source_count = _to_float(_get(indicator, "source_count")) or 0.0
     warnings = len(_list(_get(indicator, "warnings")))
     score = _clamp(58.0 + min(source_count, 5.0) * 7.0 - warnings * 4.0, 35.0, 90.0)
     return DataSourceConfidence("Capital structure", "loaded", score, f"Capital-structure indicator has {source_count:.0f} source(s) and {warnings} warning(s).", weight=0.70)
+
+
+def _capital_pressure_context_indicator(report: Any | None) -> Any | None:
+    if report is None:
+        return None
+    read = str(_get(report, "read") or "").strip()
+    warnings = _clean_lines(_list(_get(report, "warnings")), limit=4)
+    if read.lower() == "unknown" and not _capital_pressure_is_no_parsed_context(report):
+        return None
+
+    parsed_count = _capital_pressure_parsed_term_count(report)
+    levels = _list(_get(report, "possible_supply_levels"))
+    filings = int(_to_float(_get(report, "filings_analyzed")) or 0)
+    if parsed_count == 0 and not levels:
+        context_read = "no_parsed_level"
+        technical_score = 50.0
+        recommendation = "Capital-structure scan loaded but no filing-derived supply level was parsed; treat this as informational, not a failure."
+    else:
+        pressure = read.lower()
+        if pressure == "low":
+            context_read = "clean"
+            technical_score = 72.0
+        elif pressure == "high":
+            context_read = "dilution_sensitive"
+            technical_score = 42.0
+        else:
+            context_read = "supply_context"
+            technical_score = 56.0
+        recommendation = str(_first_line(_get(report, "what_would_change")) or "Capital-structure pressure scan is available as supply context.")
+
+    return SimpleNamespace(
+        technical_score=technical_score,
+        read=context_read,
+        supply_overhang_score=_to_float(_get(report, "supply_overhang_score")) or 0.0,
+        dilution_pressure_score=0.0,
+        warrant_conversion_proximity_score=0.0,
+        offering_activity_score=0.0,
+        float_quality_score=70.0,
+        foreign_issuer_confidence_modifier=0.0,
+        option_exposure_mismatch_score=0.0,
+        chase_risk_score=0.0,
+        nearest_supply_level=None,
+        nearest_supply_level_label=None,
+        nearest_supply_level_distance_percent=None,
+        source_count=filings,
+        explanation_lines=_clean_lines(_list(_get(report, "explanation_lines")), limit=4),
+        warnings=warnings if context_read != "no_parsed_level" else (),
+        recommendation_lines=(recommendation,),
+    )
+
+
+def _capital_pressure_is_no_parsed_context(report: Any | None) -> bool:
+    warnings = " ".join(str(item or "").lower() for item in _list(_get(report, "warnings")))
+    if "no recent capital-structure sec filing forms" in warnings:
+        return True
+    if (_to_float(_get(report, "filings_analyzed")) or 0.0) > 0:
+        return True
+    return False
+
+
+def _capital_pressure_parsed_term_count(report: Any | None) -> int:
+    parsed = _get(report, "parsed_terms")
+    total = 0
+    for key in (
+        "common_share_classes",
+        "preferred_series",
+        "warrants",
+        "convertibles",
+        "offering_programs",
+        "ads_adr_structures",
+    ):
+        total += len(_list(_get(parsed, key)))
+    total += len(_list(_get(report, "signals")))
+    return total
 
 
 def _macro_source_confidence(macro_read: Any | None, macro_text: str) -> DataSourceConfidence:
@@ -844,7 +941,15 @@ def _score_status_text(status: str) -> tuple[float, str]:
         return 15.0, "error"
     if "stale" in lower:
         return 35.0, "stale"
-    if "not found" in lower or "unavailable" in lower:
+    if "not configured" in lower:
+        return 50.0, "not-configured"
+    if "no parsed supply level" in lower or "no parsed level" in lower:
+        return 62.0, "informational"
+    if "no event" in lower or "no upcoming" in lower or "no recent earnings found" in lower:
+        return 58.0, "informational"
+    if "not found" in lower:
+        return 52.0, "informational"
+    if "unavailable" in lower:
         return 32.0, "missing"
     if "pending" in lower:
         return 45.0, "limited"
@@ -856,6 +961,8 @@ def _score_status_text(status: str) -> tuple[float, str]:
         return 86.0, "loaded"
     if "not-applicable" in lower or "not applicable" in lower:
         return 70.0, "not-applicable"
+    if "informational" in lower:
+        return 62.0, "informational"
     return 50.0, lower or "unknown"
 
 
