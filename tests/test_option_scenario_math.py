@@ -17,6 +17,7 @@ from app.analytics.research_workspace_insights import (
 )
 from app.analytics.empirical_recommendation import build_option_required_move_read
 from app.analytics.stock_research import AdvancedIndicatorSnapshot, GeneratedStockPosition, PortfolioSymbolContext
+from app.ui import schwab_research_workspace_extension as research_ui
 from app.ui.schwab_research_workspace_extension import _normalized_candidate_bar_rows
 from app.ui.schwab_research_workspace_extension import _option_required_move_card, _option_required_move_summary
 
@@ -391,6 +392,123 @@ class OptionScenarioMathTests(unittest.TestCase):
         self.assertEqual(normalized[1][1], 0)
         self.assertGreater(normalized[2][1], 0)
         self.assertEqual(normalized[0][2], "-$50.00")
+
+    def test_programmatic_candidate_selection_suppresses_treeview_callback(self) -> None:
+        callbacks: list[object] = []
+        app = SimpleNamespace(after_idle=lambda callback: callbacks.append(callback))
+
+        class FakeTree:
+            selected_iid = ""
+            focused_iid = ""
+            seen_iid = ""
+
+            def selection_set(self, iid: str) -> None:
+                self.selected_iid = iid
+                research_ui._show_selected_option_candidate(app)
+
+            def focus(self, iid: str) -> None:
+                self.focused_iid = iid
+
+            def see(self, iid: str) -> None:
+                self.seen_iid = iid
+
+        original_selected = research_ui._selected_option_candidate
+        research_ui._selected_option_candidate = lambda _app: (_ for _ in ()).throw(AssertionError("selection handler was not suppressed"))
+        try:
+            tree = FakeTree()
+            research_ui._select_option_candidate_row_silently(app, tree, "candidate_0")
+
+            self.assertEqual(tree.selected_iid, "candidate_0")
+            self.assertEqual(tree.focused_iid, "candidate_0")
+            self.assertEqual(tree.seen_iid, "candidate_0")
+            self.assertTrue(research_ui._option_candidate_selection_guard_active(app))
+            self.assertEqual(len(callbacks), 1)
+
+            callbacks[0]()
+            self.assertFalse(research_ui._option_candidate_selection_guard_active(app))
+        finally:
+            research_ui._selected_option_candidate = original_selected
+
+    def test_candidate_selection_handler_does_not_render_full_scenarios(self) -> None:
+        calls = {"greeks": 0, "option_scenarios": 0}
+        candidate = SimpleNamespace(
+            group="No-Trade",
+            strategy="No-trade / wait",
+            option_type="wait",
+            underlying_price=10.0,
+            contract_symbol="",
+        )
+
+        class FakeVar:
+            value = ""
+
+            def set(self, value: str) -> None:
+                self.value = value
+
+        class FakeTree:
+            rows: list[tuple] = []
+
+            def get_children(self) -> list[str]:
+                return [str(index) for index, _row in enumerate(self.rows)]
+
+            def delete(self, row_id: str) -> None:
+                index = int(row_id)
+                if 0 <= index < len(self.rows):
+                    self.rows[index] = ()
+
+            def insert(self, *_args: object, **kwargs: object) -> None:
+                self.rows.append(tuple(kwargs.get("values", ())))
+
+        class FakeBars:
+            rows: list[tuple] = []
+
+            def set_rows(self, rows: list[tuple]) -> None:
+                self.rows = rows
+
+        frame = SimpleNamespace(
+            timeline_var=FakeVar(),
+            candidate_scenario_tree=FakeTree(),
+            candidate_bars=FakeBars(),
+            detail_text=SimpleNamespace(),
+        )
+        app = SimpleNamespace(
+            schwab_research_options_frame=frame,
+            schwab_research_option_candidates=[candidate],
+            schwab_research_last_payload=SimpleNamespace(earnings_text="", context=_context(quantity=0)),
+        )
+
+        originals = {
+            "_selected_option_candidate": research_ui._selected_option_candidate,
+            "_render_option_strategy_cards": research_ui._render_option_strategy_cards,
+            "option_timeline_text": research_ui.option_timeline_text,
+            "_render_candidate_score_breakdown": research_ui._render_candidate_score_breakdown,
+            "selected_candidate_detail": research_ui.selected_candidate_detail,
+            "_set_research_text": research_ui._set_research_text,
+            "_options_strategy_popout_text": research_ui._options_strategy_popout_text,
+            "_render_greeks": research_ui._render_greeks,
+            "_render_option_scenarios_from_top": research_ui._render_option_scenarios_from_top,
+            "_render_scenarios": research_ui._render_scenarios,
+        }
+        try:
+            research_ui._selected_option_candidate = lambda _app: candidate
+            research_ui._render_option_strategy_cards = lambda *_args, **_kwargs: None
+            research_ui.option_timeline_text = lambda *_args, **_kwargs: "timeline"
+            research_ui._render_candidate_score_breakdown = lambda *_args, **_kwargs: None
+            research_ui.selected_candidate_detail = lambda *_args, **_kwargs: ["detail"]
+            research_ui._set_research_text = lambda *_args, **_kwargs: None
+            research_ui._options_strategy_popout_text = lambda *_args, **_kwargs: "popout"
+            research_ui._render_greeks = lambda *_args, **_kwargs: calls.__setitem__("greeks", calls["greeks"] + 1)
+            research_ui._render_option_scenarios_from_top = lambda *_args, **_kwargs: calls.__setitem__("option_scenarios", calls["option_scenarios"] + 1)
+            research_ui._render_scenarios = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("full scenario renderer should not run on candidate selection"))
+
+            research_ui._show_selected_option_candidate(app)
+
+            self.assertEqual(frame.timeline_var.value, "timeline")
+            self.assertEqual(calls["greeks"], 1)
+            self.assertEqual(calls["option_scenarios"], 1)
+        finally:
+            for name, original in originals.items():
+                setattr(research_ui, name, original)
 
 
 if __name__ == "__main__":

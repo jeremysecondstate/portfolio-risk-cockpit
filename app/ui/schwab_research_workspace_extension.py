@@ -5058,6 +5058,47 @@ def _replace_tree_rows(tree: ttk.Treeview, rows: list[tuple[Any, ...]]) -> None:
         tree.insert("", tk.END, values=row)
 
 
+_OPTION_SELECTION_SUPPRESS_ATTR = "schwab_research_option_selection_suppress_count"
+_OPTION_TABLE_REBUILDING_ATTR = "schwab_research_option_table_rebuilding"
+_OPTION_SELECTION_RENDERING_ATTR = "schwab_research_option_selection_rendering"
+_OPTION_STRATEGY_RENDERING_ATTR = "schwab_research_options_strategy_rendering"
+_SCENARIOS_RENDERING_ATTR = "schwab_research_scenarios_rendering"
+
+
+def _option_candidate_selection_guard_active(self: tk.Tk) -> bool:
+    suppress_count = int(getattr(self, _OPTION_SELECTION_SUPPRESS_ATTR, 0) or 0)
+    return (
+        suppress_count > 0
+        or bool(getattr(self, _OPTION_TABLE_REBUILDING_ATTR, False))
+        or bool(getattr(self, _OPTION_SELECTION_RENDERING_ATTR, False))
+    )
+
+
+def _suppress_option_candidate_selection_until_idle(self: tk.Tk) -> None:
+    count = int(getattr(self, _OPTION_SELECTION_SUPPRESS_ATTR, 0) or 0)
+    setattr(self, _OPTION_SELECTION_SUPPRESS_ATTR, count + 1)
+
+    def release() -> None:
+        current = int(getattr(self, _OPTION_SELECTION_SUPPRESS_ATTR, 0) or 0)
+        setattr(self, _OPTION_SELECTION_SUPPRESS_ATTR, max(0, current - 1))
+
+    after_idle = getattr(self, "after_idle", None)
+    if callable(after_idle):
+        try:
+            after_idle(release)
+            return
+        except tk.TclError:
+            pass
+    release()
+
+
+def _select_option_candidate_row_silently(self: tk.Tk, tree: ttk.Treeview, iid: str) -> None:
+    _suppress_option_candidate_selection_until_idle(self)
+    tree.selection_set(iid)
+    tree.focus(iid)
+    tree.see(iid)
+
+
 def _render_warning_panel(frame: ttk.Frame, rows: list[tuple[str, str]]) -> None:
     warning_box = frame.warning_box  # type: ignore[attr-defined]
     warning_tree = frame.warning_tree  # type: ignore[attr-defined]
@@ -5283,6 +5324,16 @@ def _stop_ladder_note_lines(plan: StopLadderPlan | None) -> list[str]:
 
 
 def _render_scenarios(self: tk.Tk, payload: _ResearchPayload) -> None:
+    if bool(getattr(self, _SCENARIOS_RENDERING_ATTR, False)):
+        return
+    setattr(self, _SCENARIOS_RENDERING_ATTR, True)
+    try:
+        _render_scenarios_unguarded(self, payload)
+    finally:
+        setattr(self, _SCENARIOS_RENDERING_ATTR, False)
+
+
+def _render_scenarios_unguarded(self: tk.Tk, payload: _ResearchPayload) -> None:
     frame = self.schwab_research_scenarios_frame
     risk_budget = generated_risk_budget(
         payload.context,
@@ -5466,62 +5517,77 @@ def _risk_scenario_popout_text(payload: _ResearchPayload, risk_plan: Any, decisi
 
 
 def _render_options_strategy(self: tk.Tk) -> None:
+    if bool(getattr(self, _OPTION_STRATEGY_RENDERING_ATTR, False)):
+        return
+    setattr(self, _OPTION_STRATEGY_RENDERING_ATTR, True)
+    try:
+        _render_options_strategy_unguarded(self)
+    finally:
+        setattr(self, _OPTION_STRATEGY_RENDERING_ATTR, False)
+
+
+def _render_options_strategy_unguarded(self: tk.Tk) -> None:
     frame = getattr(self, "schwab_research_options_frame", None)
     payload = getattr(self, "schwab_research_last_payload", None)
     if frame is None:
         return
     tree = frame.candidate_tree  # type: ignore[attr-defined]
-    for row_id in tree.get_children():
-        tree.delete(row_id)
-    rows_map = getattr(self, "schwab_option_chain_rows", {}) or {}
-    chain_rows = [row for row in rows_map.values() if isinstance(row, dict)]
-    if payload is None:
-        frame.status_var.set("Run technical analysis first; candidates need the symbol read, macro context, and position context.")  # type: ignore[attr-defined]
-        _set_research_text(frame.detail_text, _basic_popout_text("Options Strategy Explanation", "Run analysis first, then load the option chain to generate candidates."))  # type: ignore[attr-defined]
-        metric_grid(frame.cards, [_synthetic_badge("Options Strategy", "Waiting", "info", "Needs analysis and option chain.")], columns=1)  # type: ignore[attr-defined]
-        return
-    if not chain_rows:
-        frame.status_var.set("Load the option chain to generate option candidates.")  # type: ignore[attr-defined]
-        _set_research_text(frame.detail_text, _basic_popout_text("Options Strategy Explanation", "Load the option chain to generate option candidates.\n\nUse the Load Chain button inside this tab. No order will be submitted."))  # type: ignore[attr-defined]
-        metric_grid(frame.cards, [_synthetic_badge("Chain", "Not Loaded", "info", "Load the option chain to generate candidates.")], columns=1)  # type: ignore[attr-defined]
-        return
-    candidates = suggest_option_candidates(
-        chain_rows,
-        payload.indicators,
-        payload.context,
-        macro_label=payload.decision.macro_backdrop.label,
-        earnings_text=payload.earnings_text,
-        risk_budget=_float_from_var(getattr(self, "schwab_research_max_risk_var", None)),
-        stock_plan=getattr(self, "schwab_research_stock_plan", None),
-    )
-    self.schwab_research_option_candidates = candidates
-    if not candidates:
-        frame.status_var.set("No usable option candidates found in the loaded chain.")  # type: ignore[attr-defined]
-        _set_research_text(frame.detail_text, _basic_popout_text("Options Strategy Explanation", "The loaded chain did not include usable bid/ask/mark data for calls or puts."))  # type: ignore[attr-defined]
-        return
-    payload = _refresh_payload_empirical_option_context(self, payload, candidates, candidates[0])
-    for index, candidate in enumerate(candidates):
-        tree.insert(
-            "",
-            tk.END,
-            iid=f"candidate_{index}",
-            values=(
-                candidate.group,
-                candidate.strategy,
-                candidate.expiration,
-                _money(candidate.strike),
-                candidate.option_type.upper(),
-                _money(candidate.midpoint),
-                "Unlimited/stock" if candidate.max_loss is None else _money(candidate.max_loss),
-                _money(candidate.breakeven),
-                f"{candidate.score:.0f}",
-                candidate.confidence,
-            ),
+    _suppress_option_candidate_selection_until_idle(self)
+    setattr(self, _OPTION_TABLE_REBUILDING_ATTR, True)
+    try:
+        for row_id in tree.get_children():
+            tree.delete(row_id)
+        rows_map = getattr(self, "schwab_option_chain_rows", {}) or {}
+        chain_rows = [row for row in rows_map.values() if isinstance(row, dict)]
+        if payload is None:
+            frame.status_var.set("Run technical analysis first; candidates need the symbol read, macro context, and position context.")  # type: ignore[attr-defined]
+            _set_research_text(frame.detail_text, _basic_popout_text("Options Strategy Explanation", "Run analysis first, then load the option chain to generate candidates."))  # type: ignore[attr-defined]
+            metric_grid(frame.cards, [_synthetic_badge("Options Strategy", "Waiting", "info", "Needs analysis and option chain.")], columns=1)  # type: ignore[attr-defined]
+            return
+        if not chain_rows:
+            frame.status_var.set("Load the option chain to generate option candidates.")  # type: ignore[attr-defined]
+            _set_research_text(frame.detail_text, _basic_popout_text("Options Strategy Explanation", "Load the option chain to generate option candidates.\n\nUse the Load Chain button inside this tab. No order will be submitted."))  # type: ignore[attr-defined]
+            metric_grid(frame.cards, [_synthetic_badge("Chain", "Not Loaded", "info", "Load the option chain to generate candidates.")], columns=1)  # type: ignore[attr-defined]
+            return
+        candidates = suggest_option_candidates(
+            chain_rows,
+            payload.indicators,
+            payload.context,
+            macro_label=payload.decision.macro_backdrop.label,
+            earnings_text=payload.earnings_text,
+            risk_budget=_float_from_var(getattr(self, "schwab_research_max_risk_var", None)),
+            stock_plan=getattr(self, "schwab_research_stock_plan", None),
         )
-    tree.selection_set("candidate_0")
-    _render_option_strategy_cards(frame, _selected_option_candidate(self) or candidates[0], candidates, payload.context, getattr(self, "schwab_research_stock_plan", None))
-    frame.status_var.set(f"{len(candidates)} candidates generated from loaded {payload.symbol} chain. Select one and click Use This Option to fill fields only.")  # type: ignore[attr-defined]
-    _show_selected_option_candidate(self)
+        self.schwab_research_option_candidates = candidates
+        if not candidates:
+            frame.status_var.set("No usable option candidates found in the loaded chain.")  # type: ignore[attr-defined]
+            _set_research_text(frame.detail_text, _basic_popout_text("Options Strategy Explanation", "The loaded chain did not include usable bid/ask/mark data for calls or puts."))  # type: ignore[attr-defined]
+            return
+        payload = _refresh_payload_empirical_option_context(self, payload, candidates, candidates[0])
+        for index, candidate in enumerate(candidates):
+            tree.insert(
+                "",
+                tk.END,
+                iid=f"candidate_{index}",
+                values=(
+                    candidate.group,
+                    candidate.strategy,
+                    candidate.expiration,
+                    _money(candidate.strike),
+                    candidate.option_type.upper(),
+                    _money(candidate.midpoint),
+                    "Unlimited/stock" if candidate.max_loss is None else _money(candidate.max_loss),
+                    _money(candidate.breakeven),
+                    f"{candidate.score:.0f}",
+                    candidate.confidence,
+                ),
+            )
+        _select_option_candidate_row_silently(self, tree, "candidate_0")
+        frame.status_var.set(f"{len(candidates)} candidates generated from loaded {payload.symbol} chain. Select one and click Use This Option to fill fields only.")  # type: ignore[attr-defined]
+    finally:
+        setattr(self, _OPTION_TABLE_REBUILDING_ATTR, False)
+    _show_selected_option_candidate(self, force=True, refresh_related=False)
+    _render_greeks(self, payload)
     _render_scenarios(self, payload)
 
 
@@ -6063,79 +6129,88 @@ def _selected_option_candidate(self: tk.Tk) -> OptionCandidate | None:
     return candidates[index] if 0 <= index < len(candidates) else None
 
 
-def _show_selected_option_candidate(self: tk.Tk) -> None:
+def _show_selected_option_candidate(self: tk.Tk, *, force: bool = False, refresh_related: bool = True) -> None:
+    if bool(getattr(self, _OPTION_SELECTION_RENDERING_ATTR, False)):
+        return
+    if not force and _option_candidate_selection_guard_active(self):
+        return
     frame = getattr(self, "schwab_research_options_frame", None)
     candidate = _selected_option_candidate(self)
     if frame is None or candidate is None:
         return
-    payload = getattr(self, "schwab_research_last_payload", None)
-    earnings_text = payload.earnings_text if payload is not None else ""
-    context = _active_stock_scenario_context(self, payload) if payload is not None else None
-    candidates = getattr(self, "schwab_research_option_candidates", []) or []
-    if payload is not None:
-        _render_option_strategy_cards(frame, candidate, candidates, payload.context, getattr(self, "schwab_research_stock_plan", None))
-    frame.timeline_var.set(option_timeline_text(candidate, earnings_text))  # type: ignore[attr-defined]
-    _render_candidate_score_breakdown(frame, candidate)
-    scenario_tree = frame.candidate_scenario_tree  # type: ignore[attr-defined]
-    for row_id in scenario_tree.get_children():
-        scenario_tree.delete(row_id)
-    if payload is not None and _is_actionable_contract(candidate):
-        stock_plan = getattr(self, "schwab_research_stock_plan", None)
-        moves = option_strategy_scenario_moves(candidate, payload.indicators)
-        scenario_rows = combined_current_model_option_scenarios(candidate, payload.context, stock_plan, moves=moves)
-        frame.candidate_bars.set_rows(_normalized_current_model_option_bar_rows(scenario_rows))  # type: ignore[attr-defined]
-        for move, row in zip(moves, scenario_rows):
-            move_note = option_strategy_scenario_move_note(candidate, payload.indicators, move)
-            tag_basis = row.model_combined_pnl if row.model_combined_pnl is not None else row.current_combined_pnl
-            tag = "positive" if tag_basis > 0 else "negative" if tag_basis < 0 else ""
+    setattr(self, _OPTION_SELECTION_RENDERING_ATTR, True)
+    try:
+        payload = getattr(self, "schwab_research_last_payload", None)
+        earnings_text = payload.earnings_text if payload is not None else ""
+        context = _active_stock_scenario_context(self, payload) if payload is not None else None
+        candidates = getattr(self, "schwab_research_option_candidates", []) or []
+        if payload is not None:
+            _render_option_strategy_cards(frame, candidate, candidates, payload.context, getattr(self, "schwab_research_stock_plan", None))
+        frame.timeline_var.set(option_timeline_text(candidate, earnings_text))  # type: ignore[attr-defined]
+        _render_candidate_score_breakdown(frame, candidate)
+        scenario_tree = frame.candidate_scenario_tree  # type: ignore[attr-defined]
+        for row_id in scenario_tree.get_children():
+            scenario_tree.delete(row_id)
+        if payload is not None and _is_actionable_contract(candidate):
+            stock_plan = getattr(self, "schwab_research_stock_plan", None)
+            moves = option_strategy_scenario_moves(candidate, payload.indicators)
+            scenario_rows = combined_current_model_option_scenarios(candidate, payload.context, stock_plan, moves=moves)
+            frame.candidate_bars.set_rows(_normalized_current_model_option_bar_rows(scenario_rows))  # type: ignore[attr-defined]
+            for move, row in zip(moves, scenario_rows):
+                move_note = option_strategy_scenario_move_note(candidate, payload.indicators, move)
+                tag_basis = row.model_combined_pnl if row.model_combined_pnl is not None else row.current_combined_pnl
+                tag = "positive" if tag_basis > 0 else "negative" if tag_basis < 0 else ""
+                scenario_tree.insert(
+                    "",
+                    tk.END,
+                    values=(
+                        row.move_label,
+                        _money(row.underlying_price),
+                        candidate.contract_count,
+                        _money(row.current_stock_pnl),
+                        _money(row.model_stock_pnl),
+                        _money(row.option_pnl),
+                        _money(row.current_combined_pnl),
+                        _money(row.model_combined_pnl),
+                        _option_scenario_read(row.read, move_note),
+                    ),
+                    tags=(tag,) if tag else (),
+                )
+            lines = selected_candidate_detail(candidate, context or payload.context, earnings_text)
+        elif context is not None and _is_actionable_contract(candidate):
+            moves = option_strategy_scenario_moves(candidate, None)
+            scenario_rows = combined_option_scenarios(candidate, context, moves=moves)
+            frame.candidate_bars.set_rows(_normalized_candidate_bar_rows(scenario_rows))  # type: ignore[attr-defined]
+            for move, row in zip(moves, scenario_rows):
+                move_note = option_strategy_scenario_move_note(candidate, None, move)
+                tag = "positive" if row.combined_pnl > 0 else "negative" if row.combined_pnl < 0 else ""
+                scenario_tree.insert(
+                    "",
+                    tk.END,
+                    values=(row.move_label, _money(row.underlying_price), candidate.contract_count, _money(row.stock_pnl), "--", _money(row.option_pnl), _money(row.combined_pnl), "--", _option_scenario_read(row.read, move_note)),
+                    tags=(tag,) if tag else (),
+                )
+            lines = selected_candidate_detail(candidate, context, earnings_text)
+        elif context is not None:
+            frame.candidate_bars.set_rows([])  # type: ignore[attr-defined]
             scenario_tree.insert(
                 "",
                 tk.END,
-                values=(
-                    row.move_label,
-                    _money(row.underlying_price),
-                    candidate.contract_count,
-                    _money(row.current_stock_pnl),
-                    _money(row.model_stock_pnl),
-                    _money(row.option_pnl),
-                    _money(row.current_combined_pnl),
-                    _money(row.model_combined_pnl),
-                    _option_scenario_read(row.read, move_note),
-                ),
-                tags=(tag,) if tag else (),
+                values=("No option", _money(candidate.underlying_price), "--", "--", "--", "--", "--", "--", "Wait/no-trade has no contract, so no expiration payoff estimate is calculated."),
             )
-        lines = selected_candidate_detail(candidate, context or payload.context, earnings_text)
-    elif context is not None and _is_actionable_contract(candidate):
-        moves = option_strategy_scenario_moves(candidate, None)
-        scenario_rows = combined_option_scenarios(candidate, context, moves=moves)
-        frame.candidate_bars.set_rows(_normalized_candidate_bar_rows(scenario_rows))  # type: ignore[attr-defined]
-        for move, row in zip(moves, scenario_rows):
-            move_note = option_strategy_scenario_move_note(candidate, None, move)
-            tag = "positive" if row.combined_pnl > 0 else "negative" if row.combined_pnl < 0 else ""
-            scenario_tree.insert(
-                "",
-                tk.END,
-                values=(row.move_label, _money(row.underlying_price), candidate.contract_count, _money(row.stock_pnl), "--", _money(row.option_pnl), _money(row.combined_pnl), "--", _option_scenario_read(row.read, move_note)),
-                tags=(tag,) if tag else (),
-            )
-        lines = selected_candidate_detail(candidate, context, earnings_text)
-    elif context is not None:
-        frame.candidate_bars.set_rows([])  # type: ignore[attr-defined]
-        scenario_tree.insert(
-            "",
-            tk.END,
-            values=("No option", _money(candidate.underlying_price), "--", "--", "--", "--", "--", "--", "Wait/no-trade has no contract, so no expiration payoff estimate is calculated."),
-        )
-        lines = selected_candidate_detail(candidate, context, earnings_text)
-    else:
-        frame.candidate_bars.set_rows([])  # type: ignore[attr-defined]
-        lines = [f"{candidate.group}: {candidate.strategy}", "Run analysis to see combined stock + option scenarios."]
-    lines.extend(["", "Use This Option fills the existing options ticket only. It does not submit, preview, or stage an order."])
-    _set_research_text(frame.detail_text, _options_strategy_popout_text(payload, candidate, context, "\n".join(lines), alternatives=candidates))  # type: ignore[attr-defined]
-    self.schwab_research_selected_contract_symbol = candidate.contract_symbol
-    _render_greeks(self, payload)
-    if payload is not None:
-        _render_scenarios(self, payload)
+            lines = selected_candidate_detail(candidate, context, earnings_text)
+        else:
+            frame.candidate_bars.set_rows([])  # type: ignore[attr-defined]
+            lines = [f"{candidate.group}: {candidate.strategy}", "Run analysis to see combined stock + option scenarios."]
+        lines.extend(["", "Use This Option fills the existing options ticket only. It does not submit, preview, or stage an order."])
+        _set_research_text(frame.detail_text, _options_strategy_popout_text(payload, candidate, context, "\n".join(lines), alternatives=candidates))  # type: ignore[attr-defined]
+        self.schwab_research_selected_contract_symbol = candidate.contract_symbol
+        if refresh_related:
+            _render_greeks(self, payload)
+            if payload is not None:
+                _render_option_scenarios_from_top(self)
+    finally:
+        setattr(self, _OPTION_SELECTION_RENDERING_ATTR, False)
 
 
 def _render_candidate_score_breakdown(frame: ttk.Frame, candidate: OptionCandidate) -> None:
