@@ -10,7 +10,7 @@ _installed = False
 
 
 def install_options_resizable_layout_extension() -> None:
-    """Give the Options What-If Lab cockpit-style draggable panes."""
+    """Give the Schwab Options Lab cockpit-style draggable panes."""
 
     global _installed
     if _installed:
@@ -60,7 +60,7 @@ def _build_resizable_trading_workspace_tab(app: tk.Tk, parent: ttk.Frame) -> Non
 
 
 def _build_trading_workspace_header(app: tk.Tk, parent: ttk.Frame) -> None:
-    banner = ttk.LabelFrame(parent, text="Options What-If Lab", style="Card.TLabelframe")
+    banner = ttk.LabelFrame(parent, text="Schwab Options Lab", style="Card.TLabelframe")
     banner.grid(row=0, column=0, sticky="ew", pady=(0, 10))
     banner.columnconfigure(0, weight=1)
 

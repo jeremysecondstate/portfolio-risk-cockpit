@@ -13,10 +13,10 @@ _original_format_analysis: Callable[..., str] | None = None
 
 
 def install_schwab_options_what_if_scenario_extension(app_cls: Type[tk.Tk]) -> None:
-    """Make the integrated Schwab Options What-If button use the live option-analysis stack.
+    """Make the integrated Schwab Options button use the live option-analysis stack.
 
     The Schwab workspace flattens the option ticket into the Schwab tab, so this patch
-    deliberately routes the blue Options What-If button through the runtime-patched
+    deliberately routes the blue Schwab Options button through the runtime-patched
     trading_workspace functions instead of the early imported parser/analyzer references.
     """
 
@@ -177,7 +177,7 @@ def _fill_missing_integrated_what_if_defaults(self: tk.Tk) -> None:
 
 def _analyze_scenario_with_full_portfolio_paths(s: trading_workspace.OptionsScenario, app: tk.Tk | None = None) -> dict:
     if _original_analyze_scenario is None:
-        raise RuntimeError("Options What-If analyzer was not initialized.")
+        raise RuntimeError("Schwab Options analyzer was not initialized.")
 
     analysis = _original_analyze_scenario(s, app)
     if s.strategy in {"Vertical Debit Spread", "Vertical Credit Spread"}:
@@ -287,7 +287,7 @@ def _combined_read_summary(s: trading_workspace.OptionsScenario, analysis: dict)
 
 def _format_analysis_with_full_portfolio_paths(s: trading_workspace.OptionsScenario, analysis: dict) -> str:
     if _original_format_analysis is None:
-        raise RuntimeError("Options What-If formatter was not initialized.")
+        raise RuntimeError("Schwab Options formatter was not initialized.")
 
     base = _original_format_analysis(s, analysis)
     section = _format_combined_paths_section(s, analysis)

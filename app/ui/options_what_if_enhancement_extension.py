@@ -12,7 +12,7 @@ _ORIGINAL_FORMAT_ANALYSIS = trading_workspace._format_analysis
 
 
 def install_options_what_if_enhancement_extension(app_cls: Type[tk.Tk]) -> None:
-    """Enhance Options What-If with thesis defaults and portfolio-combined scenarios."""
+    """Enhance Schwab Options with thesis defaults and portfolio-combined scenarios."""
 
     trading_workspace._parse_scenario = _parse_scenario_with_safe_defaults  # type: ignore[method-assign]
     trading_workspace._estimate_price_pnl = _estimate_price_pnl_with_directional_verticals  # type: ignore[method-assign]

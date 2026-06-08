@@ -24,7 +24,7 @@ SIDE_NEUTRAL_COMBOBOX_STYLE = "NeutralSide.TCombobox"
 
 
 def install_trading_workspace_extension(app_cls: Type[tk.Tk]) -> None:
-    """Add the Options What-If Lab and Schwab/Hyperliquid cockpit layout."""
+    """Add the Schwab Options Lab and Schwab/Hyperliquid cockpit layout."""
 
     app_cls._build_layout = _build_layout_with_trading_workspace  # type: ignore[method-assign]
     app_cls.load_trading_workspace_technical_context = _load_trading_workspace_technical_context  # type: ignore[attr-defined]
@@ -53,7 +53,7 @@ def _build_layout_with_trading_workspace(self: tk.Tk) -> None:
     tabs.add(cockpit_tab, text="Cockpit")
     tabs.add(schwab_tab, text="Schwab Trading")
     tabs.add(hyperliquid_tab, text="Hyperliquid Trading")
-    tabs.add(options_tab, text="Options What-If Lab")
+    tabs.add(options_tab, text="Schwab Options Lab")
 
     self.active_portfolio_source_var = tk.StringVar(value="Active portfolio: current cockpit source")
     self.cockpit_source_portfolio = None
@@ -1451,7 +1451,7 @@ def _build_schwab_trading_tab(
         "SCHWAB TRADING WORKSPACE\n"
         "========================\n\n"
         "Use this tab for stocks, ETFs, Schwab previews, order history, and guarded live Schwab actions.\n\n"
-        "Options still live in the Options What-If Lab; use the button above when the weekly setup needs calls/puts instead of shares.",
+        "Options still live in the Schwab Options Lab; use the button above when the weekly setup needs calls/puts instead of shares.",
     )
 
 
@@ -1960,7 +1960,7 @@ def _build_account_sources_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     ttk.Label(
         panel,
         text=(
-            "Schwab/current portfolio powers the Cockpit and Options What-If Lab. "
+            "Schwab/current portfolio powers the Cockpit and Schwab Options Lab. "
             "Hyperliquid can be synced from the Trade Planner."
         ),
         style="Subtle.TLabel",
