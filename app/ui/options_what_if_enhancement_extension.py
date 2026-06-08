@@ -3,21 +3,21 @@ from __future__ import annotations
 import tkinter as tk
 from typing import Type
 
-from app.ui import options_lab
+from app.ui import trading_workspace
 
-_ORIGINAL_PARSE_SCENARIO = options_lab._parse_scenario
-_ORIGINAL_ANALYZE_SCENARIO = options_lab._analyze_scenario
-_ORIGINAL_ESTIMATE_PRICE_PNL = options_lab._estimate_price_pnl
-_ORIGINAL_FORMAT_ANALYSIS = options_lab._format_analysis
+_ORIGINAL_PARSE_SCENARIO = trading_workspace._parse_scenario
+_ORIGINAL_ANALYZE_SCENARIO = trading_workspace._analyze_scenario
+_ORIGINAL_ESTIMATE_PRICE_PNL = trading_workspace._estimate_price_pnl
+_ORIGINAL_FORMAT_ANALYSIS = trading_workspace._format_analysis
 
 
 def install_options_what_if_enhancement_extension(app_cls: Type[tk.Tk]) -> None:
     """Enhance Options What-If with thesis defaults and portfolio-combined scenarios."""
 
-    options_lab._parse_scenario = _parse_scenario_with_safe_defaults  # type: ignore[method-assign]
-    options_lab._estimate_price_pnl = _estimate_price_pnl_with_directional_verticals  # type: ignore[method-assign]
-    options_lab._analyze_scenario = _analyze_scenario_with_directional_verticals  # type: ignore[method-assign]
-    options_lab._format_analysis = _format_analysis_with_combined_portfolio  # type: ignore[method-assign]
+    trading_workspace._parse_scenario = _parse_scenario_with_safe_defaults  # type: ignore[method-assign]
+    trading_workspace._estimate_price_pnl = _estimate_price_pnl_with_directional_verticals  # type: ignore[method-assign]
+    trading_workspace._analyze_scenario = _analyze_scenario_with_directional_verticals  # type: ignore[method-assign]
+    trading_workspace._format_analysis = _format_analysis_with_combined_portfolio  # type: ignore[method-assign]
 
 
 def _parse_scenario_with_safe_defaults(app: tk.Tk):
@@ -109,7 +109,7 @@ def _analyze_scenario_with_directional_verticals(s, app: tk.Tk | None = None) ->
     if stop_loss is not None and stop_loss < 0 and target_profit is not None and target_profit > 0:
         reward_risk = target_profit / abs(stop_loss)
 
-    portfolio_context = options_lab._portfolio_context(s, app, margin_required, max_loss)
+    portfolio_context = trading_workspace._portfolio_context(s, app, margin_required, max_loss)
     portfolio_risk = max_loss / max(portfolio_context.total_value, 0.01)
     price_rows = []
     for move in [-0.20, -0.10, -0.05, 0.0, 0.05, 0.10, 0.20]:
@@ -117,8 +117,8 @@ def _analyze_scenario_with_directional_verticals(s, app: tk.Tk | None = None) ->
         pnl = _estimate_price_pnl_with_directional_verticals(s, price)
         price_rows.append((move, price, pnl, pnl / max(portfolio_context.total_value, 0.01)))
 
-    technical = options_lab._technical_context(s)
-    checklist = options_lab._safety_checklist(s, max_loss, margin_required, stop_loss, portfolio_context)
+    technical = trading_workspace._technical_context(s)
+    checklist = trading_workspace._safety_checklist(s, max_loss, margin_required, stop_loss, portfolio_context)
     analysis.update(
         {
             "max_loss": max_loss,

@@ -6,7 +6,7 @@ from tkinter import messagebox, ttk
 from typing import Any
 
 from app.brokers.hyperliquid.trading import HyperliquidTradingConfig
-from app.ui import options_lab_extension
+from app.ui import trading_workspace_extension
 
 _DELETE_ME = "DELETE ME"
 LEVERAGE_PNL_EXPLANATION = "Leverage does not change dollar P&L for a fixed contract size. It changes margin required, ROI on margin, and liquidation distance."
@@ -83,23 +83,23 @@ def _patch_grid_row(app_cls: type[tk.Tk]) -> None:
 
 
 def _patch_hyperliquid_tab_builder() -> None:
-    original_build_hyperliquid_tab = options_lab_extension._build_hyperliquid_trading_tab
+    original_build_hyperliquid_tab = trading_workspace_extension._build_hyperliquid_trading_tab
 
     def build_hyperliquid_tab_with_exchange_labels(self: tk.Tk, parent: ttk.Frame) -> None:
         _ensure_perp_vars(self)
         original_build_hyperliquid_tab(self, parent)
 
-    options_lab_extension._build_hyperliquid_trading_tab = build_hyperliquid_tab_with_exchange_labels
+    trading_workspace_extension._build_hyperliquid_trading_tab = build_hyperliquid_tab_with_exchange_labels
 
 
 def _patch_options_layout_builder() -> None:
-    original_build_layout = options_lab_extension._build_layout_with_options_lab
+    original_build_layout = trading_workspace_extension._build_layout_with_options_lab
 
     def build_layout_then_remove_delete_me(self: tk.Tk) -> None:
         original_build_layout(self)
         self.after_idle(lambda: _remove_delete_me_controls(self))
 
-    options_lab_extension._build_layout_with_options_lab = build_layout_then_remove_delete_me
+    trading_workspace_extension._build_layout_with_options_lab = build_layout_then_remove_delete_me
 
 
 def _patch_layout_after_build(app_cls: type[tk.Tk]) -> None:
@@ -477,11 +477,11 @@ def _make_hyperliquid_use_mid_button(self: tk.Tk, parent: tk.Widget) -> ttk.Butt
     return ttk.Button(
         parent,
         text="Use Mid",
-        command=lambda: options_lab_extension._run_hyperliquid_ticket_action(
+        command=lambda: trading_workspace_extension._run_hyperliquid_ticket_action(
             self,
             ticket_kind="perp",
             preview_widget=self.hyperliquid_trading_preview_text,
-            command=options_lab_extension._first_available_command(self, "use_hyperliquid_mid_market"),
+            command=trading_workspace_extension._first_available_command(self, "use_hyperliquid_mid_market"),
         ),
         style="Accent.TButton",
     )
@@ -491,11 +491,11 @@ def _make_schwab_use_mid_button(self: tk.Tk, parent: tk.Widget) -> ttk.Button:
     return ttk.Button(
         parent,
         text="Use Mid",
-        command=lambda: options_lab_extension._run_workspace_action(
+        command=lambda: trading_workspace_extension._run_workspace_action(
             self,
             venue="Schwab",
             preview_widget=self.schwab_trading_preview_text,
-            command=options_lab_extension._first_available_command(self, "use_schwab_mid_market"),
+            command=trading_workspace_extension._first_available_command(self, "use_schwab_mid_market"),
         ),
         style="Accent.TButton",
     )

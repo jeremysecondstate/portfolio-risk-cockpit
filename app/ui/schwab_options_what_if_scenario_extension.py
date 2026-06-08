@@ -5,7 +5,7 @@ from tkinter import messagebox
 from typing import Any, Callable, Type
 
 from app.core.order_models import TimeInForce, normalize_time_in_force
-from app.ui import schwab_trading_tab, options_lab
+from app.ui import schwab_trading_tab, trading_workspace
 
 _installed = False
 _original_analyze_scenario: Callable[..., dict] | None = None
@@ -17,18 +17,18 @@ def install_schwab_options_what_if_scenario_extension(app_cls: Type[tk.Tk]) -> N
 
     The Schwab workspace flattens the option ticket into the Schwab tab, so this patch
     deliberately routes the blue Options What-If button through the runtime-patched
-    options_lab functions instead of the early imported parser/analyzer references.
+    trading_workspace functions instead of the early imported parser/analyzer references.
     """
 
     global _installed, _original_analyze_scenario, _original_format_analysis
     if _installed:
         return
 
-    _original_analyze_scenario = options_lab._analyze_scenario
-    _original_format_analysis = options_lab._format_analysis
+    _original_analyze_scenario = trading_workspace._analyze_scenario
+    _original_format_analysis = trading_workspace._format_analysis
 
-    options_lab._analyze_scenario = _analyze_scenario_with_full_portfolio_paths  # type: ignore[method-assign]
-    options_lab._format_analysis = _format_analysis_with_full_portfolio_paths  # type: ignore[method-assign]
+    trading_workspace._analyze_scenario = _analyze_scenario_with_full_portfolio_paths  # type: ignore[method-assign]
+    trading_workspace._format_analysis = _format_analysis_with_full_portfolio_paths  # type: ignore[method-assign]
 
     schwab_trading_tab._sync_integrated_options_values = _sync_integrated_options_values  # type: ignore[attr-defined]
     schwab_trading_tab._run_schwab_integrated_options_what_if = _run_schwab_integrated_options_what_if  # type: ignore[attr-defined]
@@ -45,9 +45,9 @@ def _run_schwab_integrated_options_what_if(self: tk.Tk) -> None:
     try:
         _sync_integrated_options_values(self)
         _fill_missing_integrated_what_if_defaults(self)
-        scenario = options_lab._parse_scenario(self)
-        analysis = options_lab._analyze_scenario(scenario, self)
-        schwab_trading_tab._set_schwab_mode_text(self, options_lab._format_analysis(scenario, analysis))
+        scenario = trading_workspace._parse_scenario(self)
+        analysis = trading_workspace._analyze_scenario(scenario, self)
+        schwab_trading_tab._set_schwab_mode_text(self, trading_workspace._format_analysis(scenario, analysis))
         if hasattr(self, "schwab_preview_status_var"):
             self.schwab_preview_status_var.set("Last Schwab preview: options what-if only")
     except Exception as exc:
@@ -56,7 +56,7 @@ def _run_schwab_integrated_options_what_if(self: tk.Tk) -> None:
 
 def _sync_integrated_options_values(self: tk.Tk) -> None:
     if not hasattr(self, "options_symbol_var"):
-        options_lab._init_options_vars(self)
+        trading_workspace._init_options_vars(self)
 
     symbol = _get_var(self, "symbol_var").strip().upper() or _get_var(self, "options_symbol_var").strip().upper()
     if symbol:
@@ -68,7 +68,7 @@ def _sync_integrated_options_values(self: tk.Tk) -> None:
         _set_var(self, "options_action_var", "Sell" if side == "sell" else "Buy")
 
     order_type = _get_var(self, "order_type_var").strip().upper()
-    _set_var(self, "options_order_type_var", order_type if order_type in options_lab.ORDER_TYPES else "LIMIT")
+    _set_var(self, "options_order_type_var", order_type if order_type in trading_workspace.ORDER_TYPES else "LIMIT")
 
     tif = normalize_time_in_force(_get_var(self, "time_in_force_var"))
     _set_var(self, "options_tif_var", "GTC" if tif in {TimeInForce.GTC, TimeInForce.GTC_EXT} else "Day")
@@ -175,7 +175,7 @@ def _fill_missing_integrated_what_if_defaults(self: tk.Tk) -> None:
         _set_if_blank(self, "options_portfolio_value_var", "1")
 
 
-def _analyze_scenario_with_full_portfolio_paths(s: options_lab.OptionsScenario, app: tk.Tk | None = None) -> dict:
+def _analyze_scenario_with_full_portfolio_paths(s: trading_workspace.OptionsScenario, app: tk.Tk | None = None) -> dict:
     if _original_analyze_scenario is None:
         raise RuntimeError("Options What-If analyzer was not initialized.")
 
@@ -188,7 +188,7 @@ def _analyze_scenario_with_full_portfolio_paths(s: options_lab.OptionsScenario, 
     return analysis
 
 
-def _apply_directional_vertical_math(s: options_lab.OptionsScenario, app: tk.Tk | None, analysis: dict) -> None:
+def _apply_directional_vertical_math(s: trading_workspace.OptionsScenario, app: tk.Tk | None, analysis: dict) -> None:
     contracts = max(s.contracts, 1)
     multiplier = 100
     width = abs(s.short_strike - s.strike) * contracts * multiplier
@@ -212,7 +212,7 @@ def _apply_directional_vertical_math(s: options_lab.OptionsScenario, app: tk.Tk 
     if stop_loss is not None and stop_loss < 0 and target_profit is not None and target_profit > 0:
         reward_risk = target_profit / abs(stop_loss)
 
-    portfolio_context = options_lab._portfolio_context(s, app, margin_required, max_loss)
+    portfolio_context = trading_workspace._portfolio_context(s, app, margin_required, max_loss)
     price_rows = []
     for price in _scenario_prices(s, analysis):
         move = (price / s.underlying_price) - 1 if s.underlying_price else 0.0
@@ -232,13 +232,13 @@ def _apply_directional_vertical_math(s: options_lab.OptionsScenario, app: tk.Tk 
             "reward_risk": reward_risk,
             "price_rows": price_rows,
             "portfolio_context": portfolio_context,
-            "checklist": options_lab._safety_checklist(s, max_loss, margin_required, stop_loss, portfolio_context),
+            "checklist": trading_workspace._safety_checklist(s, max_loss, margin_required, stop_loss, portfolio_context),
         }
     )
 
 
-def _combined_scenario_rows(s: options_lab.OptionsScenario, analysis: dict) -> list[dict[str, float | str]]:
-    context: options_lab.PortfolioContext = analysis["portfolio_context"]
+def _combined_scenario_rows(s: trading_workspace.OptionsScenario, analysis: dict) -> list[dict[str, float | str]]:
+    context: trading_workspace.PortfolioContext = analysis["portfolio_context"]
     existing_quantity = context.existing_quantity
     existing_last = context.existing_last_price or s.underlying_price
     total_value = max(context.total_value, 0.01)
@@ -264,11 +264,11 @@ def _combined_scenario_rows(s: options_lab.OptionsScenario, analysis: dict) -> l
     return rows
 
 
-def _combined_read_summary(s: options_lab.OptionsScenario, analysis: dict) -> dict[str, Any]:
+def _combined_read_summary(s: trading_workspace.OptionsScenario, analysis: dict) -> dict[str, Any]:
     rows = analysis.get("combined_rows") or []
     if not rows:
         return {}
-    context: options_lab.PortfolioContext = analysis["portfolio_context"]
+    context: trading_workspace.PortfolioContext = analysis["portfolio_context"]
     worst = min(rows, key=lambda row: float(row["combined_pnl"]))
     best = max(rows, key=lambda row: float(row["combined_pnl"]))
     flat = min(rows, key=lambda row: abs(float(row["move"])))
@@ -279,13 +279,13 @@ def _combined_read_summary(s: options_lab.OptionsScenario, analysis: dict) -> di
     if context.existing_quantity:
         exposure_note = (
             f"Existing {s.symbol} spot/share exposure included: {context.existing_quantity:g} shares "
-            f"using reference price {options_lab._money(context.existing_last_price or s.underlying_price)}."
+            f"using reference price {trading_workspace._money(context.existing_last_price or s.underlying_price)}."
         )
 
     return {"worst": worst, "best": best, "flat": flat, "down": down, "up": up, "exposure_note": exposure_note}
 
 
-def _format_analysis_with_full_portfolio_paths(s: options_lab.OptionsScenario, analysis: dict) -> str:
+def _format_analysis_with_full_portfolio_paths(s: trading_workspace.OptionsScenario, analysis: dict) -> str:
     if _original_format_analysis is None:
         raise RuntimeError("Options What-If formatter was not initialized.")
 
@@ -300,7 +300,7 @@ def _format_analysis_with_full_portfolio_paths(s: options_lab.OptionsScenario, a
     return f"{base}\n\n{section}"
 
 
-def _format_combined_paths_section(s: options_lab.OptionsScenario, analysis: dict) -> str:
+def _format_combined_paths_section(s: trading_workspace.OptionsScenario, analysis: dict) -> str:
     rows = analysis.get("combined_rows") or []
     if not rows:
         return ""
@@ -314,10 +314,10 @@ def _format_combined_paths_section(s: options_lab.OptionsScenario, analysis: dic
     for row in rows:
         lines.append(
             f"{float(row['move']):>+5.0%}   "
-            f"{options_lab._money(float(row['price'])):>10}   "
-            f"{options_lab._money(float(row['option_pnl'])):>12}   "
-            f"{options_lab._money(float(row['existing_pnl'])):>16}   "
-            f"{options_lab._money(float(row['combined_pnl'])):>12}   "
+            f"{trading_workspace._money(float(row['price'])):>10}   "
+            f"{trading_workspace._money(float(row['option_pnl'])):>12}   "
+            f"{trading_workspace._money(float(row['existing_pnl'])):>16}   "
+            f"{trading_workspace._money(float(row['combined_pnl'])):>12}   "
             f"{float(row['portfolio_impact']):>8.1%}          "
             f"{row['label']}"
         )
@@ -337,10 +337,10 @@ def _format_combined_paths_section(s: options_lab.OptionsScenario, analysis: dic
         row = read.get(key)
         if row:
             lines.append(
-                f"- {title}: {float(row['move']):+.0%} to {options_lab._money(float(row['price']))} "
-                f"=> option {options_lab._money(float(row['option_pnl']))}, "
-                f"spot {options_lab._money(float(row['existing_pnl']))}, "
-                f"combined {options_lab._money(float(row['combined_pnl']))}."
+                f"- {title}: {float(row['move']):+.0%} to {trading_workspace._money(float(row['price']))} "
+                f"=> option {trading_workspace._money(float(row['option_pnl']))}, "
+                f"spot {trading_workspace._money(float(row['existing_pnl']))}, "
+                f"combined {trading_workspace._money(float(row['combined_pnl']))}."
             )
 
     lines.append(
@@ -350,7 +350,7 @@ def _format_combined_paths_section(s: options_lab.OptionsScenario, analysis: dic
     return "\n".join(lines)
 
 
-def _scenario_prices(s: options_lab.OptionsScenario, analysis: dict) -> list[float]:
+def _scenario_prices(s: trading_workspace.OptionsScenario, analysis: dict) -> list[float]:
     prices = {max(s.underlying_price * (1 + move), 0.01) for move in (-0.30, -0.20, -0.10, -0.05, 0.0, 0.05, 0.10, 0.20, 0.30)}
     for key in ("breakeven",):
         value = analysis.get(key)
@@ -362,13 +362,13 @@ def _scenario_prices(s: options_lab.OptionsScenario, analysis: dict) -> list[flo
     return sorted(prices)
 
 
-def _estimate_ticket_pnl(s: options_lab.OptionsScenario, price: float) -> float:
+def _estimate_ticket_pnl(s: trading_workspace.OptionsScenario, price: float) -> float:
     if s.strategy in {"Vertical Debit Spread", "Vertical Credit Spread"}:
         return _directional_vertical_pnl(s, price)
-    return options_lab._estimate_price_pnl(s, price)
+    return trading_workspace._estimate_price_pnl(s, price)
 
 
-def _directional_vertical_pnl(s: options_lab.OptionsScenario, underlying_price: float | None) -> float:
+def _directional_vertical_pnl(s: trading_workspace.OptionsScenario, underlying_price: float | None) -> float:
     if underlying_price is None:
         return 0.0
     contracts = max(s.contracts, 1)
@@ -387,13 +387,13 @@ def _directional_vertical_pnl(s: options_lab.OptionsScenario, underlying_price: 
     return (s.credit * contracts * multiplier) - intrinsic_spread
 
 
-def _vertical_debit_breakeven(s: options_lab.OptionsScenario) -> float:
+def _vertical_debit_breakeven(s: trading_workspace.OptionsScenario) -> float:
     if str(s.option_type).lower().startswith("put"):
         return max(s.strike, s.short_strike) - s.premium
     return min(s.strike, s.short_strike) + s.premium
 
 
-def _vertical_credit_breakeven(s: options_lab.OptionsScenario) -> float:
+def _vertical_credit_breakeven(s: trading_workspace.OptionsScenario) -> float:
     if str(s.option_type).lower().startswith("put"):
         return max(s.strike, s.short_strike) - s.credit
     return min(s.strike, s.short_strike) + s.credit

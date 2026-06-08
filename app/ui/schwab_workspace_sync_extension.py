@@ -4,7 +4,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Type
 
-from app.ui import options_lab_extension
+from app.ui import trading_workspace_extension
 
 
 def install_schwab_workspace_sync_extension(app_cls: Type[tk.Tk]) -> None:
@@ -91,8 +91,8 @@ def _embed_options_lab_under_schwab(self: tk.Tk) -> None:
     embedded.columnconfigure(1, weight=1)
     embedded.rowconfigure(1, weight=1)
 
-    options_lab_extension.build_options_lab_tab(self, embedded)
-    options_lab_extension._build_options_lab_market_loader(self, embedded)
+    trading_workspace_extension.build_options_lab_tab(self, embedded)
+    trading_workspace_extension._build_options_lab_market_loader(self, embedded)
 
     schwab_tab.rowconfigure(2, weight=1)
     self._schwab_options_lab_embedded = True
@@ -113,15 +113,15 @@ def _hide_top_level_options_tab(self: tk.Tk) -> None:
 def _run_schwab_workspace_action(self: tk.Tk, *command_names: str) -> None:
     output = getattr(self, "schwab_trading_preview_text", None)
     if output is None:
-        command = options_lab_extension._first_available_command(self, *command_names)
+        command = trading_workspace_extension._first_available_command(self, *command_names)
         command()
         return
 
-    options_lab_extension._run_workspace_action(
+    trading_workspace_extension._run_workspace_action(
         self,
         venue="Schwab",
         preview_widget=output,
-        command=options_lab_extension._first_available_command(self, *command_names),
+        command=trading_workspace_extension._first_available_command(self, *command_names),
     )
 
 
@@ -133,7 +133,7 @@ def _set_schwab_workspace_intro(self: tk.Tk) -> None:
     if "SCHWAB TRADING WORKSPACE" not in current:
         return
 
-    options_lab_extension._set_workspace_text(
+    trading_workspace_extension._set_workspace_text(
         output,
         "SCHWAB TRADING WORKSPACE\n"
         "========================\n\n"

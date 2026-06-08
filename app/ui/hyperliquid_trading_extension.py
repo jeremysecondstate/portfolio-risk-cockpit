@@ -977,7 +977,7 @@ def _fill_edit_dialog_mid_price(
         from app.ui.hyperliquid_cockpit_spot_mid_extension import _format_price, _lookup_hyperliquid_spot_mid
 
         if context_var.get() == "Perp":
-            from app.ui.options_lab_extension import _lookup_hyperliquid_mid
+            from app.ui.trading_workspace_extension import _lookup_hyperliquid_mid
 
             coin = normalize_hyperliquid_coin(market_var.get())
             mid = _lookup_hyperliquid_mid(coin)
@@ -2311,7 +2311,7 @@ def _load_hyperliquid_open_orders(self: tk.Tk, title: str = "HYPERLIQUID OPEN OR
         orders_table = getattr(self, "hyperliquid_workspace_open_orders_table", None)
         if orders_table is not None:
             try:
-                from app.ui.options_lab_extension import _populate_workspace_open_orders_table
+                from app.ui.trading_workspace_extension import _populate_workspace_open_orders_table
 
                 _populate_workspace_open_orders_table(orders_table, snapshot.open_orders)
             except Exception:

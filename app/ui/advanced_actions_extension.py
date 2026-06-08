@@ -73,7 +73,7 @@ def _sync_hyperliquid_account(self: tk.Tk) -> None:
         orders_table = getattr(self, "hyperliquid_workspace_open_orders_table", None)
         if orders_table is not None:
             try:
-                from app.ui.options_lab_extension import _populate_workspace_open_orders_table
+                from app.ui.trading_workspace_extension import _populate_workspace_open_orders_table
 
                 _populate_workspace_open_orders_table(orders_table, snapshot.open_orders)
             except Exception:

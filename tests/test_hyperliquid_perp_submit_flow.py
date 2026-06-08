@@ -65,7 +65,7 @@ class _OpenOrdersApp:
 
 class HyperliquidPerpSubmitFlowTests(TestCase):
     def test_workspace_live_submit_buttons_are_explicitly_separate(self) -> None:
-        source = Path("app/ui/options_lab_extension.py").read_text(encoding="utf-8")
+        source = Path("app/ui/trading_workspace_extension.py").read_text(encoding="utf-8")
 
         self.assertIn(
             'text="LIVE Submit", command=hyperliquid_action("spot", "show_hyperliquid_spot_live_submit_safety_review")',

@@ -4,7 +4,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Any, Type
 
-from app.ui import options_lab_extension as workspace
+from app.ui import trading_workspace_extension as workspace
 
 _ORIGINAL_WORKSPACE_HOLDING_ROWS = workspace._workspace_holding_rows
 _NEUTRAL_FOREGROUND = "#0f172a"

@@ -8,7 +8,7 @@ from tkinter import messagebox, ttk
 from typing import Any, Callable, Type
 
 from app.core.order_models import SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, TimeInForce, normalize_time_in_force, schwab_equity_session_duration
-from app.ui.options_lab import (
+from app.ui.trading_workspace import (
     OPTION_TYPES,
     ORDER_TYPES,
     STRATEGIES,
@@ -18,7 +18,7 @@ from app.ui.options_lab import (
     _parse_scenario,
     use_mid_as_limit,
 )
-from app.ui.options_lab_extension import (
+from app.ui.trading_workspace_extension import (
     _bind_side_combobox_style,
     _build_hyperliquid_trading_tab,
     _build_schwab_trading_tab,

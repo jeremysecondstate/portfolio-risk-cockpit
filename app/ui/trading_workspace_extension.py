@@ -14,7 +14,7 @@ from app.analytics.trade_setup import calculate_support_resistance
 from app.brokers.hyperliquid.client import HyperliquidInfoClient
 from app.brokers.hyperliquid.trading import normalize_hyperliquid_coin
 from app.core.order_models import SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, OrderSide, OrderType, TimeInForce
-from app.ui.options_lab import build_options_lab_tab, run_options_what_if
+from app.ui.trading_workspace import build_options_lab_tab, run_options_what_if
 from app.ui.polished_theme import _make_paned
 
 

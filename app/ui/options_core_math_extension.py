@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import tkinter as tk
 
-from app.ui import options_lab
+from app.ui import trading_workspace
 from app.ui.options_core_math import (
     OptionCoreMetrics,
     calculate_core_option_metrics,
@@ -10,8 +10,8 @@ from app.ui.options_core_math import (
 )
 
 _installed = False
-_original_analyze_scenario = options_lab._analyze_scenario
-_original_format_analysis = options_lab._format_analysis
+_original_analyze_scenario = trading_workspace._analyze_scenario
+_original_format_analysis = trading_workspace._format_analysis
 _VERTICAL_SPREADS = {"Vertical Debit Spread", "Vertical Credit Spread"}
 
 
@@ -22,13 +22,13 @@ def install_options_core_math_extension() -> None:
     if _installed:
         return
 
-    options_lab._analyze_scenario = _analyze_scenario_with_core_math
-    options_lab._format_analysis = _format_analysis_with_core_math
-    options_lab._update_order_summary = _update_order_summary_with_core_math
+    trading_workspace._analyze_scenario = _analyze_scenario_with_core_math
+    trading_workspace._format_analysis = _format_analysis_with_core_math
+    trading_workspace._update_order_summary = _update_order_summary_with_core_math
     _installed = True
 
 
-def _analyze_scenario_with_core_math(s: options_lab.OptionsScenario, app: tk.Tk | None = None) -> dict:
+def _analyze_scenario_with_core_math(s: trading_workspace.OptionsScenario, app: tk.Tk | None = None) -> dict:
     analysis = _original_analyze_scenario(s, app)
     core = calculate_core_option_metrics(
         stock_price=s.underlying_price,
@@ -56,7 +56,7 @@ def _analyze_scenario_with_core_math(s: options_lab.OptionsScenario, app: tk.Tk 
     return analysis
 
 
-def _format_analysis_with_core_math(s: options_lab.OptionsScenario, analysis: dict) -> str:
+def _format_analysis_with_core_math(s: trading_workspace.OptionsScenario, analysis: dict) -> str:
     formatted = _original_format_analysis(s, analysis)
     if s.strategy in _VERTICAL_SPREADS:
         core_block = "\n".join(_format_vertical_spread_math_lines(s, analysis))
@@ -69,7 +69,7 @@ def _format_analysis_with_core_math(s: options_lab.OptionsScenario, analysis: di
                 premium=s.premium,
                 contracts=s.contracts,
                 metrics=core,
-                money_formatter=options_lab._money,
+                money_formatter=trading_workspace._money,
             )
         )
     insertion = f"\n{core_block}\n"
@@ -79,27 +79,27 @@ def _format_analysis_with_core_math(s: options_lab.OptionsScenario, analysis: di
     return f"{formatted}\n{insertion}"
 
 
-def _format_vertical_spread_math_lines(s: options_lab.OptionsScenario, analysis: dict) -> list[str]:
+def _format_vertical_spread_math_lines(s: trading_workspace.OptionsScenario, analysis: dict) -> list[str]:
     contracts = max(s.contracts, 1)
     multiplier = 100
     width = abs(s.short_strike - s.strike)
     width_dollars = width * multiplier * contracts
     max_loss = float(analysis.get("max_loss") or 0.0)
     max_profit = analysis.get("max_profit")
-    max_profit_text = "--" if max_profit is None else options_lab._money(float(max_profit))
+    max_profit_text = "--" if max_profit is None else trading_workspace._money(float(max_profit))
     breakeven = analysis.get("breakeven")
     debit_or_credit = s.premium if s.strategy == "Vertical Debit Spread" else s.credit
     debit_or_credit_label = "Net debit" if s.strategy == "Vertical Debit Spread" else "Net credit"
-    breakeven_text = "--" if not isinstance(breakeven, (int, float)) else options_lab._money(float(breakeven))
+    breakeven_text = "--" if not isinstance(breakeven, (int, float)) else trading_workspace._money(float(breakeven))
 
     lines = [
         "Vertical Spread Math:",
         f"- Structure: buy {s.strike:g} {s.option_type.upper()} / sell {s.short_strike:g} {s.option_type.upper()} {s.expiration}.",
-        f"- Long-leg quote: bid/ask/mark {options_lab._format_optional_price(s.bid)} / {options_lab._format_optional_price(s.ask)} / {options_lab._format_optional_price(s.mark)}.",
+        f"- Long-leg quote: bid/ask/mark {trading_workspace._format_optional_price(s.bid)} / {trading_workspace._format_optional_price(s.ask)} / {trading_workspace._format_optional_price(s.mark)}.",
         f"- Short-leg credit input: {s.credit:.2f} per share.",
-        f"- {debit_or_credit_label}: {debit_or_credit:.2f} × {multiplier} × {contracts} = {options_lab._money(debit_or_credit * multiplier * contracts)}.",
-        f"- Spread width: {width:.2f} × {multiplier} × {contracts} = {options_lab._money(width_dollars)}.",
-        f"- Max loss: {options_lab._money(max_loss)}.",
+        f"- {debit_or_credit_label}: {debit_or_credit:.2f} × {multiplier} × {contracts} = {trading_workspace._money(debit_or_credit * multiplier * contracts)}.",
+        f"- Spread width: {width:.2f} × {multiplier} × {contracts} = {trading_workspace._money(width_dollars)}.",
+        f"- Max loss: {trading_workspace._money(max_loss)}.",
         f"- Max profit: {max_profit_text}.",
         f"- Breakeven: {breakeven_text}.",
         "- Note: this section uses spread net debit/credit. Long-option intrinsic/time-value math is intentionally not shown for spreads because it would mix one-leg option math with two-leg spread pricing.",
@@ -107,25 +107,25 @@ def _format_vertical_spread_math_lines(s: options_lab.OptionsScenario, analysis:
     return lines
 
 
-def _update_order_summary_with_core_math(app: tk.Tk, s: options_lab.OptionsScenario, analysis: dict) -> None:
+def _update_order_summary_with_core_math(app: tk.Tk, s: trading_workspace.OptionsScenario, analysis: dict) -> None:
     if not hasattr(app, "options_order_summary_label"):
         return
 
     if s.strategy in _VERTICAL_SPREADS:
         max_profit = analysis.get("max_profit")
-        max_profit_text = "--" if max_profit is None else options_lab._money(float(max_profit))
+        max_profit_text = "--" if max_profit is None else trading_workspace._money(float(max_profit))
         summary = (
             f"{s.action.upper()} {s.contracts} {s.symbol} {s.expiration} {s.strike:g}/{s.short_strike:g} "
             f"{s.option_type.upper()} {s.strategy} @ net {s.premium:.2f} {s.order_type} {s.time_in_force} · "
-            f"Max loss {options_lab._money(float(analysis['max_loss']))} · "
+            f"Max loss {trading_workspace._money(float(analysis['max_loss']))} · "
             f"Max profit {max_profit_text} · "
-            f"Breakeven {options_lab._money(float(analysis['breakeven']))}"
+            f"Breakeven {trading_workspace._money(float(analysis['breakeven']))}"
         )
         if s.bid is not None or s.ask is not None or s.mark is not None:
             summary += (
-                f" · Long bid/ask/mark {options_lab._format_optional_price(s.bid)} / "
-                f"{options_lab._format_optional_price(s.ask)} / "
-                f"{options_lab._format_optional_price(s.mark)} · Short credit {s.credit:.2f}"
+                f" · Long bid/ask/mark {trading_workspace._format_optional_price(s.bid)} / "
+                f"{trading_workspace._format_optional_price(s.ask)} / "
+                f"{trading_workspace._format_optional_price(s.mark)} · Short credit {s.credit:.2f}"
             )
         app.options_order_summary_label.configure(text=summary)
         return
@@ -134,20 +134,20 @@ def _update_order_summary_with_core_math(app: tk.Tk, s: options_lab.OptionsScena
     summary = (
         f"{s.action.upper()} {s.contracts} {s.symbol} {s.expiration} {s.strike:g} {s.option_type.upper()} "
         f"@ {s.premium:.2f} {s.order_type} {s.time_in_force} · "
-        f"Contract cost {options_lab._money(core.contract_cost)} · "
-        f"Breakeven {options_lab._money(analysis['breakeven'])} · "
-        f"Intrinsic {options_lab._money(core.selected_intrinsic_value)} / Time value {options_lab._money(core.time_value)}"
+        f"Contract cost {trading_workspace._money(core.contract_cost)} · "
+        f"Breakeven {trading_workspace._money(analysis['breakeven'])} · "
+        f"Intrinsic {trading_workspace._money(core.selected_intrinsic_value)} / Time value {trading_workspace._money(core.time_value)}"
     )
     if s.bid is not None or s.ask is not None or s.mark is not None:
         summary += (
-            f" · Bid {options_lab._format_optional_price(s.bid)} / "
-            f"Ask {options_lab._format_optional_price(s.ask)} / "
-            f"Mark {options_lab._format_optional_price(s.mark)}"
+            f" · Bid {trading_workspace._format_optional_price(s.bid)} / "
+            f"Ask {trading_workspace._format_optional_price(s.ask)} / "
+            f"Mark {trading_workspace._format_optional_price(s.mark)}"
         )
     app.options_order_summary_label.configure(text=summary)
 
 
-def _get_core_metrics(s: options_lab.OptionsScenario, analysis: dict) -> OptionCoreMetrics:
+def _get_core_metrics(s: trading_workspace.OptionsScenario, analysis: dict) -> OptionCoreMetrics:
     core = analysis.get("core")
     if isinstance(core, OptionCoreMetrics):
         return core

@@ -3,7 +3,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-from app.ui import schwab_trading_tab, options_lab, options_lab_extension
+from app.ui import schwab_trading_tab, trading_workspace, trading_workspace_extension
 from app.ui.polished_theme import _make_paned
 
 _installed = False
@@ -16,8 +16,8 @@ def install_options_resizable_layout_extension() -> None:
     if _installed:
         return
 
-    options_lab.build_options_lab_tab = _build_resizable_options_lab_tab
-    options_lab_extension.build_options_lab_tab = _build_resizable_options_lab_tab
+    trading_workspace.build_options_lab_tab = _build_resizable_options_lab_tab
+    trading_workspace_extension.build_options_lab_tab = _build_resizable_options_lab_tab
     schwab_trading_tab.build_options_lab_tab = _build_resizable_options_lab_tab
     schwab_trading_tab._build_options_lab_market_loader = _skip_bottom_options_loader
     _installed = True
@@ -38,7 +38,7 @@ def _skip_bottom_options_loader(app: tk.Tk, parent: ttk.Frame) -> None:
 def _build_resizable_options_lab_tab(app: tk.Tk, parent: ttk.Frame) -> None:
     """Build the options lab with draggable horizontal and vertical splitters."""
 
-    options_lab._init_options_vars(app)
+    trading_workspace._init_options_vars(app)
 
     parent.columnconfigure(0, weight=1)
     parent.rowconfigure(1, weight=1)
@@ -56,7 +56,7 @@ def _build_resizable_options_lab_tab(app: tk.Tk, parent: ttk.Frame) -> None:
 
     _build_resizable_scenario_builder(app, left_shell)
     _build_resizable_options_output(app, right_shell)
-    options_lab.run_options_what_if(app)
+    trading_workspace.run_options_what_if(app)
 
 
 def _build_options_lab_header(app: tk.Tk, parent: ttk.Frame) -> None:
@@ -77,10 +77,10 @@ def _build_options_lab_header(app: tk.Tk, parent: ttk.Frame) -> None:
 
     actions = ttk.Frame(banner, style="Panel.TFrame")
     actions.grid(row=0, column=1, sticky="e")
-    ttk.Button(actions, text="Run What-If", command=lambda: options_lab.run_options_what_if(app), style="Accent.TButton").pack(side=tk.LEFT)
-    ttk.Button(actions, text="Sync Portfolio", command=lambda: options_lab.load_options_portfolio_values(app)).pack(side=tk.LEFT, padx=(8, 0))
-    ttk.Button(actions, text="Use Holding", command=lambda: options_lab.use_current_symbol_holding_price(app)).pack(side=tk.LEFT, padx=(8, 0))
-    ttk.Button(actions, text="Use Mid", command=lambda: options_lab.use_mid_as_limit(app)).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(actions, text="Run What-If", command=lambda: trading_workspace.run_options_what_if(app), style="Accent.TButton").pack(side=tk.LEFT)
+    ttk.Button(actions, text="Sync Portfolio", command=lambda: trading_workspace.load_options_portfolio_values(app)).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(actions, text="Use Holding", command=lambda: trading_workspace.use_current_symbol_holding_price(app)).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(actions, text="Use Mid", command=lambda: trading_workspace.use_mid_as_limit(app)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(
         actions,
         text="Load Schwab Technicals",
@@ -111,7 +111,7 @@ def _build_resizable_scenario_builder(app: tk.Tk, parent: ttk.Frame) -> None:
     quote.pack(fill=tk.BOTH, expand=True)
     quote.columnconfigure(1, weight=1)
     quote.columnconfigure(3, weight=1)
-    options_lab._grid_pair(
+    trading_workspace._grid_pair(
         quote,
         0,
         "Symbol",
@@ -125,15 +125,15 @@ def _build_resizable_scenario_builder(app: tk.Tk, parent: ttk.Frame) -> None:
     ticket.columnconfigure(1, weight=1)
     ticket.columnconfigure(3, weight=1)
 
-    options_lab._grid_pair(ticket, 0, "Action", ttk.Combobox(ticket, textvariable=app.options_action_var, values=options_lab.ACTIONS, state="readonly"), "Strategy", ttk.Combobox(ticket, textvariable=app.options_strategy_var, values=options_lab.STRATEGIES, state="readonly"))
-    options_lab._grid_pair(ticket, 1, "Contracts", ttk.Entry(ticket, textvariable=app.options_contracts_var), "Expiration", ttk.Entry(ticket, textvariable=app.options_expiration_var))
-    options_lab._grid_pair(ticket, 2, "Strike", ttk.Entry(ticket, textvariable=app.options_strike_var), "Call / Put", ttk.Combobox(ticket, textvariable=app.options_type_var, values=options_lab.OPTION_TYPES, state="readonly"))
-    options_lab._grid_pair(ticket, 3, "Bid", ttk.Entry(ticket, textvariable=app.options_bid_var), "Ask", ttk.Entry(ticket, textvariable=app.options_ask_var))
-    options_lab._grid_pair(ticket, 4, "Mark", ttk.Entry(ticket, textvariable=app.options_mark_var), "Limit / Debit", ttk.Entry(ticket, textvariable=app.options_premium_var))
-    options_lab._grid_pair(ticket, 5, "Order type", ttk.Combobox(ticket, textvariable=app.options_order_type_var, values=options_lab.ORDER_TYPES, state="readonly"), "Time in force", ttk.Combobox(ticket, textvariable=app.options_tif_var, values=options_lab.TIME_IN_FORCE, state="readonly"))
-    options_lab._grid_pair(ticket, 6, "Short strike", ttk.Entry(ticket, textvariable=app.options_short_strike_var), "Credit", ttk.Entry(ticket, textvariable=app.options_credit_var))
-    options_lab._grid_pair(ticket, 7, "Shares", ttk.Entry(ticket, textvariable=app.options_quantity_var), "Stop price", ttk.Entry(ticket, textvariable=app.options_stop_price_var))
-    options_lab._grid_pair(ticket, 8, "Target price", ttk.Entry(ticket, textvariable=app.options_target_price_var), "ATR %", ttk.Entry(ticket, textvariable=app.options_atr_var))
+    trading_workspace._grid_pair(ticket, 0, "Action", ttk.Combobox(ticket, textvariable=app.options_action_var, values=trading_workspace.ACTIONS, state="readonly"), "Strategy", ttk.Combobox(ticket, textvariable=app.options_strategy_var, values=trading_workspace.STRATEGIES, state="readonly"))
+    trading_workspace._grid_pair(ticket, 1, "Contracts", ttk.Entry(ticket, textvariable=app.options_contracts_var), "Expiration", ttk.Entry(ticket, textvariable=app.options_expiration_var))
+    trading_workspace._grid_pair(ticket, 2, "Strike", ttk.Entry(ticket, textvariable=app.options_strike_var), "Call / Put", ttk.Combobox(ticket, textvariable=app.options_type_var, values=trading_workspace.OPTION_TYPES, state="readonly"))
+    trading_workspace._grid_pair(ticket, 3, "Bid", ttk.Entry(ticket, textvariable=app.options_bid_var), "Ask", ttk.Entry(ticket, textvariable=app.options_ask_var))
+    trading_workspace._grid_pair(ticket, 4, "Mark", ttk.Entry(ticket, textvariable=app.options_mark_var), "Limit / Debit", ttk.Entry(ticket, textvariable=app.options_premium_var))
+    trading_workspace._grid_pair(ticket, 5, "Order type", ttk.Combobox(ticket, textvariable=app.options_order_type_var, values=trading_workspace.ORDER_TYPES, state="readonly"), "Time in force", ttk.Combobox(ticket, textvariable=app.options_tif_var, values=trading_workspace.TIME_IN_FORCE, state="readonly"))
+    trading_workspace._grid_pair(ticket, 6, "Short strike", ttk.Entry(ticket, textvariable=app.options_short_strike_var), "Credit", ttk.Entry(ticket, textvariable=app.options_credit_var))
+    trading_workspace._grid_pair(ticket, 7, "Shares", ttk.Entry(ticket, textvariable=app.options_quantity_var), "Stop price", ttk.Entry(ticket, textvariable=app.options_stop_price_var))
+    trading_workspace._grid_pair(ticket, 8, "Target price", ttk.Entry(ticket, textvariable=app.options_target_price_var), "ATR %", ttk.Entry(ticket, textvariable=app.options_atr_var))
 
     context = ttk.LabelFrame(context_shell, text="Account + Positions Context", style="Card.TLabelframe")
     context.pack(fill=tk.BOTH, expand=True)
@@ -155,9 +155,9 @@ def _build_resizable_scenario_builder(app: tk.Tk, parent: ttk.Frame) -> None:
     technical.pack(fill=tk.BOTH, expand=True)
     technical.columnconfigure(1, weight=1)
     technical.columnconfigure(3, weight=1)
-    options_lab._grid_pair(technical, 0, "RSI", ttk.Entry(technical, textvariable=app.options_rsi_var), "20 SMA", ttk.Entry(technical, textvariable=app.options_sma_20_var))
-    options_lab._grid_pair(technical, 1, "50 SMA", ttk.Entry(technical, textvariable=app.options_sma_50_var), "200 SMA", ttk.Entry(technical, textvariable=app.options_sma_200_var))
-    options_lab._grid_pair(technical, 2, "Support", ttk.Entry(technical, textvariable=app.options_support_var), "Resistance", ttk.Entry(technical, textvariable=app.options_resistance_var))
+    trading_workspace._grid_pair(technical, 0, "RSI", ttk.Entry(technical, textvariable=app.options_rsi_var), "20 SMA", ttk.Entry(technical, textvariable=app.options_sma_20_var))
+    trading_workspace._grid_pair(technical, 1, "50 SMA", ttk.Entry(technical, textvariable=app.options_sma_50_var), "200 SMA", ttk.Entry(technical, textvariable=app.options_sma_200_var))
+    trading_workspace._grid_pair(technical, 2, "Support", ttk.Entry(technical, textvariable=app.options_support_var), "Resistance", ttk.Entry(technical, textvariable=app.options_resistance_var))
 
 
 def _place_left_stack_sashes(stack: tk.PanedWindow, parent: ttk.Frame) -> None:
@@ -188,12 +188,12 @@ def _build_resizable_options_output(app: tk.Tk, parent: ttk.Frame) -> None:
     metrics = ttk.LabelFrame(metrics_shell, text="Risk + Margin Snapshot", style="Card.TLabelframe")
     metrics.pack(fill=tk.BOTH, expand=True)
     metrics.columnconfigure((0, 1, 2), weight=1)
-    app.options_max_loss_label = options_lab._metric(metrics, "Max Loss", 0, 0)
-    app.options_max_profit_label = options_lab._metric(metrics, "Max Profit", 0, 1)
-    app.options_breakeven_label = options_lab._metric(metrics, "Breakeven", 0, 2)
-    app.options_margin_label = options_lab._metric(metrics, "BP Effect", 2, 0)
-    app.options_portfolio_risk_label = options_lab._metric(metrics, "Portfolio Risk", 2, 1)
-    app.options_reward_risk_label = options_lab._metric(metrics, "Reward/Risk", 2, 2)
+    app.options_max_loss_label = trading_workspace._metric(metrics, "Max Loss", 0, 0)
+    app.options_max_profit_label = trading_workspace._metric(metrics, "Max Profit", 0, 1)
+    app.options_breakeven_label = trading_workspace._metric(metrics, "Breakeven", 0, 2)
+    app.options_margin_label = trading_workspace._metric(metrics, "BP Effect", 2, 0)
+    app.options_portfolio_risk_label = trading_workspace._metric(metrics, "Portfolio Risk", 2, 1)
+    app.options_reward_risk_label = trading_workspace._metric(metrics, "Reward/Risk", 2, 2)
 
     summary = ttk.LabelFrame(summary_shell, text="Selected Order", style="Card.TLabelframe")
     summary.pack(fill=tk.BOTH, expand=True)
