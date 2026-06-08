@@ -149,7 +149,7 @@ from app.data.sec_edgar import SecEdgarClient, normalize_ticker
 from app.macro.analysis import format_macro_report
 from app.macro.models import MacroSnapshot
 from app.macro.releases import fetch_macro_release_snapshot
-from app.ui.research_widgets import Checklist, ScenarioImpactBars, ScoreMeter, ScrollableFrame, clear_children, freshness_badges, labeled_value_grid, metric_grid
+from app.ui.research_widgets import Checklist, RankedRows, ScenarioImpactBars, ScoreMeter, ScrollableFrame, clear_children, freshness_badges, labeled_value_grid, metric_grid
 from app.ui.schwab_option_chain_extension import _option_chain_rows, _populate_option_chain_tree, _request_option_chain, _underlying_price
 from app.ui.schwab_output_popout_extension import _apply_report_tags, _open_external_url
 
@@ -789,7 +789,7 @@ def _overview_tab(notebook: ttk.Notebook) -> ttk.Frame:
     evidence_tree.configure(yscrollcommand=evidence_scroll.set)
     _add_horizontal_tree_scrollbar(evidence_box, evidence_tree, row=1)
     frame.recommendation_evidence_tree = evidence_tree  # type: ignore[attr-defined]
-    frame.recommendation_evidence_lists = ttk.Frame(frame.recommendation, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.recommendation_evidence_lists = ttk.LabelFrame(frame.recommendation, text="Evidence Details", style="Card.TLabelframe")  # type: ignore[attr-defined]
     frame.recommendation_evidence_lists.grid(row=2, column=0, sticky="ew", padx=10, pady=(8, 0))  # type: ignore[attr-defined]
     frame.recommendation_evidence_lists.columnconfigure((0, 1), weight=0)  # type: ignore[attr-defined]
     frame.recommendation_supporting_text = _readout_launcher(  # type: ignore[attr-defined]
@@ -810,7 +810,7 @@ def _overview_tab(notebook: ttk.Notebook) -> ttk.Frame:
         sticky="w",
         pady=(0, 0),
     )
-    frame.recommendation_planning = ttk.Frame(frame.recommendation, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.recommendation_planning = ttk.LabelFrame(frame.recommendation, text="Planning Details", style="Card.TLabelframe")  # type: ignore[attr-defined]
     frame.recommendation_planning.grid(row=3, column=0, sticky="ew", padx=10, pady=(8, 0))  # type: ignore[attr-defined]
     frame.recommendation_planning.columnconfigure((0, 1), weight=0)  # type: ignore[attr-defined]
     frame.recommendation_reward_risk_text = _readout_launcher(  # type: ignore[attr-defined]
@@ -831,7 +831,7 @@ def _overview_tab(notebook: ttk.Notebook) -> ttk.Frame:
         sticky="w",
         pady=(0, 0),
     )
-    frame.recommendation_triggers = ttk.Frame(frame.recommendation, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.recommendation_triggers = ttk.LabelFrame(frame.recommendation, text="Trigger Lines", style="Card.TLabelframe")  # type: ignore[attr-defined]
     frame.recommendation_triggers.grid(row=4, column=0, sticky="ew", padx=10, pady=(8, 0))  # type: ignore[attr-defined]
     frame.recommendation_triggers.columnconfigure((0, 1), weight=0)  # type: ignore[attr-defined]
     frame.recommendation_invalidation_text = _readout_launcher(  # type: ignore[attr-defined]
@@ -852,7 +852,7 @@ def _overview_tab(notebook: ttk.Notebook) -> ttk.Frame:
         sticky="w",
         pady=(0, 0),
     )
-    frame.recommendation_followups = ttk.Frame(frame.recommendation, style="Panel.TFrame")  # type: ignore[attr-defined]
+    frame.recommendation_followups = ttk.LabelFrame(frame.recommendation, text="Risk / Data Follow-Ups", style="Card.TLabelframe")  # type: ignore[attr-defined]
     frame.recommendation_followups.grid(row=5, column=0, sticky="ew", padx=10, pady=(8, 0))  # type: ignore[attr-defined]
     frame.recommendation_followups.columnconfigure((0, 1, 2), weight=0)  # type: ignore[attr-defined]
     frame.recommendation_what_change_text = _readout_launcher(  # type: ignore[attr-defined]
@@ -3610,7 +3610,13 @@ def _recommendation_engine_detail_text(read: Any | None, symbol: str, operator_v
     ]
     lines.extend(_recommendation_text_section("Operator Verdict", _operator_verdict_detail_lines(operator_verdict)))
     lines.extend(_recommendation_text_section("Why", _recommendation_list(_recommendation_get(read, "why"))))
-    lines.extend(_recommendation_text_section("Evidence Components", [f"{component} | {vote} | {confidence} | {status} | {reason}" for component, vote, confidence, status, reason in _recommendation_evidence_rows(read, limit=20)]))
+    lines.extend(
+        _recommendation_markdown_table_section(
+            "Evidence Components",
+            ("Component", "Vote", "Confidence", "Status", "Reason"),
+            _recommendation_evidence_rows(read, limit=20),
+        )
+    )
     lines.extend(_recommendation_text_section("Empirical Recommendation Intelligence", _empirical_recommendation_detail_lines(read)))
     lines.extend(_recommendation_text_section("Supporting Evidence", _recommendation_supporting_lines(read, limit=8)))
     lines.extend(_recommendation_text_section("Contradictions", _recommendation_contradiction_lines(read, limit=8)))
@@ -3637,6 +3643,21 @@ def _recommendation_text_section(title: str, rows: list[str] | tuple[str, ...]) 
     if not clean_rows:
         clean_rows = ["No rows supplied."]
     return ["", f"{title}:", *[f"- {row}" for row in clean_rows]]
+
+
+def _recommendation_markdown_table_section(title: str, headers: tuple[str, ...], rows: list[tuple[Any, ...]]) -> list[str]:
+    if not rows:
+        rows = [("No rows", "--", "--", "Unavailable", "No evidence components were supplied.")]
+    lines = ["", f"{title}:", "| " + " | ".join(headers) + " |", "| " + " | ".join("---" for _header in headers) + " |"]
+    for row in rows:
+        values = [_markdown_table_cell(value) for value in row]
+        padded = values + [""] * max(0, len(headers) - len(values))
+        lines.append("| " + " | ".join(padded[: len(headers)]) + " |")
+    return lines
+
+
+def _markdown_table_cell(value: Any) -> str:
+    return str(value or "").replace("|", "\\|").strip()
 
 
 def _recommendation_data_source_lines(data_confidence: Any | None, *, limit: int = 12) -> list[str]:
@@ -3875,8 +3896,8 @@ def _render_trade_evidence(self: tk.Tk, payload: _ResearchPayload) -> None:
     ).grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 8))  # type: ignore[attr-defined]
 
     clear_children(frame.operator_plan)  # type: ignore[attr-defined]
-    Checklist(frame.operator_plan, "Operator Plan", _operator_plan_lines(payload.operator_verdict)).grid(row=0, column=0, sticky="nsew", padx=(10, 8), pady=8)  # type: ignore[attr-defined]
-    Checklist(frame.operator_plan, "Self-Critique", _operator_self_critique_lines(payload.operator_verdict)).grid(row=0, column=1, sticky="nsew", padx=(0, 10), pady=8)  # type: ignore[attr-defined]
+    RankedRows(frame.operator_plan, "Operator Plan", _operator_plan_lines(payload.operator_verdict), status="info").grid(row=0, column=0, sticky="nsew", padx=(10, 8), pady=8)  # type: ignore[attr-defined]
+    RankedRows(frame.operator_plan, "Self-Critique", _operator_self_critique_lines(payload.operator_verdict), status="mixed").grid(row=0, column=1, sticky="nsew", padx=(0, 10), pady=8)  # type: ignore[attr-defined]
 
     tree = frame.score_tree  # type: ignore[attr-defined]
     for row_id in tree.get_children():
@@ -3885,14 +3906,14 @@ def _render_trade_evidence(self: tk.Tk, payload: _ResearchPayload) -> None:
         tree.insert("", tk.END, values=(grade.category, grade.grade, grade.why))
 
     clear_children(frame.evidence_columns)  # type: ignore[attr-defined]
-    Checklist(frame.evidence_columns, "Supporting Evidence", report.supporting_evidence).grid(row=0, column=0, sticky="nsew", padx=(0, 8))  # type: ignore[attr-defined]
-    Checklist(frame.evidence_columns, "Contradictions", report.contradictory_evidence).grid(row=0, column=1, sticky="nsew")  # type: ignore[attr-defined]
+    RankedRows(frame.evidence_columns, "Supporting Evidence", report.supporting_evidence, status="good").grid(row=0, column=0, sticky="nsew", padx=(0, 8))  # type: ignore[attr-defined]
+    RankedRows(frame.evidence_columns, "Contradictions", report.contradictory_evidence, status="bad").grid(row=0, column=1, sticky="nsew")  # type: ignore[attr-defined]
     clear_children(frame.risk_columns)  # type: ignore[attr-defined]
-    Checklist(frame.risk_columns, "Event + Execution Risk", [*report.event_risk[:4], *report.liquidity_execution[:4]]).grid(row=0, column=0, sticky="nsew", padx=(0, 8))  # type: ignore[attr-defined]
-    Checklist(frame.risk_columns, "Portfolio + Options Impact", [*report.portfolio_impact[:4], *report.options_iv[:4]]).grid(row=0, column=1, sticky="nsew")  # type: ignore[attr-defined]
+    RankedRows(frame.risk_columns, "Event + Execution Risk", [*report.event_risk[:4], *report.liquidity_execution[:4]], status="mixed").grid(row=0, column=0, sticky="nsew", padx=(0, 8))  # type: ignore[attr-defined]
+    RankedRows(frame.risk_columns, "Portfolio + Options Impact", [*report.portfolio_impact[:4], *report.options_iv[:4]], status="info").grid(row=0, column=1, sticky="nsew")  # type: ignore[attr-defined]
     clear_children(frame.decision_columns)  # type: ignore[attr-defined]
-    Checklist(frame.decision_columns, "What Would Make This Dumb", report.dumb_if).grid(row=0, column=0, sticky="nsew", padx=(0, 8))  # type: ignore[attr-defined]
-    Checklist(frame.decision_columns, "What Would Change The View", report.changes_mind).grid(row=0, column=1, sticky="nsew")  # type: ignore[attr-defined]
+    RankedRows(frame.decision_columns, "What Would Make This Dumb", report.dumb_if, status="bad").grid(row=0, column=0, sticky="nsew", padx=(0, 8))  # type: ignore[attr-defined]
+    RankedRows(frame.decision_columns, "What Would Change The View", report.changes_mind, status="info").grid(row=0, column=1, sticky="nsew")  # type: ignore[attr-defined]
     _set_research_text(frame.detail_text, format_trade_evidence_report(report))  # type: ignore[attr-defined]
 
 

@@ -1,14 +1,26 @@
 from __future__ import annotations
 
-from typing import Any, Type
 import re
 import tkinter as tk
 from tkinter import ttk
+from typing import Any, Iterable, Type
 
 from app.analytics.earnings_filing_summary import (
     EarningsFilingSummary,
     build_earnings_filing_summary,
     format_earnings_filing_summary,
+    parse_earnings_filing_summary_from_readout,
+)
+from app.ui.research_widgets import (
+    MUTED,
+    PANEL_BG,
+    STATUS_COLORS,
+    TEXT,
+    VisualReadout,
+    VisualReadoutBlock,
+    clear_children,
+    parse_visual_readout,
+    truncate_with_detail,
 )
 
 _INSTALLED = False
@@ -19,7 +31,7 @@ _ORIGINAL_COMPACT_TEXT: Any | None = None
 
 
 def install_schwab_earnings_visual_extension(app_cls: Type[tk.Tk]) -> None:
-    """Add structured SEC filing summaries and richer research popouts."""
+    """Add structured SEC filing summaries and low-noise visual research popouts."""
 
     global _INSTALLED, _ORIGINAL_ANALYZE, _ORIGINAL_FORMAT, _ORIGINAL_OPEN_READOUT, _ORIGINAL_COMPACT_TEXT
     if _INSTALLED:
@@ -119,7 +131,7 @@ def _open_readout_popout_visual(source: tk.Text) -> None:
     toolbar.grid(row=0, column=0, sticky="ew")
     toolbar.columnconfigure(0, weight=1)
     ttk.Label(toolbar, text=title, font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
-    ttk.Label(toolbar, text="Readable view • tables render as tables • no order behavior changes", style="Subtle.TLabel").grid(row=0, column=1, sticky="e", padx=(12, 8))
+    ttk.Label(toolbar, text="Readable view | native tables | order behavior unchanged", style="Subtle.TLabel").grid(row=0, column=1, sticky="e", padx=(12, 8))
     close_button = ttk.Button(toolbar, text="Close")
     close_button.grid(row=0, column=2, sticky="e")
 
@@ -143,228 +155,411 @@ def _open_readout_popout_visual(source: tk.Text) -> None:
 
 
 def _refresh_visual_readout(source: tk.Text) -> None:
-    from app.ui import schwab_research_workspace_extension as research
-
     parent = getattr(source, "_readout_popout_text", None)
     if parent is None:
         return
     try:
         content = source.get("1.0", tk.END).strip() or "Run analysis first. The detailed readout will appear here."
-        research.clear_children(parent)  # type: ignore[attr-defined]
+        clear_children(parent)
         _build_visual_readout_body(parent, str(getattr(source, "_readout_title", "Detailed Readout") or "Detailed Readout"), content)
     except tk.TclError:
         return
 
 
 def _build_visual_readout_body(parent: ttk.Frame, title: str, content: str) -> None:
-    parsed = _parse_readout(content)
-    row = 0
-    hero = tk.Frame(parent, bg="#eff6ff", highlightbackground="#bfdbfe", highlightthickness=1)
-    hero.grid(row=row, column=0, sticky="ew")
-    hero.columnconfigure(0, weight=1)
-    tk.Label(hero, text=title, bg="#eff6ff", fg="#1e3a8a", font=("Segoe UI", 18, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 4))
-    tk.Label(hero, text=_hero_subtitle(parsed), bg="#eff6ff", fg="#0f172a", font=("Segoe UI", 10), anchor="w", justify=tk.LEFT, wraplength=1040).grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 16))
+    parsed = parse_visual_readout(content, title_hint=title)
+    lower_title = title.lower()
+    if "earnings release" in lower_title:
+        summary = parse_earnings_filing_summary_from_readout(_symbol_from_readout(title, content), content)
+        if summary.has_structured_data:
+            _build_earnings_filing_body(parent, parsed, summary)
+            return
+    if "recommendation engine" in lower_title:
+        _build_recommendation_body(parent, parsed)
+        return
+    if _is_evidence_detail_title(lower_title):
+        _build_ranked_detail_body(parent, parsed)
+        return
+    _build_generic_body(parent, parsed)
+
+
+def _build_generic_body(parent: ttk.Frame, parsed: VisualReadout) -> None:
+    row = _hero(parent, parsed.title, parsed.hero, "info")
+    primary_values = parsed.key_values[:8]
+    if primary_values:
+        _cards(parent, primary_values).grid(row=row, column=0, sticky="ew", pady=(10, 0))
+        row += 1
+    secondary_blocks: list[VisualReadoutBlock] = []
+    for block in parsed.blocks:
+        if block.secondary:
+            secondary_blocks.append(block)
+            continue
+        _block_widget(parent, block).grid(row=row, column=0, sticky="ew", pady=(10, 0))
+        row += 1
+    detail_text = _serialize_blocks(secondary_blocks).strip()
+    if detail_text:
+        _collapsible_detail(parent, "Raw / Source Detail", detail_text).grid(row=row, column=0, sticky="ew", pady=(10, 0))
+        row += 1
+    _collapsible_detail(parent, "Full Generated Readout", parsed.raw_text).grid(row=row, column=0, sticky="ew", pady=(10, 0))
+
+
+def _build_recommendation_body(parent: ttk.Frame, parsed: VisualReadout) -> None:
+    operator = _operator_card_value(parsed)
+    row = _hero(parent, parsed.title, _recommendation_hero(parsed), _status_for_text(_value_for(parsed, "recommendation")))
+    summary_cards = [
+        ("Recommendation", _value_for(parsed, "recommendation") or "No read"),
+        ("Confidence", _value_for(parsed, "confidence") or "--"),
+        ("Evidence Score", _value_for(parsed, "evidence score") or "--"),
+        ("Data Confidence", _value_for(parsed, "data confidence") or "--"),
+        ("Operator Verdict", operator or "--"),
+    ]
+    _cards(parent, summary_cards).grid(row=row, column=0, sticky="ew", pady=(10, 0))
     row += 1
 
-    if parsed["key_values"]:
-        cards = ttk.Frame(parent, style="Panel.TFrame")
-        cards.grid(row=row, column=0, sticky="ew", pady=(10, 0))
-        _key_value_grid(cards, parsed["key_values"][:8])
+    evidence_table = _first_block(parsed, "evidence components", kind="table")
+    if evidence_table is not None:
+        _table_panel(parent, "Evidence Component Table", evidence_table.headers, evidence_table.table_rows).grid(row=row, column=0, sticky="ew", pady=(10, 0))
         row += 1
 
-    for block in parsed["blocks"]:
-        kind = block["kind"]
-        if kind == "table":
-            _table_panel(parent, block["title"], block["headers"], block["rows"]).grid(row=row, column=0, sticky="ew", pady=(10, 0))
+    ordered_sections = (
+        "Why",
+        "Supporting Evidence",
+        "Contradictions",
+        "Expected Reward/Risk + Planning EV",
+        "Reward/Risk + Planning EV",
+        "Position Sizing Notes",
+        "Data Confidence Gaps",
+        "Warnings",
+        "What Would Change",
+        "Invalidation Lines",
+        "Confirmation Lines",
+        "Source Confidence Rows",
+        "Empirical Recommendation Intelligence",
+    )
+    used: set[int] = set()
+    for section in ordered_sections:
+        block = _first_block(parsed, section, used=used)
+        if block is None or block.kind == "table":
+            continue
+        used.add(id(block))
+        _section_panel(parent, block.title, block.rows, status=_status_for_text(block.title + " " + " ".join(block.rows))).grid(row=row, column=0, sticky="ew", pady=(10, 0))
+        row += 1
+
+    _collapsible_detail(parent, "Raw Generated Recommendation Text", parsed.raw_text).grid(row=row, column=0, sticky="ew", pady=(10, 0))
+
+
+def _build_ranked_detail_body(parent: ttk.Frame, parsed: VisualReadout) -> None:
+    rows = _detail_rows(parsed)
+    status = _status_for_text(parsed.title + " " + " ".join(rows))
+    row = _hero(parent, parsed.title, _ranked_hero(parsed.title, rows), status)
+    _ranked_rows_panel(parent, parsed.title, rows, status=status).grid(row=row, column=0, sticky="ew", pady=(10, 0))
+    row += 1
+    _collapsible_detail(parent, "Full Detail", parsed.raw_text).grid(row=row, column=0, sticky="ew", pady=(10, 0))
+
+
+def _build_earnings_filing_body(parent: ttk.Frame, parsed: VisualReadout, summary: EarningsFilingSummary) -> None:
+    row = _hero(parent, "Earnings Filing Dashboard", summary.headline or parsed.hero, "info")
+    metric_cards = [(metric.label, f"{metric.latest_text} | {metric.change_text}") for metric in summary.metrics[:6]]
+    if metric_cards:
+        _cards(parent, metric_cards).grid(row=row, column=0, sticky="ew", pady=(10, 0))
+        row += 1
+    if summary.metrics:
+        _table_panel(parent, "Financial Snapshot", ("Metric", "Latest", "Prior / Comparable", "Change", "Read"), _metric_rows(summary.metrics)).grid(row=row, column=0, sticky="ew", pady=(10, 0))
+        row += 1
+    if summary.platform_rows:
+        _table_panel(parent, "Segment / Platform Revenue", ("Segment", "Latest", "Prior / Comparable", "Change", "Read"), _metric_rows(summary.platform_rows)).grid(row=row, column=0, sticky="ew", pady=(10, 0))
+        row += 1
+    for title, rows, status in (
+        ("Growth Drivers", summary.growth_drivers, "good"),
+        ("Quality Of Earnings", summary.quality_points, "info"),
+        ("Risks To Watch", summary.risks, "bad"),
+        ("Capital Return / Cash Use", summary.capital_return, "mixed"),
+    ):
+        if rows:
+            _section_panel(parent, title, rows, status=status).grid(row=row, column=0, sticky="ew", pady=(10, 0))
             row += 1
-        elif kind == "bullets":
-            _bullets_panel(parent, block["title"], block["rows"]).grid(row=row, column=0, sticky="ew", pady=(10, 0))
-            row += 1
-        elif kind == "paragraphs":
-            _paragraph_panel(parent, block["title"], block["rows"]).grid(row=row, column=0, sticky="ew", pady=(10, 0))
-            row += 1
+    source_rows = _source_rows(summary)
+    if source_rows:
+        _section_panel(parent, "Source Freshness / Links", source_rows, status="info").grid(row=row, column=0, sticky="ew", pady=(10, 0))
+        row += 1
+    if summary.raw_excerpt:
+        _collapsible_detail(parent, "Raw SEC Excerpt", summary.raw_excerpt).grid(row=row, column=0, sticky="ew", pady=(10, 0))
+        row += 1
+    _collapsible_detail(parent, "Full Generated Earnings Readout", parsed.raw_text).grid(row=row, column=0, sticky="ew", pady=(10, 0))
 
 
-def _parse_readout(content: str) -> dict[str, Any]:
-    lines = [line.rstrip() for line in content.splitlines()]
-    blocks: list[dict[str, Any]] = []
-    key_values: list[tuple[str, str]] = []
-    current_title = "Summary"
-    paragraph_rows: list[str] = []
-    bullet_rows: list[str] = []
-    i = 0
-
-    def flush() -> None:
-        nonlocal paragraph_rows, bullet_rows
-        if bullet_rows:
-            blocks.append({"kind": "bullets", "title": current_title, "rows": bullet_rows})
-            bullet_rows = []
-        if paragraph_rows:
-            blocks.append({"kind": "paragraphs", "title": current_title, "rows": paragraph_rows})
-            paragraph_rows = []
-
-    while i < len(lines):
-        line = lines[i].strip()
-        next_line = lines[i + 1].strip() if i + 1 < len(lines) else ""
-        if not line:
-            i += 1
-            continue
-        if _is_underline(next_line):
-            flush()
-            current_title = line
-            i += 2
-            continue
-        if _looks_like_heading(line):
-            flush()
-            current_title = line.rstrip(":")
-            i += 1
-            continue
-        if _is_markdown_table_line(line):
-            flush()
-            headers, rows, consumed = _consume_markdown_table(lines, i)
-            blocks.append({"kind": "table", "title": current_title, "headers": headers, "rows": rows})
-            i = consumed
-            continue
-        if line.startswith("-"):
-            clean = line.lstrip("- ").strip()
-            label, value = _split_label_value(clean)
-            if label and value:
-                key_values.append((label, value))
-            bullet_rows.append(clean)
-            i += 1
-            continue
-        label, value = _split_label_value(line)
-        if label and value and len(value) <= 180:
-            key_values.append((label, value))
-        paragraph_rows.append(line)
-        i += 1
-    flush()
-    return {"blocks": _merge_short_blocks(blocks), "key_values": _dedupe_key_values(key_values)}
+def _hero(parent: ttk.Frame, title: str, subtitle: str, status: str) -> int:
+    colors = STATUS_COLORS.get(status, STATUS_COLORS["info"])
+    hero = tk.Frame(parent, bg=colors["bg"], highlightbackground=colors["bar"], highlightthickness=1)
+    hero.grid(row=0, column=0, sticky="ew")
+    hero.columnconfigure(0, weight=1)
+    tk.Label(hero, text=title, bg=colors["bg"], fg=colors["fg"], font=("Segoe UI", 18, "bold"), anchor="w", justify=tk.LEFT).grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 4))
+    tk.Label(hero, text=subtitle, bg=colors["bg"], fg=TEXT, font=("Segoe UI", 10), anchor="w", justify=tk.LEFT, wraplength=1100).grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 16))
+    return 1
 
 
-def _consume_markdown_table(lines: list[str], start: int) -> tuple[list[str], list[list[str]], int]:
-    table_lines = []
-    i = start
-    while i < len(lines) and _is_markdown_table_line(lines[i].strip()):
-        table_lines.append(lines[i].strip())
-        i += 1
-    if not table_lines:
-        return [], [], i
-    headers = _split_table_row(table_lines[0])
-    rows = []
-    for line in table_lines[1:]:
-        if set(line.replace("|", "").replace(":", "").replace(" ", "")) <= {"-"}:
-            continue
-        pieces = _split_table_row(line)
-        if pieces:
-            rows.append(pieces)
-    return headers, rows, i
+def _cards(parent: ttk.Frame, pairs: Iterable[tuple[str, str]], *, columns: int = 5) -> ttk.Frame:
+    frame = ttk.Frame(parent, style="Panel.TFrame")
+    for column in range(columns):
+        frame.columnconfigure(column, weight=1, uniform="visual_cards")
+    for index, (label, value) in enumerate(pairs):
+        status = _status_for_text(str(value))
+        colors = STATUS_COLORS.get(status, STATUS_COLORS["neutral"])
+        card = tk.Frame(frame, bg="#ffffff", highlightbackground=colors["bar"], highlightthickness=1)
+        card.grid(row=index // columns, column=index % columns, sticky="nsew", padx=(0 if index % columns == 0 else 8, 0), pady=(0 if index < columns else 8, 0))
+        card.columnconfigure(0, weight=1)
+        tk.Label(card, text=str(label).upper(), bg="#ffffff", fg=MUTED, font=("Segoe UI", 8, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 2))
+        tk.Label(card, text=str(value), bg="#ffffff", fg=colors["fg"], font=("Segoe UI", 11, "bold"), anchor="w", justify=tk.LEFT, wraplength=210).grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 11))
+    return frame
 
 
-def _table_panel(parent: ttk.Frame, title: str, headers: list[str], rows: list[list[str]]) -> ttk.LabelFrame:
+def _block_widget(parent: ttk.Frame, block: VisualReadoutBlock) -> tk.Widget:
+    if block.kind == "table":
+        return _table_panel(parent, block.title, block.headers, block.table_rows)
+    if block.kind == "bullets":
+        return _section_panel(parent, block.title, block.rows, status=_status_for_text(block.title + " " + " ".join(block.rows)))
+    return _paragraph_panel(parent, block.title, block.rows)
+
+
+def _table_panel(parent: ttk.Frame, title: str, headers: Iterable[str], rows: Iterable[Iterable[str]]) -> ttk.LabelFrame:
     from app.ui import schwab_research_workspace_extension as research
 
+    row_values = [tuple(str(value) for value in row) for row in rows]
+    header_values = tuple(str(header) for header in headers) or ("Detail",)
     box = ttk.LabelFrame(parent, text=title, style="Card.TLabelframe")
     box.columnconfigure(0, weight=1)
-    columns = [f"c{index}" for index in range(max(len(headers), 1))]
-    tree = ttk.Treeview(box, columns=columns, show="headings", height=max(4, min(12, len(rows) + 1)))
-    research._style_research_tree(tree)  # type: ignore[attr-defined]
+    columns = tuple(f"c{index}" for index in range(len(header_values)))
+    tree = ttk.Treeview(box, columns=columns, show="headings", height=max(4, min(12, len(row_values) + 1)))
+    try:
+        research._style_research_tree(tree)  # type: ignore[attr-defined]
+    except Exception:
+        pass
     for index, column in enumerate(columns):
-        label = headers[index] if index < len(headers) else f"Column {index + 1}"
+        label = header_values[index]
+        width = 230 if index == 0 else 160
+        anchor = tk.W if index == 0 or "read" in label.lower() or "reason" in label.lower() else tk.CENTER
         tree.heading(column, text=label)
-        tree.column(column, width=180 if index else 220, anchor=tk.W, stretch=True)
+        tree.column(column, width=width, anchor=anchor, stretch=index == len(columns) - 1 or "read" in label.lower() or "reason" in label.lower())
     tree.grid(row=0, column=0, sticky="ew")
     scrollbar = ttk.Scrollbar(box, orient=tk.VERTICAL, command=tree.yview)
     scrollbar.grid(row=0, column=1, sticky="ns")
     tree.configure(yscrollcommand=scrollbar.set)
-    for row in rows:
-        padded = row + [""] * max(0, len(columns) - len(row))
-        tree.insert("", tk.END, values=tuple(padded[: len(columns)]))
+    for row in row_values:
+        padded = row + ("",) * max(0, len(columns) - len(row))
+        tree.insert("", tk.END, values=padded[: len(columns)])
     return box
 
 
-def _bullets_panel(parent: ttk.Frame, title: str, rows: list[str]) -> ttk.LabelFrame:
+def _section_panel(parent: ttk.Frame, title: str, rows: Iterable[str], *, status: str = "info") -> ttk.LabelFrame:
+    box = ttk.LabelFrame(parent, text=title, style="Card.TLabelframe")
+    box.columnconfigure(1, weight=1)
+    colors = STATUS_COLORS.get(status, STATUS_COLORS["info"])
+    clean_rows = [str(row or "").strip() for row in rows if str(row or "").strip()]
+    if not clean_rows:
+        clean_rows = ["No rows are available yet."]
+    for index, row in enumerate(clean_rows):
+        tk.Label(box, text=str(index + 1), bg=colors["bg"], fg=colors["fg"], font=("Segoe UI", 8, "bold"), width=3).grid(row=index, column=0, sticky="nw", padx=(10, 8), pady=(8 if index == 0 else 3, 4))
+        ttk.Label(box, text=row, style="Subtle.TLabel", wraplength=1080, justify=tk.LEFT).grid(row=index, column=1, sticky="ew", padx=(0, 12), pady=(8 if index == 0 else 3, 4))
+    return box
+
+
+def _paragraph_panel(parent: ttk.Frame, title: str, rows: Iterable[str]) -> ttk.LabelFrame:
     box = ttk.LabelFrame(parent, text=title, style="Card.TLabelframe")
     box.columnconfigure(0, weight=1)
     for index, row in enumerate(rows):
-        ttk.Label(box, text=f"• {row}", style="Subtle.TLabel", wraplength=1120, justify=tk.LEFT).grid(row=index, column=0, sticky="ew", padx=12, pady=(8 if index == 0 else 2, 4))
+        ttk.Label(box, text=str(row), style="Subtle.TLabel", wraplength=1120, justify=tk.LEFT).grid(row=index, column=0, sticky="ew", padx=12, pady=(8 if index == 0 else 4, 4))
     return box
 
 
-def _paragraph_panel(parent: ttk.Frame, title: str, rows: list[str]) -> ttk.LabelFrame:
+def _ranked_rows_panel(parent: ttk.Frame, title: str, rows: list[str], *, status: str) -> ttk.LabelFrame:
+    box = ttk.LabelFrame(parent, text=f"{title} - Ranked Detail", style="Card.TLabelframe")
+    box.columnconfigure(2, weight=1)
+    colors = STATUS_COLORS.get(status, STATUS_COLORS["info"])
+    full_detail: list[str] = []
+    for index, row in enumerate(rows or ["No rows are available yet."], start=1):
+        text = truncate_with_detail(row, 320)
+        if text.truncated:
+            full_detail.append(text.detail)
+        tk.Label(box, text=str(index), bg=colors["bg"], fg=colors["fg"], font=("Segoe UI", 8, "bold"), width=3).grid(row=index - 1, column=0, sticky="nw", padx=(10, 8), pady=(8 if index == 1 else 4, 4))
+        tk.Frame(box, bg=colors["bar"], width=4).grid(row=index - 1, column=1, sticky="nsw", pady=(8 if index == 1 else 4, 4))
+        ttk.Label(box, text=text.display, style="Subtle.TLabel", wraplength=1060, justify=tk.LEFT).grid(row=index - 1, column=2, sticky="ew", padx=(10, 12), pady=(8 if index == 1 else 4, 4))
+    if full_detail:
+        _collapsible_detail(box, "Untruncated Row Detail", "\n\n".join(full_detail)).grid(row=len(rows) + 1, column=0, columnspan=3, sticky="ew", padx=10, pady=(6, 10))
+    return box
+
+
+def _collapsible_detail(parent: ttk.Frame, title: str, text: str) -> ttk.LabelFrame:
     box = ttk.LabelFrame(parent, text=title, style="Card.TLabelframe")
     box.columnconfigure(0, weight=1)
-    for index, row in enumerate(rows):
-        ttk.Label(box, text=row, style="Subtle.TLabel", wraplength=1120, justify=tk.LEFT).grid(row=index, column=0, sticky="ew", padx=12, pady=(8 if index == 0 else 4, 4))
-    return box
-
-
-def _key_value_grid(parent: ttk.Frame, pairs: list[tuple[str, str]]) -> None:
-    for column in range(4):
-        parent.columnconfigure(column, weight=1, uniform="readout_cards")
-    for index, (label, value) in enumerate(pairs):
-        card = tk.Frame(parent, bg="#f8fafc", highlightbackground="#cbd5e1", highlightthickness=1)
-        card.grid(row=index // 4, column=index % 4, sticky="nsew", padx=(0 if index % 4 == 0 else 8, 0), pady=(0 if index < 4 else 8, 0))
-        card.columnconfigure(0, weight=1)
-        tk.Label(card, text=label.upper(), bg="#f8fafc", fg="#64748b", font=("Segoe UI", 8, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 2))
-        tk.Label(card, text=value, bg="#f8fafc", fg="#0f172a", font=("Segoe UI", 11, "bold"), anchor="w", justify=tk.LEFT, wraplength=250).grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
-
-
-def _hero_subtitle(parsed: dict[str, Any]) -> str:
-    for block in parsed.get("blocks", []):
-        rows = block.get("rows") or []
-        if rows:
-            return str(rows[0])[:420]
-    return "Readable research popout with native sections and table rendering."
-
-
-def _looks_like_heading(line: str) -> bool:
-    if len(line) > 80 or line.startswith(("-", "|")):
-        return False
-    lower = line.lower().strip(":")
-    known = (
-        "headline", "source freshness", "key financial snapshot", "platform / segment revenue", "good", "bad / missing", "watch",
-        "supporting evidence", "contradictions", "reward/risk", "position sizing", "warnings", "data confidence gaps",
-        "latest quarter snapshot", "quality of earnings", "risks to watch", "what is driving the quarter", "source details",
+    expanded = tk.BooleanVar(value=False)
+    button = ttk.Button(box, text="Show Detail")
+    button.grid(row=0, column=0, sticky="w", padx=10, pady=8)
+    body = ttk.Frame(box, style="Panel.TFrame")
+    body.columnconfigure(0, weight=1)
+    line_count = max(5, min(18, len(str(text or "").splitlines()) + 2))
+    target = tk.Text(
+        body,
+        wrap=tk.WORD,
+        height=line_count,
+        font=("Segoe UI", 9),
+        padx=12,
+        pady=10,
+        relief=tk.FLAT,
+        borderwidth=0,
+        background=PANEL_BG,
+        foreground=TEXT,
     )
-    return lower in known or (line[:1].isupper() and not line.endswith(".") and len(line.split()) <= 7)
+    target.insert(tk.END, str(text or "").strip())
+    target.configure(state=tk.DISABLED)
+    target.grid(row=0, column=0, sticky="ew")
+
+    def toggle() -> None:
+        if expanded.get():
+            body.grid_remove()
+            expanded.set(False)
+            button.configure(text="Show Detail")
+            return
+        body.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+        expanded.set(True)
+        button.configure(text="Hide Detail")
+
+    button.configure(command=toggle)
+    return box
 
 
-def _is_underline(line: str) -> bool:
-    clean = line.strip()
-    return len(clean) >= 3 and set(clean) <= {"=", "-"}
-
-
-def _is_markdown_table_line(line: str) -> bool:
-    return line.startswith("|") and line.endswith("|") and line.count("|") >= 2
-
-
-def _split_table_row(line: str) -> list[str]:
-    return [piece.strip() for piece in line.strip().strip("|").split("|")]
-
-
-def _split_label_value(text: str) -> tuple[str, str]:
-    if ":" not in text:
-        return "", ""
-    label, value = text.split(":", 1)
-    label = label.strip(" -")
-    value = value.strip()
-    if not label or not value or len(label) > 55:
-        return "", ""
-    return label, value
-
-
-def _dedupe_key_values(pairs: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    seen: set[str] = set()
-    result: list[tuple[str, str]] = []
-    for label, value in pairs:
-        key = label.lower()
-        if key in seen:
+def _first_block(parsed: VisualReadout, title: str, *, kind: str | None = None, used: set[int] | None = None) -> VisualReadoutBlock | None:
+    target = title.lower()
+    for block in parsed.blocks:
+        if used is not None and id(block) in used:
             continue
-        seen.add(key)
-        result.append((label, value))
-    return result
+        if kind is not None and block.kind != kind:
+            continue
+        if block.title.lower() == target:
+            return block
+    for block in parsed.blocks:
+        if used is not None and id(block) in used:
+            continue
+        if kind is not None and block.kind != kind:
+            continue
+        if target in block.title.lower():
+            return block
+    return None
 
 
-def _merge_short_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [block for block in blocks if block.get("rows")]
+def _value_for(parsed: VisualReadout, label: str) -> str:
+    target = label.lower()
+    for key, value in parsed.key_values:
+        if key.lower() == target:
+            return value
+    for key, value in parsed.key_values:
+        if target in key.lower():
+            return value
+    return ""
+
+
+def _operator_card_value(parsed: VisualReadout) -> str:
+    block = _first_block(parsed, "Operator Verdict")
+    if block is None:
+        return ""
+    for row in block.rows:
+        if row.lower().startswith("primary action:"):
+            return row.split(":", 1)[1].strip()
+    return block.rows[0] if block.rows else ""
+
+
+def _recommendation_hero(parsed: VisualReadout) -> str:
+    recommendation = _value_for(parsed, "recommendation") or "No recommendation label found."
+    confidence = _value_for(parsed, "confidence") or "--"
+    evidence = _value_for(parsed, "evidence score") or "--"
+    data = _value_for(parsed, "data confidence") or "--"
+    return f"{recommendation}. Confidence {confidence}; evidence {evidence}; data confidence {data}."
+
+
+def _ranked_hero(title: str, rows: list[str]) -> str:
+    if not rows:
+        return f"{title} has no rows yet. Full generated text remains available below."
+    return f"{len(rows)} ranked row(s). Start with the highest-priority detail, then expand the full text if needed."
+
+
+def _detail_rows(parsed: VisualReadout) -> list[str]:
+    rows: list[str] = []
+    for block in parsed.blocks:
+        if block.kind == "table":
+            rows.extend(" | ".join(row) for row in block.table_rows)
+        else:
+            rows.extend(block.rows)
+    return [row for row in rows if row]
+
+
+def _serialize_blocks(blocks: Iterable[VisualReadoutBlock]) -> str:
+    lines: list[str] = []
+    for block in blocks:
+        lines.extend(["", block.title])
+        if block.kind == "table":
+            lines.append(" | ".join(block.headers))
+            lines.extend(" | ".join(row) for row in block.table_rows)
+        else:
+            lines.extend(block.rows)
+    return "\n".join(lines).strip()
+
+
+def _metric_rows(metrics: Iterable[Any]) -> tuple[tuple[str, str, str, str, str], ...]:
+    rows: list[tuple[str, str, str, str, str]] = []
+    for metric in metrics:
+        rows.append(
+            (
+                str(getattr(metric, "label", "") or ""),
+                str(getattr(metric, "latest_text", "") or "--"),
+                str(getattr(metric, "prior_text", "") or "--"),
+                str(getattr(metric, "change_text", "") or "--"),
+                str(getattr(metric, "read", "") or ""),
+            )
+        )
+    return tuple(rows)
+
+
+def _source_rows(summary: EarningsFilingSummary) -> list[str]:
+    rows = list(summary.source_notes)
+    if summary.source_label and not any("Source:" in row for row in rows):
+        rows.append(f"Source: {summary.source_label}.")
+    if summary.source_date and not any("date" in row.lower() for row in rows):
+        rows.append(f"Filed / loaded date: {summary.source_date}.")
+    if summary.source_url and not any(summary.source_url in row for row in rows):
+        rows.append(f"URL: {summary.source_url}.")
+    return rows
+
+
+def _symbol_from_readout(title: str, content: str) -> str:
+    for text in (title, content[:500]):
+        match = re.search(r"\b(?:Readout|Explanation|Dashboard)\s*-\s*([A-Z][A-Z0-9.\-]{0,9})\b", text)
+        if match:
+            return match.group(1).upper()
+    return "SYMBOL"
+
+
+def _status_for_text(text: str) -> str:
+    lower = str(text or "").lower()
+    if any(term in lower for term in ("avoid", "warning", "risk", "contradiction", "gap", "missing", "error", "bad", "unfavorable", "reduce")):
+        return "bad"
+    if any(term in lower for term in ("watch", "wait", "mixed", "limited", "stale", "caution", "confirmation", "invalidation")):
+        return "mixed"
+    if any(term in lower for term in ("constructive", "support", "favorable", "fresh", "high", "good", "loaded", "positive")):
+        return "good"
+    return "info"
+
+
+def _is_evidence_detail_title(lower_title: str) -> bool:
+    return any(
+        term in lower_title
+        for term in (
+            "supporting evidence",
+            "contradictions",
+            "warnings",
+            "data confidence gaps",
+            "reward/risk",
+            "position sizing",
+            "invalidation lines",
+            "confirmation lines",
+            "what would change",
+        )
+    )
