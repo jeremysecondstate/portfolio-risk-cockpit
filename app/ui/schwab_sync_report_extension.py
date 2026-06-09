@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import tkinter as tk
 from tkinter import messagebox
-from typing import Callable, Type
+from typing import Any, Callable, Type
 
 from app.brokers.schwab.account_adapter import (
     format_schwab_account_snapshot,
@@ -16,6 +16,8 @@ from app.brokers.schwab.account_adapter import (
 # that the saved OAuth grant is invalid.
 _REAUTH_STATUS_CODES = {401, 403}
 _TEMPORARY_PROVIDER_STATUS_CODES = {500, 502, 503, 504}
+_MATERIAL_DAY_PNL_DIFF_DOLLARS = 5.0
+_MATERIAL_DAY_PNL_DIFF_RATIO = 0.25
 
 
 def install_schwab_sync_report_extension(app_cls: Type[tk.Tk]) -> None:
@@ -146,11 +148,182 @@ def _sync_schwab_account_report(self: tk.Tk, session) -> str:
         raise RuntimeError(f"Schwab account fetch returned HTTP {status_code}: {account_payload}")
 
     portfolio, source_message = portfolio_from_schwab_account(account_payload)
+    _apply_quote_day_pnl_overrides(session, portfolio)
     self.broker.set_portfolio(portfolio, source_message)
     self.last_hyperliquid_cash_adjustment = 0.0
     self.refresh_portfolio()
     _mark_schwab_sync_status(self, "success")
-    return format_schwab_account_snapshot(account_payload, portfolio)
+    report = format_schwab_account_snapshot(account_payload, portfolio)
+    return report + _format_quote_day_pnl_report(portfolio)
+
+
+def _apply_quote_day_pnl_overrides(session: object, portfolio: object) -> None:
+    """Prefer quote-derived day P&L for Schwab equities/ETFs.
+
+    Schwab account-position payloads occasionally report suspect day-P&L dollars.
+    The market-data quote field `netChange` is per-share Last minus prior close,
+    so for stocks/ETFs the safer row value is `quantity * netChange`.
+    """
+
+    applied: list[str] = []
+    material_differences: list[str] = []
+    fallbacks: list[str] = []
+    positions = getattr(portfolio, "positions", {})
+    if not isinstance(positions, dict):
+        return
+
+    get_quote = getattr(session, "get_quote", None)
+    if not callable(get_quote):
+        return
+
+    for symbol, position in sorted(positions.items()):
+        display_symbol = str(getattr(position, "symbol", symbol)).strip().upper()
+        if not display_symbol or not _quote_day_pnl_supported(position):
+            continue
+
+        try:
+            status_code, quote_payload = get_quote(display_symbol)
+        except Exception:
+            fallbacks.append(display_symbol)
+            continue
+
+        if status_code != 200:
+            fallbacks.append(display_symbol)
+            continue
+
+        quote = _extract_quote_fields(quote_payload, display_symbol)
+        if quote is None:
+            fallbacks.append(display_symbol)
+            continue
+
+        net_change = _first_quote_number(quote, "netChange", "markChange")
+        if net_change is None:
+            fallbacks.append(display_symbol)
+            continue
+
+        quantity = _position_quantity(position)
+        if quantity is None:
+            fallbacks.append(display_symbol)
+            continue
+
+        quote_day_pnl = round(quantity * net_change, 2)
+        account_day_pnl = getattr(position, "day_profit_loss", None)
+        position.day_profit_loss = quote_day_pnl
+
+        quote_percent = _first_quote_number(quote, "netPercentChange", "markPercentChange")
+        if quote_percent is not None:
+            position.day_profit_loss_percent = quote_percent
+
+        setattr(position, "day_profit_loss_source", "Schwab quote netChange × quantity")
+        applied.append(display_symbol)
+
+        if _material_day_pnl_difference(account_day_pnl, quote_day_pnl):
+            material_differences.append(
+                f"{display_symbol}: account {_optional_money(account_day_pnl)} → quote {_money(quote_day_pnl)}"
+            )
+
+    setattr(portfolio, "schwab_quote_day_pnl_symbols", applied)
+    setattr(portfolio, "schwab_quote_day_pnl_differences", material_differences)
+    setattr(portfolio, "schwab_quote_day_pnl_fallbacks", fallbacks)
+
+
+def _quote_day_pnl_supported(position: object) -> bool:
+    asset_type = str(getattr(position, "asset_type", "") or "").upper()
+    if "OPTION" in asset_type:
+        return False
+    return True
+
+
+def _position_quantity(position: object) -> float | None:
+    try:
+        return float(getattr(position, "quantity"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_quote_fields(payload: Any, symbol: str) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    for key in (symbol, symbol.upper(), symbol.lower()):
+        quote = _quote_dict_from_entry(payload.get(key))
+        if quote is not None:
+            return quote
+
+    for value in payload.values():
+        quote = _quote_dict_from_entry(value)
+        if quote is not None:
+            return quote
+
+    return _quote_dict_from_entry(payload)
+
+
+def _quote_dict_from_entry(entry: Any) -> dict[str, Any] | None:
+    if not isinstance(entry, dict):
+        return None
+
+    nested_quote = entry.get("quote")
+    if isinstance(nested_quote, dict):
+        return nested_quote
+
+    if any(
+        key in entry
+        for key in (
+            "netChange",
+            "netPercentChange",
+            "markChange",
+            "markPercentChange",
+            "lastPrice",
+            "mark",
+            "closePrice",
+        )
+    ):
+        return entry
+
+    return None
+
+
+def _first_quote_number(source: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = source.get(key)
+        if value in (None, ""):
+            continue
+        try:
+            return float(str(value).replace(",", ""))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _material_day_pnl_difference(account_day_pnl: object, quote_day_pnl: float) -> bool:
+    try:
+        account_value = float(account_day_pnl)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+
+    difference = abs(account_value - quote_day_pnl)
+    threshold = max(abs(quote_day_pnl) * _MATERIAL_DAY_PNL_DIFF_RATIO, _MATERIAL_DAY_PNL_DIFF_DOLLARS)
+    return difference > threshold
+
+
+def _format_quote_day_pnl_report(portfolio: object) -> str:
+    symbols = list(getattr(portfolio, "schwab_quote_day_pnl_symbols", []) or [])
+    differences = list(getattr(portfolio, "schwab_quote_day_pnl_differences", []) or [])
+    fallbacks = list(getattr(portfolio, "schwab_quote_day_pnl_fallbacks", []) or [])
+    if not symbols and not differences and not fallbacks:
+        return ""
+
+    lines = ["", "", "Day P&L reconciliation:"]
+    if symbols:
+        lines.append(f"- Used Schwab quote netChange × quantity for {len(symbols)} stock/ETF position(s): {', '.join(symbols)}.")
+    if differences:
+        shown = differences[:8]
+        lines.append("- Overrode materially different account-position Day P&L: " + "; ".join(shown) + ("; …" if len(differences) > len(shown) else "."))
+    if fallbacks:
+        unique_fallbacks = sorted(set(fallbacks))
+        shown_fallbacks = unique_fallbacks[:8]
+        lines.append("- Quote Day P&L unavailable for " + ", ".join(shown_fallbacks) + (", …" if len(unique_fallbacks) > len(shown_fallbacks) else "") + "; kept Schwab account-position Day P&L for those rows.")
+    return "\n".join(lines)
 
 
 def _mark_schwab_sync_status(self: tk.Tk, status: str) -> None:
@@ -232,3 +405,14 @@ def _schwab_account_refresh_failure_report(exc: Exception) -> str:
         "- Did not submit, preview, replace, or cancel any order.\n\n"
         "Next step: click Sync Schwab again in a moment, or use Reset Session only if Schwab explicitly rejects authorization."
     )
+
+
+def _money(value: float) -> str:
+    return f"${value:,.2f}"
+
+
+def _optional_money(value: object) -> str:
+    try:
+        return _money(float(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "--"
