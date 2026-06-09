@@ -280,14 +280,15 @@ def _position_from_schwab(raw_position: Any) -> Position | None:
         last_price = abs(market_value / quantity)
 
     average_cost = _average_cost(raw_position, quantity, last_price)
+    day_profit_loss_percent = _first_number(raw_position, _DAY_PNL_PERCENT_KEYS)
 
     position = Position(
         symbol=symbol,
         quantity=round(quantity, 8),
         average_cost=round(average_cost, 4),
         last_price=round(last_price or 0.0, 4),
-        day_profit_loss=_first_number(raw_position, _DAY_PNL_KEYS),
-        day_profit_loss_percent=_first_number(raw_position, _DAY_PNL_PERCENT_KEYS),
+        day_profit_loss=_day_profit_loss(raw_position, market_value, day_profit_loss_percent),
+        day_profit_loss_percent=day_profit_loss_percent,
         open_profit_loss=_open_profit_loss(raw_position),
     )
     asset_type = _instrument_asset_type(instrument)
@@ -322,6 +323,36 @@ def _open_profit_loss(raw_position: dict[str, Any]) -> float | None:
     if long_pnl is not None or short_pnl is not None:
         return round((long_pnl or 0.0) + (short_pnl or 0.0), 2)
     return _first_number(raw_position, _OPEN_PNL_KEYS)
+
+
+def _day_profit_loss(
+    raw_position: dict[str, Any],
+    market_value: float | None,
+    day_profit_loss_percent: float | None,
+) -> float | None:
+    raw_day_pnl = _first_number(raw_position, _DAY_PNL_KEYS)
+    if raw_day_pnl is None:
+        return _day_profit_loss_from_percent(market_value, day_profit_loss_percent)
+
+    rounded_day_pnl = round(raw_day_pnl, 2)
+    if _looks_like_market_value_copy(rounded_day_pnl, market_value):
+        return _day_profit_loss_from_percent(market_value, day_profit_loss_percent)
+    return rounded_day_pnl
+
+
+def _day_profit_loss_from_percent(market_value: float | None, day_profit_loss_percent: float | None) -> float | None:
+    if market_value is None or day_profit_loss_percent is None:
+        return None
+    if abs(day_profit_loss_percent) > 100:
+        return None
+    return round(market_value * (day_profit_loss_percent / 100.0), 2)
+
+
+def _looks_like_market_value_copy(day_profit_loss: float, market_value: float | None) -> bool:
+    if market_value is None:
+        return False
+    tolerance = max(abs(market_value) * 0.0001, 0.01)
+    return abs(abs(day_profit_loss) - abs(market_value)) <= tolerance
 
 
 def _net_quantity(raw_position: dict[str, Any]) -> float:
