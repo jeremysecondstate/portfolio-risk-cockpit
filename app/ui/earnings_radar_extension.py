@@ -25,6 +25,7 @@ from app.analytics.earnings_pipeline import (
 )
 from app.data.earnings_calendar import ALPHA_VANTAGE_HORIZONS, AlphaVantageEarningsCalendarClient, UpcomingEarningsRecord
 from app.data.sec_edgar import SecEdgarClient
+from app.ui import polished_theme
 
 
 RECENT_COLUMNS = (
@@ -189,8 +190,8 @@ def _build_recent_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     self.earnings_recent_chart = _chart(parent, row=2)
     self.earnings_recent_table = _table(parent, row=3, title="Recent EDGAR Drops", columns=RECENT_COLUMNS, sort=lambda col: _sort_recent(self, col))
     self.earnings_recent_table.bind("<Double-1>", lambda _event, app=self: _open_recent_filing(app), add="+")
-    self.earnings_recent_table.tag_configure("kind_drop", foreground="#1d4ed8")
-    self.earnings_recent_table.tag_configure("kind_formal", foreground="#047857")
+    self.earnings_recent_table.tag_configure("kind_drop", foreground=polished_theme.ACCENT_SOFT)
+    self.earnings_recent_table.tag_configure("kind_formal", foreground=polished_theme.POSITIVE)
     _footer(self, parent, row=4, page_var_name="earnings_recent_page_var", size_var=self.earnings_recent_page_size_var, prev=lambda: _turn_recent_page(self, -1), next_=lambda: _turn_recent_page(self, 1), apply=lambda: _apply_recent_filters(self))
 
 
@@ -580,7 +581,7 @@ def _header(parent: ttk.Frame, title: str, body: str, status_var: tk.StringVar) 
 
 
 def _chart(parent: ttk.Frame, *, row: int) -> tk.Canvas:
-    canvas = tk.Canvas(parent, height=150, bg="#ffffff", highlightthickness=1, highlightbackground="#cbd5e1")
+    canvas = tk.Canvas(parent, height=150, bg=polished_theme.PANEL, highlightthickness=1, highlightbackground=polished_theme.BORDER)
     canvas.grid(row=row, column=0, sticky="ew", pady=(0, 8))
     return canvas
 
@@ -654,18 +655,18 @@ def _draw_grouped_chart(canvas: tk.Canvas, groups: tuple[tuple[str, dict[str, in
     panel_width = max(220, width // max(len(groups), 1))
     for group_index, (title, counts) in enumerate(groups):
         x0 = group_index * panel_width + 10
-        canvas.create_text(x0, 10, text=title, anchor="nw", fill="#0f172a", font=("Segoe UI", 9, "bold"))
+        canvas.create_text(x0, 10, text=title, anchor="nw", fill=polished_theme.TEXT, font=("Segoe UI", 9, "bold"))
         if not counts:
-            canvas.create_text(x0, 42, text="No matches.", anchor="nw", fill="#64748b", font=("Segoe UI", 9))
+            canvas.create_text(x0, 42, text="No matches.", anchor="nw", fill=polished_theme.MUTED, font=("Segoe UI", 9))
             continue
         items = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:5]
         max_value = max(count for _label, count in items) or 1
         for index, (label, count) in enumerate(items):
             y = 38 + index * 20
             bar_width = int((panel_width - 125) * (count / max_value))
-            canvas.create_text(x0, y, text=_truncate(label, 16), anchor="nw", fill="#334155", font=("Segoe UI", 8))
-            canvas.create_rectangle(x0 + 105, y + 2, x0 + 105 + bar_width, y + 13, fill="#2563eb", outline="")
-            canvas.create_text(x0 + panel_width - 16, y, text=str(count), anchor="ne", fill="#0f172a", font=("Segoe UI", 8, "bold"))
+            canvas.create_text(x0, y, text=_truncate(label, 16), anchor="nw", fill=polished_theme.MUTED, font=("Segoe UI", 8))
+            canvas.create_rectangle(x0 + 105, y + 2, x0 + 105 + bar_width, y + 13, fill=polished_theme.ACCENT, outline="")
+            canvas.create_text(x0 + panel_width - 16, y, text=str(count), anchor="ne", fill=polished_theme.TEXT, font=("Segoe UI", 8, "bold"))
 
 
 def _sorted(records: list[Any], column: str, desc: bool, sort_value: Callable[[Any, str], Any]) -> list[Any]:

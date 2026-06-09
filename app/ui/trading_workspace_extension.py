@@ -15,6 +15,7 @@ from app.brokers.hyperliquid.client import HyperliquidInfoClient
 from app.brokers.hyperliquid.trading import normalize_hyperliquid_coin
 from app.core.order_models import SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, OrderSide, OrderType, TimeInForce
 from app.ui.trading_workspace import build_trading_workspace_tab, run_options_what_if
+from app.ui import polished_theme
 from app.ui.polished_theme import _make_paned
 
 
@@ -160,9 +161,9 @@ def _ensure_bool_var(self: tk.Tk, name: str, default: bool) -> None:
 
 def _configure_side_combobox_styles(root: tk.Misc) -> None:
     style = ttk.Style(root)
-    _configure_single_side_combobox_style(style, SIDE_BUY_COMBOBOX_STYLE, "#dcfce7", "#047857")
-    _configure_single_side_combobox_style(style, SIDE_SELL_COMBOBOX_STYLE, "#fee2e2", "#b91c1c")
-    _configure_single_side_combobox_style(style, SIDE_NEUTRAL_COMBOBOX_STYLE, "#ffffff", "#0f172a")
+    _configure_single_side_combobox_style(style, SIDE_BUY_COMBOBOX_STYLE, "#052e2b", polished_theme.POSITIVE)
+    _configure_single_side_combobox_style(style, SIDE_SELL_COMBOBOX_STYLE, "#3b0a19", polished_theme.NEGATIVE)
+    _configure_single_side_combobox_style(style, SIDE_NEUTRAL_COMBOBOX_STYLE, polished_theme.INPUT, polished_theme.TEXT)
 
 
 def _configure_single_side_combobox_style(style: ttk.Style, style_name: str, background: str, foreground: str) -> None:
@@ -173,20 +174,20 @@ def _configure_single_side_combobox_style(style: ttk.Style, style_name: str, bac
         foreground=foreground,
         selectbackground=background,
         selectforeground=foreground,
-        bordercolor="#cbd5e1",
-        lightcolor="#cbd5e1",
-        darkcolor="#cbd5e1",
+        bordercolor=polished_theme.BORDER,
+        lightcolor=polished_theme.BORDER,
+        darkcolor=polished_theme.BORDER,
         arrowcolor=foreground,
         padding=6,
     )
     style.map(
         style_name,
-        fieldbackground=[("readonly", background), ("focus", background), ("disabled", "#f1f5f9")],
-        background=[("readonly", background), ("active", background), ("disabled", "#f1f5f9")],
-        foreground=[("readonly", foreground), ("focus", foreground), ("disabled", "#94a3b8")],
+        fieldbackground=[("readonly", background), ("focus", background), ("disabled", polished_theme.DISABLED_BG)],
+        background=[("readonly", background), ("active", background), ("disabled", polished_theme.DISABLED_BG)],
+        foreground=[("readonly", foreground), ("focus", foreground), ("disabled", polished_theme.DISABLED_TEXT)],
         selectbackground=[("readonly", background), ("focus", background)],
         selectforeground=[("readonly", foreground), ("focus", foreground)],
-        arrowcolor=[("readonly", foreground), ("active", foreground), ("disabled", "#94a3b8")],
+        arrowcolor=[("readonly", foreground), ("active", foreground), ("disabled", polished_theme.DISABLED_TEXT)],
     )
 
 
@@ -217,20 +218,16 @@ def _bind_side_combobox_style(var: tk.Variable, combo: ttk.Combobox) -> None:
 def _workspace_text(parent: ttk.Frame) -> tk.Text:
     text = tk.Text(
         parent,
-        height=18,
-        wrap=tk.WORD,
-        font=("Segoe UI", 10),
-        padx=18,
-        pady=16,
-        relief=tk.FLAT,
-        borderwidth=0,
-        background="#f8fafc",
-        foreground="#0f172a",
-        insertbackground="#0f172a",
-        selectbackground="#bfdbfe",
-        spacing1=3,
-        spacing2=1,
-        spacing3=6,
+        **polished_theme.dark_text_options(
+            height=18,
+            wrap=tk.WORD,
+            font=("Segoe UI", 10),
+            padx=18,
+            pady=16,
+            spacing1=3,
+            spacing2=1,
+            spacing3=6,
+        ),
     )
     _configure_workspace_report_tags(text)
     text._apply_report_style = lambda content, widget=text: _apply_workspace_report_tags(widget, content)  # type: ignore[attr-defined]
@@ -239,13 +236,13 @@ def _workspace_text(parent: ttk.Frame) -> tk.Text:
 
 
 def _configure_workspace_report_tags(text: tk.Text) -> None:
-    text.tag_configure("report_title", font=("Segoe UI", 13, "bold"), foreground="#0f172a", spacing1=2, spacing3=8)
-    text.tag_configure("section_title", font=("Segoe UI", 10, "bold"), foreground="#1d4ed8", spacing1=6, spacing3=3)
-    text.tag_configure("body", font=("Segoe UI", 10), foreground="#0f172a")
-    text.tag_configure("bullet", lmargin1=18, lmargin2=34, foreground="#1f2937")
-    text.tag_configure("muted", foreground="#64748b")
-    text.tag_configure("separator", foreground="#cbd5e1", font=("Segoe UI", 7))
-    text.tag_configure("mono", font=("Cascadia Mono", 9), foreground="#1f2937")
+    text.tag_configure("report_title", font=("Segoe UI", 13, "bold"), foreground=polished_theme.TEXT, spacing1=2, spacing3=8)
+    text.tag_configure("section_title", font=("Segoe UI", 10, "bold"), foreground=polished_theme.ACCENT_SOFT, spacing1=6, spacing3=3)
+    text.tag_configure("body", font=("Segoe UI", 10), foreground=polished_theme.TEXT)
+    text.tag_configure("bullet", lmargin1=18, lmargin2=34, foreground=polished_theme.TEXT)
+    text.tag_configure("muted", foreground=polished_theme.MUTED)
+    text.tag_configure("separator", foreground=polished_theme.BORDER, font=("Segoe UI", 7))
+    text.tag_configure("mono", font=("Cascadia Mono", 9), foreground=polished_theme.TEXT)
 
 
 def _apply_workspace_report_tags(text: tk.Text, content: str) -> None:
@@ -320,9 +317,9 @@ def _workspace_holdings_table(parent: ttk.Frame, include_custom_pnl: bool = Fals
         table.heading(column, text=label)
         table.column(column, width=width, anchor=anchor, stretch=True)
     table.pack(fill=tk.BOTH, expand=True)
-    table.tag_configure("positive", foreground="#047857")
-    table.tag_configure("negative", foreground="#b91c1c")
-    table.tag_configure("cash", foreground="#334155")
+    table.tag_configure("positive", foreground=polished_theme.POSITIVE)
+    table.tag_configure("negative", foreground=polished_theme.NEGATIVE)
+    table.tag_configure("cash", foreground=polished_theme.CASH)
     return table
 
 
@@ -346,9 +343,9 @@ def _workspace_open_orders_table(parent: ttk.Frame) -> ttk.Treeview:
         table.heading(column, text=label)
         table.column(column, width=width, anchor=anchor, stretch=column in {"trigger", "direction"})
     table.pack(fill=tk.BOTH, expand=True)
-    table.tag_configure("buy", foreground="#047857")
-    table.tag_configure("sell", foreground="#b91c1c")
-    table.tag_configure("trigger", foreground="#7c3aed")
+    table.tag_configure("buy", foreground=polished_theme.POSITIVE)
+    table.tag_configure("sell", foreground=polished_theme.NEGATIVE)
+    table.tag_configure("trigger", foreground="#c084fc")
     return table
 
 
@@ -376,6 +373,7 @@ def _open_hyperliquid_output_popout(self: tk.Tk) -> None:
             pass
 
     window = tk.Toplevel(self)
+    polished_theme.configure_toplevel(window)
     window.title("Hyperliquid Analysis + Order Output")
     window.geometry("980x720")
     window.minsize(620, 420)
@@ -395,19 +393,15 @@ def _open_hyperliquid_output_popout(self: tk.Tk) -> None:
 
     text = tk.Text(
         body,
-        wrap=tk.WORD,
-        font=("Segoe UI", 10),
-        padx=18,
-        pady=16,
-        relief=tk.FLAT,
-        borderwidth=0,
-        background="#f8fafc",
-        foreground="#0f172a",
-        insertbackground="#0f172a",
-        selectbackground="#bfdbfe",
-        spacing1=3,
-        spacing2=1,
-        spacing3=6,
+        **polished_theme.dark_text_options(
+            wrap=tk.WORD,
+            font=("Segoe UI", 10),
+            padx=18,
+            pady=16,
+            spacing1=3,
+            spacing2=1,
+            spacing3=6,
+        ),
     )
     _configure_workspace_report_tags(text)
     text.grid(row=0, column=0, sticky="nsew")
@@ -1017,8 +1011,8 @@ def _install_hyperliquid_sync_status_badge(parent: ttk.Frame, self: tk.Tk, *, ro
         badge = tk.Label(
             parent,
             textvariable=self.hyperliquid_sync_status_var,
-            bg="#fee2e2",
-            fg="#b91c1c",
+            bg="#3b0a19",
+            fg=polished_theme.NEGATIVE,
             font=("Segoe UI", 9, "bold"),
             padx=8,
             pady=4,
@@ -1064,10 +1058,10 @@ def _apply_hyperliquid_sync_status_colors(self: tk.Tk) -> None:
         return
     state = getattr(self, "hyperliquid_sync_status_state", "failure")
     colors = {
-        "success": ("#dcfce7", "#047857"),
-        "failure": ("#fee2e2", "#b91c1c"),
-        "working": ("#dbeafe", "#1d4ed8"),
-    }.get(state, ("#fee2e2", "#b91c1c"))
+        "success": ("#052e2b", polished_theme.POSITIVE),
+        "failure": ("#3b0a19", polished_theme.NEGATIVE),
+        "working": ("#0f2a4a", polished_theme.ACCENT_SOFT),
+    }.get(state, ("#3b0a19", polished_theme.NEGATIVE))
     try:
         badge.configure(bg=colors[0], fg=colors[1])
     except tk.TclError:

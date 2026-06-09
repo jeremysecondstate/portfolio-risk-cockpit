@@ -10,7 +10,7 @@ from app.analytics.option_contract_inspector import (
     is_schwab_option_holding,
     parse_occ_option_symbol,
 )
-from app.ui.polished_theme import BORDER, DANGER, MUTED, PANEL, PANEL_ALT, SURFACE, TEXT
+from app.ui.polished_theme import BORDER, DANGER, MUTED, PANEL, PANEL_ALT, POSITIVE, SURFACE, TEXT, WARNING
 
 
 _installed = False
@@ -498,12 +498,12 @@ def _contract_title(model: OptionContractInspectorModel) -> str:
 
 def _posture_colors(posture: str) -> tuple[str, str]:
     if posture == "NORMAL":
-        return "#dcfce7", "#166534"
+        return "#052e2b", POSITIVE
     if posture == "CAUTIOUS":
-        return "#fef3c7", "#92400e"
+        return "#3b2f08", WARNING
     if posture == "DEFENSIVE":
-        return "#fee2e2", DANGER
-    return "#e5e7eb", "#374151"
+        return "#3b0a19", DANGER
+    return PANEL_ALT, MUTED
 
 
 def _set_var(self: tk.Tk, name: str, value: Any) -> None:

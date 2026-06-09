@@ -10,6 +10,7 @@ from app.brokers.hyperliquid.client import (
     format_hyperliquid_snapshot,
     portfolio_from_hyperliquid_snapshot,
 )
+from app.ui import polished_theme
 from app.ui.schwab_sync_report_extension import _is_temporary_schwab_provider_error
 
 
@@ -62,10 +63,10 @@ def _replace_connection_refresh_controls(self: tk.Tk) -> None:
 
 def _configure_refresh_status_styles(self: tk.Tk) -> None:
     style = ttk.Style(self)
-    style.configure("RefreshSuccess.TLabel", background="#f8fafc", foreground="#047857", font=("Segoe UI", 9, "bold"))
-    style.configure("RefreshDue.TLabel", background="#f8fafc", foreground="#b91c1c", font=("Segoe UI", 9, "bold"))
-    style.configure("RefreshWorking.TLabel", background="#f8fafc", foreground="#2563eb", font=("Segoe UI", 9, "bold"))
-    style.configure("RefreshIdle.TLabel", background="#f8fafc", foreground="#64748b", font=("Segoe UI", 9, "bold"))
+    style.configure("RefreshSuccess.TLabel", background=polished_theme.PANEL, foreground=polished_theme.POSITIVE, font=("Segoe UI", 9, "bold"))
+    style.configure("RefreshDue.TLabel", background=polished_theme.PANEL, foreground=polished_theme.NEGATIVE, font=("Segoe UI", 9, "bold"))
+    style.configure("RefreshWorking.TLabel", background=polished_theme.PANEL, foreground=polished_theme.ACCENT_SOFT, font=("Segoe UI", 9, "bold"))
+    style.configure("RefreshIdle.TLabel", background=polished_theme.PANEL, foreground=polished_theme.MUTED, font=("Segoe UI", 9, "bold"))
 
 
 def _ensure_refresh_status_label(self: tk.Tk, parent: ttk.LabelFrame) -> None:

@@ -12,6 +12,7 @@ from app.brokers.hyperliquid.client import (
 )
 from app.core.order_models import SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, OrderSide, OrderType, TimeInForce
 from app.core.portfolio import Portfolio, Position
+from app.ui import polished_theme
 from app.ui.polished_theme import _make_paned
 
 
@@ -231,17 +232,7 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
 
     self.preview_text = tk.Text(
         results,
-        height=18,
-        wrap=tk.WORD,
-        font=("Cascadia Mono", 10),
-        padx=14,
-        pady=12,
-        relief=tk.FLAT,
-        borderwidth=0,
-        background="#0b1120",
-        foreground="#dbeafe",
-        insertbackground="#dbeafe",
-        selectbackground="#1d4ed8",
+        **polished_theme.dark_text_options(height=18, wrap=tk.WORD, font=("Cascadia Mono", 10), padx=14, pady=12),
     )
     self.preview_text.pack(fill=tk.BOTH, expand=True)
     self._set_preview_text(

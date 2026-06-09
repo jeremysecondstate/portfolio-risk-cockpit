@@ -6,9 +6,11 @@ import re
 import webbrowser
 from typing import Type
 
-REPORT_BG = "#f8fafc"
-REPORT_FG = "#111827"
-REPORT_SELECT_BG = "#bfdbfe"
+from app.ui import polished_theme
+
+REPORT_BG = polished_theme.OUTPUT
+REPORT_FG = polished_theme.TEXT
+REPORT_SELECT_BG = polished_theme.SELECTED
 REPORT_FONT = ("Segoe UI", 10)
 REPORT_MONO_FONT = ("Cascadia Mono", 10)
 URL_PATTERN = re.compile(r"https?://[^\s<>'\"{}|\\^`]+")
@@ -85,13 +87,14 @@ def _open_schwab_output_popout(self: tk.Tk) -> None:
             pass
 
     window = tk.Toplevel(self)
+    polished_theme.configure_toplevel(window)
     window.title("Schwab Analysis + Order Output")
     window.geometry("980x720")
     window.minsize(620, 420)
     window.rowconfigure(1, weight=1)
     window.columnconfigure(0, weight=1)
 
-    toolbar = ttk.Frame(window, padding=(10, 8))
+    toolbar = ttk.Frame(window, padding=(10, 8), style="Panel.TFrame")
     toolbar.grid(row=0, column=0, sticky="ew")
     toolbar.columnconfigure(0, weight=1)
     ttk.Label(
@@ -102,7 +105,7 @@ def _open_schwab_output_popout(self: tk.Tk) -> None:
     ttk.Button(toolbar, text="Use Thesis Option", command=self.use_current_thesis_option_ticket).grid(row=0, column=1, sticky="e", padx=(8, 0))
     ttk.Button(toolbar, text="Refresh", command=lambda: self.refresh_schwab_output_popout(force=True)).grid(row=0, column=2, sticky="e", padx=(8, 0))
 
-    body = ttk.Frame(window, padding=(10, 0, 10, 10))
+    body = ttk.Frame(window, padding=(10, 0, 10, 10), style="Panel.TFrame")
     body.grid(row=1, column=0, sticky="nsew")
     body.rowconfigure(0, weight=1)
     body.columnconfigure(0, weight=1)
@@ -119,6 +122,7 @@ def _open_schwab_output_popout(self: tk.Tk) -> None:
         foreground=REPORT_FG,
         insertbackground=REPORT_FG,
         selectbackground=REPORT_SELECT_BG,
+        selectforeground=polished_theme.SELECTED_TEXT,
         spacing1=3,
         spacing2=1,
         spacing3=6,
@@ -199,6 +203,7 @@ def _style_report_text(text: tk.Text) -> None:
             foreground=REPORT_FG,
             insertbackground=REPORT_FG,
             selectbackground=REPORT_SELECT_BG,
+            selectforeground=polished_theme.SELECTED_TEXT,
             spacing1=3,
             spacing2=1,
             spacing3=6,
@@ -210,15 +215,15 @@ def _style_report_text(text: tk.Text) -> None:
 
 
 def _configure_report_tags(text: tk.Text) -> None:
-    text.tag_configure("report_title", font=("Segoe UI", 13, "bold"), foreground="#0f172a", spacing1=2, spacing3=8)
-    text.tag_configure("section_title", font=("Segoe UI", 10, "bold"), foreground="#1d4ed8", spacing1=6, spacing3=3)
-    text.tag_configure("bullet", lmargin1=18, lmargin2=34, foreground="#1f2937")
-    text.tag_configure("snippet_label", font=("Segoe UI", 9, "bold"), foreground="#334155", lmargin1=18, lmargin2=18, spacing1=8, spacing3=2)
-    text.tag_configure("snippet_body", foreground="#111827", lmargin1=18, lmargin2=18, spacing1=1, spacing3=8)
-    text.tag_configure("muted", foreground="#64748b")
-    text.tag_configure("separator", foreground="#cbd5e1", font=("Segoe UI", 7))
-    text.tag_configure("mono", font=REPORT_MONO_FONT, foreground="#1f2937")
-    text.tag_configure("link", foreground="#1d4ed8", underline=True)
+    text.tag_configure("report_title", font=("Segoe UI", 13, "bold"), foreground=polished_theme.TEXT, spacing1=2, spacing3=8)
+    text.tag_configure("section_title", font=("Segoe UI", 10, "bold"), foreground=polished_theme.ACCENT_SOFT, spacing1=6, spacing3=3)
+    text.tag_configure("bullet", lmargin1=18, lmargin2=34, foreground=polished_theme.TEXT)
+    text.tag_configure("snippet_label", font=("Segoe UI", 9, "bold"), foreground=polished_theme.MUTED, lmargin1=18, lmargin2=18, spacing1=8, spacing3=2)
+    text.tag_configure("snippet_body", foreground=polished_theme.TEXT, lmargin1=18, lmargin2=18, spacing1=1, spacing3=8)
+    text.tag_configure("muted", foreground=polished_theme.MUTED)
+    text.tag_configure("separator", foreground=polished_theme.BORDER, font=("Segoe UI", 7))
+    text.tag_configure("mono", font=REPORT_MONO_FONT, foreground=polished_theme.TEXT)
+    text.tag_configure("link", foreground=polished_theme.LINK, underline=True)
     text.tag_raise("link")
 
 

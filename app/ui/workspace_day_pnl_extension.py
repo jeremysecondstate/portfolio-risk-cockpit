@@ -4,13 +4,14 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Any, Type
 
+from app.ui import polished_theme
 from app.ui import trading_workspace_extension as workspace
 
 _ORIGINAL_WORKSPACE_HOLDING_ROWS = workspace._workspace_holding_rows
-_NEUTRAL_FOREGROUND = "#0f172a"
-_CASH_FOREGROUND = "#334155"
-_POSITIVE_FOREGROUND = "#047857"
-_NEGATIVE_FOREGROUND = "#b91c1c"
+_NEUTRAL_FOREGROUND = polished_theme.TEXT
+_CASH_FOREGROUND = polished_theme.CASH
+_POSITIVE_FOREGROUND = polished_theme.POSITIVE
+_NEGATIVE_FOREGROUND = polished_theme.NEGATIVE
 
 
 def install_workspace_day_pnl_extension(app_cls: Type[tk.Tk]) -> None:

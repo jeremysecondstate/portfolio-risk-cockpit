@@ -11,6 +11,7 @@ from app.analytics.earnings_filing_summary import (
     format_earnings_filing_summary,
     parse_earnings_filing_summary_from_readout,
 )
+from app.ui import polished_theme
 from app.ui.research_widgets import (
     MUTED,
     PANEL_BG,
@@ -121,6 +122,7 @@ def _open_readout_popout_visual(source: tk.Text) -> None:
 
     title = str(getattr(source, "_readout_title", "Detailed Readout") or "Detailed Readout")
     window = tk.Toplevel(source.winfo_toplevel())
+    polished_theme.configure_toplevel(window)
     window.title(title)
     window.geometry("1320x880")
     window.minsize(980, 680)
@@ -305,11 +307,11 @@ def _cards(parent: ttk.Frame, pairs: Iterable[tuple[str, str]], *, columns: int 
     for index, (label, value) in enumerate(pairs):
         status = _status_for_text(str(value))
         colors = STATUS_COLORS.get(status, STATUS_COLORS["neutral"])
-        card = tk.Frame(frame, bg="#ffffff", highlightbackground=colors["bar"], highlightthickness=1)
+        card = tk.Frame(frame, bg=PANEL_BG, highlightbackground=colors["bar"], highlightthickness=1)
         card.grid(row=index // columns, column=index % columns, sticky="nsew", padx=(0 if index % columns == 0 else 8, 0), pady=(0 if index < columns else 8, 0))
         card.columnconfigure(0, weight=1)
-        tk.Label(card, text=str(label).upper(), bg="#ffffff", fg=MUTED, font=("Segoe UI", 8, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 2))
-        tk.Label(card, text=str(value), bg="#ffffff", fg=colors["fg"], font=("Segoe UI", 11, "bold"), anchor="w", justify=tk.LEFT, wraplength=210).grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 11))
+        tk.Label(card, text=str(label).upper(), bg=PANEL_BG, fg=MUTED, font=("Segoe UI", 8, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 2))
+        tk.Label(card, text=str(value), bg=PANEL_BG, fg=colors["fg"], font=("Segoe UI", 11, "bold"), anchor="w", justify=tk.LEFT, wraplength=210).grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 11))
     return frame
 
 
@@ -570,15 +572,15 @@ def _collapsible_detail(parent: ttk.Frame, title: str, text: str) -> ttk.LabelFr
     line_count = max(5, min(18, len(str(text or "").splitlines()) + 2))
     target = tk.Text(
         body,
-        wrap=tk.WORD,
-        height=line_count,
-        font=("Segoe UI", 9),
-        padx=12,
-        pady=10,
-        relief=tk.FLAT,
-        borderwidth=0,
-        background=PANEL_BG,
-        foreground=TEXT,
+        **polished_theme.dark_text_options(
+            wrap=tk.WORD,
+            height=line_count,
+            font=("Segoe UI", 9),
+            padx=12,
+            pady=10,
+            background=PANEL_BG,
+            foreground=TEXT,
+        ),
     )
     target.insert(tk.END, str(text or "").strip())
     target.configure(state=tk.DISABLED)

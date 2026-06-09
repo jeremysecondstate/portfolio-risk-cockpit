@@ -28,6 +28,7 @@ from app.analytics.ipo_pipeline import (
     display_price_range,
     fetch_ipo_pipeline_snapshot,
 )
+from app.ui import polished_theme
 from app.data.sec_edgar import SecEdgarClient
 
 
@@ -268,9 +269,9 @@ def _build_ipo_charts(self: tk.Tk, parent: ttk.Frame) -> None:
     charts = ttk.Frame(parent, style="Panel.TFrame")
     charts.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 8))
     charts.columnconfigure((0, 1, 2), weight=1, uniform="ipo_charts")
-    self.ipo_pipeline_status_chart = tk.Canvas(charts, height=150, bg="#ffffff", highlightthickness=1, highlightbackground="#cbd5e1")
-    self.ipo_pipeline_sector_chart = tk.Canvas(charts, height=150, bg="#ffffff", highlightthickness=1, highlightbackground="#cbd5e1")
-    self.ipo_pipeline_date_chart = tk.Canvas(charts, height=150, bg="#ffffff", highlightthickness=1, highlightbackground="#cbd5e1")
+    self.ipo_pipeline_status_chart = tk.Canvas(charts, height=150, bg=polished_theme.PANEL, highlightthickness=1, highlightbackground=polished_theme.BORDER)
+    self.ipo_pipeline_sector_chart = tk.Canvas(charts, height=150, bg=polished_theme.PANEL, highlightthickness=1, highlightbackground=polished_theme.BORDER)
+    self.ipo_pipeline_date_chart = tk.Canvas(charts, height=150, bg=polished_theme.PANEL, highlightthickness=1, highlightbackground=polished_theme.BORDER)
     for column, canvas in enumerate((self.ipo_pipeline_status_chart, self.ipo_pipeline_sector_chart, self.ipo_pipeline_date_chart)):
         canvas.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 8, 0))
         canvas.bind("<Configure>", lambda _event, app=self: _draw_ipo_charts(app), add="+")
@@ -287,11 +288,11 @@ def _build_ipo_table(self: tk.Tk, parent: ttk.Frame) -> None:
     for column_id, label, width, anchor in TABLE_COLUMNS:
         tree.heading(column_id, text=label, command=lambda col=column_id, app=self: _sort_ipo_table(app, col))
         tree.column(column_id, width=width, minwidth=min(width, 90), anchor=anchor, stretch=column_id in {"company", "industry", "risk_flags", "filing_link"})
-    tree.tag_configure("status_filed", foreground="#1d4ed8")
-    tree.tag_configure("status_amended", foreground="#92400e")
-    tree.tag_configure("status_effective", foreground="#047857")
-    tree.tag_configure("status_priced", foreground="#0f766e")
-    tree.tag_configure("status_trading_candidate", foreground="#b91c1c")
+    tree.tag_configure("status_filed", foreground=polished_theme.ACCENT_SOFT)
+    tree.tag_configure("status_amended", foreground=polished_theme.WARNING)
+    tree.tag_configure("status_effective", foreground=polished_theme.POSITIVE)
+    tree.tag_configure("status_priced", foreground="#2dd4bf")
+    tree.tag_configure("status_trading_candidate", foreground=polished_theme.NEGATIVE)
     tree.grid(row=0, column=0, sticky="nsew")
     tree.bind("<Double-1>", lambda _event, app=self: _open_selected_filing(app), add="+")
     y_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=tree.yview)
@@ -495,9 +496,9 @@ def _draw_bar_chart(canvas: tk.Canvas, title: str, counts: dict[str, int], *, li
     canvas.delete("all")
     width = max(canvas.winfo_width(), 260)
     height = max(canvas.winfo_height(), 140)
-    canvas.create_text(10, 10, text=title, anchor="nw", fill="#0f172a", font=("Segoe UI", 9, "bold"))
+    canvas.create_text(10, 10, text=title, anchor="nw", fill=polished_theme.TEXT, font=("Segoe UI", 9, "bold"))
     if not counts:
-        canvas.create_text(10, 42, text="No matching IPO filings.", anchor="nw", fill="#64748b", font=("Segoe UI", 9))
+        canvas.create_text(10, 42, text="No matching IPO filings.", anchor="nw", fill=polished_theme.MUTED, font=("Segoe UI", 9))
         return
     items = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
     max_value = max(count for _label, count in items) or 1
@@ -505,9 +506,9 @@ def _draw_bar_chart(canvas: tk.Canvas, title: str, counts: dict[str, int], *, li
     for index, (label, count) in enumerate(items):
         y = 38 + index * row_height
         bar_width = int((width - 150) * (count / max_value))
-        canvas.create_text(10, y, text=_truncate(label, 18), anchor="nw", fill="#334155", font=("Segoe UI", 8))
-        canvas.create_rectangle(128, y + 2, 128 + bar_width, y + 13, fill="#2563eb", outline="")
-        canvas.create_text(width - 10, y, text=str(count), anchor="ne", fill="#0f172a", font=("Segoe UI", 8, "bold"))
+        canvas.create_text(10, y, text=_truncate(label, 18), anchor="nw", fill=polished_theme.MUTED, font=("Segoe UI", 8))
+        canvas.create_rectangle(128, y + 2, 128 + bar_width, y + 13, fill=polished_theme.ACCENT, outline="")
+        canvas.create_text(width - 10, y, text=str(count), anchor="ne", fill=polished_theme.TEXT, font=("Segoe UI", 8, "bold"))
 
 
 def _sort_ipo_table(self: tk.Tk, column: str) -> None:

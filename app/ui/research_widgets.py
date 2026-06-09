@@ -7,20 +7,21 @@ from tkinter import ttk
 from typing import Iterable
 
 from app.analytics.research_scoring import BadgeReadout
+from app.ui import polished_theme
 
 
 STATUS_COLORS = {
-    "good": {"bg": "#dcfce7", "fg": "#047857", "bar": "#16a34a"},
-    "mixed": {"bg": "#fef3c7", "fg": "#92400e", "bar": "#d97706"},
-    "bad": {"bg": "#fee2e2", "fg": "#b91c1c", "bar": "#dc2626"},
-    "info": {"bg": "#dbeafe", "fg": "#1d4ed8", "bar": "#2563eb"},
-    "neutral": {"bg": "#f1f5f9", "fg": "#475569", "bar": "#64748b"},
+    "good": {"bg": "#052e2b", "fg": polished_theme.POSITIVE, "bar": "#10b981"},
+    "mixed": {"bg": "#3b2f08", "fg": polished_theme.WARNING, "bar": "#f59e0b"},
+    "bad": {"bg": "#3b0a19", "fg": polished_theme.NEGATIVE, "bar": "#f43f5e"},
+    "info": {"bg": "#0f2a4a", "fg": polished_theme.ACCENT_SOFT, "bar": polished_theme.ACCENT},
+    "neutral": {"bg": polished_theme.PANEL_ALT, "fg": polished_theme.MUTED, "bar": polished_theme.MUTED},
 }
 
-PANEL_BG = "#f8fafc"
-TEXT = "#111827"
-MUTED = "#64748b"
-BORDER = "#cbd5e1"
+PANEL_BG = polished_theme.PANEL
+TEXT = polished_theme.TEXT
+MUTED = polished_theme.MUTED
+BORDER = polished_theme.BORDER
 METRIC_CARD_PAD_X = 14
 METRIC_CARD_PAD_TOP = 10
 METRIC_CARD_PAD_BOTTOM = 12
@@ -456,7 +457,7 @@ class ScoreMeter(tk.Canvas):
         height = max(self.winfo_height(), 44)
         x0, x1 = 10, width - 10
         y = 16
-        self.create_rectangle(x0, y - 5, x1, y + 5, fill="#e5e7eb", outline="")
+        self.create_rectangle(x0, y - 5, x1, y + 5, fill=polished_theme.PANEL_ALT, outline="")
         if self._mode == "risk":
             fill_width = (self._score / 100.0) * (x1 - x0)
             color = _bar_color_for_risk(self._score)
@@ -467,8 +468,8 @@ class ScoreMeter(tk.Canvas):
             pointer = center + (self._score / 100.0) * ((x1 - x0) / 2)
             color = _bar_color_for_direction(self._score)
             self.create_rectangle(min(center, pointer), y - 5, max(center, pointer), y + 5, fill=color, outline="")
-            self.create_line(center, y - 9, center, y + 9, fill="#94a3b8")
-        self.create_oval(pointer - 5, y - 9, pointer + 5, y + 9, fill=color, outline="#ffffff")
+            self.create_line(center, y - 9, center, y + 9, fill=polished_theme.MUTED)
+        self.create_oval(pointer - 5, y - 9, pointer + 5, y + 9, fill=color, outline=polished_theme.TEXT)
         if self._label:
             self.create_text(x0, height - 7, text=self._label, anchor="sw", fill=MUTED, font=("Segoe UI", 8))
 
@@ -493,10 +494,10 @@ class Checklist(tk.Frame):
 
 class RankedRows(tk.Frame):
     def __init__(self, parent: tk.Widget, title: str, rows: Iterable[str], *, status: str = "info", limit: int = 8) -> None:
-        super().__init__(parent, bg="#ffffff", highlightbackground=BORDER, highlightthickness=1)
+        super().__init__(parent, bg=PANEL_BG, highlightbackground=BORDER, highlightthickness=1)
         self.columnconfigure(1, weight=1)
         colors = STATUS_COLORS.get(status, STATUS_COLORS["info"])
-        tk.Label(self, text=title, bg="#ffffff", fg=TEXT, font=("Segoe UI", 10, "bold"), anchor="w").grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(8, 5))
+        tk.Label(self, text=title, bg=PANEL_BG, fg=TEXT, font=("Segoe UI", 10, "bold"), anchor="w").grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(8, 5))
         clean_rows = [str(row or "").strip() for row in rows if str(row or "").strip()]
         if not clean_rows:
             clean_rows = ["No rows are available yet."]
@@ -514,7 +515,7 @@ class RankedRows(tk.Frame):
             tk.Label(
                 self,
                 text=row,
-                bg="#ffffff",
+                bg=PANEL_BG,
                 fg=TEXT,
                 font=("Segoe UI", 9),
                 wraplength=520,
@@ -525,7 +526,7 @@ class RankedRows(tk.Frame):
             tk.Label(
                 self,
                 text=f"+ {len(clean_rows) - limit} more in the full popout.",
-                bg="#ffffff",
+                bg=PANEL_BG,
                 fg=MUTED,
                 font=("Segoe UI", 8),
                 anchor="w",
@@ -559,7 +560,7 @@ class ScenarioImpactBars(tk.Canvas):
         max_abs = max(abs(value) for _label, value, _display in self._rows) or 0.0001
         row_height = 18
         start_y = 12
-        self.create_line(center, 6, center, start_y + len(self._rows) * row_height + 4, fill="#94a3b8")
+        self.create_line(center, 6, center, start_y + len(self._rows) * row_height + 4, fill=polished_theme.MUTED)
         self.create_text(center + 4, 6, text="0", anchor="nw", fill=MUTED, font=("Segoe UI", 8))
         for index, (label, value, display) in enumerate(self._rows):
             y = start_y + index * row_height
@@ -607,11 +608,11 @@ def labeled_value_grid(parent: tk.Widget, rows: dict[str, str], *, columns: int 
         parent.columnconfigure(column, weight=1, uniform="label_value")
     for index, (label, value) in enumerate(rows.items()):
         colors = STATUS_COLORS["neutral"]
-        cell = tk.Frame(parent, bg="#ffffff", highlightbackground=BORDER, highlightthickness=1)
+        cell = tk.Frame(parent, bg=PANEL_BG, highlightbackground=BORDER, highlightthickness=1)
         cell.grid(row=index // columns, column=index % columns, sticky="nsew", padx=(0 if index % columns == 0 else 8, 0), pady=(0, 8))
         cell.columnconfigure(0, weight=1)
-        tk.Label(cell, text=label.upper(), bg="#ffffff", fg=MUTED, font=("Segoe UI", 8, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=10, pady=(7, 0))
-        tk.Label(cell, text=_compact_text(value, COMPACT_VALUE_LIMIT), bg="#ffffff", fg=colors["fg"], font=("Segoe UI", 9, "bold"), anchor="w", wraplength=260, justify=tk.LEFT).grid(row=1, column=0, sticky="ew", padx=10, pady=(3, 8))
+        tk.Label(cell, text=label.upper(), bg=PANEL_BG, fg=MUTED, font=("Segoe UI", 8, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=10, pady=(7, 0))
+        tk.Label(cell, text=_compact_text(value, COMPACT_VALUE_LIMIT), bg=PANEL_BG, fg=colors["fg"], font=("Segoe UI", 9, "bold"), anchor="w", wraplength=260, justify=tk.LEFT).grid(row=1, column=0, sticky="ew", padx=10, pady=(3, 8))
 
 
 def freshness_badges(parent: tk.Widget, statuses: list) -> None:

@@ -152,22 +152,23 @@ from app.data.sec_edgar import SecEdgarClient, normalize_ticker
 from app.macro.analysis import format_macro_report
 from app.macro.models import MacroSnapshot
 from app.macro.releases import fetch_macro_release_snapshot
+from app.ui import polished_theme
 from app.ui.research_widgets import Checklist, RankedRows, ScenarioImpactBars, ScoreMeter, ScrollableFrame, clear_children, freshness_badges, labeled_value_grid, metric_grid
 from app.ui.schwab_option_chain_extension import _option_chain_rows, _populate_option_chain_tree, _request_option_chain, _underlying_price
 from app.ui.schwab_output_popout_extension import _apply_report_tags, _open_external_url
 
 REPORT_FORMS = ("10-K", "10-Q", "8-K")
-GREEK_VISUAL_BG = "#ffffff"
-GREEK_SURFACE = "#f8fafc"
-GREEK_BORDER = "#cbd5e1"
-GREEK_TEXT = "#0f172a"
-GREEK_MUTED = "#64748b"
-GREEK_BLUE = "#2563eb"
-GREEK_GREEN = "#16a34a"
-GREEK_RED = "#dc2626"
-GREEK_AMBER = "#d97706"
-GREEK_TEAL = "#0f766e"
-GREEK_PURPLE = "#7c3aed"
+GREEK_VISUAL_BG = polished_theme.PANEL
+GREEK_SURFACE = polished_theme.PANEL_ALT
+GREEK_BORDER = polished_theme.BORDER
+GREEK_TEXT = polished_theme.TEXT
+GREEK_MUTED = polished_theme.MUTED
+GREEK_BLUE = polished_theme.ACCENT_SOFT
+GREEK_GREEN = polished_theme.POSITIVE
+GREEK_RED = polished_theme.NEGATIVE
+GREEK_AMBER = polished_theme.WARNING
+GREEK_TEAL = "#2dd4bf"
+GREEK_PURPLE = "#c084fc"
 
 WORKSPACE_GEOMETRY = "1550x980"
 WORKSPACE_MIN_SIZE = (1180, 760)
@@ -239,6 +240,7 @@ def _open_schwab_research_workspace(self: tk.Tk) -> None:
             pass
 
     window = tk.Toplevel(self)
+    polished_theme.configure_toplevel(window)
     window.title("Schwab Research + Risk Workspace")
     window.geometry(WORKSPACE_GEOMETRY)
     window.minsize(*WORKSPACE_MIN_SIZE)
@@ -264,7 +266,7 @@ def _open_schwab_research_workspace(self: tk.Tk) -> None:
     self.schwab_research_sidebar_button = ttk.Button(header, text="Hide Sidebar", command=lambda app=self: _toggle_research_sidebar(app))
     self.schwab_research_sidebar_button.grid(row=0, column=2, rowspan=2, sticky="e", padx=(8, 0))
 
-    body = tk.PanedWindow(window, orient=tk.HORIZONTAL, bg="#0f172a", bd=0, sashwidth=8, sashpad=4, showhandle=True)
+    body = tk.PanedWindow(window, orient=tk.HORIZONTAL, bg=polished_theme.CANVAS, bd=0, sashwidth=8, sashpad=4, showhandle=True)
     body.grid(row=1, column=0, sticky="nsew", padx=WORKSPACE_PAD, pady=(0, WORKSPACE_PAD))
 
     left = ttk.Frame(body, style="Panel.TFrame", padding=PANE_PAD)
@@ -331,8 +333,8 @@ def _build_research_left_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     for column, (label, width, anchor) in specs.items():
         tree.heading(column, text=label)
         tree.column(column, width=width, anchor=anchor, stretch=column in {"symbol", "value", "pnl"})
-    tree.tag_configure("positive", foreground="#047857")
-    tree.tag_configure("negative", foreground="#b91c1c")
+    tree.tag_configure("positive", foreground=polished_theme.POSITIVE)
+    tree.tag_configure("negative", foreground=polished_theme.NEGATIVE)
     tree.grid(row=0, column=0, sticky="nsew")
     y_scroll = ttk.Scrollbar(holdings, orient=tk.VERTICAL, command=tree.yview)
     y_scroll.grid(row=0, column=1, sticky="ns")
@@ -682,7 +684,7 @@ def _build_research_right_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     self.schwab_research_summary_button = ttk.Button(top, text="Expand Summary", command=lambda app=self: _toggle_research_summary(app))
     self.schwab_research_summary_button.grid(row=0, column=5, sticky="e", padx=(8, 0))
 
-    vertical = tk.PanedWindow(parent, orient=tk.VERTICAL, bg="#cbd5e1", bd=0, sashwidth=8, sashpad=4, showhandle=True)
+    vertical = tk.PanedWindow(parent, orient=tk.VERTICAL, bg=polished_theme.BORDER, bd=0, sashwidth=8, sashpad=4, showhandle=True)
     vertical.grid(row=1, column=0, sticky="nsew", pady=(SECTION_GAP, 0))
     self.schwab_research_vertical_paned = vertical
 
@@ -1064,7 +1066,10 @@ def _open_source_tree_url(tree: ttk.Treeview, event: tk.Event | None = None) -> 
 
 
 def _detail_text(parent: ttk.Frame) -> tk.Text:
-    text = tk.Text(parent, wrap=tk.WORD, font=("Segoe UI", 10), padx=16, pady=14, relief=tk.FLAT, borderwidth=0, background="#f8fafc", foreground="#111827")
+    text = tk.Text(
+        parent,
+        **polished_theme.dark_text_options(wrap=tk.WORD, font=("Segoe UI", 10), padx=16, pady=14),
+    )
     scroll = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=text.yview)
     text.configure(yscrollcommand=scroll.set)
     text._paired_scrollbar = scroll  # type: ignore[attr-defined]
@@ -1118,14 +1123,7 @@ def _contextual_detail_button_text(title: str, rows: Any, payload: Any | None, *
 def _readout_storage_text(parent: ttk.Frame) -> tk.Text:
     text = tk.Text(
         parent,
-        wrap=tk.WORD,
-        font=("Segoe UI", 10),
-        padx=16,
-        pady=14,
-        relief=tk.FLAT,
-        borderwidth=0,
-        background="#f8fafc",
-        foreground="#111827",
+        **polished_theme.dark_text_options(wrap=tk.WORD, font=("Segoe UI", 10), padx=16, pady=14),
     )
     return text
 
@@ -1148,6 +1146,7 @@ def _open_readout_popout(source: tk.Text) -> None:
             pass
 
     window = tk.Toplevel(source.winfo_toplevel())
+    polished_theme.configure_toplevel(window)
     title = str(getattr(source, "_readout_title", "Detailed Readout"))
     window.title(title)
     window.geometry(FOCUS_WINDOW_GEOMETRY)
@@ -1168,19 +1167,15 @@ def _open_readout_popout(source: tk.Text) -> None:
     body.rowconfigure(0, weight=1)
     target = tk.Text(
         body,
-        wrap=tk.WORD,
-        font=("Segoe UI", 11),
-        padx=24,
-        pady=22,
-        relief=tk.FLAT,
-        borderwidth=0,
-        background="#f8fafc",
-        foreground="#111827",
-        insertbackground="#111827",
-        selectbackground="#bfdbfe",
-        spacing1=5,
-        spacing2=2,
-        spacing3=8,
+        **polished_theme.dark_text_options(
+            wrap=tk.WORD,
+            font=("Segoe UI", 11),
+            padx=24,
+            pady=22,
+            spacing1=5,
+            spacing2=2,
+            spacing3=8,
+        ),
     )
     target.grid(row=0, column=0, sticky="nsew")
     scrollbar = ttk.Scrollbar(body, orient=tk.VERTICAL, command=target.yview)
@@ -1241,6 +1236,7 @@ def _open_greek_visual_popout(source: tk.Text) -> None:
             pass
 
     window = tk.Toplevel(source.winfo_toplevel())
+    polished_theme.configure_toplevel(window)
     title = "Option Sensitivities Visual Guide"
     window.title(title)
     window.geometry("1320x880")
@@ -1352,19 +1348,19 @@ def _build_greek_visual_popout_body(parent: ttk.Frame, source: tk.Text) -> None:
 
 
 def _build_greek_visual_hero(parent: ttk.Frame, symbol: str, summary: GreekSummary, active: OptionGreekSnapshot | None, classification: str) -> None:
-    hero = tk.Frame(parent, bg="#eff6ff", highlightbackground="#bfdbfe", highlightthickness=1)
+    hero = tk.Frame(parent, bg=GREEK_SURFACE, highlightbackground=GREEK_BORDER, highlightthickness=1)
     hero.grid(row=0, column=0, sticky="ew")
     hero.columnconfigure(0, weight=1)
     hero.columnconfigure(1, weight=0)
     contract = _greek_contract_short_label(active)
     title = f"{symbol} Greeks: {contract}" if active is not None else f"{symbol} Greeks"
-    tk.Label(hero, text=title, bg="#eff6ff", fg="#1e3a8a", font=("Segoe UI", 18, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 4))
+    tk.Label(hero, text=title, bg=GREEK_SURFACE, fg=GREEK_TEXT, font=("Segoe UI", 18, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 4))
     subtitle = f"Underlying {_money(summary.underlying_price)}. {classification}. Source mix: {active.source_summary if active is not None else 'Unavailable'}."
-    tk.Label(hero, text=subtitle, bg="#eff6ff", fg=GREEK_TEXT, font=("Segoe UI", 10), anchor="w", justify=tk.LEFT, wraplength=820).grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 16))
-    badge = tk.Frame(hero, bg="#dbeafe", highlightbackground=GREEK_BLUE, highlightthickness=1)
+    tk.Label(hero, text=subtitle, bg=GREEK_SURFACE, fg=GREEK_TEXT, font=("Segoe UI", 10), anchor="w", justify=tk.LEFT, wraplength=820).grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 16))
+    badge = tk.Frame(hero, bg="#0f2a4a", highlightbackground=GREEK_BLUE, highlightthickness=1)
     badge.grid(row=0, column=1, rowspan=2, sticky="e", padx=18, pady=16)
-    tk.Label(badge, text="Decision Support", bg="#dbeafe", fg="#1d4ed8", font=("Segoe UI", 9, "bold")).pack(padx=12, pady=(8, 2))
-    tk.Label(badge, text="No order action", bg="#dbeafe", fg="#1e3a8a", font=("Segoe UI", 11, "bold")).pack(padx=12, pady=(0, 8))
+    tk.Label(badge, text="Decision Support", bg="#0f2a4a", fg=GREEK_BLUE, font=("Segoe UI", 9, "bold")).pack(padx=12, pady=(8, 2))
+    tk.Label(badge, text="No order action", bg="#0f2a4a", fg=GREEK_TEXT, font=("Segoe UI", 11, "bold")).pack(padx=12, pady=(0, 8))
 
 
 def _greek_visual_metric_specs(active: OptionGreekSnapshot) -> list[dict[str, Any]]:
@@ -1588,7 +1584,10 @@ def _report_tab(notebook: ttk.Notebook, title: str) -> tk.Text:
     frame = ttk.Frame(notebook, style="Panel.TFrame", padding=10)
     frame.rowconfigure(0, weight=1)
     frame.columnconfigure(0, weight=1)
-    text = tk.Text(frame, wrap=tk.WORD, font=("Segoe UI", 10), padx=16, pady=14, relief=tk.FLAT, borderwidth=0, background="#f8fafc", foreground="#111827")
+    text = tk.Text(
+        frame,
+        **polished_theme.dark_text_options(wrap=tk.WORD, font=("Segoe UI", 10), padx=16, pady=14),
+    )
     text.grid(row=0, column=0, sticky="nsew")
     scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=text.yview)
     scroll.grid(row=0, column=1, sticky="ns")
@@ -1875,8 +1874,8 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     ):
         stop_ladder_tree.heading(column, text=label)
         stop_ladder_tree.column(column, width=width, anchor=tk.E if column in {"shares", "stop", "max_loss", "impact", "remaining"} else tk.W, stretch=column == "reason")
-    stop_ladder_tree.tag_configure("negative", foreground="#b91c1c")
-    stop_ladder_tree.tag_configure("summary", foreground="#1d4ed8")
+    stop_ladder_tree.tag_configure("negative", foreground=polished_theme.NEGATIVE)
+    stop_ladder_tree.tag_configure("summary", foreground=polished_theme.ACCENT_SOFT)
     stop_ladder_tree.grid(row=2, column=0, sticky="ew")
     stop_ladder_scroll = ttk.Scrollbar(stop_ladder_box, orient=tk.VERTICAL, command=stop_ladder_tree.yview)
     stop_ladder_scroll.grid(row=2, column=1, sticky="ns")
@@ -1937,8 +1936,8 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     ):
         tree.heading(column, text=label)
         tree.column(column, width=width, anchor=tk.E if column != "scenario" else tk.W, stretch=True)
-    tree.tag_configure("positive", foreground="#047857")
-    tree.tag_configure("negative", foreground="#b91c1c")
+    tree.tag_configure("positive", foreground=polished_theme.POSITIVE)
+    tree.tag_configure("negative", foreground=polished_theme.NEGATIVE)
     tree.grid(row=1, column=0, sticky="ew")
     y_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
     y_scroll.grid(row=1, column=1, sticky="ns")
@@ -1980,8 +1979,8 @@ def _scenarios_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     ):
         option_tree.heading(column, text=label)
         option_tree.column(column, width=width, anchor=tk.E if column not in {"move", "read"} else tk.W, stretch=True)
-    option_tree.tag_configure("positive", foreground="#047857")
-    option_tree.tag_configure("negative", foreground="#b91c1c")
+    option_tree.tag_configure("positive", foreground=polished_theme.POSITIVE)
+    option_tree.tag_configure("negative", foreground=polished_theme.NEGATIVE)
     option_tree.grid(row=2, column=0, sticky="ew")
     option_scroll = ttk.Scrollbar(option_box, orient=tk.VERTICAL, command=option_tree.yview)
     option_scroll.grid(row=2, column=1, sticky="ns")
@@ -2071,8 +2070,8 @@ def _options_strategy_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     ):
         scenario_tree.heading(column, text=label)
         scenario_tree.column(column, width=width, anchor=tk.E if column not in {"move", "read"} else tk.W, stretch=column == "read")
-    scenario_tree.tag_configure("positive", foreground="#047857")
-    scenario_tree.tag_configure("negative", foreground="#b91c1c")
+    scenario_tree.tag_configure("positive", foreground=polished_theme.POSITIVE)
+    scenario_tree.tag_configure("negative", foreground=polished_theme.NEGATIVE)
     scenario_tree.grid(row=2, column=0, sticky="ew")
     scenario_scroll = ttk.Scrollbar(scenario_box, orient=tk.VERTICAL, command=scenario_tree.yview)
     scenario_scroll.grid(row=2, column=1, sticky="ns")
@@ -2130,7 +2129,7 @@ def _greeks_tab(self: tk.Tk, notebook: ttk.Notebook) -> ttk.Frame:
     for column, label, width, anchor in specs:
         tree.heading(column, text=label)
         tree.column(column, width=width, anchor=anchor, stretch=column in {"expiration", "source"})
-    tree.tag_configure("selected", background="#dbeafe", foreground="#0f172a")
+    tree.tag_configure("selected", background=polished_theme.SELECTED, foreground=polished_theme.SELECTED_TEXT)
     tree.grid(row=0, column=0, sticky="ew")
     y_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
     y_scroll.grid(row=0, column=1, sticky="ns")

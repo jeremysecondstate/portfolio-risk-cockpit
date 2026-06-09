@@ -124,9 +124,9 @@ def _configure_compact_ticket_styles(self: tk.Tk) -> None:
     style.configure("Mono.TLabel", background=polished_theme.PANEL, foreground=polished_theme.TEXT, font=("Consolas", 9))
     style.configure("CompactAccent.TButton", background=polished_theme.ACCENT, foreground="#ffffff", padding=(6, 5), font=("Segoe UI", 9, "bold"))
     style.map("CompactAccent.TButton", background=[("active", polished_theme.ACCENT_DARK), ("pressed", polished_theme.ACCENT_DARK)], foreground=[("active", "#ffffff")])
-    style.configure("CompactDanger.TButton", background="#fee2e2", foreground=polished_theme.DANGER, padding=(6, 5), font=("Segoe UI", 9, "bold"))
-    style.map("CompactDanger.TButton", background=[("active", "#fecaca")])
-    style.configure("ConnectionGood.TLabel", background=polished_theme.PANEL, foreground="#047857", font=("Segoe UI", 9, "bold"))
+    style.configure("CompactDanger.TButton", background="#3b0a19", foreground=polished_theme.NEGATIVE, padding=(6, 5), font=("Segoe UI", 9, "bold"))
+    style.map("CompactDanger.TButton", background=[("active", "#4a1020")], foreground=[("active", "#fecdd3")])
+    style.configure("ConnectionGood.TLabel", background=polished_theme.PANEL, foreground=polished_theme.POSITIVE, font=("Segoe UI", 9, "bold"))
     style.configure("ConnectionMuted.TLabel", background=polished_theme.PANEL, foreground=polished_theme.MUTED, font=("Segoe UI", 9))
 
 
@@ -232,7 +232,7 @@ def _build_order_panel_with_hyperliquid(self: tk.Tk, parent: ttk.Frame) -> None:
         self.cockpit_exposure_table.heading(column, text=label)
         self.cockpit_exposure_table.column(column, width=width, anchor=anchor, stretch=True)
     self.cockpit_exposure_table.tag_configure("equity", foreground=polished_theme.TEXT)
-    self.cockpit_exposure_table.tag_configure("crypto", foreground="#075985")
+    self.cockpit_exposure_table.tag_configure("crypto", foreground=polished_theme.ACCENT_SOFT)
     self.cockpit_exposure_table.tag_configure("cash", foreground=polished_theme.MUTED)
     self.cockpit_exposure_table.pack(fill=tk.BOTH, expand=True)
     _update_cockpit_risk_console(self, self.broker.get_portfolio())

@@ -73,7 +73,7 @@ def _open_hyperliquid_chain_health_popup(
     window.title("Hyperliquid Chain Vibe Check")
     window.geometry("900x700")
     window.minsize(760, 560)
-    window.configure(bg=polished_theme.CANVAS)
+    polished_theme.configure_toplevel(window)
     window.columnconfigure(0, weight=1)
     window.rowconfigure(2, weight=1)
 
@@ -136,14 +136,7 @@ def _open_hyperliquid_chain_health_popup(
     detail.rowconfigure(0, weight=1)
     text = tk.Text(
         detail,
-        wrap=tk.WORD,
-        font=("Segoe UI", 10),
-        padx=14,
-        pady=12,
-        relief=tk.FLAT,
-        borderwidth=0,
-        background="#ffffff",
-        foreground=polished_theme.TEXT,
+        **polished_theme.dark_text_options(wrap=tk.WORD, font=("Segoe UI", 10), padx=14, pady=12),
     )
     text.grid(row=0, column=0, sticky="nsew")
     scroll = ttk.Scrollbar(detail, orient=tk.VERTICAL, command=text.yview)
@@ -185,12 +178,12 @@ def _set_output_text(self: tk.Tk, report: str) -> None:
 
 
 def _metric_card(parent: ttk.Frame, row: int, column: int, title: str, value: str, detail: str, status: str) -> None:
-    card = tk.Frame(parent, bg="#ffffff", bd=1, relief=tk.SOLID, padx=12, pady=10)
+    card = tk.Frame(parent, bg=polished_theme.PANEL, bd=1, relief=tk.SOLID, padx=12, pady=10)
     card.grid(row=row, column=column, sticky="nsew", padx=(0 if column == 0 else 8, 0), pady=(0 if row == 0 else 8, 0))
     card.columnconfigure(0, weight=1)
-    tk.Label(card, text=title.upper(), bg="#ffffff", fg=polished_theme.MUTED, font=("Segoe UI", 8, "bold")).grid(row=0, column=0, sticky="w")
-    tk.Label(card, text=value, bg="#ffffff", fg=polished_theme.TEXT, font=("Segoe UI", 14, "bold"), wraplength=230, justify=tk.LEFT).grid(row=1, column=0, sticky="w", pady=(3, 0))
-    tk.Label(card, text=detail, bg="#ffffff", fg=polished_theme.MUTED, font=("Segoe UI", 9), wraplength=230, justify=tk.LEFT).grid(row=2, column=0, sticky="w", pady=(3, 0))
+    tk.Label(card, text=title.upper(), bg=polished_theme.PANEL, fg=polished_theme.MUTED, font=("Segoe UI", 8, "bold")).grid(row=0, column=0, sticky="w")
+    tk.Label(card, text=value, bg=polished_theme.PANEL, fg=polished_theme.TEXT, font=("Segoe UI", 14, "bold"), wraplength=230, justify=tk.LEFT).grid(row=1, column=0, sticky="w", pady=(3, 0))
+    tk.Label(card, text=detail, bg=polished_theme.PANEL, fg=polished_theme.MUTED, font=("Segoe UI", 9), wraplength=230, justify=tk.LEFT).grid(row=2, column=0, sticky="w", pady=(3, 0))
     tk.Label(card, text=status, bg=_status_color(status), fg="#ffffff", font=("Segoe UI", 8, "bold"), padx=8, pady=3).grid(row=3, column=0, sticky="w", pady=(8, 0))
 
 
@@ -216,23 +209,23 @@ def _copy_report(window: tk.Toplevel, report: str) -> None:
 
 def _vibe_color(temperature: str) -> str:
     return {
-        "GREEN": "#047857",
-        "YELLOW": "#d97706",
+        "GREEN": polished_theme.POSITIVE,
+        "YELLOW": polished_theme.WARNING,
         "ORANGE": "#ea580c",
-        "RED": "#b91c1c",
-        "UNKNOWN": "#64748b",
-    }.get(temperature, "#64748b")
+        "RED": polished_theme.NEGATIVE,
+        "UNKNOWN": polished_theme.MUTED,
+    }.get(temperature, polished_theme.MUTED)
 
 
 def _status_color(status: str) -> str:
     normalized = status.strip().lower()
     if normalized in {"ok", "normal", "high"}:
-        return "#047857"
+        return polished_theme.POSITIVE
     if normalized in {"warning", "caution", "medium"}:
-        return "#d97706"
+        return polished_theme.WARNING
     if normalized in {"bad", "defensive", "low"}:
-        return "#b91c1c"
-    return "#64748b"
+        return polished_theme.NEGATIVE
+    return polished_theme.MUTED
 
 
 def _plain_headline(assessment: HyperliquidChainHealthAssessment, market: HyperliquidMarketImpactRead) -> str:

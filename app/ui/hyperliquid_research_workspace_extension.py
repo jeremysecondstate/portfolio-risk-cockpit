@@ -30,6 +30,7 @@ from app.analytics.hyperliquid_market_data import (
 )
 from app.analytics.research_scoring import direction_strength_label, risk_heat_label
 from app.analytics.stock_research import AdvancedIndicatorSnapshot, DataSourceStatus, calculate_advanced_indicators
+from app.ui import polished_theme
 from app.ui.research_widgets import Checklist, ScenarioImpactBars, ScoreMeter, ScrollableFrame, clear_children, freshness_badges, labeled_value_grid, metric_grid
 
 
@@ -38,14 +39,7 @@ class _ScrollableDetailText:
         self.container = ttk.Frame(parent, style="Panel.TFrame")
         self.text = tk.Text(
             self.container,
-            wrap=tk.WORD,
-            font=("Segoe UI", 10),
-            padx=16,
-            pady=14,
-            relief=tk.FLAT,
-            borderwidth=0,
-            background="#f8fafc",
-            foreground="#111827",
+            **polished_theme.dark_text_options(wrap=tk.WORD, font=("Segoe UI", 10), padx=16, pady=14),
         )
         self.text.grid(row=0, column=0, sticky="nsew")
         scroll = ttk.Scrollbar(self.container, orient=tk.VERTICAL, command=self.text.yview)
@@ -92,6 +86,7 @@ def _open_hyperliquid_research_workspace(self: tk.Tk) -> None:
             pass
 
     window = tk.Toplevel(self)
+    polished_theme.configure_toplevel(window)
     window.title("Hyperliquid Market + Position Intelligence")
     window.geometry("1360x840")
     window.minsize(1080, 660)
@@ -110,7 +105,7 @@ def _open_hyperliquid_research_workspace(self: tk.Tk) -> None:
     ttk.Label(header, textvariable=self.hyperliquid_research_status_var, style="Subtle.TLabel").grid(row=1, column=0, sticky="w", pady=(2, 0))
     ttk.Button(header, text="Refresh Account", command=lambda app=self: _refresh_hyperliquid_research(app)).grid(row=0, column=1, rowspan=2, sticky="e")
 
-    body = tk.PanedWindow(window, orient=tk.HORIZONTAL, bg="#0f172a", bd=0, sashwidth=8, sashpad=4, showhandle=True)
+    body = tk.PanedWindow(window, orient=tk.HORIZONTAL, bg=polished_theme.CANVAS, bd=0, sashwidth=8, sashpad=4, showhandle=True)
     body.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
     left = ttk.Frame(body, style="Panel.TFrame", padding=10)
     right = ttk.Frame(body, style="Panel.TFrame", padding=10)
@@ -169,8 +164,8 @@ def _build_left_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     ):
         tree.heading(column, text=label)
         tree.column(column, width=width, anchor=anchor, stretch=column == "symbol")
-    tree.tag_configure("positive", foreground="#047857")
-    tree.tag_configure("negative", foreground="#b91c1c")
+    tree.tag_configure("positive", foreground=polished_theme.POSITIVE)
+    tree.tag_configure("negative", foreground=polished_theme.NEGATIVE)
     tree.grid(row=0, column=0, sticky="nsew")
     y_scroll = ttk.Scrollbar(balances, orient=tk.VERTICAL, command=tree.yview)
     y_scroll.grid(row=0, column=1, sticky="ns")
@@ -286,9 +281,9 @@ def _timeframe_matrix_tab(notebook: ttk.Notebook) -> ttk.Frame:
     for column, label, width, anchor in headings:
         tree.heading(column, text=label)
         tree.column(column, width=width, anchor=anchor, stretch=column == "read")
-    tree.tag_configure("good", foreground="#047857")
-    tree.tag_configure("bad", foreground="#b91c1c")
-    tree.tag_configure("mixed", foreground="#92400e")
+    tree.tag_configure("good", foreground=polished_theme.POSITIVE)
+    tree.tag_configure("bad", foreground=polished_theme.NEGATIVE)
+    tree.tag_configure("mixed", foreground=polished_theme.WARNING)
     tree.grid(row=0, column=0, sticky="ew")
     tree_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
     tree_scroll.grid(row=0, column=1, sticky="ns")
@@ -386,8 +381,8 @@ def _scenarios_tab(notebook: ttk.Notebook) -> ttk.Frame:
     for column, label, width in (("scenario", "Scenario", 90), ("price", "Price", 120), ("spot", "Spot P&L", 120), ("perp", "Perp P&L", 120), ("net", "Net P&L", 120), ("impact", "Portfolio", 100), ("read", "After Move", 170)):
         tree.heading(column, text=label)
         tree.column(column, width=width, anchor=tk.E if column not in {"scenario", "read"} else tk.W, stretch=True)
-    tree.tag_configure("positive", foreground="#047857")
-    tree.tag_configure("negative", foreground="#b91c1c")
+    tree.tag_configure("positive", foreground=polished_theme.POSITIVE)
+    tree.tag_configure("negative", foreground=polished_theme.NEGATIVE)
     tree.grid(row=0, column=0, sticky="ew")
     tree_scroll = ttk.Scrollbar(tree_box, orient=tk.VERTICAL, command=tree.yview)
     tree_scroll.grid(row=0, column=1, sticky="ns")

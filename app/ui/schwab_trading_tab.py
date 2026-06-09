@@ -29,6 +29,7 @@ from app.ui.trading_workspace_extension import (
     _run_workspace_action,
     _workspace_holdings_table,
 )
+from app.ui import polished_theme
 from app.ui.polished_theme import _make_paned
 from app.ui.venue_mid_extension import _extract_schwab_quote, _first_number, _format_optional_price, _format_price
 
@@ -670,9 +671,9 @@ def _build_schwab_orders_table(parent: ttk.Frame) -> ttk.Treeview:
     x_scroll = ttk.Scrollbar(parent, orient=tk.HORIZONTAL, command=table.xview)
     x_scroll.grid(row=2, column=0, sticky="ew")
     table.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
-    table.tag_configure("active", foreground="#047857")
-    table.tag_configure("terminal", foreground="#64748b")
-    table.tag_configure("error", foreground="#b91c1c")
+    table.tag_configure("active", foreground=polished_theme.POSITIVE)
+    table.tag_configure("terminal", foreground=polished_theme.MUTED)
+    table.tag_configure("error", foreground=polished_theme.NEGATIVE)
     return table
 
 
@@ -834,6 +835,7 @@ def _open_selected_schwab_order_editor(self: tk.Tk, source: str = "open") -> Non
 
 def _show_schwab_replace_dialog(self: tk.Tk, order: dict[str, Any], parsed: dict[str, str]) -> None:
     window = tk.Toplevel(self)
+    polished_theme.configure_toplevel(window)
     window.title(f"Edit Schwab Order {parsed['order_id']}")
     window.geometry("760x640")
     window.minsize(640, 520)
@@ -870,7 +872,10 @@ def _show_schwab_replace_dialog(self: tk.Tk, order: dict[str, Any], parsed: dict
     preview_frame.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 8))
     preview_frame.rowconfigure(0, weight=1)
     preview_frame.columnconfigure(0, weight=1)
-    preview = tk.Text(preview_frame, height=14, wrap=tk.WORD, font=("Consolas", 10), padx=8, pady=8)
+    preview = tk.Text(
+        preview_frame,
+        **polished_theme.dark_text_options(height=14, wrap=tk.WORD, font=("Consolas", 10), padx=8, pady=8),
+    )
     preview.grid(row=0, column=0, sticky="nsew")
     scrollbar = ttk.Scrollbar(preview_frame, orient=tk.VERTICAL, command=preview.yview)
     scrollbar.grid(row=0, column=1, sticky="ns")
@@ -1294,8 +1299,8 @@ def _install_schwab_sync_status_badge(self: tk.Tk, sync_button: ttk.Button) -> N
         badge = tk.Label(
             parent,
             textvariable=self.schwab_sync_status_var,
-            bg="#f1f5f9",
-            fg="#475569",
+            bg=polished_theme.PANEL_ALT,
+            fg=polished_theme.MUTED,
             font=("Segoe UI", 9, "bold"),
             padx=8,
             pady=4,
@@ -1343,10 +1348,10 @@ def _apply_schwab_sync_status_colors(self: tk.Tk) -> None:
         return
     state = getattr(self, "schwab_sync_status_state", "neutral")
     colors = {
-        "success": ("#dcfce7", "#047857"),
-        "failure": ("#fee2e2", "#b91c1c"),
-        "neutral": ("#f1f5f9", "#475569"),
-    }.get(state, ("#f1f5f9", "#475569"))
+        "success": ("#052e2b", polished_theme.POSITIVE),
+        "failure": ("#3b0a19", polished_theme.NEGATIVE),
+        "neutral": (polished_theme.PANEL_ALT, polished_theme.MUTED),
+    }.get(state, (polished_theme.PANEL_ALT, polished_theme.MUTED))
     try:
         badge.configure(bg=colors[0], fg=colors[1])
     except tk.TclError:

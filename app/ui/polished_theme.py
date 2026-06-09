@@ -9,17 +9,68 @@ from app.core.order_models import SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, OrderSide
 from app.core.portfolio import Portfolio
 
 
-CANVAS = "#0f172a"
-SURFACE = "#111827"
-PANEL = "#f8fafc"
-PANEL_ALT = "#eef2ff"
-BORDER = "#cbd5e1"
-TEXT = "#0f172a"
-MUTED = "#64748b"
+DARK_MODE = True
+
+CANVAS = "#070d19"
+SURFACE = "#0f172a"
+PANEL = "#111827"
+PANEL_ALT = "#1f2937"
+BORDER = "#334155"
+TEXT = "#e5e7eb"
+MUTED = "#94a3b8"
 ACCENT = "#2563eb"
 ACCENT_DARK = "#1d4ed8"
-DANGER = "#b91c1c"
-INPUT = "#ffffff"
+ACCENT_SOFT = "#60a5fa"
+DANGER = "#fb7185"
+INPUT = "#0b1220"
+OUTPUT = "#08111f"
+TREE_HEADING = "#1e293b"
+SELECTED = "#1d4ed8"
+SELECTED_TEXT = "#f8fafc"
+DISABLED_BG = "#172033"
+DISABLED_TEXT = "#64748b"
+POSITIVE = "#34d399"
+NEGATIVE = DANGER
+WARNING = "#fbbf24"
+CASH = MUTED
+LINK = "#93c5fd"
+
+
+def dark_text_options(**overrides: object) -> dict[str, object]:
+    """Return readable defaults for raw ``tk.Text`` widgets on dark panels."""
+
+    options: dict[str, object] = {
+        "relief": tk.FLAT,
+        "borderwidth": 0,
+        "background": OUTPUT,
+        "foreground": TEXT,
+        "insertbackground": TEXT,
+        "selectbackground": SELECTED,
+        "selectforeground": SELECTED_TEXT,
+        "highlightthickness": 1,
+        "highlightbackground": BORDER,
+        "highlightcolor": ACCENT,
+    }
+    options.update(overrides)
+    return options
+
+
+def configure_text_widget(text: tk.Text, **overrides: object) -> None:
+    """Apply the dark text palette to an already-created raw text widget."""
+
+    try:
+        text.configure(**dark_text_options(**overrides))
+    except tk.TclError:
+        return
+
+
+def configure_toplevel(window: tk.Toplevel | tk.Tk) -> None:
+    """Keep raw toplevel backgrounds aligned with the dark ttk palette."""
+
+    try:
+        window.configure(bg=CANVAS)
+    except tk.TclError:
+        return
 
 
 def install_polished_cockpit_theme(app_cls: Type[tk.Tk]) -> None:
@@ -47,39 +98,122 @@ def install_polished_cockpit_theme(app_cls: Type[tk.Tk]) -> None:
 
 def _configure_style(self: tk.Tk) -> None:
     self.option_add("*Font", "{Segoe UI} 10")
+    self.option_add("*Text.background", OUTPUT)
+    self.option_add("*Text.foreground", TEXT)
+    self.option_add("*Text.insertBackground", TEXT)
+    self.option_add("*Text.selectBackground", SELECTED)
+    self.option_add("*Text.selectForeground", SELECTED_TEXT)
+    self.option_add("*Canvas.background", PANEL)
+    self.option_add("*Toplevel.background", CANVAS)
     self.configure(bg=CANVAS)
 
     style = ttk.Style(self)
     style.theme_use("clam")
 
-    style.configure(".", font=("Segoe UI", 10), background=PANEL, foreground=TEXT)
+    style.configure(
+        ".",
+        font=("Segoe UI", 10),
+        background=PANEL,
+        foreground=TEXT,
+        fieldbackground=INPUT,
+        bordercolor=BORDER,
+        darkcolor=BORDER,
+        lightcolor=BORDER,
+        troughcolor=CANVAS,
+        selectbackground=SELECTED,
+        selectforeground=SELECTED_TEXT,
+    )
     style.configure("TFrame", background=PANEL)
     style.configure("Canvas.TFrame", background=CANVAS)
     style.configure("Hero.TFrame", background=SURFACE)
     style.configure("Panel.TFrame", background=PANEL)
+    style.configure("TLabel", background=PANEL, foreground=TEXT)
     style.configure("Card.TLabelframe", background=PANEL, bordercolor=BORDER, relief="solid", padding=16)
     style.configure("Card.TLabelframe.Label", background=PANEL, foreground=TEXT, font=("Segoe UI", 11, "bold"))
 
     style.configure("Header.TLabel", background=SURFACE, foreground="#ffffff", font=("Segoe UI", 22, "bold"))
-    style.configure("HeroSubtle.TLabel", background=SURFACE, foreground="#cbd5e1")
+    style.configure("HeroSubtle.TLabel", background=SURFACE, foreground=MUTED)
     style.configure("Subtle.TLabel", background=PANEL, foreground=MUTED)
-    style.configure("Mode.TLabel", background=SURFACE, foreground="#86efac", font=("Segoe UI", 10, "bold"))
+    style.configure("Danger.TLabel", background=PANEL, foreground=DANGER, font=("Segoe UI", 10, "bold"))
+    style.configure("Mode.TLabel", background=SURFACE, foreground=POSITIVE, font=("Segoe UI", 10, "bold"))
     style.configure("MetricTitle.TLabel", background=PANEL, foreground=MUTED, font=("Segoe UI", 9, "bold"))
     style.configure("MetricValue.TLabel", background=PANEL, foreground=TEXT, font=("Segoe UI", 18, "bold"))
-    style.configure("Chip.TLabel", background=PANEL_ALT, foreground=ACCENT_DARK, font=("Segoe UI", 9, "bold"), padding=(8, 4))
+    style.configure("Chip.TLabel", background=PANEL_ALT, foreground=ACCENT_SOFT, font=("Segoe UI", 9, "bold"), padding=(8, 4))
 
-    style.configure("TButton", padding=(10, 7), borderwidth=0)
-    style.map("TButton", background=[("active", "#e0e7ff")])
+    style.configure("TButton", background=PANEL_ALT, foreground=TEXT, padding=(10, 7), borderwidth=0, focusthickness=1, focuscolor=BORDER)
+    style.map(
+        "TButton",
+        background=[("disabled", DISABLED_BG), ("pressed", "#263449"), ("active", "#243044")],
+        foreground=[("disabled", DISABLED_TEXT), ("active", TEXT)],
+    )
     style.configure("Accent.TButton", background=ACCENT, foreground="#ffffff", font=("Segoe UI", 10, "bold"), padding=(12, 8))
-    style.map("Accent.TButton", background=[("active", ACCENT_DARK), ("pressed", ACCENT_DARK)], foreground=[("active", "#ffffff")])
-    style.configure("Danger.TButton", background="#fee2e2", foreground=DANGER, font=("Segoe UI", 10, "bold"), padding=(10, 7))
-    style.map("Danger.TButton", background=[("active", "#fecaca")])
+    style.map("Accent.TButton", background=[("disabled", DISABLED_BG), ("active", ACCENT_DARK), ("pressed", ACCENT_DARK)], foreground=[("disabled", DISABLED_TEXT), ("active", "#ffffff")])
+    style.configure("Danger.TButton", background="#3b0a19", foreground=DANGER, font=("Segoe UI", 10, "bold"), padding=(10, 7))
+    style.map("Danger.TButton", background=[("disabled", DISABLED_BG), ("active", "#4a1020"), ("pressed", "#4a1020")], foreground=[("disabled", DISABLED_TEXT), ("active", "#fecdd3")])
 
-    style.configure("TEntry", fieldbackground=INPUT, bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, padding=6)
-    style.configure("TCombobox", fieldbackground=INPUT, bordercolor=BORDER, padding=6)
+    style.configure("TCheckbutton", background=PANEL, foreground=TEXT)
+    style.map("TCheckbutton", background=[("active", PANEL), ("disabled", PANEL)], foreground=[("disabled", DISABLED_TEXT)])
+    style.configure("TRadiobutton", background=PANEL, foreground=TEXT)
+    style.map("TRadiobutton", background=[("active", PANEL), ("disabled", PANEL)], foreground=[("disabled", DISABLED_TEXT)])
+
+    style.configure("TNotebook", background=CANVAS, borderwidth=0, tabmargins=(0, 0, 0, 0))
+    style.configure("TNotebook.Tab", background=SURFACE, foreground=MUTED, padding=(14, 8), borderwidth=0)
+    style.map(
+        "TNotebook.Tab",
+        background=[("selected", PANEL), ("active", PANEL_ALT)],
+        foreground=[("selected", TEXT), ("active", TEXT), ("disabled", DISABLED_TEXT)],
+    )
+
+    style.configure("TEntry", fieldbackground=INPUT, foreground=TEXT, insertcolor=TEXT, bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER, padding=6)
+    style.map(
+        "TEntry",
+        fieldbackground=[("disabled", DISABLED_BG), ("readonly", INPUT), ("focus", INPUT)],
+        foreground=[("disabled", DISABLED_TEXT), ("readonly", TEXT)],
+        bordercolor=[("focus", ACCENT), ("disabled", BORDER)],
+    )
+    style.configure(
+        "TCombobox",
+        fieldbackground=INPUT,
+        background=INPUT,
+        foreground=TEXT,
+        arrowcolor=TEXT,
+        bordercolor=BORDER,
+        lightcolor=BORDER,
+        darkcolor=BORDER,
+        padding=6,
+    )
+    style.map(
+        "TCombobox",
+        fieldbackground=[("readonly", INPUT), ("focus", INPUT), ("disabled", DISABLED_BG)],
+        background=[("readonly", INPUT), ("active", PANEL_ALT), ("disabled", DISABLED_BG)],
+        foreground=[("readonly", TEXT), ("focus", TEXT), ("disabled", DISABLED_TEXT)],
+        selectbackground=[("readonly", INPUT), ("focus", SELECTED)],
+        selectforeground=[("readonly", TEXT), ("focus", SELECTED_TEXT)],
+        arrowcolor=[("disabled", DISABLED_TEXT), ("active", TEXT), ("readonly", TEXT)],
+        bordercolor=[("focus", ACCENT), ("disabled", BORDER)],
+    )
+
+    for scrollbar_style in ("TScrollbar", "Vertical.TScrollbar", "Horizontal.TScrollbar"):
+        style.configure(
+            scrollbar_style,
+            background=PANEL_ALT,
+            troughcolor=CANVAS,
+            bordercolor=BORDER,
+            arrowcolor=MUTED,
+            darkcolor=PANEL_ALT,
+            lightcolor=PANEL_ALT,
+            relief=tk.FLAT,
+        )
+        style.map(
+            scrollbar_style,
+            background=[("active", "#263449"), ("pressed", "#263449"), ("disabled", DISABLED_BG)],
+            arrowcolor=[("active", TEXT), ("disabled", DISABLED_TEXT)],
+        )
+
     style.configure("Treeview", background=INPUT, fieldbackground=INPUT, foreground=TEXT, rowheight=30, bordercolor=BORDER, borderwidth=0)
-    style.configure("Treeview.Heading", background="#e2e8f0", foreground=TEXT, font=("Segoe UI", 9, "bold"), padding=8)
-    style.map("Treeview", background=[("selected", "#dbeafe")], foreground=[("selected", TEXT)])
+    style.configure("Treeview.Heading", background=TREE_HEADING, foreground=TEXT, font=("Segoe UI", 9, "bold"), padding=8, relief=tk.FLAT)
+    style.map("Treeview", background=[("selected", SELECTED)], foreground=[("selected", SELECTED_TEXT)])
+    style.map("Treeview.Heading", background=[("active", PANEL_ALT)], foreground=[("active", TEXT)])
 
 
 def _make_paned(parent: tk.Widget, orient: str) -> tk.PanedWindow:
@@ -201,8 +335,8 @@ def _build_portfolio_panel(self: tk.Tk, parent: ttk.Frame) -> None:
         self.positions_table.heading(column, text=label)
         self.positions_table.column(column, width=width, anchor=tk.E, stretch=True)
     self.positions_table.column("symbol", anchor=tk.W)
-    self.positions_table.tag_configure("pnl_positive", foreground="#047857")
-    self.positions_table.tag_configure("pnl_negative", foreground=DANGER)
+    self.positions_table.tag_configure("pnl_positive", foreground=POSITIVE)
+    self.positions_table.tag_configure("pnl_negative", foreground=NEGATIVE)
     self.positions_table.grid(row=0, column=0, sticky="nsew")
 
     y_scrollbar = ttk.Scrollbar(table_wrap, orient=tk.VERTICAL, command=self.positions_table.yview)
@@ -215,15 +349,7 @@ def _build_portfolio_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     alerts_box.pack(fill=tk.BOTH, expand=True)
     self.risk_alerts_text = tk.Text(
         alerts_box,
-        height=5,
-        wrap=tk.WORD,
-        font=("Segoe UI", 10),
-        padx=10,
-        pady=8,
-        relief=tk.FLAT,
-        borderwidth=0,
-        background=INPUT,
-        foreground=TEXT,
+        **dark_text_options(height=5, wrap=tk.WORD, font=("Segoe UI", 10), padx=10, pady=8),
     )
     self.risk_alerts_text.pack(fill=tk.BOTH, expand=True)
     self.risk_alerts_text.configure(state=tk.DISABLED)
@@ -454,17 +580,7 @@ def _build_order_panel(self: tk.Tk, parent: ttk.Frame) -> None:
 
     self.preview_text = tk.Text(
         results,
-        height=18,
-        wrap=tk.WORD,
-        font=("Cascadia Mono", 10),
-        padx=14,
-        pady=12,
-        relief=tk.FLAT,
-        borderwidth=0,
-        background="#0b1120",
-        foreground="#dbeafe",
-        insertbackground="#dbeafe",
-        selectbackground="#1d4ed8",
+        **dark_text_options(height=18, wrap=tk.WORD, font=("Cascadia Mono", 10), padx=14, pady=12),
     )
     self.preview_text.pack(fill=tk.BOTH, expand=True)
     self._set_preview_text(

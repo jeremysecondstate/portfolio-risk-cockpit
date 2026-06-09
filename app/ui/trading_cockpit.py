@@ -29,6 +29,7 @@ from app.brokers.schwab.session import SchwabSession, schwab_auth_error_requires
 from app.brokers.schwab.token_store import clear_token_payload
 from app.core.order_models import SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, OrderSide, OrderType, TimeInForce
 from app.core.portfolio import Portfolio, Position
+from app.ui import polished_theme
 from app.ui.dashboard import PortfolioRiskCockpitApp
 
 
@@ -102,7 +103,10 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         results = ttk.LabelFrame(parent, text="Risk Preview + Instructions", style="Card.TLabelframe")
         results.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
 
-        self.preview_text = tk.Text(results, height=21, wrap=tk.WORD, font=("Consolas", 10), padx=10, pady=10)
+        self.preview_text = tk.Text(
+            results,
+            **polished_theme.dark_text_options(height=21, wrap=tk.WORD, font=("Consolas", 10), padx=10, pady=10),
+        )
         self.preview_text.pack(fill=tk.BOTH, expand=True)
         self._set_preview_text(
             "Create an order and click Preview Risk.\n\n"

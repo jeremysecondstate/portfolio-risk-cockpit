@@ -3,7 +3,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-from app.ui import schwab_trading_tab, trading_workspace, trading_workspace_extension
+from app.ui import polished_theme, schwab_trading_tab, trading_workspace, trading_workspace_extension
 from app.ui.polished_theme import _make_paned
 
 _installed = False
@@ -206,7 +206,10 @@ def _build_resizable_options_output(app: tk.Tk, parent: ttk.Frame) -> None:
     output.rowconfigure(0, weight=1)
     output.columnconfigure(0, weight=1)
 
-    app.options_output_text = tk.Text(output, height=12, wrap=tk.WORD, font=("Consolas", 10), padx=10, pady=10)
+    app.options_output_text = tk.Text(
+        output,
+        **polished_theme.dark_text_options(height=12, wrap=tk.WORD, font=("Consolas", 10), padx=10, pady=10),
+    )
     app.options_output_text.grid(row=0, column=0, sticky="nsew")
     scrollbar = ttk.Scrollbar(output, orient=tk.VERTICAL, command=app.options_output_text.yview)
     scrollbar.grid(row=0, column=1, sticky="ns")

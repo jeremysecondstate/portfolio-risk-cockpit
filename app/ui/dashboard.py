@@ -25,6 +25,7 @@ from app.core.order_models import (
     schwab_equity_session_duration,
 )
 from app.core.position_sizing import calculate_position_size
+from app.ui import polished_theme
 
 load_dotenv()
 
@@ -55,17 +56,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
         self.refresh_portfolio()
 
     def _configure_style(self) -> None:
-        self.option_add("*Font", "{Segoe UI} 10")
-        style = ttk.Style(self)
-        style.theme_use("clam")
-        style.configure("Header.TLabel", font=("Segoe UI", 20, "bold"))
-        style.configure("Subtle.TLabel", foreground="#666666")
-        style.configure("Mode.TLabel", foreground="#0a7f2e", font=("Segoe UI", 11, "bold"))
-        style.configure("Danger.TLabel", foreground="#a83232", font=("Segoe UI", 10, "bold"))
-        style.configure("Card.TLabelframe", padding=12)
-        style.configure("Card.TLabelframe.Label", font=("Segoe UI", 11, "bold"))
-        style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"))
-        style.configure("Treeview", rowheight=26)
+        polished_theme._configure_style(self)
 
     def _build_layout(self) -> None:
         root = ttk.Frame(self, padding=16)
@@ -173,7 +164,10 @@ class PortfolioRiskCockpitApp(tk.Tk):
         results = ttk.LabelFrame(parent, text="Risk Preview + Instructions", style="Card.TLabelframe")
         results.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
 
-        self.preview_text = tk.Text(results, height=21, wrap=tk.WORD, font=("Consolas", 10), padx=10, pady=10)
+        self.preview_text = tk.Text(
+            results,
+            **polished_theme.dark_text_options(height=21, wrap=tk.WORD, font=("Consolas", 10), padx=10, pady=10),
+        )
         self.preview_text.pack(fill=tk.BOTH, expand=True)
         self._set_preview_text(
             "Create an order and click Preview Risk.\n\n"

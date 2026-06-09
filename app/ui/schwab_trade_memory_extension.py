@@ -16,7 +16,7 @@ from app.storage.trade_memory_store import (
     normalize_order_side,
     order_identity,
 )
-from app.ui.polished_theme import BORDER, DANGER, MUTED, PANEL, PANEL_ALT, SURFACE, TEXT
+from app.ui.polished_theme import BORDER, DANGER, MUTED, PANEL, PANEL_ALT, POSITIVE, SURFACE, TEXT, dark_text_options
 
 
 _installed = False
@@ -608,7 +608,7 @@ def _memory_notes(parent: ttk.Frame, record: Mapping[str, Any], *, row: int, col
         ttk.Entry(card, textvariable=var).grid(row=index, column=1, sticky="ew", pady=3)
         widgets[key] = var
     ttk.Label(card, text="Freeform notes", style="MemoryMuted.TLabel").grid(row=len(fields), column=0, sticky="nw", padx=(0, 10), pady=3)
-    text = tk.Text(card, height=4, wrap=tk.WORD, background="#ffffff", foreground=TEXT, relief=tk.FLAT, borderwidth=1)
+    text = tk.Text(card, **dark_text_options(height=4, wrap=tk.WORD, background=PANEL_ALT, borderwidth=1))
     text.insert("1.0", str(notes.get("freeform") or ""))
     text.grid(row=len(fields), column=1, sticky="ew", pady=3)
     widgets["freeform"] = text
@@ -626,8 +626,8 @@ def _build_memory_header(parent: tk.Frame, record: Mapping[str, Any]) -> None:
     title = str(record.get("symbol") or "Trade Memory")
     subtitle = f"{ticket.get('side') or '--'} {ticket.get('quantity') or '--'} | status {record.get('order_status') or '--'}"
     thesis = str(record.get("thesis_status") or "unknown").upper().replace("MISSING_ANALYSIS", "MISSING")
-    badge_bg = "#dcfce7" if thesis == "SAVED" else "#fee2e2" if thesis == "MISSING" else "#e5e7eb"
-    badge_fg = "#166534" if thesis == "SAVED" else DANGER if thesis == "MISSING" else "#374151"
+    badge_bg = "#052e2b" if thesis == "SAVED" else "#3b0a19" if thesis == "MISSING" else PANEL_ALT
+    badge_fg = POSITIVE if thesis == "SAVED" else DANGER if thesis == "MISSING" else MUTED
     tk.Label(parent, text=title, bg=SURFACE, fg="#ffffff", font=("Segoe UI", 18, "bold"), anchor="w").grid(row=0, column=0, sticky="ew")
     tk.Label(parent, text=subtitle, bg=SURFACE, fg="#cbd5e1", font=("Segoe UI", 10), anchor="w").grid(row=1, column=0, sticky="ew", pady=(4, 0))
     tk.Label(parent, text=thesis, bg=badge_bg, fg=badge_fg, font=("Segoe UI", 10, "bold"), padx=12, pady=6).grid(row=0, column=1, rowspan=2, sticky="ne", padx=(16, 0))
