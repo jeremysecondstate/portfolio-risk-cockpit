@@ -107,10 +107,10 @@ def _options_strategy_tab_with_current_model_combo(*args: Any, **kwargs: Any) ->
     return frame
 
 
-def _show_selected_option_candidate_with_current_model_combo(app: tk.Tk) -> None:
+def _show_selected_option_candidate_with_current_model_combo(app: tk.Tk, *args: Any, **kwargs: Any) -> None:
     if _original_show_selected_option_candidate is None:
         return
-    _original_show_selected_option_candidate(app)
+    _original_show_selected_option_candidate(app, *args, **kwargs)
     frame = getattr(app, "schwab_research_options_frame", None)
     if frame is None:
         return
