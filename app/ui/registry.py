@@ -24,6 +24,7 @@ from app.ui.earnings_radar_extension import install_earnings_radar_extension
 from app.ui.ipo_pipeline_extension import install_ipo_pipeline_extension
 from app.ui.options_candidate_actionability_extension import install_options_candidate_actionability_extension
 from app.ui.options_core_math_extension import install_options_core_math_extension
+from app.ui.options_current_model_combo_extension import install_options_current_model_combo_extension
 from app.ui.trading_workspace_extension import install_trading_workspace_extension
 from app.ui.options_resizable_layout_extension import install_options_resizable_layout_extension
 from app.ui.options_what_if_enhancement_extension import install_options_what_if_enhancement_extension
@@ -106,3 +107,4 @@ def install_ui_extensions(app_cls: Type[tk.Tk]) -> None:
     install_hyperliquid_spot_symbol_display_extension(app_cls)
     install_hyperliquid_quote_asset_extension(app_cls)
     install_uncovered_options_risk_lane_extension(app_cls)
+    install_options_current_model_combo_extension(app_cls)
