@@ -20,6 +20,18 @@ _ORIGINAL_COLUMNS = (
     "read",
 )
 _NEW_COLUMN = "current_model_combined"
+_SCENARIO_COLUMN_SPECS = {
+    "move": ("Move", 75, tk.W, False),
+    "price": ("Stock Price", 105, tk.E, False),
+    "contracts": ("Contracts", 85, tk.E, False),
+    "current_stock": ("Current Stock", 105, tk.E, False),
+    "model_stock": ("Model Stock", 105, tk.E, False),
+    "option": ("Option Payoff", 105, tk.E, False),
+    "current_combined": ("Current Combo", 112, tk.E, False),
+    "model_combined": ("Model Combo", 112, tk.E, False),
+    _NEW_COLUMN: ("Current + Model Combo", 165, tk.E, False),
+    "read": ("Plain-English Read", 340, tk.W, True),
+}
 
 _installed = False
 _original_combined_current_model_option_scenarios = None
@@ -141,14 +153,31 @@ def _ensure_current_model_combo_column(frame: Any) -> None:
         insert_at = columns.index("read") if "read" in columns else len(columns)
         columns.insert(insert_at, _NEW_COLUMN)
         tree.configure(columns=columns)
+    _apply_scenario_column_headings(tree)
+
+
+def _apply_scenario_column_headings(tree: Any) -> None:
+    """Reapply every heading after changing Treeview columns.
+
+    Tk can drop existing heading text when the column list is reconfigured. The
+    new combo column is injected after the original table is built, so this pass
+    restores all headers instead of only setting the new one.
+    """
+
     try:
-        tree.heading(_NEW_COLUMN, text="Current+Model Combo")
-        tree.column(_NEW_COLUMN, width=145, anchor=tk.E, stretch=False)
-        if "read" in columns:
-            tree.heading("read", text="Plain-English Read")
-            tree.column("read", width=320, anchor=tk.W, stretch=True)
-    except tk.TclError:
+        columns = list(tree["columns"])
+    except Exception:
         return
+    for column in columns:
+        label, width, anchor, stretch = _SCENARIO_COLUMN_SPECS.get(
+            column,
+            (column.replace("_", " ").title(), 105, tk.E, False),
+        )
+        try:
+            tree.heading(column, text=label)
+            tree.column(column, width=width, anchor=anchor, stretch=stretch)
+        except tk.TclError:
+            continue
 
 
 def _repair_current_model_combo_rows(frame: Any) -> None:
