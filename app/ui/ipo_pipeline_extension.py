@@ -4,11 +4,17 @@ import math
 import threading
 import webbrowser
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Callable, Type
 
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from app.analytics.ipo_filing_report import (
+    GeneratedIpoFilingReport,
+    generate_ipo_filing_report,
+    reportable_ipo_form,
+)
 from app.analytics.ipo_pipeline import (
     EMPTY_VALUE,
     IPO_FORMS,
@@ -174,6 +180,9 @@ def _ensure_ipo_state(self: tk.Tk) -> None:
     self.ipo_pipeline_has_424b4_var = tk.BooleanVar(value=False)
     self.ipo_pipeline_has_effect_var = tk.BooleanVar(value=False)
     self.ipo_pipeline_foreign_var = tk.BooleanVar(value=False)
+    self.ipo_filing_report_jobs: set[str] = set()
+    self.ipo_pipeline_latest_report_dir: Path | None = None
+    self.ipo_pipeline_latest_report_path: Path | None = None
 
 
 def _build_ipo_header(self: tk.Tk, parent: ttk.Frame) -> None:
@@ -244,6 +253,14 @@ def _build_ipo_filters(self: tk.Tk, parent: ttk.Frame) -> None:
     actions.grid(row=3, column=0, columnspan=8, sticky="ew", pady=(8, 0))
     ttk.Button(actions, text="Refresh SEC Data", command=lambda app=self: _refresh_ipo_pipeline(app, force_refresh=True), style="Accent.TButton").pack(side=tk.LEFT)
     ttk.Button(actions, text="Open SEC Filing", command=lambda app=self: _open_selected_filing(app)).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(actions, text="Generate Filing Report", command=lambda app=self: _generate_selected_filing_report(app, force_refresh=False)).pack(side=tk.LEFT, padx=(8, 0))
+    self.ipo_pipeline_open_report_folder_button = ttk.Button(
+        actions,
+        text="Open Report Folder",
+        command=lambda app=self: _open_latest_report_folder(app),
+        state=tk.DISABLED,
+    )
+    self.ipo_pipeline_open_report_folder_button.pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Clear Filters", command=lambda app=self: _clear_ipo_filters(app)).pack(side=tk.LEFT, padx=(8, 0))
 
 
@@ -521,6 +538,92 @@ def _open_selected_filing(self: tk.Tk) -> None:
         messagebox.showinfo("Open SEC Filing", "The selected row does not have an SEC filing URL.")
         return
     webbrowser.open_new_tab(record.filing_url)
+    if reportable_ipo_form(record.form):
+        _start_ipo_filing_report_job(self, record, force_refresh=False)
+
+
+def _generate_selected_filing_report(self: tk.Tk, *, force_refresh: bool) -> None:
+    record = _selected_ipo_record(self)
+    if record is None:
+        messagebox.showinfo("Generate Filing Report", "Select an IPO pipeline row first.")
+        return
+    if not reportable_ipo_form(record.form):
+        messagebox.showinfo("Generate Filing Report", "Filing reports are available for S-1, S-1/A, F-1, and F-1/A rows.")
+        return
+    _start_ipo_filing_report_job(self, record, force_refresh=force_refresh)
+
+
+def _selected_ipo_record(self: tk.Tk) -> IpoPipelineRecord | None:
+    tree = getattr(self, "ipo_pipeline_table", None)
+    if tree is None:
+        return None
+    selection = tree.selection()
+    if not selection:
+        return None
+    return self.ipo_pipeline_row_map.get(selection[0])
+
+
+def _start_ipo_filing_report_job(self: tk.Tk, record: IpoPipelineRecord, *, force_refresh: bool) -> None:
+    key = _ipo_filing_report_job_key(record)
+    jobs = getattr(self, "ipo_filing_report_jobs", set())
+    if key in jobs:
+        self.ipo_pipeline_status_var.set(f"Filing report already generating for {record.company_name}.")
+        return
+    jobs.add(key)
+    self.ipo_filing_report_jobs = jobs
+    self.ipo_pipeline_status_var.set(f"Generating filing report for {record.company_name}...")
+
+    def worker() -> None:
+        try:
+            result = generate_ipo_filing_report(
+                record,
+                client=SecEdgarClient(),
+                force_refresh=force_refresh,
+            )
+        except Exception as exc:
+            self.after(0, lambda error=exc, rec=record: _finish_ipo_filing_report_error(self, rec, error))
+            return
+        self.after(0, lambda generated=result, rec=record: _finish_ipo_filing_report_success(self, rec, generated))
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _finish_ipo_filing_report_success(self: tk.Tk, record: IpoPipelineRecord, result: GeneratedIpoFilingReport) -> None:
+    _clear_ipo_filing_report_job(self, record)
+    self.ipo_pipeline_latest_report_dir = result.paths.output_dir
+    self.ipo_pipeline_latest_report_path = result.paths.markdown_path
+    button = getattr(self, "ipo_pipeline_open_report_folder_button", None)
+    if button is not None:
+        try:
+            button.configure(state=tk.NORMAL)
+        except tk.TclError:
+            pass
+    action = "Using cached filing report" if result.cached else "Report saved"
+    self.ipo_pipeline_status_var.set(f"{action}: {result.paths.markdown_path}")
+
+
+def _finish_ipo_filing_report_error(self: tk.Tk, record: IpoPipelineRecord, error: Exception) -> None:
+    _clear_ipo_filing_report_job(self, record)
+    self.ipo_pipeline_status_var.set(f"Filing report failed for {record.company_name}: {error}")
+    messagebox.showerror("IPO Filing Report failed", str(error))
+
+
+def _clear_ipo_filing_report_job(self: tk.Tk, record: IpoPipelineRecord) -> None:
+    jobs = getattr(self, "ipo_filing_report_jobs", set())
+    jobs.discard(_ipo_filing_report_job_key(record))
+    self.ipo_filing_report_jobs = jobs
+
+
+def _open_latest_report_folder(self: tk.Tk) -> None:
+    path = getattr(self, "ipo_pipeline_latest_report_dir", None)
+    if path is None or not Path(path).exists():
+        messagebox.showinfo("Open Report Folder", "No IPO filing report folder is available yet.")
+        return
+    webbrowser.open(Path(path).resolve().as_uri())
+
+
+def _ipo_filing_report_job_key(record: IpoPipelineRecord) -> str:
+    return f"{record.cik}:{record.accession_number}"
 
 
 def _clear_ipo_filters(self: tk.Tk) -> None:
