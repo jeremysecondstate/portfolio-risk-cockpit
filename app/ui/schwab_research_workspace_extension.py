@@ -7,7 +7,7 @@ import tkinter as tk
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from tkinter import messagebox, ttk
-from typing import Any, Type
+from typing import Any, Type, Iterable
 
 from app.analytics.earnings_release import (
     analyze_earnings_release,
