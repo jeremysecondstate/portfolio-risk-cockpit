@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import re
 import tkinter as tk
 from tkinter import messagebox
@@ -160,14 +161,17 @@ def _sync_schwab_account_report(self: tk.Tk, session) -> str:
 def _apply_quote_day_pnl_overrides(session: object, portfolio: object) -> None:
     """Prefer quote-derived day P&L for Schwab equities/ETFs.
 
-    Schwab account-position payloads occasionally report suspect day-P&L dollars.
-    The market-data quote field `netChange` is per-share Last minus prior close,
-    so for stocks/ETFs the safer row value is `quantity * netChange`.
+    Overnight shares use quote `netChange` because that is per-share Last minus
+    prior close. Shares opened today use Last minus today's fill price instead;
+    otherwise a brand-new position incorrectly inherits the whole stock move
+    from yesterday's close.
     """
 
     applied: list[str] = []
     material_differences: list[str] = []
     fallbacks: list[str] = []
+    same_day_adjustments: list[str] = []
+    fill_fetch_note = ""
     positions = getattr(portfolio, "positions", {})
     if not isinstance(positions, dict):
         return
@@ -175,6 +179,8 @@ def _apply_quote_day_pnl_overrides(session: object, portfolio: object) -> None:
     get_quote = getattr(session, "get_quote", None)
     if not callable(get_quote):
         return
+
+    same_day_buy_fills, fill_fetch_note = _same_day_buy_fills_by_symbol(session)
 
     for symbol, position in sorted(positions.items()):
         display_symbol = str(getattr(position, "symbol", symbol)).strip().upper()
@@ -206,15 +212,35 @@ def _apply_quote_day_pnl_overrides(session: object, portfolio: object) -> None:
             fallbacks.append(display_symbol)
             continue
 
+        last_price = _first_quote_number(quote, "lastPrice", "mark")
+        if last_price is None:
+            last_price = _position_last_price(position)
+
         quote_day_pnl = round(quantity * net_change, 2)
+        same_day_calc = _same_day_adjusted_day_pnl(
+            current_quantity=quantity,
+            net_change=net_change,
+            last_price=last_price,
+            buy_fills=same_day_buy_fills.get(display_symbol, []),
+        )
+        if same_day_calc is not None:
+            quote_day_pnl = same_day_calc["day_pnl"]
+            same_day_adjustments.append(
+                f"{display_symbol}: {same_day_calc['today_quantity']:g} share(s) opened today at avg {_money(same_day_calc['today_average_price'])}"
+            )
+
         account_day_pnl = getattr(position, "day_profit_loss", None)
         position.day_profit_loss = quote_day_pnl
 
-        quote_percent = _first_quote_number(quote, "netPercentChange", "markPercentChange")
-        if quote_percent is not None:
-            position.day_profit_loss_percent = quote_percent
+        if same_day_calc is not None and same_day_calc["basis"] > 0:
+            position.day_profit_loss_percent = round((quote_day_pnl / same_day_calc["basis"]) * 100.0, 2)
+        else:
+            quote_percent = _first_quote_number(quote, "netPercentChange", "markPercentChange")
+            if quote_percent is not None:
+                position.day_profit_loss_percent = quote_percent
 
-        setattr(position, "day_profit_loss_source", "Schwab quote netChange × quantity")
+        source = "Schwab quote netChange × overnight quantity + last-minus-fill for today's buys" if same_day_calc is not None else "Schwab quote netChange × quantity"
+        setattr(position, "day_profit_loss_source", source)
         applied.append(display_symbol)
 
         if _material_day_pnl_difference(account_day_pnl, quote_day_pnl):
@@ -225,6 +251,150 @@ def _apply_quote_day_pnl_overrides(session: object, portfolio: object) -> None:
     setattr(portfolio, "schwab_quote_day_pnl_symbols", applied)
     setattr(portfolio, "schwab_quote_day_pnl_differences", material_differences)
     setattr(portfolio, "schwab_quote_day_pnl_fallbacks", fallbacks)
+    setattr(portfolio, "schwab_quote_day_pnl_same_day_adjustments", same_day_adjustments)
+    setattr(portfolio, "schwab_quote_day_pnl_fill_fetch_note", fill_fetch_note)
+
+
+def _same_day_buy_fills_by_symbol(session: object) -> tuple[dict[str, list[dict[str, float]]], str]:
+    get_orders = getattr(session, "get_orders", None)
+    if not callable(get_orders):
+        return {}, ""
+
+    now = datetime.now(timezone.utc)
+    from_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if from_time > now:
+        from_time = now - timedelta(hours=24)
+
+    try:
+        status_code, payload = get_orders(from_entered_time=from_time, to_entered_time=now)
+    except Exception as exc:
+        return {}, f"same-day fills unavailable ({type(exc).__name__}: {exc})"
+
+    if status_code != 200 or not isinstance(payload, list):
+        return {}, f"same-day fills unavailable (orders HTTP {status_code})"
+
+    fills: dict[str, list[dict[str, float]]] = {}
+    for raw_order in payload:
+        if isinstance(raw_order, dict):
+            _collect_same_day_buy_fills(raw_order, fills)
+    return fills, ""
+
+
+def _collect_same_day_buy_fills(order: dict[str, Any], fills: dict[str, list[dict[str, float]]]) -> None:
+    for child in order.get("childOrderStrategies") or []:
+        if isinstance(child, dict):
+            _collect_same_day_buy_fills(child, fills)
+
+    status = str(order.get("status") or "").upper()
+    if "FILLED" not in status:
+        return
+
+    fill_price = _order_average_fill_price(order)
+    if fill_price is None or fill_price <= 0:
+        return
+
+    legs = order.get("orderLegCollection") or order.get("orderLegs") or []
+    if not isinstance(legs, list):
+        return
+
+    for leg in legs:
+        if not isinstance(leg, dict):
+            continue
+        instruction = str(leg.get("instruction") or order.get("instruction") or "").upper()
+        if "BUY" not in instruction or "SELL" in instruction:
+            continue
+        if _leg_is_option(leg):
+            continue
+        symbol = _leg_symbol(leg, order)
+        if not symbol:
+            continue
+        quantity = _leg_filled_quantity(order, leg)
+        if quantity is None or quantity <= 0:
+            continue
+        fills.setdefault(symbol, []).append({"quantity": quantity, "price": fill_price})
+
+
+def _leg_symbol(leg: dict[str, Any], order: dict[str, Any]) -> str:
+    instrument = leg.get("instrument") if isinstance(leg.get("instrument"), dict) else {}
+    return str(instrument.get("symbol") or leg.get("finalSymbol") or order.get("symbol") or "").strip().upper()
+
+
+def _leg_is_option(leg: dict[str, Any]) -> bool:
+    instrument = leg.get("instrument") if isinstance(leg.get("instrument"), dict) else {}
+    pieces = [str(instrument.get("assetType") or ""), str(instrument.get("assetSubType") or instrument.get("type") or "")]
+    return "OPTION" in " ".join(pieces).upper()
+
+
+def _leg_filled_quantity(order: dict[str, Any], leg: dict[str, Any]) -> float | None:
+    for value in (
+        order.get("filledQuantity"),
+        order.get("filled_quantity"),
+        leg.get("filledQuantity"),
+        leg.get("quantity"),
+        order.get("quantity"),
+    ):
+        parsed = _to_float(value)
+        if parsed is not None and parsed > 0:
+            return parsed
+    return None
+
+
+def _order_average_fill_price(order: dict[str, Any]) -> float | None:
+    execution_value = 0.0
+    execution_quantity = 0.0
+    for activity in order.get("orderActivityCollection") or []:
+        if not isinstance(activity, dict):
+            continue
+        for execution in activity.get("executionLegs") or []:
+            if not isinstance(execution, dict):
+                continue
+            price = _to_float(execution.get("price"))
+            quantity = _to_float(execution.get("quantity")) or _to_float(execution.get("legQuantity"))
+            if price is None or price <= 0:
+                continue
+            if quantity is None or quantity <= 0:
+                quantity = 1.0
+            execution_value += price * quantity
+            execution_quantity += quantity
+    if execution_quantity > 0:
+        return execution_value / execution_quantity
+
+    for key in ("averagePrice", "avgPrice", "price", "netPrice"):
+        price = _to_float(order.get(key))
+        if price is not None and price > 0:
+            return price
+    return None
+
+
+def _same_day_adjusted_day_pnl(
+    *,
+    current_quantity: float,
+    net_change: float,
+    last_price: float | None,
+    buy_fills: list[dict[str, float]],
+) -> dict[str, float] | None:
+    if current_quantity <= 0 or last_price is None or not buy_fills:
+        return None
+
+    total_buy_quantity = sum(fill["quantity"] for fill in buy_fills if fill.get("quantity", 0.0) > 0)
+    total_buy_cost = sum(fill["quantity"] * fill["price"] for fill in buy_fills if fill.get("quantity", 0.0) > 0 and fill.get("price", 0.0) > 0)
+    if total_buy_quantity <= 0 or total_buy_cost <= 0:
+        return None
+
+    today_quantity = min(current_quantity, total_buy_quantity)
+    if today_quantity <= 0:
+        return None
+
+    today_average_price = total_buy_cost / total_buy_quantity
+    overnight_quantity = max(current_quantity - today_quantity, 0.0)
+    day_pnl = round((overnight_quantity * net_change) + (today_quantity * (last_price - today_average_price)), 2)
+    basis = abs((overnight_quantity * max(last_price - net_change, 0.0)) + (today_quantity * today_average_price))
+    return {
+        "day_pnl": day_pnl,
+        "today_quantity": today_quantity,
+        "today_average_price": today_average_price,
+        "basis": basis,
+    }
 
 
 def _quote_day_pnl_supported(position: object) -> bool:
@@ -237,6 +407,13 @@ def _quote_day_pnl_supported(position: object) -> bool:
 def _position_quantity(position: object) -> float | None:
     try:
         return float(getattr(position, "quantity"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _position_last_price(position: object) -> float | None:
+    try:
+        return float(getattr(position, "last_price"))
     except (TypeError, ValueError):
         return None
 
@@ -295,6 +472,15 @@ def _first_quote_number(source: dict[str, Any], *keys: str) -> float | None:
     return None
 
 
+def _to_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(str(value).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
 def _material_day_pnl_difference(account_day_pnl: object, quote_day_pnl: float) -> bool:
     try:
         account_value = float(account_day_pnl)  # type: ignore[arg-type]
@@ -310,12 +496,17 @@ def _format_quote_day_pnl_report(portfolio: object) -> str:
     symbols = list(getattr(portfolio, "schwab_quote_day_pnl_symbols", []) or [])
     differences = list(getattr(portfolio, "schwab_quote_day_pnl_differences", []) or [])
     fallbacks = list(getattr(portfolio, "schwab_quote_day_pnl_fallbacks", []) or [])
-    if not symbols and not differences and not fallbacks:
+    same_day_adjustments = list(getattr(portfolio, "schwab_quote_day_pnl_same_day_adjustments", []) or [])
+    fill_fetch_note = str(getattr(portfolio, "schwab_quote_day_pnl_fill_fetch_note", "") or "")
+    if not symbols and not differences and not fallbacks and not same_day_adjustments and not fill_fetch_note:
         return ""
 
     lines = ["", "", "Day P&L reconciliation:"]
     if symbols:
-        lines.append(f"- Used Schwab quote netChange × quantity for {len(symbols)} stock/ETF position(s): {', '.join(symbols)}.")
+        lines.append(f"- Used Schwab quote netChange for overnight shares and fill-price math for same-day buys across {len(symbols)} stock/ETF position(s): {', '.join(symbols)}.")
+    if same_day_adjustments:
+        shown_same_day = same_day_adjustments[:8]
+        lines.append("- Same-day entry adjustment: " + "; ".join(shown_same_day) + ("; …" if len(same_day_adjustments) > len(shown_same_day) else "."))
     if differences:
         shown = differences[:8]
         lines.append("- Overrode materially different account-position Day P&L: " + "; ".join(shown) + ("; …" if len(differences) > len(shown) else "."))
@@ -323,6 +514,8 @@ def _format_quote_day_pnl_report(portfolio: object) -> str:
         unique_fallbacks = sorted(set(fallbacks))
         shown_fallbacks = unique_fallbacks[:8]
         lines.append("- Quote Day P&L unavailable for " + ", ".join(shown_fallbacks) + (", …" if len(unique_fallbacks) > len(shown_fallbacks) else "") + "; kept Schwab account-position Day P&L for those rows.")
+    if fill_fetch_note:
+        lines.append(f"- Same-day fill check: {fill_fetch_note}; pure quote Day P&L was used where quotes were available.")
     return "\n".join(lines)
 
 
