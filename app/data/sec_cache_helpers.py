@@ -9,10 +9,12 @@ from app.data import sec_edgar
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CACHE_DIR = PROJECT_ROOT / "app" / "data" / "sec_cache"
+DEFAULT_CACHE_DRIVE_DIR = Path("I:/My Drive/PRC/SEC_CACHE")
+
 
 
 def configured_cache_dir() -> Path:
-    return path_from_value(os.getenv("SEC_CACHE_DIR")) or DEFAULT_CACHE_DIR
+    return path_from_value(os.getenv("SEC_CACHE_DIR")) or DEFAULT_CACHE_DRIVE_DIR
 
 
 def path_from_value(value: Path | str | None) -> Path | None:

@@ -21,6 +21,7 @@ SEC_CURRENT_FILINGS_URL = "https://www.sec.gov/cgi-bin/browse-edgar"
 SEC_ARCHIVES_BASE_URL = "https://www.sec.gov/Archives/edgar/data"
 DEFAULT_USER_AGENT = "PortfolioRiskCockpit jeremy@secondstate.art"
 DEFAULT_CACHE_DIR = Path("data/sec_cache")
+DEFAULT_CACHE_DRIVE_DIR = Path("I:/My Drive/PRC/SEC_CACHE")
 DEFAULT_CACHE_TTL = timedelta(hours=6)
 TICKER_CACHE_TTL = timedelta(days=1)
 CURRENT_FILINGS_CACHE_TTL = timedelta(minutes=15)
@@ -193,7 +194,7 @@ class SecEdgarClient:
         user_agent: str | None = None,
         timeout_seconds: int = 30,
     ) -> None:
-        self.cache_dir = Path(cache_dir or os.getenv("SEC_CACHE_DIR") or DEFAULT_CACHE_DIR)
+        self.cache_dir = Path(cache_dir or os.getenv("SEC_CACHE_DIR") or DEFAULT_CACHE_DRIVE_DIR)
         self.user_agent = (user_agent or os.getenv("SEC_USER_AGENT") or DEFAULT_USER_AGENT).strip()
         self.timeout_seconds = timeout_seconds
         self.session = requests.Session()
@@ -824,6 +825,6 @@ def _to_int(value: Any) -> int | None:
 
 
 def cache_status_line() -> str:
-    cache_dir = Path(os.getenv("SEC_CACHE_DIR") or DEFAULT_CACHE_DIR)
+    cache_dir = Path(os.getenv("SEC_CACHE_DIR") or DEFAULT_CACHE_DRIVE_DIR)
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     return f"Generated: {generated_at} · Cache: {cache_dir}"
