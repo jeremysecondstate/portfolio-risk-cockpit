@@ -30,6 +30,7 @@ from app.analytics.ipo_pipeline import (
     fetch_ipo_pipeline_snapshot,
 )
 from app.ui import polished_theme
+from app.ui.ipo_filing_chat_window import open_ipo_filing_chat_window
 from app.data.sec_edgar import SecEdgarClient
 
 
@@ -257,8 +258,9 @@ def _build_ipo_filters(self: tk.Tk, parent: ttk.Frame) -> None:
     actions.grid(row=3, column=0, columnspan=8, sticky="ew", pady=(8, 0))
     ttk.Button(actions, text="Refresh SEC Data", command=lambda app=self: _refresh_ipo_pipeline(app, force_refresh=True), style="Accent.TButton").pack(side=tk.LEFT)
     ttk.Button(actions, text="Open SEC Filing", command=lambda app=self: _open_selected_filing(app)).pack(side=tk.LEFT, padx=(8, 0))
-    ttk.Button(actions, text="Generate AI Filing Report", command=lambda app=self: _generate_selected_ai_filing_report(app, force_refresh=False)).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(actions, text="Open AI Filing Chat", command=lambda app=self: _open_selected_ai_filing_chat(app), style="Accent.TButton").pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Generate Filing Report", command=lambda app=self: _generate_selected_filing_report(app, force_refresh=False)).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(actions, text="Generate AI Filing Report", command=lambda app=self: _generate_selected_ai_filing_report(app, force_refresh=False)).pack(side=tk.LEFT, padx=(8, 0))
     self.ipo_pipeline_open_report_folder_button = ttk.Button(
         actions,
         text="Open Report Folder",
@@ -571,6 +573,18 @@ def _generate_selected_filing_report(self: tk.Tk, *, force_refresh: bool) -> Non
         messagebox.showinfo("Generate Filing Report", "Filing reports are available for S-1/F-1, 424B4, and EFFECT rows.")
         return
     _start_ipo_filing_report_job(self, record, force_refresh=force_refresh)
+
+
+def _open_selected_ai_filing_chat(self: tk.Tk) -> None:
+    record = _selected_ipo_record(self)
+    if record is None:
+        messagebox.showinfo("Open AI Filing Chat", "Select an IPO pipeline row first.")
+        return
+    if not reportable_ipo_form(record.form):
+        messagebox.showinfo("Open AI Filing Chat", "AI filing chat is available for S-1/F-1, 424B4, and EFFECT rows.")
+        return
+    open_ipo_filing_chat_window(self, record)
+    self.ipo_pipeline_status_var.set(f"Opened AI filing chat for {record.company_name.rstrip('.')}.")
 
 
 def _generate_selected_ai_filing_report(self: tk.Tk, *, force_refresh: bool) -> None:
