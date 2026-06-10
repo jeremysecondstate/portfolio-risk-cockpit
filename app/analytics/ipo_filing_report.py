@@ -366,16 +366,14 @@ def write_markdown_pdf(markdown: str, output_path: str | Path, *, title: str = "
 
 def _enhance_report_fields(record: IpoPipelineRecord, parsed: ParsedIpoFields, text: str) -> ParsedIpoFields:
     low, high = parsed.price_range_low, parsed.price_range_high
-    if low is None or high is None:
-        low, high = _extract_report_price_range(text)
     underwriters = tuple(unique_flags([*parsed.underwriters, *_extract_report_underwriters(text), *record.underwriters]))
     return ParsedIpoFields(
         proposed_ticker=parsed.proposed_ticker or record.proposed_ticker,
         exchange=parsed.exchange or record.exchange,
         offering_amount=parsed.offering_amount or record.offering_amount,
-        price_range_low=low if low is not None else record.price_range_low,
-        price_range_high=high if high is not None else record.price_range_high,
-        shares_offered=parsed.shares_offered or _extract_report_shares_offered(text) or record.shares_offered,
+        price_range_low=low,
+        price_range_high=high,
+        shares_offered=parsed.shares_offered,
         implied_market_cap=parsed.implied_market_cap or record.implied_market_cap,
         revenue=parsed.revenue if parsed.revenue is not None else record.revenue,
         revenue_growth=parsed.revenue_growth if parsed.revenue_growth is not None else record.revenue_growth,
@@ -459,11 +457,11 @@ def _headline_lines(report: IpoFilingReport) -> list[str]:
     if parsed.shares_offered is not None:
         lines.append(f"- Shares offered: {_format_shares(parsed.shares_offered)}.")
     else:
-        lines.append("- Shares offered: not cleanly disclosed in the parsed filing text.")
+        lines.append("- Shares offered: Not confidently extracted.")
     if parsed.price_range_low is not None and parsed.price_range_high is not None:
         lines.append(f"- Price range: {_format_price_range(parsed.price_range_low, parsed.price_range_high)}.")
     else:
-        lines.append("- Price range: not cleanly disclosed in the parsed filing text.")
+        lines.append("- Price range: Not confidently extracted.")
     listing_parts = [part for part in (parsed.proposed_ticker, parsed.exchange) if part]
     if listing_parts:
         lines.append(f"- Proposed listing: {' on '.join(listing_parts)}.")
@@ -479,17 +477,22 @@ def _headline_lines(report: IpoFilingReport) -> list[str]:
 
 
 def _business_description(company_name: str, text: str) -> str:
-    section = _section_text(
-        text,
-        ("Prospectus Summary", "Company Overview", "Our Company", "Business Overview", "Business"),
-        ("Risk Factors", "The Offering", "Use of Proceeds", "Dividend Policy", "Capitalization", "Dilution", "Management"),
-    )
-    sentences = _meaningful_sentences(section)
+    sentences: list[str] = []
+    for heading in ("Company Overview", "Our Company", "Business Overview", "Business", "Prospectus Summary"):
+        section = _section_text(
+            text,
+            (heading,),
+            ("Risk Factors", "The Offering", "Use of Proceeds", "Dividend Policy", "Capitalization", "Dilution", "Management"),
+        )
+        sentences = _meaningful_sentences(section)
+        if sentences:
+            break
     if not sentences:
+        narrative = _narrative_source_text(text)
         sentences = [
             sentence
-            for sentence in _meaningful_sentences(text[:15000])
-            if re.search(r"\b(we|company)\b", sentence, flags=re.IGNORECASE)
+            for sentence in _meaningful_sentences(narrative[:20000])
+            if re.search(r"\b(we|company|business|provide|develop|operate)\b", sentence, flags=re.IGNORECASE)
         ]
     if not sentences:
         return f"The filing text did not yield a clean plain-English business description for {company_name}."
@@ -497,8 +500,9 @@ def _business_description(company_name: str, text: str) -> str:
 
 
 def _why_interesting_lines(record: IpoPipelineRecord, text: str, business: str) -> list[str]:
+    narrative = _narrative_source_text(text)
     candidates = _sentences_with_terms(
-        text,
+        narrative,
         (
             "market",
             "industry",
@@ -523,8 +527,9 @@ def _why_interesting_lines(record: IpoPipelineRecord, text: str, business: str) 
 
 
 def _traction_lines(text: str) -> list[str]:
+    narrative = _narrative_source_text(text)
     candidates = _sentences_with_terms(
-        text,
+        narrative,
         (
             "customer",
             "customers",
@@ -675,23 +680,22 @@ def _dilution_lines(parsed: ParsedIpoFields, text: str) -> list[str]:
 def _notable_term_lines(record: IpoPipelineRecord, risks: Iterable[str], text: str) -> list[str]:
     lines: list[str] = []
     term_checks = (
-        ("Reverse split", ("reverse split", "share split")),
-        ("Foreign private issuer", ("foreign private issuer",)),
-        ("Controlled-company status", ("controlled company",)),
-        ("Related-party issues", ("related party", "related-party")),
-        ("China/VIE risk", ("variable interest entity", " vie ", "china-based", "prc")),
-        ("Customer concentration", ("customer concentration", "major customer", "significant customer")),
-        ("Auditor change", ("auditor change", "change in auditor", "changed auditors", "auditor resignation")),
-        ("ADS/ADR structure", ("american depositary", "ads", "adr")),
+        ("Reverse split", (r"\breverse split\b", r"\bshare split\b")),
+        ("Foreign private issuer", (r"\bforeign private issuer\b",)),
+        ("Controlled-company status", (r"\bcontrolled company\b",)),
+        ("Related-party issues", (r"\brelated[- ]party\b",)),
+        ("China/VIE risk", (r"\bvariable interest entity\b", r"\bVIEs?\b", r"\bchina[- ]based\b", r"\bPRC\b")),
+        ("Customer concentration", (r"\bcustomer concentration\b", r"\bmajor customers?\b", r"\bsignificant customers?\b")),
+        ("Auditor change", (r"\bauditor change\b", r"\bchange in auditor\b", r"\bchanged auditors\b", r"\bauditor resignation\b")),
+        ("ADS/ADR structure", (r"\bamerican depositary (?:shares?|receipts?)\b", r"\bamerican depositary\b")),
     )
-    lower = text.lower()
-    for label, terms in term_checks:
+    for label, patterns in term_checks:
         if label == "Foreign private issuer" and record.is_foreign_issuer:
-            sentence = _first_sentence_with_terms(text, terms)
+            sentence = _first_sentence_with_patterns(text, patterns)
             lines.append(f"{label}: {sentence or 'The row/form indicates foreign-issuer treatment.'}")
             continue
-        if any(term in lower for term in terms):
-            sentence = _first_sentence_with_terms(text, terms)
+        if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns):
+            sentence = _first_sentence_with_patterns(text, patterns)
             lines.append(f"{label}: {sentence or 'Flagged in the filing text.'}")
     for risk in risks:
         if risk and not any(risk.lower() in line.lower() for line in lines):
@@ -824,11 +828,24 @@ def _section_text(text: str, headings: tuple[str, ...], stop_headings: tuple[str
     return text[start_index:stop_index][:5000]
 
 
+def _narrative_source_text(text: str) -> str:
+    sections: list[str] = []
+    for heading in ("Company Overview", "Our Company", "Business Overview", "Business", "Prospectus Summary"):
+        section = _section_text(
+            text,
+            (heading,),
+            ("Risk Factors", "The Offering", "Use of Proceeds", "Dividend Policy", "Capitalization", "Dilution", "Management"),
+        )
+        if section and not _looks_like_boilerplate_or_toc(section):
+            sections.append(section)
+    return "\n".join(sections) if sections else text[:20000]
+
+
 def _meaningful_sentences(text: str) -> list[str]:
     output: list[str] = []
     for sentence in _split_sentences(text):
         clean = _clean_snippet(sentence)
-        if len(clean) < 40 or _looks_like_table_of_contents(clean):
+        if len(clean) < 40 or _looks_like_table_of_contents(clean) or _looks_like_boilerplate_sentence(clean):
             continue
         output.append(clean)
         if len(output) >= 8:
@@ -842,7 +859,7 @@ def _sentences_with_terms(text: str, terms: tuple[str, ...], *, limit: int) -> l
         lower = f" {sentence.lower()} "
         if any(term in lower for term in terms):
             clean = _clean_snippet(sentence)
-            if len(clean) >= 35 and not _looks_like_table_of_contents(clean):
+            if len(clean) >= 35 and not _looks_like_table_of_contents(clean) and not _looks_like_boilerplate_sentence(clean):
                 output.append(clean)
         if len(output) >= limit:
             break
@@ -852,6 +869,16 @@ def _sentences_with_terms(text: str, terms: tuple[str, ...], *, limit: int) -> l
 def _first_sentence_with_terms(text: str, terms: tuple[str, ...]) -> str:
     matches = _sentences_with_terms(text, terms, limit=1)
     return matches[0] if matches else ""
+
+
+def _first_sentence_with_patterns(text: str, patterns: tuple[str, ...]) -> str:
+    for sentence in _split_sentences(text[:80000]):
+        clean = _clean_snippet(sentence)
+        if len(clean) < 35 or _looks_like_table_of_contents(clean) or _looks_like_boilerplate_sentence(clean):
+            continue
+        if any(re.search(pattern, clean, flags=re.IGNORECASE) for pattern in patterns):
+            return clean
+    return ""
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -900,7 +927,29 @@ def _looks_like_table_of_contents(value: str) -> bool:
         "table of contents" in lower
         or bool(re.search(r"\.{4,}\s*\d+$", value))
         or len(re.findall(r"\b\d+\b", value)) > 12
+        or len(re.findall(r"\b[A-Z][A-Z '&/-]{3,}\s+\d{1,3}\b", value)) >= 3
     )
+
+
+def _looks_like_boilerplate_or_toc(value: str) -> bool:
+    return _looks_like_table_of_contents(value) or _looks_like_boilerplate_sentence(value)
+
+
+def _looks_like_boilerplate_sentence(value: str) -> bool:
+    lower = value.lower()
+    boilerplate_terms = (
+        "indicate by check mark",
+        "large accelerated filer",
+        "smaller reporting company",
+        "emerging growth company",
+        "we may amend or supplement this prospectus",
+        "you should read the entire prospectus",
+        "this prospectus contains forward-looking statements",
+        "factors that could contribute to such differences",
+        "not limited to",
+        "risk factors",
+    )
+    return any(term in lower for term in boilerplate_terms)
 
 
 def _has_going_concern_language(text: str) -> bool:

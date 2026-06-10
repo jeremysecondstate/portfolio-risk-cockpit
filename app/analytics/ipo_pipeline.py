@@ -8,7 +8,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from app.data.sec_edgar import DEFAULT_CACHE_DIR, SEC_ARCHIVES_BASE_URL, SecCurrentFiling, SecEdgarClient, normalize_cik
+from app.data.sec_edgar import (
+    DEFAULT_CACHE_DIR,
+    DEFAULT_CACHE_TTL,
+    SEC_ARCHIVES_BASE_URL,
+    SecCurrentFiling,
+    SecEdgarClient,
+    html_to_text,
+    normalize_cik,
+)
 
 
 IPO_FORMS = ("S-1", "S-1/A", "F-1", "F-1/A", "424B4", "EFFECT")
@@ -842,13 +850,70 @@ def _document_candidate_sort_key(candidate: IpoDocumentCandidate) -> tuple[int, 
 
 
 def _fetch_candidate_text(client: SecEdgarClient, candidate: IpoDocumentCandidate) -> str:
-    return client.document_text_url(
-        candidate.url,
-        cache_name=(
-            f"companies/{normalize_cik(candidate.cik)}/filings/{candidate.accession_no_dashes}/"
-            f"ipo_documents/{_safe_cache_part(candidate.name)}.txt"
-        ),
+    cache_name = (
+        f"companies/{normalize_cik(candidate.cik)}/filings/{candidate.accession_no_dashes}/"
+        f"ipo_documents/{_safe_cache_part(candidate.name)}.txt"
     )
+    if candidate.is_complete_submission and hasattr(client, "_fetch_text"):
+        fetch_text = getattr(client, "_fetch_text")
+        if callable(fetch_text):
+            raw = fetch_text(candidate.url, cache_name=cache_name, ttl=DEFAULT_CACHE_TTL)
+            return html_to_text(_prospectus_document_from_complete_submission(raw, fallback_form=candidate.form))
+
+    text = client.document_text_url(candidate.url, cache_name=cache_name)
+    if candidate.is_complete_submission:
+        return html_to_text(_prospectus_document_from_complete_submission(text, fallback_form=candidate.form))
+    return text
+
+
+def _prospectus_document_from_complete_submission(raw: str, *, fallback_form: str = "") -> str:
+    blocks = _complete_submission_document_blocks(raw)
+    if not blocks:
+        return raw
+    ranked = sorted(blocks, key=lambda block: _complete_submission_block_rank(block, fallback_form=fallback_form))
+    return ranked[0].get("text") or ranked[0].get("raw") or raw
+
+
+def _complete_submission_document_blocks(raw: str) -> list[dict[str, str]]:
+    blocks: list[dict[str, str]] = []
+    for match in re.finditer(r"(?is)<DOCUMENT>(.*?)</DOCUMENT>", raw or ""):
+        block = match.group(1)
+        text_match = re.search(r"(?is)<TEXT>(.*?)(?:</TEXT>|$)", block)
+        blocks.append(
+            {
+                "raw": block,
+                "type": _complete_submission_tag(block, "TYPE"),
+                "filename": _complete_submission_tag(block, "FILENAME"),
+                "description": _complete_submission_tag(block, "DESCRIPTION"),
+                "text": text_match.group(1) if text_match else block,
+            }
+        )
+    return blocks
+
+
+def _complete_submission_tag(block: str, tag: str) -> str:
+    match = re.search(rf"(?im)^\s*<{tag}>\s*([^\r\n<]+)", block)
+    return match.group(1).strip() if match else ""
+
+
+def _complete_submission_block_rank(block: dict[str, str], *, fallback_form: str = "") -> tuple[int, int, str]:
+    document_type = block.get("type", "").strip().upper()
+    filename = block.get("filename", "").lower()
+    description = block.get("description", "").lower()
+    haystack = f"{document_type} {filename} {description}".lower()
+    fallback = fallback_form.strip().upper()
+    score = 50
+    if document_type == fallback and fallback:
+        score = 0
+    elif document_type in PROSPECTUS_SOURCE_FORMS:
+        score = 1
+    elif "prospectus" in haystack:
+        score = 2
+    elif any(slug in filename.replace("-", "") for slug in ("forms1", "formf1", "s1", "f1", "424b4")):
+        score = 3
+    elif document_type.startswith("EX-") or "exhibit" in haystack:
+        score = 80
+    return score, -len(block.get("text") or ""), filename
 
 
 def _prospectus_text_is_too_thin(text: str) -> bool:
@@ -949,7 +1014,8 @@ def parse_ipo_filing_text(text: str, *, form: str = "") -> ParsedIpoFields:
     if not clean_text:
         return ParsedIpoFields(is_foreign_issuer=form.upper().startswith("F-1") if form else None)
 
-    price_low, price_high = _extract_price_range(clean_text)
+    offering_text = _offering_section_text(clean_text)
+    price_low, price_high = _extract_price_range(offering_text)
     proposed_ticker = _extract_ticker(clean_text)
     exchange = _extract_exchange(clean_text)
     table_multiplier = _table_amount_multiplier(clean_text)
@@ -967,16 +1033,21 @@ def parse_ipo_filing_text(text: str, *, form: str = "") -> ParsedIpoFields:
     gross_margin = _extract_percent_after_terms(clean_text, ("gross margin", "gross profit margin"))
     if gross_margin is None and revenue not in (None, 0) and gross_profit is not None:
         gross_margin = gross_profit / revenue * 100
-    cash = _extract_money_after_terms(clean_text, ("cash and cash equivalents", "cash equivalents"))
-    debt = _extract_money_after_terms(clean_text, ("total debt", "indebtedness"))
+    cash = (
+        _extract_financial_row_value(clean_text, (r"Cash and cash equivalents", r"Cash equivalents"), table_multiplier)
+        or _extract_money_after_terms(clean_text, ("cash and cash equivalents", "cash equivalents"))
+    )
+    debt = (
+        _extract_financial_row_value(clean_text, (r"Total debt", r"Indebtedness"), table_multiplier)
+        or _extract_money_after_terms(clean_text, ("total debt", "indebtedness"))
+    )
     risk_flags = analyze_text_risk_flags(clean_text)
     is_foreign = form.upper().startswith("F-1") or "foreign private issuer" in clean_text.lower()
-    lower = clean_text.lower()
-    going_concern = "going concern" in lower or "substantial doubt about our ability to continue" in lower
-    customer_concentration = any(term in lower for term in ("customer concentration", "major customer", "significant customer"))
-    related_party = any(term in lower for term in ("related party", "related-party", "transactions with related parties"))
-    controlled_company = "controlled company" in lower
-    vie_or_china = any(term in lower for term in ("variable interest entity", " vie ", "china-based", "prc"))
+    going_concern = _has_pattern(clean_text, (r"\bgoing concern\b", r"\bsubstantial doubt about our ability to continue\b"))
+    customer_concentration = _has_pattern(clean_text, (r"\bcustomer concentration\b", r"\bmajor customers?\b", r"\bsignificant customers?\b"))
+    related_party = _has_pattern(clean_text, (r"\brelated[- ]party\b", r"\btransactions with related parties\b"))
+    controlled_company = _has_pattern(clean_text, (r"\bcontrolled company\b",))
+    vie_or_china = _has_pattern(clean_text, (r"\bvariable interest entity\b", r"\bVIEs?\b", r"\bPRC\b", r"\bchina[- ]based\b"))
 
     return ParsedIpoFields(
         proposed_ticker=proposed_ticker,
@@ -984,7 +1055,7 @@ def parse_ipo_filing_text(text: str, *, form: str = "") -> ParsedIpoFields:
         offering_amount=_extract_money_after_terms(clean_text, ("offering amount", "aggregate offering price", "maximum aggregate offering price")),
         price_range_low=price_low,
         price_range_high=price_high,
-        shares_offered=_extract_shares_offered(clean_text),
+        shares_offered=_extract_shares_offered(offering_text),
         implied_market_cap=_extract_money_after_terms(clean_text, ("implied market capitalization", "market capitalization")),
         revenue=revenue,
         revenue_growth=_extract_percent_after_terms(clean_text, ("revenue growth", "revenues increased")),
@@ -1038,21 +1109,24 @@ def analyze_ipo_risk_flags(
 
 
 def analyze_text_risk_flags(text: str) -> list[str]:
-    lower = text.lower()
     checks = [
-        ("Going concern language", ("going concern", "substantial doubt about our ability to continue")),
-        ("Related-party transactions", ("related party transaction", "related-party transaction", "transactions with related parties")),
-        ("Customer concentration", ("customer concentration", "major customer", "significant customer")),
-        ("Controlled company", ("controlled company",)),
-        ("China/VIE structure", ("variable interest entity", " vie ", "prc", "china-based")),
-        ("SPAC-related", ("special purpose acquisition company", " spac ")),
-        ("Auditor change", ("auditor change", "change in auditor", "changed auditors", "auditor resignation")),
+        ("Going concern language", (r"\bgoing concern\b", r"\bsubstantial doubt about our ability to continue\b")),
+        ("Related-party transactions", (r"\brelated[- ]party transactions?\b", r"\btransactions with related parties\b")),
+        ("Customer concentration", (r"\bcustomer concentration\b", r"\bmajor customers?\b", r"\bsignificant customers?\b")),
+        ("Controlled company", (r"\bcontrolled company\b",)),
+        ("China/VIE structure", (r"\bvariable interest entity\b", r"\bVIEs?\b", r"\bPRC\b", r"\bchina[- ]based\b")),
+        ("SPAC-related", (r"\bspecial purpose acquisition company\b", r"\bSPAC\b")),
+        ("Auditor change", (r"\bauditor change\b", r"\bchange in auditor\b", r"\bchanged auditors\b", r"\bauditor resignation\b")),
     ]
     flags: list[str] = []
-    for flag, terms in checks:
-        if any(term in lower for term in terms):
+    for flag, patterns in checks:
+        if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns):
             flags.append(flag)
     return unique_flags(flags)
+
+
+def _has_pattern(text: str, patterns: tuple[str, ...]) -> bool:
+    return any(re.search(pattern, text or "", flags=re.IGNORECASE) for pattern in patterns)
 
 
 def sector_for_sic(sic: str | None, industry: str | None = None) -> str | None:
@@ -1300,6 +1374,78 @@ def _collapse_text(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
+def _offering_section_text(text: str) -> str:
+    section = _section_between_headings(
+        text,
+        ("The Offering", "Offering", "Initial Public Offering"),
+        (
+            "Risk Factors",
+            "Use of Proceeds",
+            "Dividend Policy",
+            "Capitalization",
+            "Dilution",
+            "Management",
+            "Underwriting",
+            "Plan of Distribution",
+            "Business",
+        ),
+    )
+    if _looks_like_real_offering_section(section):
+        return section
+
+    match = re.search(
+        r"\bwe\s+are\s+offering\b.{0,900}?\b(?:initial\s+public\s+offering\s+price|public\s+offering\s+price|price\s+range|between\s+\$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        start = max(0, match.start() - 120)
+        return text[start : match.end() + 600]
+    return ""
+
+
+def _section_between_headings(text: str, headings: tuple[str, ...], stop_headings: tuple[str, ...]) -> str:
+    lower = text.lower()
+    starts: list[tuple[int, int]] = []
+    for heading in headings:
+        for match in re.finditer(rf"\b{re.escape(heading.lower())}\b", lower):
+            starts.append((match.start(), match.end()))
+    if not starts:
+        return ""
+    for start, content_start in sorted(starts, key=lambda item: item[0]):
+        if _looks_like_toc_window(text[max(0, start - 120) : start + 240]):
+            continue
+        stop_index = len(text)
+        for stop in stop_headings:
+            stop_match = re.search(rf"\b{re.escape(stop.lower())}\b", lower[content_start + 120 :])
+            if stop_match:
+                stop_index = min(stop_index, content_start + 120 + stop_match.start())
+        section = text[content_start:stop_index].strip()
+        if section:
+            return section[:8000]
+    return ""
+
+
+def _looks_like_real_offering_section(section: str) -> bool:
+    lower = section.lower()
+    return bool(section) and any(term in lower for term in ("we are offering", "shares offered", "offering price", "price range"))
+
+
+def _looks_like_toc_window(value: str) -> bool:
+    lower = value.lower()
+    return "table of contents" in lower or len(re.findall(r"\b[A-Z][A-Z ]{3,}\s+\d{1,3}\b", value)) >= 3
+
+
+def _looks_like_table_or_boilerplate(value: str) -> bool:
+    lower = value.lower()
+    if "table of contents" in lower or "indicate by check mark" in lower:
+        return True
+    if len(re.findall(r"\b[A-Z][A-Z '&/-]{3,}\s+\d{1,3}\b", value)) >= 3:
+        return True
+    words = re.findall(r"[A-Za-z]+", value)
+    return bool(words) and sum(1 for word in words if len(word) <= 2) / max(len(words), 1) > 0.45
+
+
 def _extract_ticker(text: str) -> str | None:
     patterns = (
         r"(?:proposed|expected)\s+(?:ticker\s+)?symbol\s+(?:is|will be)?\s*[\"']?([A-Z][A-Z0-9.]{0,5})[\"']?",
@@ -1334,19 +1480,33 @@ def _extract_exchange(text: str) -> str | None:
 
 def _extract_price_range(text: str) -> tuple[float | None, float | None]:
     range_patterns = (
-        r"between\s+\$?\s*([0-9]+(?:\.[0-9]+)?)\s+and\s+\$?\s*([0-9]+(?:\.[0-9]+)?)",
-        r"price\s+range\s+(?:of\s+)?\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:-|to|and)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)",
-        r"estimated\s+(?:initial\s+)?public\s+offering\s+price\s+(?:range\s+)?(?:of\s+)?\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:-|to|and)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)",
+        r"between\s+\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s+and\s+\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
+        r"price\s+range\s+(?:of\s+)?\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:-|to|and)\s*\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
+        r"estimated\s+(?:initial\s+)?public\s+offering\s+price\s+(?:range\s+)?(?:of\s+)?\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:-|to|and)\s*\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
     )
     for pattern in range_patterns:
         match = re.search(pattern, text, flags=re.IGNORECASE)
         if match:
-            return float(match.group(1)), float(match.group(2))
-    match = re.search(r"(?:public offering price|initial public offering price)\s+(?:of|is)\s+\$?\s*([0-9]+(?:\.[0-9]+)?)", text, flags=re.IGNORECASE)
+            low = float(match.group(1).replace(",", ""))
+            high = float(match.group(2).replace(",", ""))
+            return (low, high) if _reasonable_ipo_price_range(low, high) else (None, None)
+    match = re.search(r"(?:public offering price|initial public offering price)\s+(?:of|is)\s+\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)", text, flags=re.IGNORECASE)
     if match:
-        value = float(match.group(1))
-        return value, value
+        value = float(match.group(1).replace(",", ""))
+        return (value, value) if _reasonable_ipo_price_range(value, value) else (None, None)
     return None, None
+
+
+def _reasonable_ipo_price_range(low: float, high: float) -> bool:
+    if low <= 0 or high <= 0 or high < low:
+        return False
+    if high > 500:
+        return False
+    if low < 0.01:
+        return False
+    if high / low > 5:
+        return False
+    return True
 
 
 def _extract_money_after_terms(text: str, terms: tuple[str, ...]) -> float | None:
@@ -1460,6 +1620,8 @@ def _extract_shares_offered(text: str) -> float | None:
         shares *= 1_000_000
     elif scale == "thousand":
         shares *= 1_000
+    if shares <= 0 or shares > 1_000_000_000:
+        return None
     return shares
 
 
@@ -1480,11 +1642,23 @@ def _extract_per_share_value_near(text: str, terms: tuple[str, ...]) -> float | 
 
 
 def _extract_section_snippet(text: str, heading: str) -> str | None:
-    lower = text.lower()
-    index = lower.find(heading.lower())
-    if index < 0:
+    section = _section_between_headings(
+        text,
+        (heading,),
+        (
+            "Dividend Policy",
+            "Capitalization",
+            "Dilution",
+            "Management",
+            "Underwriting",
+            "Plan of Distribution",
+            "Risk Factors",
+            "Business",
+        ),
+    )
+    if not section or _looks_like_table_or_boilerplate(section):
         return None
-    snippet = text[index : index + 420].strip()
+    snippet = f"{heading.title()} {section[:420]}".strip()
     snippet = re.sub(r"\s+", " ", snippet)
     return snippet[:260].rstrip(" ,.;") if snippet else None
 

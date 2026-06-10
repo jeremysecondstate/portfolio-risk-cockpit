@@ -10,6 +10,7 @@ from app.analytics.ipo_filing_report import (
 )
 from app.analytics.ipo_pipeline import (
     IpoPipelineRecord,
+    analyze_text_risk_flags,
     fetch_ipo_document_text_with_source,
     fetch_ipo_pipeline_snapshot,
     parse_ipo_filing_text,
@@ -53,6 +54,70 @@ At an assumed initial public offering price of $7.00 per share, our pro forma as
 Other Terms
 In May 2026, we completed a 1-for-5 reverse split of our ordinary shares.
 We are a foreign private issuer and have related party transactions with our founder.
+"""
+
+
+STARFIGHTERS_STYLE_BAD_TEXT = """
+Prospectus Summary
+Table of Contents
+Prospectus Summary 1 Risk Factors 7 Use of Proceeds 26 Determination of Offering Price 26 Management's Discussion and Analysis 33.
+Indicate by check mark whether the registrant is a large accelerated filer, an accelerated filer, a non-accelerated filer,
+smaller reporting company, or emerging growth company.
+We may amend or supplement this prospectus from time to time. You should read the entire prospectus carefully.
+
+Risk Factors
+We may issue up to 5.2 million shares in future transactions.
+Historical page references run between $1,963 and $1,969 in archived materials and should not be interpreted as an offering price.
+Payloads and launch operations may be delayed or damaged before launch.
+We expect to derive a substantial amount of our revenues from only a core group of major customers.
+If we issue additional Common Stock, stockholders may experience dilution in their ownership of the Company.
+
+Use of Proceeds
+USE OF PROCEEDS 26 DETERMINATION OF OFFERING PRICE 26 DIVIDEND POLICY 26 SELLING STOCKHOLDERS 26 PLAN OF DISTRIBUTION 29
+
+Business
+Starfighters Space provides commercial astronaut training, high-altitude flight testing, and aerospace research services
+for government, academic, and commercial customers.
+The company operates specialized aircraft and training facilities to support mission simulation and payload validation.
+
+Selected Consolidated Statements of Operations
+($ in thousands)
+Operating expenses 4,100 1,900
+Net loss 88.6 5.1
+
+Balance Sheets
+($ in thousands)
+Cash and cash equivalents 31 20
+Total debt 1,200 900
+"""
+
+
+COMPLETE_SUBMISSION_WITH_EXHIBIT_FIRST = """
+<SEC-DOCUMENT>0000000000-26-000001.txt
+<DOCUMENT>
+<TYPE>EX-99.1
+<FILENAME>ex99.htm
+<DESCRIPTION>Launch risk exhibit
+<TEXT>
+Risk Factors
+This exhibit says our launch costs were between $1,963 and $1,969 and we may issue 5.2 million shares.
+</TEXT>
+</DOCUMENT>
+<DOCUMENT>
+<TYPE>S-1
+<FILENAME>forms1.htm
+<DESCRIPTION>Registration Statement Prospectus
+<TEXT>
+Prospectus Summary
+Orbital Training Corp. provides astronaut training and flight-test services to commercial customers.
+The Offering
+We are offering 2,000,000 shares of common stock.
+The estimated initial public offering price is between $6.00 and $8.00 per share.
+Use of Proceeds
+We intend to use the net proceeds for aircraft upgrades, working capital, and training facility expansion.
+</TEXT>
+</DOCUMENT>
+</SEC-DOCUMENT>
 """
 
 
@@ -176,6 +241,77 @@ def test_ipo_text_parser_extracts_key_terms_for_pipeline_cache() -> None:
     assert parsed.debt == 3_500_000
     assert parsed.dilution_per_share == 5.75
     assert parsed.going_concern is True
+
+
+def test_report_rejects_absurd_low_confidence_offering_terms() -> None:
+    record = IpoPipelineRecord(
+        cik="1947016",
+        company_name="Starfighters Space, Inc.",
+        proposed_ticker="FJET",
+        form="S-1",
+        filed_date="2026-06-09",
+        ipo_status="Filed",
+        sic=None,
+        sector=None,
+        industry=None,
+        exchange="NYSE American",
+        filing_url="https://www.sec.gov/test/starfighters.txt",
+        accession_number="0001062993-26-003129",
+    )
+    report = build_ipo_filing_report(record, STARFIGHTERS_STYLE_BAD_TEXT, source_url=record.filing_url)
+    markdown = render_ipo_filing_report_markdown(report)
+    financials = {row.label: row for row in report.financial_rows}
+
+    assert report.parsed.price_range_low is None
+    assert report.parsed.price_range_high is None
+    assert report.parsed.shares_offered is None
+    assert "Price range: Not confidently extracted." in markdown
+    assert "Shares offered: Not confidently extracted." in markdown
+    assert "Midpoint gross raise math" not in markdown
+    assert "At the midpoint" not in markdown
+    assert "Implications of Being an Emerging Growth Company" not in report.business_description
+    assert "check mark" not in markdown.lower()
+    assert "USE OF PROCEEDS 26" not in markdown
+    assert "ADS/ADR structure" not in markdown
+    assert financials["Net income / loss"].latest_value == -88_600
+    assert any("Cash and cash equivalents parsed from the filing: $31.0K." in line for line in report.balance_sheet)
+    assert any("Debt / indebtedness parsed from the filing: $1.2M." in line for line in report.balance_sheet)
+
+
+def test_complete_submission_parser_uses_prospectus_document_block(tmp_path) -> None:
+    filing = _filing(primary_document="forms1.htm")
+    complete_url = "https://www.sec.gov/Archives/edgar/data/1234567/000123456726000001/0001234567-26-000001.txt"
+    client = FakeSecClient(
+        tmp_path,
+        index_items={
+            filing.accession_number: [
+                {"name": "forms1.htm", "type": "S-1", "description": "Registration Statement", "size": "1000"},
+                {"name": "0001234567-26-000001.txt", "type": "", "description": "Complete submission text file", "size": "200000"},
+            ]
+        },
+        documents={
+            filing.filing_url: "Short cover page.",
+            complete_url: COMPLETE_SUBMISSION_WITH_EXHIBIT_FIRST,
+        },
+    )
+
+    fetched = fetch_ipo_document_text_with_source(client, filing)
+    parsed = parse_ipo_filing_text(fetched.text, form="S-1")
+
+    assert "This exhibit says" not in fetched.text
+    assert parsed.price_range_low == 6.0
+    assert parsed.price_range_high == 8.0
+    assert parsed.shares_offered == 2_000_000
+
+
+def test_risk_flags_require_word_boundaries_and_evidence() -> None:
+    flags = analyze_text_risk_flags(
+        "Payloads can be delayed before launch. The address line says Prince Street. "
+        "We use ads to market the service and ADR means average daily rate in this paragraph."
+    )
+
+    assert "ADS/ADR structure" not in flags
+    assert "China/VIE structure" not in flags
 
 
 def test_document_candidate_ranking_chooses_prospectus_html(tmp_path) -> None:
