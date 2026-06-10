@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import json
+import os
 from datetime import timedelta
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.analytics.ipo_filing_report import (
     build_ipo_filing_report,
     generate_ipo_filing_report,
     render_ipo_filing_report_markdown,
     save_ipo_filing_report,
+)
+from app.analytics.openai_ipo_report import (
+    IPO_REPORT_JSON_SCHEMA,
+    OpenAiIpoReportError,
+    build_ipo_filing_source_bundle,
+    save_openai_ipo_filing_report,
 )
 from app.analytics.ipo_pipeline import (
     IpoPipelineRecord,
@@ -182,6 +192,77 @@ class FakeSecClient:
             return self.documents[url]
         except KeyError as exc:
             raise AssertionError(f"Unexpected document fetch: {url}") from exc
+
+
+class FakeOpenAiResponses:
+    def __init__(self, payload=None, error: Exception | None = None) -> None:
+        self.payload = payload or _fake_ai_report_payload()
+        self.error = error
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(output_text=json.dumps(self.payload))
+
+
+class FakeOpenAiClient:
+    def __init__(self, payload=None, error: Exception | None = None) -> None:
+        self.responses = FakeOpenAiResponses(payload=payload, error=error)
+
+
+def _fake_ai_report_payload() -> dict:
+    return {
+        "headline_bullets": [
+            "Silentium filed for an IPO based on ordinary shares.",
+            "The price range is $6.00 to $8.00 per share.",
+        ],
+        "business_summary": {
+            "summary": "Silentium develops active noise control systems for industrial equipment and commercial facilities.",
+            "source_snippets": [
+                "Silentium Ltd. is an acoustic intelligence company that develops active noise control systems."
+            ],
+        },
+        "ipo_terms": {
+            "shares_offered": "2,000,000 ordinary shares",
+            "price_range": "$6.00 to $8.00 per ordinary share",
+            "offering_size": "Not confidently extracted",
+            "ticker": "SLNT",
+            "exchange": "Nasdaq Capital Market",
+            "underwriters": ["Example Securities LLC", "Test Capital LLC"],
+            "listing_terms": "Ordinary shares proposed for Nasdaq listing.",
+            "source_snippets": [
+                "We are offering 2,000,000 ordinary shares.",
+                "between $6.00 and $8.00 per ordinary share",
+            ],
+        },
+        "financial_summary": {
+            "revenue": "$4.2 million",
+            "net_income_loss": "Net loss of $7.1 million",
+            "cash": "$1.2 million",
+            "debt": "$3.5 million",
+            "summary": "Revenue increased while the company remained loss-making.",
+            "source_snippets": ["Revenue 4,200 1,850", "Net loss 7,100 3,900"],
+        },
+        "use_of_proceeds": {
+            "summary": "Sales expansion, product development, working capital, and repayment of indebtedness.",
+            "source_snippet": "We intend to use the net proceeds for sales expansion, product development, working capital, and repayment of indebtedness.",
+        },
+        "key_risks": [
+            {
+                "risk": "Going concern",
+                "why_it_matters": "The filing says recurring losses raise substantial doubt about continuing as a going concern.",
+                "source_snippet": "raise substantial doubt about our ability to continue as a going concern",
+            }
+        ],
+        "bull_case": ["The company has disclosed enterprise customers and international deployments."],
+        "bear_case": ["The company is loss-making and dependent on IPO proceeds."],
+        "final_key_question": "Can Silentium turn IPO proceeds into durable growth before financing pressure returns?",
+        "confidence": {"level": "high", "explanation": "Core terms and risk snippets were present in the provided filing sections."},
+        "not_disclosed_fields": ["Market cap"],
+        "not_confidently_extracted_fields": ["Offering size"],
+    }
 
 
 def _submission(*, cik: str = "0001234567") -> dict:
@@ -486,3 +567,75 @@ def test_ipo_filing_report_renders_markdown_and_pdf_from_same_content(tmp_path) 
     assert cached.cached
     assert cached.paths == generated.paths
     assert cached.markdown == generated.markdown
+
+
+def test_openai_ipo_report_uses_responses_structured_outputs_with_mocked_client(tmp_path) -> None:
+    fake_openai = FakeOpenAiClient()
+    generated = save_openai_ipo_filing_report(
+        _record(),
+        SAMPLE_F1_TEXT,
+        source_url="https://www.sec.gov/test/f1.htm",
+        output_root=tmp_path,
+        force_refresh=True,
+        openai_client=fake_openai,
+        model="gpt-test",
+    )
+
+    call = fake_openai.responses.calls[0]
+    assert call["model"] == "gpt-test"
+    assert call["temperature"] == 0
+    assert call["store"] is False
+    assert call["text"]["format"]["type"] == "json_schema"
+    assert call["text"]["format"]["strict"] is True
+    assert call["text"]["format"]["schema"] == IPO_REPORT_JSON_SCHEMA
+    assert "OPENAI_API_KEY" not in json.dumps(call)
+    assert "2,000,000 ordinary shares" in call["input"][1]["content"]
+
+    assert generated.report is not None
+    assert generated.report.generation_method == "openai"
+    assert generated.paths.markdown_path.name == "Silentium Ltd AI Filing Report.md"
+    assert generated.paths.markdown_path.exists()
+    assert generated.paths.pdf_path.exists()
+    assert "# Silentium Ltd. F-1 AI Filing Report" in generated.markdown
+    assert "Source snippet:" in generated.markdown
+    assert "AI model: gpt-test" in generated.markdown
+    assert "Not disclosed: Market cap" in generated.markdown
+    assert generated.paths.pdf_path.read_bytes().startswith(b"%PDF-1.4")
+
+
+def test_openai_source_bundle_uses_cleaned_sections_and_metadata() -> None:
+    bundle = build_ipo_filing_source_bundle(
+        _record(),
+        SAMPLE_F1_TEXT,
+        source_url="https://www.sec.gov/test/f1.htm",
+    )
+
+    assert bundle.metadata["company_name"] == "Silentium Ltd."
+    assert bundle.metadata["source_form"] == "F-1"
+    assert bundle.deterministic_extracts["parsed_fields"]["price_range_low"] == 6.0
+    section_names = {section.name for section in bundle.sections}
+    assert "prospectus_summary" in section_names
+    assert "offering" in section_names
+    assert "risk_factors" in section_names
+    assert all("Table of Contents" not in section.text for section in bundle.sections)
+
+
+def test_openai_ipo_report_redacts_api_key_from_errors(tmp_path) -> None:
+    fake_openai = FakeOpenAiClient(error=RuntimeError("request failed for sk-test-secret123456789"))
+    with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test-secret123456789"}):
+        try:
+            save_openai_ipo_filing_report(
+                _record(),
+                SAMPLE_F1_TEXT,
+                source_url="https://www.sec.gov/test/f1.htm",
+                output_root=tmp_path,
+                force_refresh=True,
+                openai_client=fake_openai,
+            )
+        except OpenAiIpoReportError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("Expected OpenAiIpoReportError")
+
+    assert "sk-test-secret" not in message
+    assert "[REDACTED]" in message

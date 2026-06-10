@@ -15,6 +15,7 @@ from app.analytics.ipo_filing_report import (
     generate_ipo_filing_report,
     reportable_ipo_form,
 )
+from app.analytics.openai_ipo_report import generate_openai_ipo_filing_report
 from app.analytics.ipo_pipeline import (
     EMPTY_VALUE,
     IPO_FORMS,
@@ -256,6 +257,7 @@ def _build_ipo_filters(self: tk.Tk, parent: ttk.Frame) -> None:
     actions.grid(row=3, column=0, columnspan=8, sticky="ew", pady=(8, 0))
     ttk.Button(actions, text="Refresh SEC Data", command=lambda app=self: _refresh_ipo_pipeline(app, force_refresh=True), style="Accent.TButton").pack(side=tk.LEFT)
     ttk.Button(actions, text="Open SEC Filing", command=lambda app=self: _open_selected_filing(app)).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(actions, text="Generate AI Filing Report", command=lambda app=self: _generate_selected_ai_filing_report(app, force_refresh=False)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Generate Filing Report", command=lambda app=self: _generate_selected_filing_report(app, force_refresh=False)).pack(side=tk.LEFT, padx=(8, 0))
     self.ipo_pipeline_open_report_folder_button = ttk.Button(
         actions,
@@ -571,6 +573,17 @@ def _generate_selected_filing_report(self: tk.Tk, *, force_refresh: bool) -> Non
     _start_ipo_filing_report_job(self, record, force_refresh=force_refresh)
 
 
+def _generate_selected_ai_filing_report(self: tk.Tk, *, force_refresh: bool) -> None:
+    record = _selected_ipo_record(self)
+    if record is None:
+        messagebox.showinfo("Generate AI Filing Report", "Select an IPO pipeline row first.")
+        return
+    if not reportable_ipo_form(record.form):
+        messagebox.showinfo("Generate AI Filing Report", "AI filing reports are available for S-1/F-1, 424B4, and EFFECT rows.")
+        return
+    _start_ipo_ai_filing_report_job(self, record, force_refresh=force_refresh)
+
+
 def _selected_ipo_record(self: tk.Tk) -> IpoPipelineRecord | None:
     tree = getattr(self, "ipo_pipeline_table", None)
     if tree is None:
@@ -606,6 +619,31 @@ def _start_ipo_filing_report_job(self: tk.Tk, record: IpoPipelineRecord, *, forc
     threading.Thread(target=worker, daemon=True).start()
 
 
+def _start_ipo_ai_filing_report_job(self: tk.Tk, record: IpoPipelineRecord, *, force_refresh: bool) -> None:
+    key = "ai:" + _ipo_filing_report_job_key(record)
+    jobs = getattr(self, "ipo_filing_report_jobs", set())
+    if key in jobs:
+        self.ipo_pipeline_status_var.set(f"AI filing report already generating for {record.company_name}.")
+        return
+    jobs.add(key)
+    self.ipo_filing_report_jobs = jobs
+    self.ipo_pipeline_status_var.set(f"Generating AI filing report for {record.company_name}...")
+
+    def worker() -> None:
+        try:
+            result = generate_openai_ipo_filing_report(
+                record,
+                client=SecEdgarClient(),
+                force_refresh=force_refresh,
+            )
+        except Exception as exc:
+            self.after(0, lambda error=exc, rec=record: _finish_ipo_ai_filing_report_error(self, rec, error))
+            return
+        self.after(0, lambda generated=result, rec=record: _finish_ipo_ai_filing_report_success(self, rec, generated))
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
 def _finish_ipo_filing_report_success(self: tk.Tk, record: IpoPipelineRecord, result: GeneratedIpoFilingReport) -> None:
     _clear_ipo_filing_report_job(self, record)
     self.ipo_pipeline_latest_report_dir = result.paths.output_dir
@@ -620,15 +658,41 @@ def _finish_ipo_filing_report_success(self: tk.Tk, record: IpoPipelineRecord, re
     self.ipo_pipeline_status_var.set(f"{action}: {result.paths.markdown_path}")
 
 
+def _finish_ipo_ai_filing_report_success(self: tk.Tk, record: IpoPipelineRecord, result: GeneratedIpoFilingReport) -> None:
+    _clear_ipo_ai_filing_report_job(self, record)
+    self.ipo_pipeline_latest_report_dir = result.paths.output_dir
+    self.ipo_pipeline_latest_report_path = result.paths.markdown_path
+    button = getattr(self, "ipo_pipeline_open_report_folder_button", None)
+    if button is not None:
+        try:
+            button.configure(state=tk.NORMAL)
+        except tk.TclError:
+            pass
+    action = "Using cached AI filing report" if result.cached else "AI report saved"
+    self.ipo_pipeline_status_var.set(f"{action}: {result.paths.markdown_path}")
+
+
 def _finish_ipo_filing_report_error(self: tk.Tk, record: IpoPipelineRecord, error: Exception) -> None:
     _clear_ipo_filing_report_job(self, record)
     self.ipo_pipeline_status_var.set(f"Filing report failed for {record.company_name}: {error}")
     messagebox.showerror("IPO Filing Report failed", str(error))
 
 
+def _finish_ipo_ai_filing_report_error(self: tk.Tk, record: IpoPipelineRecord, error: Exception) -> None:
+    _clear_ipo_ai_filing_report_job(self, record)
+    self.ipo_pipeline_status_var.set(f"AI filing report failed for {record.company_name}: {error}")
+    messagebox.showerror("AI IPO Filing Report failed", str(error))
+
+
 def _clear_ipo_filing_report_job(self: tk.Tk, record: IpoPipelineRecord) -> None:
     jobs = getattr(self, "ipo_filing_report_jobs", set())
     jobs.discard(_ipo_filing_report_job_key(record))
+    self.ipo_filing_report_jobs = jobs
+
+
+def _clear_ipo_ai_filing_report_job(self: tk.Tk, record: IpoPipelineRecord) -> None:
+    jobs = getattr(self, "ipo_filing_report_jobs", set())
+    jobs.discard("ai:" + _ipo_filing_report_job_key(record))
     self.ipo_filing_report_jobs = jobs
 
 
