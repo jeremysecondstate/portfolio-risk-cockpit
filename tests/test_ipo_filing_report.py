@@ -13,7 +13,9 @@ from app.analytics.ipo_filing_report import (
     save_ipo_filing_report,
 )
 from app.analytics.openai_ipo_report import (
+    FULL_PROSPECTUS_CHAR_LIMIT,
     IPO_REPORT_JSON_SCHEMA,
+    SECTION_MAP_JSON_SCHEMA,
     OpenAiIpoReportError,
     build_ipo_filing_source_bundle,
     save_openai_ipo_filing_report,
@@ -204,7 +206,13 @@ class FakeOpenAiResponses:
         self.calls.append(kwargs)
         if self.error is not None:
             raise self.error
-        return SimpleNamespace(output_text=json.dumps(self.payload))
+        if isinstance(self.payload, list):
+            payload = self.payload[len(self.calls) - 1]
+        elif callable(self.payload):
+            payload = self.payload(kwargs)
+        else:
+            payload = self.payload
+        return SimpleNamespace(output_text=json.dumps(payload))
 
 
 class FakeOpenAiClient:
@@ -214,54 +222,52 @@ class FakeOpenAiClient:
 
 def _fake_ai_report_payload() -> dict:
     return {
-        "headline_bullets": [
-            "Silentium filed for an IPO based on ordinary shares.",
-            "The price range is $6.00 to $8.00 per share.",
-        ],
-        "business_summary": {
-            "summary": "Silentium develops active noise control systems for industrial equipment and commercial facilities.",
-            "source_snippets": [
-                "Silentium Ltd. is an acoustic intelligence company that develops active noise control systems."
-            ],
-        },
-        "ipo_terms": {
+        "markdown_report": (
+            "## Executive read\n"
+            "Silentium is an acoustic intelligence IPO candidate with disclosed enterprise traction.\n\n"
+            "## IPO terms\n"
+            "- The filing says it is offering 2,000,000 ordinary shares at $6.00 to $8.00 per share.\n\n"
+            "## Source excerpts\n"
+            "- \"We are offering 2,000,000 ordinary shares.\"\n"
+            "- \"Revenue 4,200 1,850\""
+        ),
+        "facts": {
+            "company_name": "Silentium Ltd.",
+            "form": "F-1",
             "shares_offered": "2,000,000 ordinary shares",
             "price_range": "$6.00 to $8.00 per ordinary share",
             "offering_size": "Not confidently extracted",
             "ticker": "SLNT",
             "exchange": "Nasdaq Capital Market",
-            "underwriters": ["Example Securities LLC", "Test Capital LLC"],
-            "listing_terms": "Ordinary shares proposed for Nasdaq listing..",
-            "source_snippets": [
-                "We are offering 2,000,000 ordinary shares.",
-                "between $6.00 and $8.00 per ordinary share",
-            ],
-        },
-        "financial_summary": {
             "revenue": "$4.2 million",
-            "net_income_loss": "Net loss of $7.1 million",
             "cash": "$1.2 million",
             "debt": "$3.5 million",
-            "summary": "Revenue increased while the company remained loss-making.",
-            "source_snippets": ["Revenue 4,200 1,850", "Net loss 7,100 3,900"],
+            "source_snippets": ["We are offering 2,000,000 ordinary shares.", "Revenue 4,200 1,850"],
         },
-        "use_of_proceeds": {
-            "summary": "Sales expansion, product development, working capital, and repayment of indebtedness.",
-            "source_snippet": "We intend to use the net proceeds for sales expansion, product development, working capital, and repayment of indebtedness.",
-        },
-        "key_risks": [
-            {
-                "risk": "Going concern",
-                "why_it_matters": "The filing says recurring losses raise substantial doubt about continuing as a going concern.",
-                "source_snippet": "raise substantial doubt about our ability to continue as a going concern",
-            }
-        ],
-        "bull_case": ["The company has disclosed enterprise customers and international deployments."],
-        "bear_case": ["The company is loss-making and dependent on IPO proceeds."],
-        "final_key_question": "Can Silentium turn IPO proceeds into durable growth before financing pressure returns?",
         "confidence": {"level": "high", "explanation": "Core terms and risk snippets were present in the provided filing sections."},
         "not_disclosed_fields": ["market_cap"],
         "not_confidently_extracted_fields": ["offering_size"],
+    }
+
+
+def _fake_section_map_payload() -> dict:
+    return {
+        "sections": [
+            {
+                "name": "prospectus_summary",
+                "start_offset": 1,
+                "end_offset": 520,
+                "confidence": "high",
+                "reason": "Starts at the Prospectus Summary heading.",
+            },
+            {
+                "name": "mdna_financials",
+                "start_offset": 930,
+                "end_offset": 1190,
+                "confidence": "medium",
+                "reason": "Contains selected statements of operations.",
+            },
+        ]
     }
 
 
@@ -591,14 +597,16 @@ def test_openai_ipo_report_uses_responses_structured_outputs_with_mocked_client(
     assert "OPENAI_API_KEY" not in json.dumps(call)
     assert "2,000,000 ordinary shares" in call["input"][1]["content"]
     request_payload = json.loads(call["input"][1]["content"])
-    request_sections = {section["name"]: section["text"] for section in request_payload["sections"]}
-    assert "develops active noise control systems" in request_sections["business"]
-    assert "Revenue 4,200 1,850" in request_sections["financials"]
-    assert "We intend to use the net proceeds" in request_sections["use_of_proceeds"]
-    assert "underwriters are Example Securities LLC and Test Capital LLC" in request_sections["underwriting"]
+    assert request_payload["source_mode"] == "full_prospectus_text"
+    assert "sections" not in request_payload
+    assert "full_prospectus_text" in request_payload
+    assert "develops active noise control systems" in request_payload["full_prospectus_text"]
+    assert "Revenue 4,200 1,850" in request_payload["full_prospectus_text"]
+    assert "We intend to use the net proceeds" in request_payload["full_prospectus_text"]
+    assert "underwriters are Example Securities LLC and Test Capital LLC" in request_payload["full_prospectus_text"]
+    assert request_payload["deterministic_extracts"]["deterministic_financial_rows"][0]["label"] == "Revenue"
     debug_by_name = {entry["name"]: entry for entry in request_payload["section_debug"]}
-    assert debug_by_name["financials"]["character_length"] > len("Selected Consolidated Statements of Operations")
-    assert "Revenue 4,200 1,850" in debug_by_name["financials"]["preview"]
+    assert debug_by_name["full_prospectus_text"]["character_length"] == len(request_payload["full_prospectus_text"])
 
     assert generated.report is not None
     assert generated.report.generation_method == "openai"
@@ -606,11 +614,14 @@ def test_openai_ipo_report_uses_responses_structured_outputs_with_mocked_client(
     assert generated.paths.markdown_path.exists()
     assert generated.paths.pdf_path.exists()
     assert "# Silentium Ltd. F-1 AI Filing Report" in generated.markdown
-    assert "Source snippet:" in generated.markdown
+    assert "## Executive read" in generated.markdown
+    assert "## Source excerpts" in generated.markdown
     assert "AI model: gpt-test" in generated.markdown
-    assert "Not disclosed: Market cap" in generated.markdown
-    assert "Not confidently extracted: Offering size" in generated.markdown
-    assert "Nasdaq listing.." not in generated.markdown
+    assert '"not_disclosed"' in generated.markdown
+    assert "Market cap" in generated.markdown
+    assert "Offering size" in generated.markdown
+    assert "Facts metadata" in generated.markdown
+    assert "AI source mode: full_prospectus_text" in generated.markdown
     assert "Source section debug:" in generated.markdown
     assert generated.paths.pdf_path.read_bytes().startswith(b"%PDF-1.4")
 
@@ -625,21 +636,45 @@ def test_openai_source_bundle_uses_cleaned_sections_and_metadata() -> None:
     assert bundle.metadata["company_name"] == "Silentium Ltd."
     assert bundle.metadata["source_form"] == "F-1"
     assert bundle.deterministic_extracts["parsed_fields"]["price_range_low"] == 6.0
-    section_names = {section.name for section in bundle.sections}
-    assert "prospectus_summary" in section_names
-    assert "business" in section_names
-    assert "offering" in section_names
-    assert "financials" in section_names
-    assert "use_of_proceeds" in section_names
-    assert "underwriting" in section_names
-    assert "risk_factors" in section_names
-    by_name = {section.name: section.text for section in bundle.sections}
-    assert "active noise control systems" in by_name["business"]
-    assert "Revenue 4,200 1,850" in by_name["financials"]
-    assert "working capital, and repayment of indebtedness" in by_name["use_of_proceeds"]
-    assert "Example Securities LLC and Test Capital LLC" in by_name["underwriting"]
-    assert any(entry["name"] == "business" and entry["character_length"] > 100 for entry in bundle.section_debug)
-    assert all("Table of Contents" not in section.text for section in bundle.sections)
+    assert bundle.source_mode == "full_prospectus_text"
+    assert bundle.sections == ()
+    assert "active noise control systems" in bundle.full_text
+    assert "Revenue 4,200 1,850" in bundle.full_text
+    assert "working capital, and repayment of indebtedness" in bundle.full_text
+    assert "Example Securities LLC and Test Capital LLC" in bundle.full_text
+    assert bundle.section_debug[0]["name"] == "full_prospectus_text"
+    assert bundle.section_debug[0]["character_length"] == len(bundle.full_text)
+    assert "Table of Contents" not in bundle.full_text
+
+
+def test_openai_ipo_report_uses_two_pass_section_map_for_large_documents(tmp_path) -> None:
+    large_text = SAMPLE_F1_TEXT + "\n" + ("Additional risk and business context.\n" * ((FULL_PROSPECTUS_CHAR_LIMIT // 38) + 100))
+    fake_openai = FakeOpenAiClient(payload=[_fake_section_map_payload(), _fake_ai_report_payload()])
+
+    generated = save_openai_ipo_filing_report(
+        _record(),
+        large_text,
+        source_url="https://www.sec.gov/test/f1.htm",
+        output_root=tmp_path,
+        force_refresh=True,
+        openai_client=fake_openai,
+        model="gpt-test",
+    )
+
+    assert len(fake_openai.responses.calls) == 2
+    map_call, report_call = fake_openai.responses.calls
+    assert map_call["text"]["format"]["schema"] == SECTION_MAP_JSON_SCHEMA
+    map_payload = json.loads(map_call["input"][1]["content"])
+    assert "full_prospectus_text" in map_payload
+    assert len(map_payload["full_prospectus_text"]) > FULL_PROSPECTUS_CHAR_LIMIT
+
+    assert report_call["text"]["format"]["schema"] == IPO_REPORT_JSON_SCHEMA
+    report_payload = json.loads(report_call["input"][1]["content"])
+    assert report_payload["source_mode"] == "mapped_large_sections"
+    assert "full_prospectus_text" not in report_payload
+    assert {section["name"] for section in report_payload["sections"]} >= {"prospectus_summary", "mdna_financials"}
+    assert any("Revenue 4,200 1,850" in section["text"] for section in report_payload["sections"])
+    assert "AI source mode: mapped_large_sections" in generated.markdown
 
 
 def test_openai_ipo_report_redacts_api_key_from_errors(tmp_path) -> None:

@@ -34,31 +34,61 @@ from app.data.sec_edgar import SecCurrentFiling, SecEdgarClient, normalize_cik
 
 DEFAULT_OPENAI_IPO_REPORT_MODEL = "gpt-5.5"
 AI_REPORT_NAME = "AI Filing Report"
+FULL_PROSPECTUS_CHAR_LIMIT = 160_000
+SECTION_MAP_TARGET_NAMES = (
+    "prospectus_summary",
+    "business",
+    "offering",
+    "use_of_proceeds",
+    "mdna_financials",
+    "risk_factors",
+    "underwriting",
+)
+SECTION_SLICE_PADDING = 1_500
 
 
 @dataclass(frozen=True)
 class IpoFilingSourceSection:
     name: str
     text: str
+    start_offset: int | None = None
+    end_offset: int | None = None
 
 
 @dataclass(frozen=True)
 class IpoFilingSourceBundle:
     metadata: dict[str, Any]
     deterministic_extracts: dict[str, Any]
-    sections: tuple[IpoFilingSourceSection, ...]
+    full_text: str
+    sections: tuple[IpoFilingSourceSection, ...] = ()
+    source_mode: str = "full_prospectus_text"
+    section_map: tuple[dict[str, Any], ...] = ()
 
     @property
     def section_debug(self) -> tuple[dict[str, Any], ...]:
-        return tuple(_section_debug_payload(section) for section in self.sections)
+        if self.sections:
+            return tuple(_section_debug_payload(section) for section in self.sections)
+        return (
+            {
+                "name": "full_prospectus_text",
+                "character_length": len(self.full_text),
+                "preview": _shorten(self.full_text, 300),
+            },
+        )
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "metadata": self.metadata,
             "deterministic_extracts": self.deterministic_extracts,
+            "source_mode": self.source_mode,
             "section_debug": list(self.section_debug),
-            "sections": [asdict(section) for section in self.sections],
         }
+        if self.sections:
+            payload["sections"] = [asdict(section) for section in self.sections]
+            payload["section_map"] = list(self.section_map)
+        else:
+            payload["full_prospectus_text"] = self.full_text
+        return payload
 
 
 class OpenAiIpoReportError(RuntimeError):
@@ -80,99 +110,47 @@ IPO_REPORT_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": [
-        "headline_bullets",
-        "business_summary",
-        "ipo_terms",
-        "financial_summary",
-        "use_of_proceeds",
-        "key_risks",
-        "bull_case",
-        "bear_case",
-        "final_key_question",
+        "markdown_report",
+        "facts",
         "confidence",
         "not_disclosed_fields",
         "not_confidently_extracted_fields",
     ],
     "properties": {
-        "headline_bullets": STRING_ARRAY_SCHEMA,
-        "business_summary": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["summary", "source_snippets"],
-            "properties": {
-                "summary": {"type": "string"},
-                "source_snippets": SOURCE_SNIPPETS_SCHEMA,
-            },
+        "markdown_report": {
+            "type": "string",
+            "description": "A polished Markdown analyst memo based only on the provided filing text and deterministic facts.",
         },
-        "ipo_terms": {
+        "facts": {
             "type": "object",
             "additionalProperties": False,
             "required": [
+                "company_name",
+                "form",
+                "ticker",
+                "exchange",
                 "shares_offered",
                 "price_range",
                 "offering_size",
-                "ticker",
-                "exchange",
-                "underwriters",
-                "listing_terms",
+                "revenue",
+                "cash",
+                "debt",
                 "source_snippets",
             ],
             "properties": {
+                "company_name": {"type": "string"},
+                "form": {"type": "string"},
+                "ticker": {"type": "string"},
+                "exchange": {"type": "string"},
                 "shares_offered": {"type": "string"},
                 "price_range": {"type": "string"},
                 "offering_size": {"type": "string"},
-                "ticker": {"type": "string"},
-                "exchange": {"type": "string"},
-                "underwriters": STRING_ARRAY_SCHEMA,
-                "listing_terms": {"type": "string"},
-                "source_snippets": SOURCE_SNIPPETS_SCHEMA,
-            },
-        },
-        "financial_summary": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": [
-                "revenue",
-                "net_income_loss",
-                "cash",
-                "debt",
-                "summary",
-                "source_snippets",
-            ],
-            "properties": {
                 "revenue": {"type": "string"},
-                "net_income_loss": {"type": "string"},
                 "cash": {"type": "string"},
                 "debt": {"type": "string"},
-                "summary": {"type": "string"},
                 "source_snippets": SOURCE_SNIPPETS_SCHEMA,
             },
         },
-        "use_of_proceeds": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["summary", "source_snippet"],
-            "properties": {
-                "summary": {"type": "string"},
-                "source_snippet": {"type": "string"},
-            },
-        },
-        "key_risks": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["risk", "why_it_matters", "source_snippet"],
-                "properties": {
-                    "risk": {"type": "string"},
-                    "why_it_matters": {"type": "string"},
-                    "source_snippet": {"type": "string"},
-                },
-            },
-        },
-        "bull_case": STRING_ARRAY_SCHEMA,
-        "bear_case": STRING_ARRAY_SCHEMA,
-        "final_key_question": {"type": "string"},
         "confidence": {
             "type": "object",
             "additionalProperties": False,
@@ -188,17 +166,50 @@ IPO_REPORT_JSON_SCHEMA: dict[str, Any] = {
 }
 
 
-IPO_REPORT_SYSTEM_PROMPT = """Generate an IPO filing report from the provided SEC filing source bundle.
+SECTION_MAP_JSON_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["sections"],
+    "properties": {
+        "sections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["name", "start_offset", "end_offset", "confidence", "reason"],
+                "properties": {
+                    "name": {"type": "string", "enum": list(SECTION_MAP_TARGET_NAMES)},
+                    "start_offset": {"type": "integer"},
+                    "end_offset": {"type": "integer"},
+                    "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                    "reason": {"type": "string"},
+                },
+            },
+        }
+    },
+}
+
+
+IPO_REPORT_SYSTEM_PROMPT = """Write an IPO filing analyst memo from the provided SEC prospectus source.
 
 Rules:
-- Use only the provided JSON metadata, deterministic extracts, and cleaned source sections.
-- Treat deterministic extracts as derived only from the provided filing sections.
+- Use only the provided metadata, deterministic extracts, and filing text or mapped filing sections.
+- Treat deterministic extracts as supporting facts, not a substitute for reading the filing context.
 - Say exactly "Not disclosed" when a requested field is absent from the source.
 - Say exactly "Not confidently extracted" when the source is ambiguous or too thin.
 - Do not invent offering size, price range, revenue, cash, debt, market cap, listing terms, or exchange/ticker details.
-- Include short source snippets for important claims. Snippets must come from the provided sections.
+- Produce a polished Markdown analyst memo. Do not return a stitched field-by-field template.
+- Include a small "Source excerpts" section with a few short snippets for the most important claims, but do not append a snippet after every bullet.
+- Include sections for executive read, business, IPO terms, financial read, use of proceeds, key risks, bull case, bear case, and final key question when supported by the filing.
+- Do not include the outer report title, SEC source header, parser notes, or fenced code blocks in markdown_report.
 - Never include credentials, API keys, or secrets.
 - Return only JSON that matches the schema.
+"""
+
+
+SECTION_MAP_SYSTEM_PROMPT = """Map a large IPO prospectus into broad analyst-relevant sections.
+
+Use exact character offsets into the provided full_prospectus_text. Return only offsets for sections you can identify from the text. Prefer larger ranges that include the section body, tables, and nearby subsections over tiny heading previews.
 """
 
 
@@ -216,6 +227,52 @@ class OpenAiIpoReportClient:
         self.model = (model or os.getenv("OPENAI_IPO_REPORT_MODEL") or DEFAULT_OPENAI_IPO_REPORT_MODEL).strip()
 
     def generate_report(self, bundle: IpoFilingSourceBundle) -> dict[str, Any]:
+        if len(bundle.full_text) <= FULL_PROSPECTUS_CHAR_LIMIT:
+            return self._generate_markdown_report(bundle)
+
+        section_map = self.map_large_prospectus_sections(bundle)
+        mapped_bundle = bundle_with_mapped_sections(bundle, section_map)
+        return self._generate_markdown_report(mapped_bundle)
+
+    def map_large_prospectus_sections(self, bundle: IpoFilingSourceBundle) -> dict[str, Any]:
+        request_payload = json.dumps(
+            {
+                "metadata": bundle.metadata,
+                "target_sections": list(SECTION_MAP_TARGET_NAMES),
+                "full_prospectus_text": bundle.full_text,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        try:
+            response = self._client().responses.create(
+                model=self.model,
+                input=[
+                    {"role": "system", "content": SECTION_MAP_SYSTEM_PROMPT},
+                    {"role": "user", "content": request_payload},
+                ],
+                text={
+                    "format": {
+                        "type": "json_schema",
+                        "name": "ipo_filing_section_map",
+                        "schema": SECTION_MAP_JSON_SCHEMA,
+                        "strict": True,
+                    }
+                },
+                store=False,
+            )
+        except Exception as exc:
+            message = _redact_api_key(f"OpenAI IPO section-map generation failed: {exc}", self._current_api_key())
+            raise OpenAiIpoReportError(message) from None
+
+        try:
+            payload = json.loads(_response_output_text(response))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise OpenAiIpoReportError(f"OpenAI IPO section-map response was not valid structured JSON: {exc}") from None
+        _validate_section_map_payload(payload)
+        return payload
+
+    def _generate_markdown_report(self, bundle: IpoFilingSourceBundle) -> dict[str, Any]:
         request_payload = json.dumps(bundle.to_payload(), ensure_ascii=False, indent=2)
         try:
             response = self._client().responses.create(
@@ -244,6 +301,11 @@ class OpenAiIpoReportClient:
             raise OpenAiIpoReportError(f"OpenAI IPO report response was not valid structured JSON: {exc}") from None
 
         _validate_report_payload(payload)
+        payload["_source_mode"] = bundle.source_mode
+        payload["_source_section_names"] = [section.name for section in bundle.sections] if bundle.sections else ("full_prospectus_text",)
+        payload["_source_section_debug"] = [_section_debug_line(section) for section in bundle.sections] if bundle.sections else (
+            f"full_prospectus_text ({len(bundle.full_text)} chars): {_shorten(bundle.full_text, 300)}",
+        )
         return payload
 
     def _client(self) -> Any:
@@ -319,15 +381,6 @@ def save_openai_ipo_filing_report(
         if "This report was generated by OpenAI" in cached_markdown:
             return GeneratedIpoFilingReport(report=None, paths=paths, cached=True, markdown=cached_markdown)
 
-    bundle = build_ipo_filing_source_bundle(
-        record,
-        filing_text,
-        source_url=source_url,
-        source_filing=source_filing,
-        source_document=source_document,
-    )
-    client = OpenAiIpoReportClient(openai_client=openai_client, model=model)
-    payload = client.generate_report(bundle)
     base_report = build_ipo_filing_report(
         record,
         filing_text,
@@ -335,12 +388,20 @@ def save_openai_ipo_filing_report(
         source_filing=source_filing,
         source_document=source_document,
     )
+    bundle = build_ipo_filing_source_bundle(
+        record,
+        filing_text,
+        source_url=source_url,
+        source_filing=source_filing,
+        source_document=source_document,
+        deterministic_report=base_report,
+    )
+    client = OpenAiIpoReportClient(openai_client=openai_client, model=model)
+    payload = client.generate_report(bundle)
     report = _report_from_openai_payload(
         base_report,
         payload,
         model=client.model,
-        source_section_names=tuple(section.name for section in bundle.sections),
-        source_section_debug=tuple(_section_debug_line(section) for section in bundle.sections),
     )
     return write_ipo_filing_report(report, paths)
 
@@ -352,6 +413,7 @@ def build_ipo_filing_source_bundle(
     source_url: str = "",
     source_filing: SecCurrentFiling | None = None,
     source_document: IpoDocumentCandidate | None = None,
+    deterministic_report: IpoFilingReport | None = None,
 ) -> IpoFilingSourceBundle:
     normalized = _normalize_text(filing_text)
     source_form = (source_filing.form if source_filing is not None else record.form).strip().upper()
@@ -376,10 +438,82 @@ def build_ipo_filing_source_bundle(
         "parsed_fields": _parsed_fields_payload(parsed),
         "risk_flags": risks,
     }
+    if deterministic_report is None:
+        deterministic_report = build_ipo_filing_report(
+            record,
+            filing_text,
+            source_url=source_url,
+            source_filing=source_filing,
+            source_document=source_document,
+        )
+    deterministic_extracts["deterministic_financial_rows"] = [
+        {
+            "label": row.label,
+            "latest_text": row.latest_text,
+            "prior_text": row.prior_text,
+            "change_text": row.change_text,
+            "read": row.read,
+        }
+        for row in deterministic_report.financial_rows
+    ]
+    deterministic_extracts["deterministic_balance_sheet"] = list(deterministic_report.balance_sheet)
+    deterministic_extracts["deterministic_dilution"] = list(deterministic_report.dilution)
     return IpoFilingSourceBundle(
         metadata=metadata,
         deterministic_extracts=deterministic_extracts,
-        sections=tuple(_cleaned_source_sections(normalized)),
+        full_text=normalized,
+    )
+
+
+def bundle_with_mapped_sections(bundle: IpoFilingSourceBundle, section_map_payload: dict[str, Any]) -> IpoFilingSourceBundle:
+    sections: list[IpoFilingSourceSection] = []
+    clean_map: list[dict[str, Any]] = []
+    text_length = len(bundle.full_text)
+    for entry in section_map_payload.get("sections", []):
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if name not in SECTION_MAP_TARGET_NAMES:
+            continue
+        start = _bounded_int(entry.get("start_offset"), 0, text_length)
+        end = _bounded_int(entry.get("end_offset"), 0, text_length)
+        if end <= start:
+            continue
+        padded_start = max(0, start - SECTION_SLICE_PADDING)
+        padded_end = min(text_length, end + SECTION_SLICE_PADDING)
+        body = _clean_section_text(bundle.full_text[padded_start:padded_end], limit=45_000)
+        if not body:
+            continue
+        sections.append(IpoFilingSourceSection(name=name, text=body, start_offset=padded_start, end_offset=padded_end))
+        clean_map.append(
+            {
+                "name": name,
+                "start_offset": start,
+                "end_offset": end,
+                "confidence": str(entry.get("confidence") or ""),
+                "reason": str(entry.get("reason") or ""),
+            }
+        )
+
+    if not sections:
+        sections = tuple(_cleaned_source_sections(bundle.full_text))
+        clean_map = [
+            {
+                "name": section.name,
+                "start_offset": section.start_offset,
+                "end_offset": section.end_offset,
+                "confidence": "low",
+                "reason": "Deterministic fallback section slice.",
+            }
+            for section in sections
+        ]
+    return IpoFilingSourceBundle(
+        metadata=bundle.metadata,
+        deterministic_extracts=bundle.deterministic_extracts,
+        full_text=bundle.full_text,
+        sections=tuple(sections),
+        source_mode="mapped_large_sections",
+        section_map=tuple(clean_map),
     )
 
 
@@ -388,35 +522,38 @@ def _report_from_openai_payload(
     payload: dict[str, Any],
     *,
     model: str,
-    source_section_names: tuple[str, ...],
-    source_section_debug: tuple[str, ...],
 ) -> IpoFilingReport:
-    business = _business_summary_text(payload["business_summary"])
+    facts = payload.get("facts") if isinstance(payload.get("facts"), dict) else {}
+    source_section_names = tuple(str(value) for value in payload.get("_source_section_names", ("full_prospectus_text",)))
+    source_section_debug = tuple(str(value) for value in payload.get("_source_section_debug", ()))
     return replace(
         base,
-        business_description=business,
+        business_description="",
         why_interesting=(),
         traction=(),
         financial_rows=(),
-        key_risks=tuple(_risk_lines(payload["key_risks"])),
+        key_risks=(),
         balance_sheet=(),
         dilution=(),
         notable_terms=(),
-        bull_case=tuple(_string_list(payload["bull_case"])),
-        bear_case=tuple(_string_list(payload["bear_case"])),
-        final_key_question=_field_text(payload["final_key_question"], fallback="Not confidently extracted"),
+        bull_case=(),
+        bear_case=(),
+        final_key_question="",
         raw_excerpt="",
         generation_method="openai",
-        headline_bullets=tuple(_string_list(payload["headline_bullets"])),
-        ipo_terms=tuple(_ipo_terms_lines(payload["ipo_terms"])),
-        financial_summary=tuple(_financial_summary_lines(payload["financial_summary"])),
-        use_of_proceeds_summary=_use_of_proceeds_text(payload["use_of_proceeds"]),
+        headline_bullets=(),
+        ipo_terms=(),
+        financial_summary=(),
+        use_of_proceeds_summary="",
         confidence=_confidence_text(payload["confidence"]),
         not_disclosed_fields=tuple(_pretty_label_list(payload["not_disclosed_fields"])),
         not_confidently_extracted_fields=tuple(_pretty_label_list(payload["not_confidently_extracted_fields"])),
         model_name=model,
         source_section_names=source_section_names,
         source_section_debug=source_section_debug,
+        source_mode=str(payload.get("_source_mode") or "full_prospectus_text"),
+        ai_markdown_report=_clean_model_markdown(str(payload["markdown_report"])),
+        facts_json=json.dumps(_facts_metadata_payload(facts, payload), indent=2, ensure_ascii=False),
     )
 
 
@@ -674,6 +811,16 @@ def _validate_report_payload(payload: Any) -> None:
     missing = [field for field in IPO_REPORT_JSON_SCHEMA["required"] if field not in payload]
     if missing:
         raise OpenAiIpoReportError("OpenAI IPO report response was missing structured fields: " + ", ".join(missing))
+    if not str(payload.get("markdown_report") or "").strip():
+        raise OpenAiIpoReportError("OpenAI IPO report response did not include markdown_report.")
+
+
+def _validate_section_map_payload(payload: Any) -> None:
+    if not isinstance(payload, dict):
+        raise OpenAiIpoReportError("OpenAI IPO section-map response was not a JSON object.")
+    sections = payload.get("sections")
+    if not isinstance(sections, list):
+        raise OpenAiIpoReportError("OpenAI IPO section-map response did not include a sections list.")
 
 
 def _response_output_text(response: Any) -> str:
@@ -775,6 +922,42 @@ def _confidence_text(value: Any) -> str:
     return f"{level}: {explanation}"
 
 
+def _facts_metadata_payload(facts: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    output = {
+        key: _field_text(facts.get(key), fallback="Not disclosed")
+        for key in (
+            "company_name",
+            "form",
+            "ticker",
+            "exchange",
+            "shares_offered",
+            "price_range",
+            "offering_size",
+            "revenue",
+            "cash",
+            "debt",
+        )
+    }
+    snippets = _string_list(facts.get("source_snippets"))
+    if snippets:
+        output["source_snippets"] = snippets[:6]
+    not_disclosed = _pretty_label_list(payload.get("not_disclosed_fields"))
+    not_confident = _pretty_label_list(payload.get("not_confidently_extracted_fields"))
+    if not_disclosed:
+        output["not_disclosed"] = not_disclosed
+    if not_confident:
+        output["not_confidently_extracted"] = not_confident
+    return output
+
+
+def _clean_model_markdown(value: str) -> str:
+    clean = value.strip()
+    clean = re.sub(r"^```(?:markdown|md)?\s*", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\s*```$", "", clean)
+    clean = re.sub(r"(?m)^# .+\n+", "", clean, count=1)
+    return _normalize_markdown_punctuation(clean).strip()
+
+
 def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -842,11 +1025,24 @@ def _normalize_punctuation(value: str) -> str:
     return clean
 
 
+def _normalize_markdown_punctuation(value: str) -> str:
+    lines = [_normalize_punctuation(line) if line.strip() else "" for line in (value or "").splitlines()]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
 def _shorten(value: str, limit: int) -> str:
     clean = _normalize_punctuation(value)
     if len(clean) <= limit:
         return clean
     return clean[: max(0, limit - 3)].rstrip(" ,.;") + "..."
+
+
+def _bounded_int(value: Any, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return minimum
+    return max(minimum, min(maximum, parsed))
 
 
 def _safe_read_text(path: Path) -> str:
