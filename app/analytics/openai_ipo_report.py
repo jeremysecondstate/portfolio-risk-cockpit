@@ -13,7 +13,6 @@ from app.analytics.ipo_filing_report import (
     DEFAULT_IPO_REPORT_DIR,
     GeneratedIpoFilingReport,
     IpoFilingReport,
-    IpoReportPaths,
     build_ipo_filing_report,
     ipo_report_paths,
     reportable_ipo_form,
@@ -49,10 +48,15 @@ class IpoFilingSourceBundle:
     deterministic_extracts: dict[str, Any]
     sections: tuple[IpoFilingSourceSection, ...]
 
+    @property
+    def section_debug(self) -> tuple[dict[str, Any], ...]:
+        return tuple(_section_debug_payload(section) for section in self.sections)
+
     def to_payload(self) -> dict[str, Any]:
         return {
             "metadata": self.metadata,
             "deterministic_extracts": self.deterministic_extracts,
+            "section_debug": list(self.section_debug),
             "sections": [asdict(section) for section in self.sections],
         }
 
@@ -331,7 +335,13 @@ def save_openai_ipo_filing_report(
         source_filing=source_filing,
         source_document=source_document,
     )
-    report = _report_from_openai_payload(base_report, payload, model=client.model, source_section_names=tuple(section.name for section in bundle.sections))
+    report = _report_from_openai_payload(
+        base_report,
+        payload,
+        model=client.model,
+        source_section_names=tuple(section.name for section in bundle.sections),
+        source_section_debug=tuple(_section_debug_line(section) for section in bundle.sections),
+    )
     return write_ipo_filing_report(report, paths)
 
 
@@ -379,6 +389,7 @@ def _report_from_openai_payload(
     *,
     model: str,
     source_section_names: tuple[str, ...],
+    source_section_debug: tuple[str, ...],
 ) -> IpoFilingReport:
     business = _business_summary_text(payload["business_summary"])
     return replace(
@@ -401,10 +412,11 @@ def _report_from_openai_payload(
         financial_summary=tuple(_financial_summary_lines(payload["financial_summary"])),
         use_of_proceeds_summary=_use_of_proceeds_text(payload["use_of_proceeds"]),
         confidence=_confidence_text(payload["confidence"]),
-        not_disclosed_fields=tuple(_string_list(payload["not_disclosed_fields"])),
-        not_confidently_extracted_fields=tuple(_string_list(payload["not_confidently_extracted_fields"])),
+        not_disclosed_fields=tuple(_pretty_label_list(payload["not_disclosed_fields"])),
+        not_confidently_extracted_fields=tuple(_pretty_label_list(payload["not_confidently_extracted_fields"])),
         model_name=model,
         source_section_names=source_section_names,
+        source_section_debug=source_section_debug,
     )
 
 
@@ -415,62 +427,95 @@ def _cleaned_source_sections(text: str) -> list[IpoFilingSourceSection]:
             ("Prospectus Summary", "Summary"),
             ("Risk Factors", "The Offering", "Use of Proceeds", "Dividend Policy", "Capitalization", "Dilution", "Management"),
             9000,
+            ("company", "business", "we are", "we provide", "we develop", "customers", "market"),
+            600,
+            2200,
         ),
         (
             "business",
-            ("Business Overview", "Our Business", "Our Company", "Business"),
-            ("Risk Factors", "Management", "Management's Discussion", "Use of Proceeds", "Financial Statements"),
-            9000,
+            ("Business Overview", "Our Business", "Our Company", "Company Overview", "Prospectus Summary", "Business"),
+            ("Risk Factors", "The Offering", "Use of Proceeds", "Management", "Management's Discussion", "Financial Statements", "Underwriting"),
+            12000,
+            ("our platform", "we provide", "we develop", "we operate", "our customers", "enterprise customers", "contracts", "market"),
+            900,
+            3200,
         ),
         (
             "offering",
             ("The Offering", "Offering", "Initial Public Offering"),
             ("Risk Factors", "Use of Proceeds", "Dividend Policy", "Capitalization", "Dilution", "Underwriting", "Management"),
             7000,
+            ("we are offering", "initial public offering price", "price range", "under the symbol", "applied to list"),
+            600,
+            2600,
         ),
         (
             "use_of_proceeds",
             ("Use of Proceeds",),
             ("Dividend Policy", "Capitalization", "Dilution", "Management", "Underwriting", "Risk Factors", "Business"),
-            5000,
+            8000,
+            ("we intend to use", "use the net proceeds", "net proceeds", "proceeds for", "repayment of indebtedness"),
+            700,
+            3200,
         ),
         (
             "financials",
             (
                 "Selected Consolidated Financial Data",
                 "Selected Consolidated Statements of Operations",
+                "Consolidated Statements of Operations",
                 "Selected Financial Data",
                 "Results of Operations",
                 "Management's Discussion and Analysis",
+                "Liquidity and Capital Resources",
             ),
-            ("Liquidity", "Capital Resources", "Business", "Risk Factors", "Management", "Financial Statements"),
-            10000,
+            ("Business", "Risk Factors", "Management", "Underwriting", "Financial Statements", "Quantitative and Qualitative Disclosures"),
+            16000,
+            ("revenue", "revenues", "net loss", "net income", "cash and cash equivalents", "total debt", "liquidity", "capital resources"),
+            900,
+            4200,
         ),
         (
             "capitalization_and_dilution",
             ("Capitalization", "Dilution"),
             ("Management", "Underwriting", "Plan of Distribution", "Financial Statements", "Business"),
             8000,
+            ("capitalization", "net tangible book value", "immediate dilution", "pro forma as adjusted"),
+            700,
+            3000,
         ),
         (
             "risk_factors",
             ("Risk Factors", "Going Concern"),
             ("Use of Proceeds", "Dividend Policy", "Capitalization", "Dilution", "Management", "Business", "Underwriting"),
             12000,
+            ("going concern", "substantial doubt", "risk factors", "customer concentration", "related party", "controlled company"),
+            700,
+            3600,
         ),
         (
             "underwriting",
             ("Underwriting", "Plan of Distribution"),
             ("Legal Matters", "Experts", "Financial Statements", "Where You Can Find More Information"),
-            6000,
+            9000,
+            ("underwriters are", "representatives of the underwriters", "book-running", "bookrunners", "under the symbol", "applied to list"),
+            800,
+            3600,
         ),
     )
     sections: list[IpoFilingSourceSection] = []
     seen_text: set[str] = set()
-    for name, headings, stops, limit in specs:
-        section = _section_between_headings(text, headings, stops, limit=limit)
-        section = _clean_section_text(section, limit=limit)
-        key = section[:500].lower()
+    for name, headings, stops, limit, terms, window_before, window_after in specs:
+        section = _rich_section_text(
+            text,
+            headings=headings,
+            stop_headings=stops,
+            terms=terms,
+            limit=limit,
+            window_before=window_before,
+            window_after=window_after,
+        )
+        key = f"{name}:{section[:500].lower()}"
         if section and key not in seen_text:
             seen_text.add(key)
             sections.append(IpoFilingSourceSection(name=name, text=section))
@@ -480,24 +525,109 @@ def _cleaned_source_sections(text: str) -> list[IpoFilingSourceSection]:
     return sections
 
 
-def _section_between_headings(text: str, headings: tuple[str, ...], stop_headings: tuple[str, ...], *, limit: int) -> str:
+def _rich_section_text(
+    text: str,
+    *,
+    headings: tuple[str, ...],
+    stop_headings: tuple[str, ...],
+    terms: tuple[str, ...],
+    limit: int,
+    window_before: int,
+    window_after: int,
+) -> str:
+    pieces = [
+        *_sections_between_headings(
+            text,
+            headings,
+            stop_headings,
+            limit=limit,
+            min_body_chars=min(900, max(250, limit // 12)),
+            max_sections=2,
+        ),
+        *_windows_around_terms(
+            text,
+            terms,
+            before=window_before,
+            after=window_after,
+            max_windows=4,
+        ),
+    ]
+    return _merge_section_pieces(pieces, limit=limit)
+
+
+def _sections_between_headings(
+    text: str,
+    headings: tuple[str, ...],
+    stop_headings: tuple[str, ...],
+    *,
+    limit: int,
+    min_body_chars: int,
+    max_sections: int,
+) -> list[str]:
     lower = text.lower()
     starts: list[tuple[int, int]] = []
     for heading in headings:
         for match in re.finditer(rf"\b{re.escape(heading.lower())}\b", lower):
             starts.append((match.start(), match.end()))
+    sections: list[str] = []
     for start, content_start in sorted(starts, key=lambda item: item[0]):
         if _looks_like_toc_window(text[max(0, start - 160) : start + 320]):
             continue
         stop_index = len(text)
         for stop in stop_headings:
-            match = re.search(rf"\b{re.escape(stop.lower())}\b", lower[content_start + 200 :])
+            match = re.search(rf"\b{re.escape(stop.lower())}\b", lower[content_start + min_body_chars :])
             if match:
-                stop_index = min(stop_index, content_start + 200 + match.start())
+                stop_index = min(stop_index, content_start + min_body_chars + match.start())
         section = text[content_start:stop_index].strip()
-        if section:
-            return section[:limit]
-    return ""
+        if section and _has_section_body(section):
+            sections.append(section[:limit])
+        if len(sections) >= max_sections:
+            break
+    return sections
+
+
+def _windows_around_terms(
+    text: str,
+    terms: tuple[str, ...],
+    *,
+    before: int,
+    after: int,
+    max_windows: int,
+) -> list[str]:
+    lower = text.lower()
+    windows: list[str] = []
+    seen_ranges: list[tuple[int, int]] = []
+    for term in terms:
+        start_at = 0
+        while len(windows) < max_windows:
+            index = lower.find(term.lower(), start_at)
+            if index < 0:
+                break
+            start = max(0, index - before)
+            end = min(len(text), index + len(term) + after)
+            start_at = index + len(term)
+            if any(start <= old_end and end >= old_start for old_start, old_end in seen_ranges):
+                continue
+            window = text[start:end].strip()
+            if window and _has_section_body(window):
+                seen_ranges.append((start, end))
+                windows.append(window)
+        if len(windows) >= max_windows:
+            break
+    return windows
+
+
+def _merge_section_pieces(pieces: list[str], *, limit: int) -> str:
+    output: list[str] = []
+    seen: set[str] = set()
+    for piece in pieces:
+        clean = _clean_section_text(piece, limit=limit)
+        key = clean[:300].lower()
+        if not clean or key in seen:
+            continue
+        seen.add(key)
+        output.append(clean)
+    return "\n\n".join(output)[:limit].strip()
 
 
 def _clean_section_text(text: str, *, limit: int) -> str:
@@ -511,11 +641,31 @@ def _clean_section_text(text: str, *, limit: int) -> str:
     return "\n".join(lines)[:limit].strip()
 
 
+def _has_section_body(text: str) -> bool:
+    words = re.findall(r"[A-Za-z][A-Za-z0-9'-]*", text)
+    if len(words) < 12:
+        return False
+    return any(len(word) >= 4 for word in words)
+
+
 def _parsed_fields_payload(parsed: ParsedIpoFields) -> dict[str, Any]:
     payload = asdict(parsed)
     payload["underwriters"] = list(parsed.underwriters)
     payload["risk_flags"] = list(parsed.risk_flags)
     return payload
+
+
+def _section_debug_payload(section: IpoFilingSourceSection) -> dict[str, Any]:
+    return {
+        "name": section.name,
+        "character_length": len(section.text),
+        "preview": _shorten(section.text, 300),
+    }
+
+
+def _section_debug_line(section: IpoFilingSourceSection) -> str:
+    debug = _section_debug_payload(section)
+    return f"{debug['name']} ({debug['character_length']} chars): {debug['preview']}"
 
 
 def _validate_report_payload(payload: Any) -> None:
@@ -567,12 +717,12 @@ def _ipo_terms_lines(value: Any) -> list[str]:
     if not isinstance(value, dict):
         return ["Not confidently extracted."]
     lines = [
-        f"Shares offered: {_field_text(value.get('shares_offered'))}.",
-        f"Price range: {_field_text(value.get('price_range'))}.",
-        f"Offering size: {_field_text(value.get('offering_size'))}.",
-        f"Ticker / exchange: {_field_text(value.get('ticker'))} / {_field_text(value.get('exchange'))}.",
-        f"Underwriters: {', '.join(_string_list(value.get('underwriters'))) or 'Not disclosed'}.",
-        f"Listing terms: {_field_text(value.get('listing_terms'))}.",
+        _labeled_sentence("Shares offered", value.get("shares_offered")),
+        _labeled_sentence("Price range", value.get("price_range")),
+        _labeled_sentence("Offering size", value.get("offering_size")),
+        _labeled_sentence("Ticker / exchange", f"{_field_text(value.get('ticker'))} / {_field_text(value.get('exchange'))}"),
+        _labeled_sentence("Underwriters", ", ".join(_string_list(value.get("underwriters"))) or "Not disclosed"),
+        _labeled_sentence("Listing terms", value.get("listing_terms")),
     ]
     lines.extend(f"Source snippet: {_quote_snippet(snippet)}" for snippet in _string_list(value.get("source_snippets"))[:4])
     return _dedupe_lines(lines)
@@ -582,10 +732,10 @@ def _financial_summary_lines(value: Any) -> list[str]:
     if not isinstance(value, dict):
         return ["Not confidently extracted."]
     lines = [
-        f"Revenue: {_field_text(value.get('revenue'))}.",
-        f"Net income / loss: {_field_text(value.get('net_income_loss'))}.",
-        f"Cash: {_field_text(value.get('cash'))}.",
-        f"Debt: {_field_text(value.get('debt'))}.",
+        _labeled_sentence("Revenue", value.get("revenue")),
+        _labeled_sentence("Net income / loss", value.get("net_income_loss")),
+        _labeled_sentence("Cash", value.get("cash")),
+        _labeled_sentence("Debt", value.get("debt")),
         _field_text(value.get("summary"), fallback="Not confidently extracted"),
     ]
     lines.extend(f"Source snippet: {_quote_snippet(snippet)}" for snippet in _string_list(value.get("source_snippets"))[:4])
@@ -610,7 +760,7 @@ def _risk_lines(values: Any) -> list[str]:
         risk = _field_text(value.get("risk"), fallback="Not confidently extracted")
         why = _field_text(value.get("why_it_matters"), fallback="Not confidently extracted")
         snippet = _field_text(value.get("source_snippet"), fallback="")
-        line = f"{risk}: {why}"
+        line = _labeled_sentence(risk, why)
         if snippet:
             line += f" Source snippet: {_quote_snippet(snippet)}"
         lines.append(line)
@@ -636,8 +786,34 @@ def _string_list(value: Any) -> list[str]:
     return output
 
 
+def _pretty_label_list(value: Any) -> list[str]:
+    return _dedupe_lines([_pretty_label(item) for item in _string_list(value)])
+
+
+def _pretty_label(value: str) -> str:
+    clean = re.sub(r"[_\-]+", " ", value or "")
+    clean = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", clean)
+    clean = re.sub(r"\s+", " ", clean).strip(" .")
+    if not clean:
+        return ""
+    words = clean.lower().split()
+    acronym_map = {"ipo": "IPO", "sec": "SEC", "cik": "CIK", "md&a": "MD&A", "nyse": "NYSE", "nasdaq": "Nasdaq"}
+    pretty_words = [acronym_map.get(word, word) for word in words]
+    pretty_words[0] = pretty_words[0] if pretty_words[0].isupper() else pretty_words[0].capitalize()
+    return " ".join(pretty_words)
+
+
+def _labeled_sentence(label: str, value: Any, *, fallback: str = "Not disclosed") -> str:
+    return f"{label}: {_sentence_text(_field_text(value, fallback=fallback))}"
+
+
+def _sentence_text(value: str) -> str:
+    clean = _normalize_punctuation(value)
+    return clean if clean.endswith((".", "!", "?")) else clean + "."
+
+
 def _field_text(value: Any, *, fallback: str = "Not disclosed") -> str:
-    clean = re.sub(r"\s+", " ", str(value or "")).strip(" -")
+    clean = _normalize_punctuation(str(value or "")).strip(" -")
     return _shorten(clean, 700) if clean else fallback
 
 
@@ -650,7 +826,7 @@ def _dedupe_lines(values: list[str]) -> list[str]:
     seen: set[str] = set()
     output: list[str] = []
     for value in values:
-        clean = re.sub(r"\s+", " ", value).strip()
+        clean = _normalize_punctuation(value).strip()
         key = clean.lower()
         if clean and key not in seen:
             seen.add(key)
@@ -658,8 +834,16 @@ def _dedupe_lines(values: list[str]) -> list[str]:
     return output
 
 
-def _shorten(value: str, limit: int) -> str:
+def _normalize_punctuation(value: str) -> str:
     clean = re.sub(r"\s+", " ", value or "").strip()
+    clean = re.sub(r"\s+([,.;:!?])", r"\1", clean)
+    clean = re.sub(r"([.!?]){2,}", r"\1", clean)
+    clean = re.sub(r"([,;:])([.!?])", r"\2", clean)
+    return clean
+
+
+def _shorten(value: str, limit: int) -> str:
+    clean = _normalize_punctuation(value)
     if len(clean) <= limit:
         return clean
     return clean[: max(0, limit - 3)].rstrip(" ,.;") + "..."

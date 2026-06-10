@@ -4,7 +4,7 @@
 << /Type /Catalog /Pages 2 0 R >>
 endobj
 2 0 obj
-<< /Type /Pages /Kids [4 0 R 6 0 R 8 0 R] /Count 3 >>
+<< /Type /Pages /Kids [4 0 R 6 0 R 8 0 R 10 0 R] /Count 4 >>
 endobj
 3 0 obj
 << /Type /Font /Subtype /Type1 /BaseFont /Courier >>
@@ -13,7 +13,7 @@ endobj
 << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
 endobj
 5 0 obj
-<< /Length 3697 >>
+<< /Length 3856 >>
 stream
 BT
 /F1 9 Tf
@@ -37,43 +37,61 @@ T*
 T*
 (## The headline) Tj
 T*
-(- SunScout Holding Limited filed an amended F-1 for an IPO of 4,000,000 Class A Ordinary Shares.) Tj
+(- SunScout Holding Limited filed an amended F-1 for an IPO of 4,000,000 Class A Ordinary Shares) Tj
 T*
-(- The anticipated IPO price range is US$5.00 to US$6.00 per Class A Ordinary Share.) Tj
+(  at an expected US$5.00?US$6.00 per share range.) Tj
 T*
-(- The company intends to apply to list on NYSE American under the symbol ?SNSC?; the offering is) Tj
+(- The company intends to list on NYSE American under the symbol ?SNSC?; the offering will not) Tj
 T*
-(  contingent on listing acceptance.) Tj
+(  proceed unless the shares are accepted for listing.) Tj
 T*
-(- SunScout is described as a Cayman Islands holding company with principal places of business in) Tj
+(- SunScout is a Cayman Islands holding company operating through subsidiaries in New Zealand and) Tj
 T*
-(  New Zealand and the United States through wholly owned subsidiaries.) Tj
+(  the United States, with businesses in autonomous solar-powered equipment, solar) Tj
 T*
-(- Use of proceeds, underwriter names, and reliable financial statement line items were not) Tj
+(  EPC/development solutions, and engineering/fabrication services.) Tj
 T*
-(  available or not confidently extractable from the provided sections.) Tj
+(- Estimated net proceeds are approximately US$19.25 million at the US$5.50 midpoint, intended) Tj
+T*
+(  for manufacturing, marketing, product development, inventory, loan repayment, Brightway MPA) Tj
+T*
+(  payments, and working capital.) Tj
+T*
+(- Key risks include holding-company structure, controlled-company voting power, limited) Tj
+T*
+(  commercial-scale history for SunScout Products, technology commercialization risk, capital) Tj
+T*
+(  needs, and foreign private issuer / emerging growth company reduced reporting.) Tj
 T*
 () Tj
 T*
 (## What does SunScout Holding Ltd actually do?) Tj
 T*
-(SunScout Holding Limited is a Cayman Islands holding company. The provided filing excerpts state) Tj
+(SunScout Holding Limited is a Cayman Islands holding company with operations through SunScout) Tj
 T*
-(that it has principal places of business in New Zealand and the United States through wholly) Tj
+(New Zealand Limited and Brightway Energy LLC in New Zealand and the United States. The company) Tj
 T*
-(owned subsidiaries, SunScout New Zealand Limited and Brightway Energy LLC. The provided sections) Tj
+(describes itself as a clean-technology and renewable-energy solutions business with three main) Tj
 T*
-(are too limited to confidently describe the company?s products, services, customers, or market.) Tj
+(lines: autonomous solar-powered equipment and related technologies, solar power development /) Tj
+T*
+(EPC services, and engineering products and fabrication services under SunScout NZ / Brunton) Tj
+T*
+(Engineering.) Tj
 T*
 () Tj
 T*
-(Source snippets: "?SunScout Holding Limited, a Cayman Islands holding company.?"; "?principal) Tj
+(Source snippets: "?We were incorporated in the Cayman Islands on August 18, 2025, as a holding) Tj
 T*
-(places of business in New Zealand and the United States through our wholly -owned subsidiaries,) Tj
+(company of our business?"; "?will be operated through our wholly -owned subsidiaries, SunScout) Tj
 T*
-(SunScout New Zealand Limited... and Brightway Energy LLC?"; "?We were incorporated in the Cayman) Tj
+(NZ and SunScout USA, in New Zealand and the United States respectively.?"; "?Solar Power) Tj
 T*
-(Islands on August 18, 2025, as a holding company?") Tj
+(Development Solutions. This line of services represents our solar energy business segment that) Tj
+T*
+(develops and installs solar power systems for commercial, industrial, and institutional) Tj
+T*
+(customers?") Tj
 T*
 () Tj
 T*
@@ -89,11 +107,11 @@ T*
 T*
 (- Underwriters: Not disclosed.) Tj
 T*
-(- Listing terms: The company intends to apply to list its Class A Ordinary Shares on NYSE) Tj
+(- Listing terms: The company intends to apply to list on NYSE American, and the offering is) Tj
 T*
-(  American under the symbol ?SNSC.? The offering is contingent upon listing acceptance and will) Tj
+(  contingent on acceptance for listing; the offering will not proceed unless the Class A) Tj
 T*
-(  not proceed unless the shares are accepted for listing on NYSE American..) Tj
+(  Ordinary Shares are accepted for listing.) Tj
 T*
 (- Source snippet: "?SunScout Holding Limited 4,000,000 Class A Ordinary Shares?") Tj
 T*
@@ -108,7 +126,19 @@ T*
 (- Source snippet: "?We intend to apply to list our Class A Ordinary Shares on the New York Stock) Tj
 T*
 (  Exchange American \(?NYSE American?\) under the symbol ?SNSC.??") Tj
-T*
+ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>
+endobj
+7 0 obj
+<< /Length 4272 >>
+stream
+BT
+/F1 9 Tf
+50 760 Td
+12 TL
 () Tj
 T*
 (## Financial summary) Tj
@@ -121,97 +151,143 @@ T*
 T*
 (- Debt: Not confidently extracted.) Tj
 T*
-(- The provided financials excerpt does not include enough context, periods, units, or complete) Tj
+(- The provided cleaned financial sections do not contain enough clearly contextualized income) Tj
 T*
-(  financial statements to confidently report revenue, net income/loss, cash, or debt.) Tj
+(  statement, cash, or debt line items to confidently report revenue, net income/loss, cash, or) Tj
 T*
-(- Source snippet: "?PRESENTATION OF FINANCIAL INFORMATION?") Tj
-ET
-endstream
-endobj
-6 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>
-endobj
-7 0 obj
-<< /Length 3765 >>
-stream
-BT
-/F1 9 Tf
-50 760 Td
-12 TL
-(- Source snippet: "?MANAGEMENT?S DISCUSSION AND ANALYSIS OF FINANCIAL CONDITION AND RESULTS OF) Tj
+(  debt. The source does disclose selected operating context, including customer concentration) Tj
 T*
-(  OPERATIONS?") Tj
+(  for SunScout NZ and total assets referenced in a risk discussion, but not a complete set of) Tj
 T*
-(- Source snippet: "?The information contained in this prospectus is accurate only as of the date) Tj
+(  requested financial metrics in the provided excerpts.) Tj
 T*
-(  of this prospectus?") Tj
+(- Source snippet: "?For the financial years ended June 30, 2024 and 2025, SunScout NZ?s top five) Tj
+T*
+(  customers accounted for approximately 45% of SunScout NZ?s total revenue?") Tj
+T*
+(- Source snippet: "?For the six months ended December 31, 2024 and 2025, SunScout NZ?s top five) Tj
+T*
+(  customers accounted for approximately 56% of SunScout NZ?s total revenue?") Tj
+T*
+(- Source snippet: "?approximately 18% of our total assets of US$4,833,690?") Tj
+T*
+(- Source snippet: "?As a company with less than US$1.235 billion in revenue during our last) Tj
+T*
+(  fiscal year, we qualify as an ?emerging growth company??") Tj
 T*
 () Tj
 T*
 (## Use of proceeds) Tj
 T*
-(Not disclosed) Tj
+(SunScout expects approximately US$19.25 million of net proceeds at the US$5.50 assumed midpoint,) Tj
+T*
+(after underwriting discounts, non-accountable expense allowance, and estimated offering) Tj
+T*
+(expenses. Planned uses include establishing an Austin, Texas manufacturing plant, marketing and) Tj
+T*
+(promotion campaigns, product development, inventory, loan repayment, payments under the) Tj
+T*
+(Brightway MPA, and working capital. Specific disclosed allocations include approximately 18% for) Tj
+T*
+(the manufacturing plant, 10% for marketing and promotion, 10% for product development, and 10%) Tj
+T*
+(for inventory.) Tj
 T*
 () Tj
 T*
-(Source snippet: "Not disclosed") Tj
+(Source snippet: "?We expect to receive approximately US$19,252,605 of net proceeds from this) Tj
+T*
+(offering after deducting underwriting discounts, the non -accountable expense allowance and) Tj
+T*
+(estimated offering expenses of approximately US$987,394.56 payable by us. We currently intend to) Tj
+T*
+(use proceeds...") Tj
 T*
 () Tj
 T*
 (## Key risks) Tj
 T*
-(- High-risk investment; possible loss of entire investment: The filing explicitly warns) Tj
+(- Holding-company structure; investors buy Cayman parent shares, not operating subsidiaries.:) Tj
 T*
-(  investors that purchasing the shares involves a high degree of risk, including losing the full) Tj
+(  Investors will not directly own the New Zealand or U.S. operating businesses, creating) Tj
 T*
-(  investment. Source snippet: "?Investing in our Class A Ordinary Shares involves a high degree) Tj
+(  structural and enforcement risks if subsidiary operations or cash flows do not reach the) Tj
 T*
-(  of risk, including the risk of losing your entire investment.?") Tj
+(  parent. Source snippet: "?The Class A Ordinary Shares offered in this offering are shares of) Tj
 T*
-(- No prior public market: Because there has been no public market for the shares, liquidity and) Tj
+(  the holding company that is incorporated in the Cayman Islands and not equity interests in) Tj
 T*
-(  valuation may be uncertain after the IPO. Source snippet: "?Prior to this offering, there has) Tj
+(  SunScout NZ or SunScout USA.?") Tj
 T*
-(  been no public market for our Class A Ordinary Shares.?") Tj
+(- Controlled-company voting concentration.: The CEO/chairman and his son are expected to control) Tj
 T*
-(- Listing contingency: The IPO will not proceed unless the shares are accepted for listing on) Tj
+(  nearly all voting power after the offering, limiting public shareholders? influence over major) Tj
 T*
-(  NYSE American, creating execution risk for the offering. Source snippet: "?This offering is) Tj
+(  corporate actions. Source snippet: "?Mr. Edwin Cywinski. and his son Mr. Marc Cywinski. will) Tj
 T*
-(  contingent upon the listing of our Class A Ordinary Shares on the NYSE American?") Tj
+(  be able to exercise 96.30% of the aggregate voting power of our total issued and outstanding) Tj
 T*
-(- Emerging growth company and foreign private issuer status: The company may use reduced) Tj
+(  share capital?") Tj
 T*
-(  reporting requirements, which can mean less disclosure than investors receive from other) Tj
+(- Limited operating history at commercial scale for SunScout Products.: Scaling autonomous) Tj
 T*
-(  public companies. Source snippet: "?We are an ?Emerging Growth Company? and a ?Foreign Private) Tj
+(  solar-powered equipment from development or early commercialization to broad production and) Tj
 T*
-(  Issuer? under applicable U.S. federal securities laws and, as such, are eligible for reduced) Tj
-T*
-(  public company reporting requirements.?") Tj
-T*
-(- Cayman Islands holding company structure: Investors are buying shares of a Cayman Islands) Tj
-T*
-(  holding company, not direct equity in the operating subsidiaries. Source snippet: "?SunScout) Tj
-T*
-(  Holding Limited, a Cayman Islands holding company.?") Tj
-T*
-(- Potential loss of ownership interests or control over subsidiaries: The excerpt flags a risk) Tj
-T*
-(  involving ownership interests in, and control over, SunScout New Zealand and SunScout Limited,) Tj
-T*
-(  which could affect the company?s operating structure. Source snippet: "?of our ownership) Tj
-T*
-(  interests in, and a loss of our control over, SunScout New Zealand and SunScout Limited?") Tj
-T*
-(- Limited operating history at commercial scale: A limited commercial-scale history may make it) Tj
-T*
-(  harder to assess execution risk, scalability, and future operating performance. Source) Tj
+(  sales may require operational execution the company has not yet proven at scale. Source) Tj
 T*
 (  snippet: "?We have a limited operating history at commercial scale for our SunScout Products) Tj
 T*
-(  segment?") Tj
+(  segment, and our ability to scale our business may be uncertain?") Tj
+T*
+(- Technology commercialization and product performance risk.: The company?s growth depends on) Tj
+T*
+(  technologies such as DSA and autonomous mower systems performing reliably and being adopted by) Tj
+T*
+(  customers under real-world technical and regulatory constraints. Source snippet: "?Our growth) Tj
+T*
+(  depends on the successful commercialization and reliable performance of our DSA technology?") Tj
+ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 9 0 R >>
+endobj
+9 0 obj
+<< /Length 3965 >>
+stream
+BT
+/F1 9 Tf
+50 760 Td
+12 TL
+(- Capital needs and potential dilution or restrictive debt.: The company states its business) Tj
+T*
+(  plans require significant capital, which could lead to additional equity dilution or debt) Tj
+T*
+(  covenants beyond the IPO proceeds. Source snippet: "?Our business plans require a significant) Tj
+T*
+(  amount of capital, which will require us to sell additional equity securities or incur) Tj
+T*
+(  additional indebtedness that will dilute our shareholders or introduce covenants that may) Tj
+T*
+(  restrict our operations?") Tj
+T*
+(- No prior public market and listing not guaranteed.: Even if the IPO is completed, an active) Tj
+T*
+(  trading market may not develop or continue; the deal is also contingent on NYSE American) Tj
+T*
+(  listing acceptance. Source snippet: "?Prior to this offering, there has been no public market) Tj
+T*
+(  for our Class A Ordinary Shares.?") Tj
+T*
+(- Reduced reporting as an emerging growth company and foreign private issuer.: Investors may) Tj
+T*
+(  receive less frequent or less detailed reporting than from many U.S. domestic public) Tj
+T*
+(  companies, reducing transparency. Source snippet: "?We are an ?Emerging Growth Company? and a) Tj
+T*
+(  ?Foreign Private Issuer? under applicable U.S. federal securities laws and, as such, are) Tj
+T*
+(  eligible for reduced public company reporting requirements.?") Tj
 T*
 () Tj
 T*
@@ -221,83 +297,89 @@ T*
 T*
 (**Bull case**) Tj
 T*
-(- Clear IPO terms are provided for shares offered and price range: 4,000,000 Class A Ordinary) Tj
+(- Exposure to clean technology, renewable energy, automation, and cost-efficiency trends through) Tj
 T*
-(  Shares at US$5.00 to US$6.00 per share.) Tj
+(  robotic mowers, solar EPC, and engineering services.) Tj
 T*
-(- The company intends to list on NYSE American under the symbol ?SNSC,? which could provide) Tj
+(- Diversified regional footprint across the United States, New Zealand, Oceania, Asia, and) Tj
 T*
-(  public-market visibility if accepted.) Tj
+(  planned neighboring regions may provide multiple growth channels.) Tj
 T*
-(- The offering is described as firm commitment, meaning the underwriters are obligated to take) Tj
+(- Planned U.S. manufacturing in Austin, Texas could reduce tariff exposure, shorten delivery) Tj
 T*
-(  and pay for the shares if any are taken.) Tj
+(  timelines, and improve market acceptance if executed successfully.) Tj
 T*
-(- The company has operations through subsidiaries in New Zealand and the United States, based on) Tj
+(- Existing engineering/fabrication capabilities and long customer relationships at Brunton) Tj
 T*
-(  the provided filing excerpts.) Tj
+(  Engineering may support product development and recurring revenue.) Tj
+T*
+(- IPO proceeds could fund manufacturing, marketing, product development, and inventory needed to) Tj
+T*
+(  scale commercial operations.) Tj
 T*
 () Tj
 T*
 (**Bear case**) Tj
 T*
-(- The provided source sections do not include reliable financial statement detail, making) Tj
+(- Financial statement metrics were not confidently extractable from the provided sections,) Tj
 T*
-(  valuation and operating performance difficult to assess.) Tj
+(  limiting visibility into revenue quality, profitability, cash, and leverage.) Tj
 T*
-(- Use of proceeds is not disclosed in the provided excerpts.) Tj
-ET
-endstream
-endobj
-8 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 9 0 R >>
-endobj
-9 0 obj
-<< /Length 2063 >>
-stream
-BT
-/F1 9 Tf
-50 760 Td
-12 TL
-(- Underwriter names are not disclosed in the provided excerpts.) Tj
+(- SunScout Products has limited commercial-scale operating history, and key technology) Tj
 T*
-(- The company warns that the investment involves a high degree of risk, including possible loss) Tj
+(  commercialization remains uncertain.) Tj
 T*
-(  of the entire investment.) Tj
+(- Public shareholders will have limited influence due to concentrated voting control by) Tj
 T*
-(- The offering depends on NYSE American listing acceptance and will not proceed unless the) Tj
+(  insiders.) Tj
 T*
-(  shares are accepted for listing.) Tj
+(- The offering depends on NYSE American listing acceptance, and there has been no prior public) Tj
 T*
-(- The company is an emerging growth company and foreign private issuer, and therefore may) Tj
+(  market for the shares.) Tj
 T*
-(  provide reduced public-company reporting.) Tj
+(- Management has broad discretion over use of proceeds, and planned uses may not generate) Tj
+T*
+(  profitability or share-price appreciation.) Tj
+T*
+(- The company may need additional capital, which could dilute shareholders or add restrictive) Tj
+T*
+(  debt obligations.) Tj
 T*
 () Tj
 T*
-(**Final key question:** Can investors obtain sufficient financial, operational, and use-of-) Tj
+(**Final key question:** Can SunScout convert its engineering base and renewable-energy strategy) Tj
 T*
-(proceeds detail to evaluate SunScout?s commercial-scale prospects before buying into the IPO?) Tj
+(into scalable, profitable commercial sales of autonomous solar-powered products while managing) Tj
+T*
+(insider control, capital needs, and public-company execution risk?) Tj
 T*
 () Tj
 T*
 (## Confidence and disclosure gaps) Tj
 T*
-(- Confidence: medium: Offering terms, price range, ticker, exchange, and listing contingency are) Tj
+(- Confidence: medium: Offering terms, listing terms, corporate structure, use of proceeds, and) Tj
 T*
-(  directly supported by the provided excerpts. Business details and financial metrics are) Tj
+(  several risk factors are well supported by source snippets. Confidence is lower for financial) Tj
 T*
-(  limited or incomplete in the provided sections, so several requested fields are marked not) Tj
+(  metrics because the provided cleaned financial excerpts do not include clearly contextualized) Tj
 T*
-(  disclosed or not confidently extracted.) Tj
+(  revenue, net income/loss, cash, or debt line items.) Tj
 T*
-(- Not disclosed: offering_size, underwriter_names, use_of_proceeds) Tj
-T*
-(- Not confidently extracted: revenue, net_income_loss, cash, debt,) Tj
-T*
-(  detailed_business_description, customer_concentration, controlled_company_status,) Tj
-T*
-(  related_party_transaction_details, China_or_VIE_structure_details) Tj
+(- Not disclosed: Offering size, Underwriter names) Tj
+ET
+endstream
+endobj
+10 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 11 0 R >>
+endobj
+11 0 obj
+<< /Length 3693 >>
+stream
+BT
+/F1 9 Tf
+50 760 Td
+12 TL
+(- Not confidently extracted: Revenue, Net income loss, Cash, Debt) Tj
 T*
 () Tj
 T*
@@ -317,28 +399,96 @@ T*
 T*
 (  financials, capitalization_and_dilution, risk_factors, underwriting) Tj
 T*
+(- Source section debug:) Tj
+T*
+(  - prospectus_summary \(9000 chars\): ,? ?Risk Factors,? ?Use of Proceeds,? ?Management?s) Tj
+T*
+(Discussion and Analysis of Financial Condition and Results of Operations,? ?Industry Overview?) Tj
+T*
+(and ?Business.? These statements relate to events that involve known and unknown risks,) Tj
+T*
+(uncertainties and other factors, including those listed under...) Tj
+T*
+(  - business \(12000 chars\): in New Zealand and the United States through our wholly -owned) Tj
+T*
+(subsidiaries, SunScout New Zealand Limited, a limited liability company formed in New Zealand) Tj
+T*
+(\(?SunScout NZ?\), and Brightway Energy LLC, a limited liability company formed in the State of) Tj
+T*
+(Delaware \(?SunScout USA?\), respectively. We ar...) Tj
+T*
+(  - offering \(6999 chars\): pursuant to Rule 462\(b\) under the Securities Act, check the following) Tj
+T*
+(box and list the Securities Act registration statement number of the earlier effective) Tj
+T*
+(registration statement for the same offering. ? If this Form is a post -effective amendment) Tj
+T*
+(filed pursuant to Rule 462\(c\) under the Securiti...) Tj
+T*
+(  - use_of_proceeds \(8000 chars\): ,? ?Management?s Discussion and Analysis of Financial) Tj
+T*
+(Condition and Results of Operations,? ?Industry Overview? and ?Business.? These statements) Tj
+T*
+(relate to events that involve known and unknown risks, uncertainties and other factors,) Tj
+T*
+(including those listed under ?Risk Factors,? which may cause our...) Tj
+T*
+(  - financials \(16000 chars\): . We have prepared this prospectus so that you will have the) Tj
+T*
+(information necessary to make an informed investment decision. This prospectus is an offer to) Tj
+T*
+(sell only the securities offered hereby, but only under circumstances and in jurisdictions where) Tj
+T*
+(it is lawful to do so. The information contai...) Tj
+T*
+(  - capitalization_and_dilution \(8000 chars\): of our ownership interests in, and a loss of our) Tj
+T*
+(control over, SunScout New Zealand and SunScout Limited \(see page 16\). ? We have a limited) Tj
+T*
+(operating history at commercial scale for our SunScout Products segment, and our ability to) Tj
+T*
+(scale our business may be uncertain \(see page 17\). ? Our growth d...) Tj
+T*
+(  - risk_factors \(12000 chars\): beginning on page 16 to read about factors you should consider) Tj
+T*
+(before buying our Class A Ordinary Shares. We are an ?Emerging Growth Company? and a ?Foreign) Tj
+T*
+(Private Issuer? under applicable U.S. federal securities laws and, as such, are eligible for) Tj
+T*
+(reduced public company reporting requirements...) Tj
+T*
+(  - underwriting \(8999 chars\): discounts to be paid by us \(2\) US$ US$ Proceeds to the Company) Tj
+T*
+(before expenses \(3\) US$ US$ ____________ \(1\) Initial public offering price per share is assumed) Tj
+T*
+(to be US$5.50, being the midpoint of the price range set forth on the cover page of this) Tj
+T*
+(prospectus. \(2\) We have agreed to pay the underwr...) Tj
+T*
 (- Source selection: Document type matches selected SEC form F-1/A.) Tj
 ET
 endstream
 endobj
-10 0 obj
+12 0 obj
 << /Title (SunScout Holding Ltd Filing Report) /Creator (Portfolio Risk Cockpit) >>
 endobj
 xref
-0 11
+0 13
 0000000000 65535 f 
 0000000015 00000 n 
 0000000064 00000 n 
-0000000133 00000 n 
-0000000201 00000 n 
-0000000327 00000 n 
-0000004076 00000 n 
-0000004202 00000 n 
-0000008019 00000 n 
-0000008145 00000 n 
-0000010260 00000 n 
+0000000140 00000 n 
+0000000208 00000 n 
+0000000334 00000 n 
+0000004242 00000 n 
+0000004368 00000 n 
+0000008692 00000 n 
+0000008818 00000 n 
+0000012835 00000 n 
+0000012963 00000 n 
+0000016709 00000 n 
 trailer
-<< /Size 11 /Root 1 0 R /Info 10 0 R >>
+<< /Size 13 /Root 1 0 R /Info 12 0 R >>
 startxref
-10360
+16809
 %%EOF

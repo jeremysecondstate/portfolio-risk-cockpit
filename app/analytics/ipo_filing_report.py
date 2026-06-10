@@ -73,6 +73,7 @@ class IpoFilingReport:
     not_confidently_extracted_fields: tuple[str, ...] = ()
     model_name: str = ""
     source_section_names: tuple[str, ...] = ()
+    source_section_debug: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -399,6 +400,9 @@ def _render_openai_ipo_filing_report_markdown(report: IpoFilingReport) -> str:
         lines.append(f"- AI model: {report.model_name}")
     if report.source_section_names:
         lines.append(f"- Source sections sent to model: {', '.join(report.source_section_names)}")
+    if report.source_section_debug:
+        lines.append("- Source section debug:")
+        lines.extend(f"  - {entry}" for entry in report.source_section_debug)
     if report.source_selection_reason:
         lines.append(f"- Source selection: {report.source_selection_reason}")
     if report.source_document_size is not None:
