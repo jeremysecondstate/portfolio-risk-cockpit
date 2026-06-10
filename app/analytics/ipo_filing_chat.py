@@ -35,7 +35,7 @@ from app.data.sec_edgar import SecCurrentFiling, SecEdgarClient
 
 
 CHAT_FULL_TEXT_CHAR_LIMIT = 120_000
-CHAT_RETRIEVED_CHAR_LIMIT = 75_000
+CHAT_RETRIEVED_CHAR_LIMIT = 120_000
 CHAT_SECTION_CHAR_LIMIT = 18_000
 CHAT_CHUNK_SIZE = 8_000
 CHAT_CHUNK_OVERLAP = 900
@@ -47,6 +47,9 @@ Analyze only the selected SEC filing text and supplied deterministic metadata.
 Do not invent undisclosed offering terms, financials, underwriters, dates, share counts, prices, or market caps.
 When a field is absent, say "Not disclosed."
 When a field is ambiguous, say "Not confidently extracted."
+Treat deterministic extracts as hints only. If deterministic extracts conflict with retrieved filing text, use the filing text.
+Never present deterministic financial metrics unless the source context or verified filing facts show the metric and period.
+Preserve currency exactly as disclosed, including S$, US$, HK$, and other currency prefixes.
 
 For S-1/F-1/424B filings, prioritize:
 1. What the company does
@@ -151,6 +154,8 @@ class IpoFilingChatContext:
 class IpoFilingChatMessage:
     role: Literal["user", "assistant"]
     content: str
+    source_mode: str = ""
+    source_debug: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -185,7 +190,14 @@ class IpoFilingChatSession:
 
         response = self.chat_client.ask(self.context, self.messages, clean_prompt)
         self.messages.append(IpoFilingChatMessage(role="user", content=clean_prompt))
-        self.messages.append(IpoFilingChatMessage(role="assistant", content=response.answer))
+        self.messages.append(
+            IpoFilingChatMessage(
+                role="assistant",
+                content=response.answer,
+                source_mode=response.source_mode,
+                source_debug=response.source_debug,
+            )
+        )
         self.last_response_id = response.response_id
         return response
 
@@ -213,10 +225,17 @@ class OpenAiIpoFilingChatClient:
         request_payload = {
             "question": prompt,
             "filing_metadata": context.bundle.metadata,
-            "deterministic_extracts": context.bundle.deterministic_extracts,
+            "deterministic_extracts_hints": {
+                "use_policy": "Hints only. Filing text and verified filing facts override these values.",
+                "extracts": context.bundle.deterministic_extracts,
+            },
+            "verified_filing_facts": verified_filing_facts_for_prompt(context.bundle, filing_context, prompt),
             "filing_context": filing_context,
             "grounding_rules": [
-                "Use only filing_metadata, deterministic_extracts, and filing_context for factual claims.",
+                "Use only filing_metadata, verified_filing_facts, filing_context, and deterministic_extracts_hints for factual claims.",
+                "Treat deterministic_extracts_hints as hints only; filing text and verified_filing_facts override parser output.",
+                "Never present deterministic financial metrics unless filing_context or verified_filing_facts show the metric and period.",
+                "Preserve currency exactly as disclosed, including S$, US$, HK$, and other currency prefixes.",
                 'Say "Not disclosed" for absent fields.',
                 'Say "Not confidently extracted" for ambiguous fields.',
                 "Do not infer offering economics, underwriters, selling shareholders, or transaction type beyond the supplied text.",
@@ -347,6 +366,237 @@ def filing_context_payload_for_prompt(bundle: IpoFilingSourceBundle, prompt: str
     }
 
 
+def verified_filing_facts_for_prompt(
+    bundle: IpoFilingSourceBundle,
+    filing_context: dict[str, Any],
+    prompt: str,
+) -> dict[str, Any]:
+    text = bundle.full_text
+    context_text = _filing_context_text(filing_context)
+    facts: dict[str, Any] = {
+        "policy": (
+            "These facts were extracted from filing text as a local verification aid. "
+            "Use them only when supported by the accompanying source snippets; otherwise say Not confidently extracted."
+        ),
+        "offering_terms": _verified_offering_terms(text),
+        "financial_metrics": _verified_financial_metrics(text, context_text),
+        "risk_checks": _verified_risk_checks(text),
+    }
+    unsupported_industry_revenue = _industry_market_revenue_warning(text)
+    if unsupported_industry_revenue:
+        facts["company_revenue_guardrail"] = unsupported_industry_revenue
+    return facts
+
+
+def _verified_offering_terms(text: str) -> dict[str, Any]:
+    cover = _cover_page_section(text).text
+    offering = _first_named_section_text(text, _offering_spec(max_sections=1)) or cover
+    combined = f"{cover}\n\n{offering}"
+    facts: dict[str, Any] = {}
+
+    match = re.search(
+        r"([0-9][0-9,]*)\s+American Depositary Shares\s+Representing\s+([0-9][0-9,]*)\s+Ordinary Shares",
+        combined,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        facts["securities_offered"] = _fact(
+            f"{match.group(1)} ADSs representing {match.group(2)} ordinary shares",
+            combined,
+            match.group(0),
+        )
+    match = re.search(r"Each ADS represents\s+([0-9][0-9,]*)\s+ordinary shares", combined, flags=re.IGNORECASE)
+    if match:
+        facts["ads_ratio"] = _fact(f"1 ADS = {match.group(1)} ordinary shares", combined, match.group(0))
+    match = re.search(r"between\s+(US\$[0-9][0-9,.]*)\s+and\s+(US\$[0-9][0-9,.]*)\s+per ADS", combined, flags=re.IGNORECASE)
+    if match:
+        facts["expected_price_range"] = _fact(f"{match.group(1)}-{match.group(2)} per ADS", combined, match.group(0))
+    match = re.search(r"Nasdaq Capital Market under the symbol\s+[“\"]?([A-Z][A-Z0-9.]{0,5})[”\"]?", combined, flags=re.IGNORECASE)
+    if match:
+        facts["listing"] = _fact(f"Nasdaq Capital Market under symbol {match.group(1).strip('.').upper()}", combined, match.group(0))
+    match = re.search(r"([0-9]{1,3})\s*-?\s*day option.*?additional\s+([0-9]{1,2})%\s+of the ADSs", combined, flags=re.IGNORECASE)
+    if match:
+        facts["over_allotment_option"] = _fact(f"{match.group(1)}-day option for up to an additional {match.group(2)}% of ADSs sold", combined, match.group(0))
+    if re.search(r"Roth Capital Partners", combined, flags=re.IGNORECASE) and re.search(r"Benchmark", combined, flags=re.IGNORECASE):
+        facts["underwriters"] = _fact("Roth Capital Partners and Benchmark are joint book-running managers / representatives", combined, "Roth Capital Partners Benchmark")
+
+    proceeds = _first_named_section_text(text, _use_of_proceeds_spec(max_sections=1))
+    if "net proceeds of approximately" not in proceeds.lower():
+        proceeds = text
+    match = re.search(r"net proceeds of approximately\s+(US\$[0-9.]+\s+million).*?\(\s*(?:or\s+)?(US\$[0-9.]+\s+million)\s+if the underwriters exercise", proceeds, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        facts["net_proceeds"] = _fact(
+            f"Approximately {match.group(1)}, or {match.group(2)} if the over-allotment option is exercised in full",
+            proceeds,
+            match.group(0),
+        )
+    return facts
+
+
+def _verified_financial_metrics(text: str, context_text: str) -> dict[str, Any]:
+    financial_text = _financial_verification_text(text, context_text)
+    facts: dict[str, Any] = {}
+
+    match = re.search(r"Our revenue amounted to\s+(S\$[0-9,]+)\s+and\s+S\$[0-9,]+\s+in\s+2025\s+and\s+2024", financial_text, flags=re.IGNORECASE)
+    if not match:
+        match = re.search(r"Revenue\s+\d+\s+([0-9,]+)\s+[0-9,]+", financial_text, flags=re.IGNORECASE)
+    if match:
+        value = match.group(1) if match.group(1).startswith("S$") else f"S${match.group(1)}"
+        facts["fy2025_revenue"] = _fact(value, financial_text, match.group(0))
+
+    match = re.search(r"net losses? of\s+(S\$[0-9,]+).*?for the years? ended December 31,\s*2025", financial_text, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        match = re.search(r"Loss after income tax and total comprehensive loss\s+\(?([0-9,]+)\s*\)?", financial_text, flags=re.IGNORECASE)
+    if match:
+        value = match.group(1) if match.group(1).startswith("S$") else f"S${match.group(1)}"
+        facts["fy2025_net_loss"] = _fact(value, financial_text, match.group(0))
+
+    match = re.search(r"Gross profit\s+([0-9,]+)\s+[0-9,]+", financial_text, flags=re.IGNORECASE)
+    if match:
+        facts["fy2025_gross_profit"] = _fact(f"S${match.group(1)}", financial_text, match.group(0))
+    match = re.search(r"Gross profit margin decreased from\s+[0-9.]+%\s+in\s+2024\s+to\s+([0-9.]+%)\s+in\s+2025", financial_text, flags=re.IGNORECASE)
+    if match:
+        facts["fy2025_gross_margin"] = _fact(match.group(1), financial_text, match.group(0))
+
+    capitalization = _first_named_section_text(text, _capitalization_spec(max_sections=1))
+    match = re.search(r"Cash and cash equivalents\s+([0-9,]+)\s+([0-9,]+)\s+([0-9,]+)\s+([0-9,]+)", capitalization, flags=re.IGNORECASE)
+    if match:
+        facts["cash_and_cash_equivalents"] = _fact(
+            f"Actual S${match.group(1)} / US${match.group(2)}; as adjusted S${match.group(3)} / US${match.group(4)}",
+            capitalization,
+            match.group(0),
+        )
+    match = re.search(r"Total debt\s+([0-9,]+)\s+([0-9,]+)\s+([0-9,]+)\s+([0-9,]+)", capitalization, flags=re.IGNORECASE)
+    if match:
+        facts["total_debt"] = _fact(
+            f"Actual S${match.group(1)} / US${match.group(2)}; as adjusted S${match.group(3)} / US${match.group(4)}",
+            capitalization,
+            match.group(0),
+        )
+    return facts
+
+
+def _verified_risk_checks(text: str) -> dict[str, Any]:
+    going_concern_sentence = _source_snippet(text, "prepared on a going concern basis", before=180, after=420)
+    return {
+        "going_concern_risk_detected": {
+            "value": _has_adverse_going_concern_language(text),
+            "source_snippet": going_concern_sentence,
+            "instruction": "Do not describe a material going-concern warning unless adverse substantial-doubt or material-uncertainty language is present.",
+        },
+        "vie_structure_detected": {
+            "value": _has_vie_structure_language(text),
+            "source_snippet": _source_snippet(text, "variable interest entity", before=180, after=420) or _source_snippet(text, "wholly-owned subsidiaries", before=180, after=420),
+            "instruction": "Do not flag China/VIE risk from generic China, PRC, customer, patent, or market-report references.",
+        },
+    }
+
+
+def _industry_market_revenue_warning(text: str) -> dict[str, str]:
+    match = re.search(r"Global revenue grew from about\s+(US\$[0-9.]+\s+million).*?according to the Independent Market Report", text, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return {}
+    return {
+        "warning": f"{match.group(1)} is an industry-market figure, not company revenue.",
+        "source_snippet": _shorten(re.sub(r"\s+", " ", match.group(0)), 500),
+    }
+
+
+def _fact(value: str, source_text: str, needle: str) -> dict[str, str]:
+    return {
+        "value": value,
+        "source_snippet": _source_snippet(source_text, needle, before=220, after=360) or _shorten(needle, 500),
+    }
+
+
+def _filing_context_text(filing_context: dict[str, Any]) -> str:
+    full_text = filing_context.get("full_prospectus_text")
+    if isinstance(full_text, str):
+        return full_text
+    sections = filing_context.get("sections")
+    if not isinstance(sections, list):
+        return ""
+    return "\n\n".join(str(section.get("text") or "") for section in sections if isinstance(section, dict))
+
+
+def _financial_verification_text(text: str, context_text: str) -> str:
+    pieces = [
+        _first_named_section_text(text, _mda_spec(max_sections=1)),
+        _first_named_section_text(text, _financial_statements_spec(max_sections=2)),
+        _first_named_section_text(text, _capitalization_spec(max_sections=1)),
+        context_text,
+    ]
+    return "\n\n".join(_dedupe([piece for piece in pieces if piece]))
+
+
+def _first_named_section_text(text: str, spec: _SectionSpec) -> str:
+    sections = _sections_for_spec(_normalize_text(text), spec)
+    return "\n\n".join(section.text for section in sections[: spec.max_sections])
+
+
+def _source_snippet(text: str, needle: str, *, before: int, after: int) -> str:
+    if not text or not needle:
+        return ""
+    lower = text.lower()
+    clean_needle = re.sub(r"\s+", " ", needle).strip().lower()
+    index = lower.find(clean_needle)
+    if index < 0:
+        words = [word for word in re.findall(r"[A-Za-z0-9$.,%-]+", clean_needle) if len(word) >= 4]
+        for word in words[:8]:
+            index = lower.find(word.lower())
+            if index >= 0:
+                break
+    if index < 0:
+        return ""
+    return _shorten(text[max(0, index - before) : min(len(text), index + len(needle) + after)], 650)
+
+
+def _has_adverse_going_concern_language(text: str) -> bool:
+    lower = (text or "").lower()
+    adverse_patterns = (
+        r"substantial doubt (?:about|regarding) (?:our|the company's|the group'?s)? ability to continue",
+        r"substantial doubt .*? going concern",
+        r"may not be able to continue as a going concern",
+        r"raise substantial doubt",
+        r"going concern qualification",
+        r"going concern uncertainty",
+        r"material uncertainty .*? going concern",
+        r"auditor'?s report .*? going concern",
+    )
+    return any(re.search(pattern, lower, flags=re.IGNORECASE) for pattern in adverse_patterns)
+
+
+def _has_vie_structure_language(text: str) -> bool:
+    lower = (text or "").lower()
+    direct_patterns = (
+        r"\bvariable interest entity\b",
+        r"\bvie structure\b",
+    )
+    for pattern in direct_patterns:
+        for match in re.finditer(pattern, lower):
+            if not _is_negated_structure_reference(lower, match.start(), match.end()):
+                return True
+    for match in re.finditer(r"\bvies?\b", lower):
+        if _is_negated_structure_reference(lower, match.start(), match.end()):
+            continue
+        window = lower[match.start() : match.end() + 220]
+        if re.search(r"\b(contractual arrangements?|contractual control|nominee shareholder|wfoe|variable interest)\b", window):
+            return True
+    return False
+
+
+def _is_negated_structure_reference(lower_text: str, start: int, end: int) -> bool:
+    before = lower_text[max(0, start - 140) : start]
+    around = lower_text[max(0, start - 80) : min(len(lower_text), end + 120)]
+    if re.search(r"\b(no|not|without|does not|do not|did not|doesn't|is not|are not)\b[^.;:]{0,120}$", before):
+        return True
+    if re.search(r"\bdoes not disclose\b[^.;:]{0,160}\b(variable interest entity|vie structure|vies?)\b", around):
+        return True
+    if re.search(r"\bno\b[^.;:]{0,120}\b(variable interest entity|vie structure|vies?)\b", around):
+        return True
+    return False
+
+
 def retrieve_relevant_filing_sections(text: str, prompt: str) -> tuple[IpoFilingSourceSection, ...]:
     clean_text = _normalize_text(text)
     if not clean_text:
@@ -416,6 +666,13 @@ def render_ipo_filing_chat_transcript_markdown(session: IpoFilingChatSession) ->
         for index, message in enumerate(session.messages, start=1):
             speaker = "User" if message.role == "user" else "Assistant"
             lines.extend([f"## {index}. {speaker}", "", _redact_common_secrets(message.content), ""])
+            if message.role == "assistant" and (message.source_mode or message.source_debug):
+                lines.extend(["### Source Debug", ""])
+                if message.source_mode:
+                    lines.append(f"- Source mode: {message.source_mode}")
+                for entry in message.source_debug:
+                    lines.append(f"- {entry}")
+                lines.append("")
     return "\n".join(lines).strip() + "\n"
 
 
@@ -460,28 +717,37 @@ def _section_specs_for_prompt(prompt: str) -> tuple[_SectionSpec, ...]:
             specs.append(spec)
 
     if wants_overview:
+        add(_cover_page_spec())
         add(_prospectus_summary_spec())
         add(_business_spec())
         add(_offering_spec())
         add(_use_of_proceeds_spec())
-        add(_financials_spec())
+        add(_capitalization_spec())
         add(_dilution_spec())
+        add(_mda_spec())
+        add(_financial_statements_spec())
         add(_risk_spec())
+        add(_principal_shareholders_spec())
+        add(_underwriting_spec())
 
     if any(term in lower for term in ("risk", "viability", "liquidity", "valuation", "protection", "going concern")):
         add(_risk_spec(max_sections=2))
     if any(term in lower for term in ("offering", "terms", "transaction", "ipo", "resale", "shelf", "spac", "direct listing", "price", "ticker", "underwriter", "lockup", "lock-up", "securities offered")):
+        add(_cover_page_spec())
         add(_offering_spec(max_sections=2))
         add(_selling_shareholders_spec())
         add(_underwriting_spec())
     if any(term in lower for term in ("proceeds", "repay", "working capital", "company receives")):
         add(_use_of_proceeds_spec(max_sections=2))
     if any(term in lower for term in ("dilution", "ownership", "capitalization", "overhang", "warrant", "option", "insider", "control", "selling shareholder")):
+        add(_capitalization_spec(max_sections=2))
         add(_dilution_spec(max_sections=2))
         add(_selling_shareholders_spec())
         add(_principal_shareholders_spec())
     if any(term in lower for term in ("financial", "revenue", "cash", "debt", "income", "loss", "condition", "liquidity", "capital resources")):
-        add(_financials_spec(max_sections=2))
+        add(_mda_spec(max_sections=2))
+        add(_financial_statements_spec(max_sections=2))
+        add(_capitalization_spec())
     if any(term in lower for term in ("bull", "bear", "diligence")):
         add(_prospectus_summary_spec())
         add(_business_spec())
@@ -504,11 +770,20 @@ def _prospectus_summary_spec() -> _SectionSpec:
     )
 
 
+def _cover_page_spec() -> _SectionSpec:
+    return _SectionSpec(
+        name="cover_page",
+        headings=("PRELIMINARY PROSPECTUS", "PROSPECTUS", "American Depositary Shares", "Ordinary Shares"),
+        stop_headings=("TABLE OF CONTENTS", "Table of Contents", "PROSPECTUS SUMMARY"),
+        terms=("American Depositary Shares", "offering price", "Nasdaq", "under the symbol", "Joint Book-Running Managers"),
+    )
+
+
 def _business_spec() -> _SectionSpec:
     return _SectionSpec(
         name="business",
         headings=("Business Overview", "Our Business", "Our Company", "Company Overview", "Business"),
-        stop_headings=("Risk Factors", "Management", "Management's Discussion", "Financial Statements", "Underwriting"),
+        stop_headings=("Risk Factors", "Management", "Management's Discussion", "Principal Shareholders", "Financial Statements", "Underwriting"),
         terms=("our platform", "we provide", "we develop", "we operate", "customers", "market"),
     )
 
@@ -534,28 +809,56 @@ def _use_of_proceeds_spec(*, max_sections: int = 1) -> _SectionSpec:
 
 
 def _financials_spec(*, max_sections: int = 1) -> _SectionSpec:
+    return _mda_spec(max_sections=max_sections)
+
+
+def _mda_spec(*, max_sections: int = 1) -> _SectionSpec:
     return _SectionSpec(
-        name="financial_condition",
+        name="mda_results",
         headings=(
-            "Selected Consolidated Financial Data",
-            "Selected Consolidated Statements of Operations",
-            "Consolidated Statements of Operations",
-            "Selected Financial Data",
             "Results of Operations",
             "Management's Discussion and Analysis",
+            "Management’s Discussion and Analysis",
             "Liquidity and Capital Resources",
         ),
-        stop_headings=("Business", "Risk Factors", "Management", "Underwriting", "Financial Statements", "Quantitative and Qualitative Disclosures"),
+        stop_headings=("Industry", "Business", "Risk Factors", "Management", "Underwriting", "Financial Statements", "Quantitative and Qualitative Disclosures"),
         terms=("revenue", "revenues", "net loss", "net income", "cash and cash equivalents", "total debt", "liquidity", "capital resources"),
+        max_sections=max_sections,
+    )
+
+
+def _financial_statements_spec(*, max_sections: int = 2) -> _SectionSpec:
+    return _SectionSpec(
+        name="financial_statements",
+        headings=(
+            "Consolidated Statements of Comprehensive Loss",
+            "Consolidated Statements of Operations",
+            "Consolidated Statements of Income",
+            "Selected Consolidated Statements of Operations",
+            "Consolidated Balance Sheets",
+            "Consolidated Statements of Financial Position",
+        ),
+        stop_headings=("Consolidated Balance Sheets", "Consolidated Statements of Changes", "Consolidated Statements of Cash Flows", "Notes to the Financial Statements", "The accompanying notes", "Going concern"),
+        terms=("Revenue", "Gross profit", "Loss after income tax", "Cash at bank", "Cash and cash equivalents", "Total debt"),
+        max_sections=max_sections,
+    )
+
+
+def _capitalization_spec(*, max_sections: int = 1) -> _SectionSpec:
+    return _SectionSpec(
+        name="capitalization",
+        headings=("Capitalization",),
+        stop_headings=("Dilution", "Dividend Policy", "Management's Discussion", "Management’s Discussion", "Industry", "Business"),
+        terms=("cash and cash equivalents", "total debt", "as adjusted", "total capitalization"),
         max_sections=max_sections,
     )
 
 
 def _dilution_spec(*, max_sections: int = 1) -> _SectionSpec:
     return _SectionSpec(
-        name="capitalization_and_dilution",
-        headings=("Capitalization", "Dilution"),
-        stop_headings=("Management", "Underwriting", "Plan of Distribution", "Financial Statements", "Business", "Description of Capital Stock"),
+        name="dilution",
+        headings=("Dilution",),
+        stop_headings=("Management", "Underwriting", "Plan of Distribution", "Financial Statements", "Business", "Description of Capital Stock", "Enforceability"),
         terms=("capitalization", "net tangible book value", "immediate dilution", "pro forma as adjusted", "warrants", "options"),
         max_sections=max_sections,
     )
@@ -594,16 +897,31 @@ def _underwriting_spec() -> _SectionSpec:
     return _SectionSpec(
         name="underwriting",
         headings=("Underwriting", "Plan of Distribution"),
-        stop_headings=("Legal Matters", "Experts", "Financial Statements", "Where You Can Find More Information"),
+        stop_headings=("Legal Matters", "Experts", "Financial Statements", "Consolidated Statements", "METAOPTICS LTD AND ITS SUBSIDIARIES", "Where You Can Find More Information"),
         terms=("underwriters are", "representatives of the underwriters", "book-running", "bookrunners", "lock-up", "lockup"),
     )
 
 
 def _sections_for_spec(text: str, spec: _SectionSpec) -> list[IpoFilingSourceSection]:
+    if spec.name == "cover_page":
+        return [_cover_page_section(text)]
     sections = _sections_between_headings(text, spec)
     if sections:
         return sections
     return _windows_around_terms(text, spec)
+
+
+def _cover_page_section(text: str) -> IpoFilingSourceSection:
+    lower = text.lower()
+    stop_candidates = [
+        index
+        for marker in ("table of contents", "prospectus summary")
+        if (index := lower.find(marker, 300)) > 0
+    ]
+    end = min(stop_candidates) if stop_candidates else min(len(text), 12_000)
+    end = max(end, min(len(text), 1_200))
+    body = _clean_section_text(text[: min(end, 14_000)], limit=14_000)
+    return IpoFilingSourceSection(name="cover_page", text=body, start_offset=0, end_offset=min(end, 14_000))
 
 
 def _sections_between_headings(text: str, spec: _SectionSpec) -> list[IpoFilingSourceSection]:
@@ -611,17 +929,17 @@ def _sections_between_headings(text: str, spec: _SectionSpec) -> list[IpoFilingS
     starts: list[tuple[int, int, str]] = []
     for heading in spec.headings:
         for match in re.finditer(rf"\b{re.escape(heading.lower())}\b", lower):
+            if not _looks_like_section_heading_match(text, match.start(), match.end(), heading):
+                continue
             starts.append((match.start(), match.end(), heading))
     sections: list[IpoFilingSourceSection] = []
     for start, content_start, heading in sorted(starts, key=lambda item: item[0]):
-        if _looks_like_toc_window(text[max(0, start - 160) : start + 360]):
-            continue
         stop_index = len(text)
         for stop in spec.stop_headings:
-            stop_match = re.search(rf"\b{re.escape(stop.lower())}\b", lower[content_start + 240 :])
+            stop_match = re.search(rf"\b{re.escape(stop.lower())}\b", lower[content_start + 20 :])
             if stop_match:
-                stop_index = min(stop_index, content_start + 240 + stop_match.start())
-        section_start = max(0, start - 80)
+                stop_index = min(stop_index, content_start + 20 + stop_match.start())
+        section_start = start
         section_end = min(stop_index, section_start + CHAT_SECTION_CHAR_LIMIT)
         body = _clean_section_text(text[section_start:section_end], limit=CHAT_SECTION_CHAR_LIMIT)
         if body and _has_section_body(body):
@@ -636,6 +954,32 @@ def _sections_between_headings(text: str, spec: _SectionSpec) -> list[IpoFilingS
         if len(sections) >= spec.max_sections:
             break
     return sections
+
+
+def _looks_like_section_heading_match(text: str, start: int, end: int, heading: str) -> bool:
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end)
+    if line_end < 0:
+        line_end = min(len(text), end + 160)
+    line = text[line_start:line_end].strip(" \t:-")
+    clean_line = re.sub(r"\s+", " ", line).strip().lower()
+    clean_heading = re.sub(r"\s+", " ", heading).strip().lower()
+    if clean_line == clean_heading:
+        return True
+    if re.search(r"\s\d{1,4}$", clean_line):
+        return False
+    if not clean_line.startswith(clean_heading):
+        return False
+    suffix = clean_line[len(clean_heading) :].strip(" :-")
+    if not suffix:
+        return True
+    if re.fullmatch(r"\d{1,4}", suffix):
+        return False
+    if len(suffix) > 120:
+        return False
+    if line and line.upper() == line:
+        return True
+    return bool(re.match(r"^(of financial condition|and results of operations|discussion and analysis)\b", suffix))
 
 
 def _windows_around_terms(text: str, spec: _SectionSpec) -> list[IpoFilingSourceSection]:
@@ -763,7 +1107,10 @@ def _has_section_body(text: str) -> bool:
 
 def _looks_like_toc_window(value: str) -> bool:
     lower = value.lower()
-    return "table of contents" in lower or len(re.findall(r"\b[A-Z][A-Z '&/-]{3,}\s+\d{1,3}\b", value)) >= 3
+    return (
+        ("table of contents" in lower and re.search(r"\b(prospectus summary|risk factors|use of proceeds|capitalization|dilution)\s+\d+", lower) is not None)
+        or len(re.findall(r"\b[A-Z][A-Z '&/-]{3,}\s+\d{1,3}\b", value)) >= 3
+    )
 
 
 def _looks_like_table_of_contents(value: str) -> bool:

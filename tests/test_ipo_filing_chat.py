@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -51,6 +52,28 @@ Risk Factors
 Our recurring losses and negative cash flows raise substantial doubt about our ability to continue as a going concern.
 We depend on a limited number of large enterprise customers.
 """
+
+
+def _metaoptics_f1a_text() -> str:
+    return (Path(__file__).parent / "fixtures" / "metaoptics_f1a_excerpt.txt").read_text(encoding="utf-8")
+
+
+def _metaoptics_record() -> IpoPipelineRecord:
+    return IpoPipelineRecord(
+        cik="2099681",
+        company_name="MetaOptics Ltd",
+        proposed_ticker=None,
+        form="F-1/A",
+        filed_date="2026-06-10",
+        ipo_status="Filed",
+        sic="",
+        sector=None,
+        industry="Metalens technology",
+        exchange=None,
+        filing_url=f"{SEC_ARCHIVES_BASE_URL}/2099681/000121390026067164/ea0270354-12.htm",
+        accession_number="0001213900-26-067164",
+        is_foreign_issuer=True,
+    )
 
 
 def _record(*, form: str = "F-1") -> IpoPipelineRecord:
@@ -199,6 +222,69 @@ def test_large_filing_chat_context_uses_relevant_retrieved_chunks() -> None:
     assert "Immediate dilution" in joined
 
 
+def test_metaoptics_overview_retrieval_forces_core_filing_sections() -> None:
+    text = _metaoptics_f1a_text()
+    filler = "Generic prospectus boilerplate that should not outrank named sections.\n" * ((CHAT_FULL_TEXT_CHAR_LIMIT // 70) + 100)
+    bundle = build_ipo_filing_source_bundle(_metaoptics_record(), text + "\n" + filler, source_url=_metaoptics_record().filing_url)
+
+    payload = filing_context_payload_for_prompt(bundle, "Generate an overview of this F-1 document.")
+    names = [section["name"] for section in payload["sections"]]
+    joined = "\n".join(section["text"] for section in payload["sections"])
+
+    assert payload["source_mode"] == "retrieved_filing_chunks"
+    assert {
+        "cover_page",
+        "prospectus_summary",
+        "offering_terms",
+        "use_of_proceeds",
+        "capitalization",
+        "dilution",
+        "mda_results",
+        "financial_statements",
+        "risk_factors",
+        "principal_shareholders",
+        "underwriting",
+    } <= set(names)
+    assert "3,000,000 American Depositary Shares Representing 36,000,000 Ordinary Shares" in joined
+    assert "US$14.3 million" in joined
+    assert "Cash and cash equivalents 8,789,537 6,845,071 27,141,117 21,136,822" in joined
+    assert "Revenue 787,388" in joined
+    assert "Loss after income tax and total comprehensive loss (5,445,573)" in joined
+    assert "Roth Capital Partners, LLC and The Benchmark Company, LLC" in joined
+
+
+def test_metaoptics_chat_payload_marks_parser_values_as_hints_and_adds_verified_facts() -> None:
+    context = build_ipo_filing_chat_context(_metaoptics_record(), client=FakeSecClient(_metaoptics_f1a_text()))
+    fake_openai = FakeOpenAiClient(answer="## Overview\nGrounded answer.")
+    session = IpoFilingChatSession(
+        context,
+        chat_client=OpenAiIpoFilingChatClient(openai_client=fake_openai, model="gpt-test"),
+    )
+
+    session.ask("Generate an overview of this F-1 document.")
+
+    request_payload = json.loads(fake_openai.responses.calls[0]["input"][-1]["content"])
+    facts = request_payload["verified_filing_facts"]
+    offering = facts["offering_terms"]
+    financials = facts["financial_metrics"]
+    risk_checks = facts["risk_checks"]
+
+    assert "deterministic_extracts" not in request_payload
+    assert request_payload["deterministic_extracts_hints"]["use_policy"].startswith("Hints only")
+    assert offering["securities_offered"]["value"] == "3,000,000 ADSs representing 36,000,000 ordinary shares"
+    assert offering["ads_ratio"]["value"] == "1 ADS = 12 ordinary shares"
+    assert offering["expected_price_range"]["value"] == "US$5.00-US$7.00 per ADS"
+    assert offering["listing"]["value"] == "Nasdaq Capital Market under symbol MOT"
+    assert offering["net_proceeds"]["value"] == "Approximately US$14.3 million, or US$16.8 million if the over-allotment option is exercised in full"
+    assert financials["fy2025_revenue"]["value"] == "S$787,388"
+    assert financials["fy2025_net_loss"]["value"] == "S$5,445,573"
+    assert financials["cash_and_cash_equivalents"]["value"] == "Actual S$8,789,537 / US$6,845,071; as adjusted S$27,141,117 / US$21,136,822"
+    assert financials["total_debt"]["value"] == "Actual S$2,106,147 / US$1,640,215; as adjusted S$2,106,147 / US$1,640,215"
+    assert facts["company_revenue_guardrail"]["warning"] == "US$2.3 million is an industry-market figure, not company revenue."
+    assert risk_checks["going_concern_risk_detected"]["value"] is False
+    assert risk_checks["vie_structure_detected"]["value"] is False
+
+
 def test_filing_chat_transcript_saves_markdown(tmp_path) -> None:
     context = build_ipo_filing_chat_context(_record(), client=FakeSecClient(SAMPLE_FILING_TEXT * 20))
     fake_openai = FakeOpenAiClient(answer="Not disclosed fields should stay labeled.")
@@ -214,6 +300,8 @@ def test_filing_chat_transcript_saves_markdown(tmp_path) -> None:
     assert "# Silentium Ltd. F-1 AI Filing Chat" in markdown
     assert "## 1. User" in markdown
     assert "## 2. Assistant" in markdown
+    assert "### Source Debug" in markdown
+    assert "- Source mode: full_prospectus_text" in markdown
     assert saved.read_text(encoding="utf-8") == markdown
 
 

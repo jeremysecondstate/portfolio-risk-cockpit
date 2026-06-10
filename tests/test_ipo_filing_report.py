@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -67,6 +68,28 @@ Other Terms
 In May 2026, we completed a 1-for-5 reverse split of our ordinary shares.
 We are a foreign private issuer and have related party transactions with our founder.
 """
+
+
+def _metaoptics_f1a_text() -> str:
+    return (Path(__file__).parent / "fixtures" / "metaoptics_f1a_excerpt.txt").read_text(encoding="utf-8")
+
+
+def _metaoptics_record() -> IpoPipelineRecord:
+    return IpoPipelineRecord(
+        cik="2099681",
+        company_name="MetaOptics Ltd",
+        proposed_ticker=None,
+        form="F-1/A",
+        filed_date="2026-06-10",
+        ipo_status="Filed",
+        sic="",
+        sector=None,
+        industry="Metalens technology",
+        exchange=None,
+        filing_url="https://www.sec.gov/Archives/edgar/data/2099681/000121390026067164/ea0270354-12.htm",
+        accession_number="0001213900-26-067164",
+        is_foreign_issuer=True,
+    )
 
 
 STARFIGHTERS_STYLE_BAD_TEXT = """
@@ -328,6 +351,35 @@ def test_ipo_text_parser_extracts_key_terms_for_pipeline_cache() -> None:
     assert parsed.debt == 3_500_000
     assert parsed.dilution_per_share == 5.75
     assert parsed.going_concern is True
+
+
+def test_metaoptics_f1a_parser_prefers_filing_financials_over_industry_figures() -> None:
+    text = _metaoptics_f1a_text()
+    parsed = parse_ipo_filing_text(text, form="F-1/A")
+    flags = analyze_text_risk_flags(text)
+    report = build_ipo_filing_report(_metaoptics_record(), text, source_url=_metaoptics_record().filing_url)
+    financials = {row.label: row for row in report.financial_rows}
+
+    assert parsed.price_range_low == 5.0
+    assert parsed.price_range_high == 7.0
+    assert parsed.shares_offered == 3_000_000
+    assert parsed.proposed_ticker == "MOT"
+    assert parsed.exchange == "Nasdaq Capital Market"
+    assert parsed.revenue == 787_388
+    assert parsed.net_income == -5_445_573
+    assert parsed.cash == 8_789_537
+    assert parsed.debt == 2_106_147
+    assert round(parsed.gross_margin or 0, 1) == 18.4
+    assert parsed.revenue != 2_300_000
+    assert parsed.going_concern is False
+    assert parsed.vie_or_china_risk is False
+    assert "Going concern language" not in flags
+    assert "China/VIE structure" not in flags
+
+    assert financials["Revenue"].latest_value == 787_388
+    assert financials["Net income / loss"].latest_value == -5_445_573
+    assert all("China/VIE" not in line for line in report.key_risks)
+    assert all("China/VIE" not in line for line in report.notable_terms)
 
 
 def test_report_rejects_absurd_low_confidence_offering_terms() -> None:

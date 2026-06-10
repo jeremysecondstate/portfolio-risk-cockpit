@@ -1018,36 +1018,40 @@ def parse_ipo_filing_text(text: str, *, form: str = "") -> ParsedIpoFields:
     price_low, price_high = _extract_price_range(offering_text)
     proposed_ticker = _extract_ticker(clean_text)
     exchange = _extract_exchange(clean_text)
-    table_multiplier = _table_amount_multiplier(clean_text)
+    financial_text = _company_financial_metric_text(clean_text)
+    financial_source = financial_text or clean_text
+    table_multiplier = _table_amount_multiplier(financial_source)
     revenue = (
-        _extract_financial_row_value(clean_text, (r"Revenue", r"Revenues", r"Net sales"), table_multiplier)
-        or _extract_money_after_terms(clean_text, ("revenue", "revenues", "net sales"))
+        _extract_financial_row_value(financial_source, (r"Revenue", r"Revenues", r"Net sales"), table_multiplier)
+        or _extract_money_after_terms(financial_source, ("revenue", "revenues", "net sales"))
     )
-    gross_profit = _extract_financial_row_value(clean_text, (r"Gross profit",), table_multiplier)
+    gross_profit = _extract_financial_row_value(financial_source, (r"Gross profit",), table_multiplier)
     net_income = (
-        _extract_financial_row_value(clean_text, (r"Net income \(loss\)", r"Net loss", r"Net income"), table_multiplier)
-        or _extract_money_after_terms(clean_text, ("net income", "net loss"))
+        _extract_financial_row_value(financial_source, (r"Net income \(loss\)", r"Net loss", r"Net income", r"Loss after income tax and total comprehensive loss", r"Loss before income tax"), table_multiplier)
+        or _extract_money_after_terms(financial_source, ("net income", "net loss", "loss after income tax", "loss before income tax"))
     )
-    if net_income is not None and _near_term(clean_text, "net loss", net_income):
+    if net_income is not None and _near_term(financial_source, "net loss", net_income):
         net_income = -abs(net_income)
-    gross_margin = _extract_percent_after_terms(clean_text, ("gross margin", "gross profit margin"))
-    if gross_margin is None and revenue not in (None, 0) and gross_profit is not None:
+    gross_margin = None
+    if revenue not in (None, 0) and gross_profit is not None:
         gross_margin = gross_profit / revenue * 100
+    if gross_margin is None:
+        gross_margin = _extract_percent_after_terms(financial_source, ("gross margin", "gross profit margin"))
     cash = (
-        _extract_financial_row_value(clean_text, (r"Cash and cash equivalents", r"Cash equivalents"), table_multiplier)
-        or _extract_money_after_terms(clean_text, ("cash and cash equivalents", "cash equivalents"))
+        _extract_financial_row_value(financial_source, (r"Cash and cash equivalents", r"Cash at bank", r"Cash equivalents"), table_multiplier)
+        or _extract_money_after_terms(financial_source, ("cash and cash equivalents", "cash at bank", "cash equivalents"))
     )
     debt = (
-        _extract_financial_row_value(clean_text, (r"Total debt", r"Indebtedness"), table_multiplier)
-        or _extract_money_after_terms(clean_text, ("total debt", "indebtedness"))
+        _extract_financial_row_value(financial_source, (r"Total debt", r"Long-term debt", r"Indebtedness", r"Amount due to a shareholder"), table_multiplier)
+        or _extract_money_after_terms(financial_source, ("total debt", "long-term debt", "indebtedness", "amount due to a shareholder"))
     )
     risk_flags = analyze_text_risk_flags(clean_text)
     is_foreign = form.upper().startswith("F-1") or "foreign private issuer" in clean_text.lower()
-    going_concern = _has_pattern(clean_text, (r"\bgoing concern\b", r"\bsubstantial doubt about our ability to continue\b"))
+    going_concern = _has_adverse_going_concern_language(clean_text)
     customer_concentration = _has_pattern(clean_text, (r"\bcustomer concentration\b", r"\bmajor customers?\b", r"\bsignificant customers?\b"))
     related_party = _has_pattern(clean_text, (r"\brelated[- ]party\b", r"\btransactions with related parties\b"))
     controlled_company = _has_pattern(clean_text, (r"\bcontrolled company\b",))
-    vie_or_china = _has_pattern(clean_text, (r"\bvariable interest entity\b", r"\bVIEs?\b", r"\bPRC\b", r"\bchina[- ]based\b"))
+    vie_or_china = _has_vie_structure_language(clean_text)
 
     return ParsedIpoFields(
         proposed_ticker=proposed_ticker,
@@ -1058,7 +1062,7 @@ def parse_ipo_filing_text(text: str, *, form: str = "") -> ParsedIpoFields:
         shares_offered=_extract_shares_offered(offering_text),
         implied_market_cap=_extract_money_after_terms(clean_text, ("implied market capitalization", "market capitalization")),
         revenue=revenue,
-        revenue_growth=_extract_percent_after_terms(clean_text, ("revenue growth", "revenues increased")),
+        revenue_growth=_extract_percent_after_terms(financial_source, ("revenue growth", "revenues increased", "representing an increase")),
         net_income=net_income,
         gross_margin=gross_margin,
         cash=cash,
@@ -1110,15 +1114,17 @@ def analyze_ipo_risk_flags(
 
 def analyze_text_risk_flags(text: str) -> list[str]:
     checks = [
-        ("Going concern language", (r"\bgoing concern\b", r"\bsubstantial doubt about our ability to continue\b")),
         ("Related-party transactions", (r"\brelated[- ]party transactions?\b", r"\btransactions with related parties\b")),
         ("Customer concentration", (r"\bcustomer concentration\b", r"\bmajor customers?\b", r"\bsignificant customers?\b")),
         ("Controlled company", (r"\bcontrolled company\b",)),
-        ("China/VIE structure", (r"\bvariable interest entity\b", r"\bVIEs?\b", r"\bPRC\b", r"\bchina[- ]based\b")),
         ("SPAC-related", (r"\bspecial purpose acquisition company\b", r"\bSPAC\b")),
         ("Auditor change", (r"\bauditor change\b", r"\bchange in auditor\b", r"\bchanged auditors\b", r"\bauditor resignation\b")),
     ]
     flags: list[str] = []
+    if _has_adverse_going_concern_language(text):
+        flags.append("Going concern language")
+    if _has_vie_structure_language(text):
+        flags.append("China/VIE structure")
     for flag, patterns in checks:
         if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns):
             flags.append(flag)
@@ -1127,6 +1133,63 @@ def analyze_text_risk_flags(text: str) -> list[str]:
 
 def _has_pattern(text: str, patterns: tuple[str, ...]) -> bool:
     return any(re.search(pattern, text or "", flags=re.IGNORECASE) for pattern in patterns)
+
+
+def _has_adverse_going_concern_language(text: str) -> bool:
+    lower = (text or "").lower()
+    adverse_patterns = (
+        r"substantial doubt (?:about|regarding) (?:our|the company's|the group'?s)? ability to continue",
+        r"substantial doubt .*? going concern",
+        r"may not be able to continue as a going concern",
+        r"raise substantial doubt",
+        r"going concern qualification",
+        r"going concern uncertainty",
+        r"material uncertainty .*? going concern",
+        r"auditor'?s report .*? going concern",
+    )
+    if any(re.search(pattern, lower, flags=re.IGNORECASE) for pattern in adverse_patterns):
+        return True
+    if "going concern" not in lower:
+        return False
+    supportive_patterns = (
+        r"prepared on a going concern basis .*? sufficient financial resources",
+        r"sufficient financial resources .*? next twelve months",
+        r"directors are of the view .*? sufficient financial resources",
+    )
+    return not any(re.search(pattern, lower, flags=re.IGNORECASE) for pattern in supportive_patterns) and (
+        "substantial doubt" in lower or "material uncertainty" in lower
+    )
+
+
+def _has_vie_structure_language(text: str) -> bool:
+    lower = (text or "").lower()
+    direct_patterns = (
+        r"\bvariable interest entity\b",
+        r"\bvie structure\b",
+    )
+    for pattern in direct_patterns:
+        for match in re.finditer(pattern, lower):
+            if not _is_negated_structure_reference(lower, match.start(), match.end()):
+                return True
+    for match in re.finditer(r"\bvies?\b", lower):
+        if _is_negated_structure_reference(lower, match.start(), match.end()):
+            continue
+        window = lower[match.start() : match.end() + 220]
+        if re.search(r"\b(contractual arrangements?|contractual control|nominee shareholder|wfoe|variable interest)\b", window):
+            return True
+    return False
+
+
+def _is_negated_structure_reference(lower_text: str, start: int, end: int) -> bool:
+    before = lower_text[max(0, start - 140) : start]
+    around = lower_text[max(0, start - 80) : min(len(lower_text), end + 120)]
+    if re.search(r"\b(no|not|without|does not|do not|did not|doesn't|is not|are not)\b[^.;:]{0,120}$", before):
+        return True
+    if re.search(r"\bdoes not disclose\b[^.;:]{0,160}\b(variable interest entity|vie structure|vies?)\b", around):
+        return True
+    if re.search(r"\bno\b[^.;:]{0,120}\b(variable interest entity|vie structure|vies?)\b", around):
+        return True
+    return False
 
 
 def sector_for_sic(sic: str | None, industry: str | None = None) -> str | None:
@@ -1249,6 +1312,18 @@ def _dedupe_filings(filings: Iterable[SecCurrentFiling]) -> list[SecCurrentFilin
     for filing in filings:
         by_accession[filing.accession_number] = filing
     return list(by_accession.values())
+
+
+def _dedupe_text_sections(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        clean = _collapse_text(value)
+        key = clean[:500].lower()
+        if clean and key not in seen:
+            seen.add(key)
+            output.append(value)
+    return output
 
 
 def _group_filings_by_cik(filings: Iterable[SecCurrentFiling]) -> dict[str, list[SecCurrentFiling]]:
@@ -1404,6 +1479,85 @@ def _offering_section_text(text: str) -> str:
     return ""
 
 
+def _company_financial_metric_text(text: str) -> str:
+    section_specs = (
+        (
+            (
+                "Consolidated Statements of Comprehensive Loss",
+                "Consolidated Statements of Operations",
+                "Consolidated Statements of Income",
+                "Selected Consolidated Statements of Operations",
+                "Statements of Comprehensive Loss",
+            ),
+            (
+                "Consolidated Balance Sheets",
+                "Consolidated Statements of Changes",
+                "Consolidated Statements of Cash Flows",
+                "Notes to the Financial Statements",
+                "The accompanying notes",
+            ),
+        ),
+        (
+            (
+                "Consolidated Balance Sheets",
+                "Consolidated Statements of Financial Position",
+                "Balance Sheets",
+            ),
+            (
+                "Consolidated Statements of Changes",
+                "Consolidated Statements of Cash Flows",
+                "Notes to the Financial Statements",
+                "The accompanying notes",
+            ),
+        ),
+        (
+            (
+                "Results of Operations",
+                "Comparison of the Years Ended",
+                "Management's Discussion and Analysis of Financial Condition and Results of Operations",
+                "Management’s Discussion and Analysis of Financial Condition and Results of Operations",
+            ),
+            (
+                "Liquidity and Capital Resources",
+                "Seasonality",
+                "Inflation",
+                "Critical Accounting",
+                "Quantitative and Qualitative Disclosures",
+                "Industry",
+                "Business",
+            ),
+        ),
+        (
+            ("Liquidity and Capital Resources",),
+            (
+                "Capital Expenditures",
+                "Contractual Obligations",
+                "Critical Accounting",
+                "Quantitative and Qualitative Disclosures",
+                "Industry",
+                "Business",
+            ),
+        ),
+        (
+            ("Capitalization",),
+            (
+                "Dilution",
+                "Dividend Policy",
+                "Management's Discussion",
+                "Management’s Discussion",
+                "Industry",
+                "Business",
+            ),
+        ),
+    )
+    sections: list[str] = []
+    for headings, stops in section_specs:
+        section = _section_between_headings(text, headings, stops)
+        if section and not _looks_like_table_or_boilerplate(section):
+            sections.append(section)
+    return "\n".join(_dedupe_text_sections(sections))
+
+
 def _section_between_headings(text: str, headings: tuple[str, ...], stop_headings: tuple[str, ...]) -> str:
     lower = text.lower()
     starts: list[tuple[int, int]] = []
@@ -1433,7 +1587,10 @@ def _looks_like_real_offering_section(section: str) -> bool:
 
 def _looks_like_toc_window(value: str) -> bool:
     lower = value.lower()
-    return "table of contents" in lower or len(re.findall(r"\b[A-Z][A-Z ]{3,}\s+\d{1,3}\b", value)) >= 3
+    return (
+        ("table of contents" in lower and re.search(r"\b(prospectus summary|risk factors|use of proceeds|capitalization|dilution)\s+\d+", lower) is not None)
+        or len(re.findall(r"\b[A-Z][A-Z ]{3,}\s+\d{1,3}\b", value)) >= 3
+    )
 
 
 def _looks_like_table_or_boilerplate(value: str) -> bool:
@@ -1480,9 +1637,9 @@ def _extract_exchange(text: str) -> str | None:
 
 def _extract_price_range(text: str) -> tuple[float | None, float | None]:
     range_patterns = (
-        r"between\s+\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s+and\s+\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
-        r"price\s+range\s+(?:of\s+)?\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:-|to|and)\s*\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
-        r"estimated\s+(?:initial\s+)?public\s+offering\s+price\s+(?:range\s+)?(?:of\s+)?\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:-|to|and)\s*\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
+        r"between\s+(?:US\$|S\$|\$)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s+and\s+(?:US\$|S\$|\$)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
+        r"price\s+range\s+(?:of\s+)?(?:US\$|S\$|\$)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:-|to|and)\s*(?:US\$|S\$|\$)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
+        r"estimated\s+(?:initial\s+)?public\s+offering\s+price\s+(?:range\s+)?(?:of\s+)?(?:US\$|S\$|\$)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:-|to|and)\s*(?:US\$|S\$|\$)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)",
     )
     for pattern in range_patterns:
         match = re.search(pattern, text, flags=re.IGNORECASE)
@@ -1490,7 +1647,7 @@ def _extract_price_range(text: str) -> tuple[float | None, float | None]:
             low = float(match.group(1).replace(",", ""))
             high = float(match.group(2).replace(",", ""))
             return (low, high) if _reasonable_ipo_price_range(low, high) else (None, None)
-    match = re.search(r"(?:public offering price|initial public offering price)\s+(?:of|is)\s+\$?\s*([0-9][0-9,]*(?:\.[0-9]+)?)", text, flags=re.IGNORECASE)
+    match = re.search(r"(?:public offering price|initial public offering price)\s+(?:of|is)\s+(?:US\$|S\$|\$)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)", text, flags=re.IGNORECASE)
     if match:
         value = float(match.group(1).replace(",", ""))
         return (value, value) if _reasonable_ipo_price_range(value, value) else (None, None)
@@ -1525,15 +1682,23 @@ def _extract_financial_row_value(text: str, labels: tuple[str, ...], default_mul
     for label in labels:
         match = re.search(
             rf"(?<![A-Za-z0-9]){label}(?![A-Za-z0-9])"
-            rf"[^$\d(]{{0,80}}"
-            rf"(\(?\$?\s*-?[0-9][0-9,.]*(?:\s*(?:billion|million|thousand|B|M|K))?\)?)"
-            rf"(?:\s+\(?\$?\s*-?[0-9][0-9,.]*(?:\s*(?:billion|million|thousand|B|M|K))?\)?)?",
+            rf"([^\n]{{0,220}})",
             text,
             flags=re.IGNORECASE,
         )
         if not match:
             continue
-        value = _parse_money_amount(match.group(1), default_multiplier=default_multiplier)
+        tokens = re.findall(
+            r"\(?(?:US\$|S\$|HK\$|\$)?\s*-?[0-9][0-9,.]*(?:\s*(?:billion|million|thousand|B|M|K)\b)?\)?",
+            match.group(1),
+            flags=re.IGNORECASE,
+        )
+        tokens = [token for token in tokens if _parse_money_amount(token, default_multiplier=default_multiplier) is not None]
+        if len(tokens) >= 3 and _looks_like_financial_note_number(tokens[0], tokens[1:3]):
+            tokens = tokens[1:]
+        if not tokens:
+            continue
+        value = _parse_money_amount(tokens[0], default_multiplier=default_multiplier)
         if value is None:
             continue
         if "loss" in label.lower() or (label.lower() == "net income" and _near_term(text, "net loss", value)):
@@ -1542,12 +1707,25 @@ def _extract_financial_row_value(text: str, labels: tuple[str, ...], default_mul
     return None
 
 
+def _looks_like_financial_note_number(token: str, following: Iterable[str]) -> bool:
+    clean = re.sub(r"[(),\s]", "", token)
+    if not clean.isdigit() or len(clean) > 2:
+        return False
+    parsed_following = [
+        parsed
+        for value in following
+        if (parsed := _parse_money_amount(value, default_multiplier=1)) is not None
+    ]
+    return bool(parsed_following) and abs(parsed_following[0]) >= 1_000
+
+
 def _parse_money_amount(value: str | None, *, default_multiplier: float = 1) -> float | None:
     if value is None:
         return None
     raw = value.strip()
     negative = raw.startswith("-") or (raw.startswith("(") and raw.endswith(")"))
-    clean = raw.strip("()").replace("$", "").replace(",", "").replace(" ", "")
+    clean = raw.strip("()").replace(",", "").replace(" ", "")
+    clean = re.sub(r"^[A-Z]{0,3}\$", "", clean, flags=re.IGNORECASE).replace("$", "")
     multiplier = default_multiplier
     lower = clean.lower()
     for suffix, scale in (("billion", 1_000_000_000), ("million", 1_000_000), ("thousand", 1_000), ("b", 1_000_000_000), ("m", 1_000_000), ("k", 1_000)):
@@ -1607,11 +1785,39 @@ def _extract_percent_after_terms(text: str, terms: tuple[str, ...]) -> float | N
 
 
 def _extract_shares_offered(text: str) -> float | None:
+    ads_patterns = (
+        r"(?:ADSs?\s+offered\s+by\s+us|we\s+are\s+offering)\s+([0-9][0-9,]*(?:\.[0-9]+)?)\s*(million|thousand)?\s+(?:ADSs?|American\s+depositary\s+shares?)",
+        r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*(million|thousand)?\s+American\s+Depositary\s+Shares\s+Representing",
+        r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*(million|thousand)?\s+(?:ADSs?|American\s+depositary\s+shares?)\b.{0,120}\brepresenting\b",
+    )
+    for pattern in ads_patterns:
+        shares = _extract_scaled_share_count(text, pattern)
+        if shares is not None:
+            return shares
+
     match = re.search(
         r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*(million|thousand)?\s+(?:ordinary\s+shares|common\s+stock|shares)",
         text,
         flags=re.IGNORECASE,
     )
+    if not match:
+        return None
+    context = text[max(0, match.start() - 90) : match.end() + 90].lower()
+    if re.search(r"\beach\s+ads?\s+represents\b", context):
+        return None
+    shares = float(match.group(1).replace(",", ""))
+    scale = (match.group(2) or "").lower()
+    if scale == "million":
+        shares *= 1_000_000
+    elif scale == "thousand":
+        shares *= 1_000
+    if shares <= 0 or shares > 1_000_000_000:
+        return None
+    return shares
+
+
+def _extract_scaled_share_count(text: str, pattern: str) -> float | None:
+    match = re.search(pattern, text, flags=re.IGNORECASE)
     if not match:
         return None
     shares = float(match.group(1).replace(",", ""))

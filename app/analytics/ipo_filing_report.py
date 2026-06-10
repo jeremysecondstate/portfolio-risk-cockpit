@@ -687,8 +687,116 @@ def _traction_lines(text: str) -> list[str]:
     return ["The parsed filing text did not disclose clean customer, deployment, backlog, contract, or geography metrics."]
 
 
+def _company_financial_metric_text(text: str) -> str:
+    section_specs = (
+        (
+            (
+                "Consolidated Statements of Comprehensive Loss",
+                "Consolidated Statements of Operations",
+                "Consolidated Statements of Income",
+                "Selected Consolidated Statements of Operations",
+                "Statements of Comprehensive Loss",
+            ),
+            (
+                "Consolidated Balance Sheets",
+                "Consolidated Statements of Changes",
+                "Consolidated Statements of Cash Flows",
+                "Notes to the Financial Statements",
+                "The accompanying notes",
+            ),
+        ),
+        (
+            (
+                "Consolidated Balance Sheets",
+                "Consolidated Statements of Financial Position",
+                "Balance Sheets",
+            ),
+            (
+                "Consolidated Statements of Changes",
+                "Consolidated Statements of Cash Flows",
+                "Notes to the Financial Statements",
+                "The accompanying notes",
+            ),
+        ),
+        (
+            (
+                "Results of Operations",
+                "Comparison of the Years Ended",
+                "Management's Discussion and Analysis of Financial Condition and Results of Operations",
+                "Management’s Discussion and Analysis of Financial Condition and Results of Operations",
+            ),
+            (
+                "Liquidity and Capital Resources",
+                "Seasonality",
+                "Inflation",
+                "Critical Accounting",
+                "Quantitative and Qualitative Disclosures",
+                "Industry",
+                "Business",
+            ),
+        ),
+        (
+            ("Liquidity and Capital Resources",),
+            (
+                "Capital Expenditures",
+                "Contractual Obligations",
+                "Critical Accounting",
+                "Quantitative and Qualitative Disclosures",
+                "Industry",
+                "Business",
+            ),
+        ),
+        (
+            ("Capitalization",),
+            (
+                "Dilution",
+                "Dividend Policy",
+                "Management's Discussion",
+                "Management’s Discussion",
+                "Industry",
+                "Business",
+            ),
+        ),
+    )
+    sections: list[str] = []
+    for headings, stops in section_specs:
+        section = _financial_section_between_headings(text, headings, stops)
+        if section:
+            sections.append(section)
+    return "\n".join(_dedupe(sections))
+
+
+def _financial_section_between_headings(text: str, headings: tuple[str, ...], stop_headings: tuple[str, ...]) -> str:
+    lower = text.lower()
+    starts: list[tuple[int, int]] = []
+    for heading in headings:
+        for match in re.finditer(rf"\b{re.escape(heading.lower())}\b", lower):
+            starts.append((match.start(), match.end()))
+    for start, content_start in sorted(starts, key=lambda item: item[0]):
+        if _looks_like_toc_window(text[max(0, start - 160) : start + 360]):
+            continue
+        stop_index = len(text)
+        for stop in stop_headings:
+            match = re.search(rf"\b{re.escape(stop.lower())}\b", lower[content_start + 220 :])
+            if match:
+                stop_index = min(stop_index, content_start + 220 + match.start())
+        section = text[start:stop_index].strip()
+        if section:
+            return section[:22000]
+    return ""
+
+
+def _looks_like_toc_window(value: str) -> bool:
+    lower = value.lower()
+    return (
+        ("table of contents" in lower and re.search(r"\b(prospectus summary|risk factors|use of proceeds|capitalization|dilution)\s+\d+", lower) is not None)
+        or len(re.findall(r"\b[A-Z][A-Z '&/-]{3,}\s+\d{1,3}\b", value)) >= 3
+    )
+
+
 def _financial_rows(text: str) -> list[IpoReportFinancialRow]:
-    multiplier = _table_amount_multiplier(text)
+    financial_text = _company_financial_metric_text(text) or text
+    multiplier = _table_amount_multiplier(financial_text)
     rows: list[IpoReportFinancialRow] = []
     values: dict[str, IpoReportFinancialRow] = {}
 
@@ -697,11 +805,11 @@ def _financial_rows(text: str) -> list[IpoReportFinancialRow]:
             values[key] = row
             rows.append(row)
 
-    revenue = _money_row(text, "Revenue", (r"Revenue", r"Revenues", r"Net sales"), multiplier, "Top-line sales disclosed in the selected filing.")
-    cost = _money_row(text, "Cost of revenue", (r"Cost of revenue", r"Cost of revenues", r"Cost of sales"), multiplier, "Direct cost to deliver the product or service.")
-    gross_profit = _money_row(text, "Gross profit", (r"Gross profit",), multiplier, "Revenue after direct costs.")
-    operating_expenses = _money_row(text, "Operating expenses", (r"Total operating expenses", r"Operating expenses"), multiplier, "Sales, R&D, G&A, and other operating costs.")
-    net_income = _money_row(text, "Net income / loss", (r"Net income \(loss\)", r"Net loss", r"Net income"), multiplier, "Bottom-line profit or loss.")
+    revenue = _money_row(financial_text, "Revenue", (r"Revenue", r"Revenues", r"Net sales"), multiplier, "Top-line sales disclosed in the selected filing.")
+    cost = _money_row(financial_text, "Cost of revenue", (r"Cost of revenue", r"Cost of revenues", r"Cost of sales"), multiplier, "Direct cost to deliver the product or service.")
+    gross_profit = _money_row(financial_text, "Gross profit", (r"Gross profit",), multiplier, "Revenue after direct costs.")
+    operating_expenses = _money_row(financial_text, "Operating expenses", (r"Total operating expenses", r"Operating expenses"), multiplier, "Sales, R&D, G&A, and other operating costs.")
+    net_income = _money_row(financial_text, "Net income / loss", (r"Net income \(loss\)", r"Net loss", r"Net income", r"Loss after income tax and total comprehensive loss", r"Loss before income tax"), multiplier, "Bottom-line profit or loss.")
 
     add("revenue", revenue)
     add("cost", cost)
@@ -754,20 +862,39 @@ def _money_row(
 def _find_money_pair_after_label(text: str, label_pattern: str, default_multiplier: float) -> tuple[float | None, float | None, bool]:
     pattern = re.compile(
         rf"(?<![A-Za-z0-9]){label_pattern}(?![A-Za-z0-9])"
-        rf"[^$\d(]{{0,80}}"
-        rf"(\(?\$?\s*-?[0-9][0-9,.]*(?:\s*(?:billion|million|thousand|B|M|K))?\)?)"
-        rf"\s+"
-        rf"(\(?\$?\s*-?[0-9][0-9,.]*(?:\s*(?:billion|million|thousand|B|M|K))?\)?)",
+        rf"([^\n]{{0,220}})",
         re.IGNORECASE,
     )
     match = pattern.search(text)
     if not match:
         return None, None, False
-    latest = _parse_money_amount(match.group(1), default_multiplier=default_multiplier)
-    prior = _parse_money_amount(match.group(2), default_multiplier=default_multiplier)
+    tokens = re.findall(
+        r"\(?(?:US\$|S\$|HK\$|\$)?\s*-?[0-9][0-9,.]*(?:\s*(?:billion|million|thousand|B|M|K)\b)?\)?",
+        match.group(1),
+        flags=re.IGNORECASE,
+    )
+    tokens = [token for token in tokens if _parse_money_amount(token, default_multiplier=default_multiplier) is not None]
+    if len(tokens) >= 3 and _looks_like_financial_note_number(tokens[0], tokens[1:3]):
+        tokens = tokens[1:]
+    if not tokens:
+        return None, None, False
+    latest = _parse_money_amount(tokens[0], default_multiplier=default_multiplier)
+    prior = _parse_money_amount(tokens[1], default_multiplier=default_multiplier) if len(tokens) > 1 else None
     label_text = label_pattern.lower()
     negative = "loss" in label_text or "deficit" in label_text
     return latest, prior, negative
+
+
+def _looks_like_financial_note_number(token: str, following: Iterable[str]) -> bool:
+    clean = re.sub(r"[(),\s]", "", token)
+    if not clean.isdigit() or len(clean) > 2:
+        return False
+    parsed_following = [
+        parsed
+        for value in following
+        if (parsed := _parse_money_amount(value, default_multiplier=1)) is not None
+    ]
+    return bool(parsed_following) and abs(parsed_following[0]) >= 1_000
 
 
 def _balance_sheet_lines(parsed: ParsedIpoFields, text: str) -> list[str]:
@@ -817,7 +944,7 @@ def _notable_term_lines(record: IpoPipelineRecord, risks: Iterable[str], text: s
         ("Foreign private issuer", (r"\bforeign private issuer\b",)),
         ("Controlled-company status", (r"\bcontrolled company\b",)),
         ("Related-party issues", (r"\brelated[- ]party\b",)),
-        ("China/VIE risk", (r"\bvariable interest entity\b", r"\bVIEs?\b", r"\bchina[- ]based\b", r"\bPRC\b")),
+        ("China/VIE risk", (r"\bvariable interest entity\b", r"\bVIE structure\b", r"\bVIEs?\b.{0,160}\bcontractual\b")),
         ("Customer concentration", (r"\bcustomer concentration\b", r"\bmajor customers?\b", r"\bsignificant customers?\b")),
         ("Auditor change", (r"\bauditor change\b", r"\bchange in auditor\b", r"\bchanged auditors\b", r"\bauditor resignation\b")),
         ("ADS/ADR structure", (r"\bamerican depositary (?:shares?|receipts?)\b", r"\bamerican depositary\b")),
@@ -826,6 +953,11 @@ def _notable_term_lines(record: IpoPipelineRecord, risks: Iterable[str], text: s
         if label == "Foreign private issuer" and record.is_foreign_issuer:
             sentence = _first_sentence_with_patterns(text, patterns)
             lines.append(f"{label}: {sentence or 'The row/form indicates foreign-issuer treatment.'}")
+            continue
+        if label == "China/VIE risk":
+            if _has_vie_structure_language(text):
+                sentence = _first_sentence_with_patterns(text, patterns)
+                lines.append(f"{label}: {sentence or 'Flagged in the filing text.'}")
             continue
         if any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in patterns):
             sentence = _first_sentence_with_patterns(text, patterns)
@@ -1087,7 +1219,48 @@ def _looks_like_boilerplate_sentence(value: str) -> bool:
 
 def _has_going_concern_language(text: str) -> bool:
     lower = text.lower()
-    return "going concern" in lower or "substantial doubt about our ability to continue" in lower
+    adverse_patterns = (
+        r"substantial doubt (?:about|regarding) (?:our|the company's|the group'?s)? ability to continue",
+        r"substantial doubt .*? going concern",
+        r"may not be able to continue as a going concern",
+        r"raise substantial doubt",
+        r"going concern qualification",
+        r"going concern uncertainty",
+        r"material uncertainty .*? going concern",
+        r"auditor'?s report .*? going concern",
+    )
+    return any(re.search(pattern, lower, flags=re.IGNORECASE) for pattern in adverse_patterns)
+
+
+def _has_vie_structure_language(text: str) -> bool:
+    lower = (text or "").lower()
+    direct_patterns = (
+        r"\bvariable interest entity\b",
+        r"\bvie structure\b",
+    )
+    for pattern in direct_patterns:
+        for match in re.finditer(pattern, lower):
+            if not _is_negated_structure_reference(lower, match.start(), match.end()):
+                return True
+    for match in re.finditer(r"\bvies?\b", lower):
+        if _is_negated_structure_reference(lower, match.start(), match.end()):
+            continue
+        window = lower[match.start() : match.end() + 220]
+        if re.search(r"\b(contractual arrangements?|contractual control|nominee shareholder|wfoe|variable interest)\b", window):
+            return True
+    return False
+
+
+def _is_negated_structure_reference(lower_text: str, start: int, end: int) -> bool:
+    before = lower_text[max(0, start - 140) : start]
+    around = lower_text[max(0, start - 80) : min(len(lower_text), end + 120)]
+    if re.search(r"\b(no|not|without|does not|do not|did not|doesn't|is not|are not)\b[^.;:]{0,120}$", before):
+        return True
+    if re.search(r"\bdoes not disclose\b[^.;:]{0,160}\b(variable interest entity|vie structure|vies?)\b", around):
+        return True
+    if re.search(r"\bno\b[^.;:]{0,120}\b(variable interest entity|vie structure|vies?)\b", around):
+        return True
+    return False
 
 
 def _first_money_near(text: str, terms: tuple[str, ...]) -> float | None:
@@ -1123,7 +1296,8 @@ def _parse_money_amount(value: str | None, *, default_multiplier: float) -> floa
         return None
     raw = value.strip()
     negative = raw.startswith("-") or (raw.startswith("(") and raw.endswith(")"))
-    clean = raw.strip("()").replace("$", "").replace(",", "").replace(" ", "")
+    clean = raw.strip("()").replace(",", "").replace(" ", "")
+    clean = re.sub(r"^[A-Z]{0,3}\$", "", clean, flags=re.IGNORECASE).replace("$", "")
     multiplier = default_multiplier
     lower = clean.lower()
     for suffix, scale in (("billion", 1_000_000_000), ("million", 1_000_000), ("thousand", 1_000), ("b", 1_000_000_000), ("m", 1_000_000), ("k", 1_000)):
