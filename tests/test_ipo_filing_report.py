@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 from app.analytics.ipo_filing_report import (
     build_ipo_filing_report,
+    generate_ipo_filing_report,
     render_ipo_filing_report_markdown,
     save_ipo_filing_report,
 )
-from app.analytics.ipo_pipeline import IpoPipelineRecord
+from app.analytics.ipo_pipeline import (
+    IpoPipelineRecord,
+    fetch_ipo_document_text_with_source,
+    fetch_ipo_pipeline_snapshot,
+    parse_ipo_filing_text,
+    related_prospectus_filing_for_report,
+    select_ipo_document_candidate,
+)
+from app.data.sec_edgar import SecCurrentFiling
 
 
 SAMPLE_F1_TEXT = """
@@ -63,6 +74,75 @@ def _record() -> IpoPipelineRecord:
     )
 
 
+def _filing(
+    *,
+    form: str = "S-1",
+    accession: str = "0001234567-26-000001",
+    primary_document: str = "s1.htm",
+    filing_date: str = "2026-06-01",
+) -> SecCurrentFiling:
+    accession_no_dashes = accession.replace("-", "")
+    return SecCurrentFiling(
+        company_name="Example IPO Inc.",
+        cik="1234567",
+        form=form,
+        filing_date=filing_date,
+        accession_number=accession,
+        filing_url=f"https://www.sec.gov/Archives/edgar/data/1234567/{accession_no_dashes}/{primary_document}",
+        primary_document=primary_document,
+    )
+
+
+class FakeSecClient:
+    def __init__(self, tmp_path, *, filings=None, index_items=None, documents=None, submissions=None) -> None:
+        self.cache_dir = tmp_path
+        self.filings = list(filings or [])
+        self.index_items = dict(index_items or {})
+        self.documents = dict(documents or {})
+        self.submissions = dict(submissions or {})
+        self.document_fetch_count = 0
+
+    def recent_current_filings(self, form: str, *, limit: int = 100, start: int = 0):
+        return [filing for filing in self.filings if filing.form == form]
+
+    def get_submissions_by_cik(self, cik):
+        return self.submissions.get(str(cik).zfill(10), self.submissions.get("default", {"cik": str(cik), "filings": {"recent": {}}}))
+
+    def filing_index_items_for_accession(self, cik, accession_number):
+        return list(self.index_items.get(accession_number, []))
+
+    def document_text_url(self, url: str, *, cache_name=None, ttl=None):
+        self.document_fetch_count += 1
+        try:
+            return self.documents[url]
+        except KeyError as exc:
+            raise AssertionError(f"Unexpected document fetch: {url}") from exc
+
+
+def _submission(*, cik: str = "0001234567") -> dict:
+    return {
+        "cik": cik,
+        "name": "Example IPO Inc.",
+        "sic": "7372",
+        "sicDescription": "Software",
+        "filings": {
+            "recent": {
+                "form": ["EFFECT", "424B4", "S-1/A", "S-1"],
+                "accessionNumber": [
+                    "0001234567-26-000004",
+                    "0001234567-26-000003",
+                    "0001234567-26-000002",
+                    "0001234567-26-000001",
+                ],
+                "filingDate": ["2026-06-07", "2026-06-06", "2026-06-05", "2026-06-01"],
+                "reportDate": ["", "", "", ""],
+                "primaryDocument": ["effect.htm", "424b4.htm", "s1a.htm", "s1.htm"],
+                "acceptanceDateTime": ["2026-06-07T12:00:00", "2026-06-06T12:00:00", "2026-06-05T12:00:00", "2026-06-01T12:00:00"],
+            }
+        },
+    }
+
+
 def test_ipo_filing_report_parser_extracts_offering_risk_and_financials() -> None:
     report = build_ipo_filing_report(_record(), SAMPLE_F1_TEXT, source_url="https://www.sec.gov/test/f1.htm")
     financials = {row.label: row for row in report.financial_rows}
@@ -80,6 +160,156 @@ def test_ipo_filing_report_parser_extracts_offering_risk_and_financials() -> Non
     assert any("$1.25" in line and "$5.75" in line for line in report.dilution)
     assert any("Reverse split" in line for line in report.notable_terms)
     assert any("related" in line.lower() for line in report.notable_terms)
+
+
+def test_ipo_text_parser_extracts_key_terms_for_pipeline_cache() -> None:
+    parsed = parse_ipo_filing_text(SAMPLE_F1_TEXT, form="F-1")
+
+    assert parsed.price_range_low == 6.0
+    assert parsed.price_range_high == 8.0
+    assert parsed.shares_offered == 2_000_000
+    assert "Example Securities LLC" in parsed.underwriters
+    assert parsed.revenue == 4_200_000
+    assert parsed.net_income == -7_100_000
+    assert parsed.gross_margin == 40.0
+    assert parsed.cash == 1_200_000
+    assert parsed.debt == 3_500_000
+    assert parsed.dilution_per_share == 5.75
+    assert parsed.going_concern is True
+
+
+def test_document_candidate_ranking_chooses_prospectus_html(tmp_path) -> None:
+    filing = _filing(primary_document="0001234567-26-000001-index.htm")
+    client = FakeSecClient(
+        tmp_path,
+        index_items={
+            filing.accession_number: [
+                {"name": "0001234567-26-000001-index.htm", "type": "", "description": "Index", "size": "800"},
+                {"name": "FilingSummary.xml", "type": "XML", "description": "Filing summary", "size": "2000"},
+                {"name": "logo.jpg", "type": "GRAPHIC", "description": "Graphic", "size": "1000"},
+                {"name": "ex99-1.htm", "type": "EX-99.1", "description": "Exhibit 99.1", "size": "20000"},
+                {"name": "s1.htm", "type": "S-1", "description": "Registration Statement Prospectus", "size": "90000"},
+                {"name": "0001234567-26-000001.txt", "type": "", "description": "Complete submission text file", "size": "120000"},
+            ]
+        },
+    )
+
+    candidate = select_ipo_document_candidate(client, filing)
+
+    assert candidate is not None
+    assert candidate.name == "s1.htm"
+    assert candidate.document_type == "S-1"
+    assert "matches selected SEC form" in candidate.selection_reason
+
+
+def test_effect_report_resolves_to_related_final_prospectus(tmp_path) -> None:
+    effect = _filing(
+        form="EFFECT",
+        accession="0001234567-26-000004",
+        primary_document="effect.htm",
+        filing_date="2026-06-07",
+    )
+    final = _filing(
+        form="424B4",
+        accession="0001234567-26-000003",
+        primary_document="424b4.htm",
+        filing_date="2026-06-06",
+    )
+    final_url = final.filing_url
+    client = FakeSecClient(
+        tmp_path,
+        filings=[effect],
+        submissions={"0001234567": _submission()},
+        index_items={
+            "0001234567-26-000003": [
+                {"name": "424b4.htm", "type": "424B4", "description": "Final prospectus", "size": "100000"},
+            ]
+        },
+        documents={final_url: SAMPLE_F1_TEXT * 30},
+    )
+
+    source = related_prospectus_filing_for_report(client, effect)
+    assert source.form == "424B4"
+    assert source.accession_number == "0001234567-26-000003"
+
+    record = IpoPipelineRecord(
+        cik=effect.cik,
+        company_name=effect.company_name,
+        proposed_ticker=None,
+        form=effect.form,
+        filed_date=effect.filing_date,
+        ipo_status="Effective",
+        sic=None,
+        sector=None,
+        industry=None,
+        exchange=None,
+        filing_url=effect.filing_url,
+        accession_number=effect.accession_number,
+    )
+    generated = generate_ipo_filing_report(record, client=client, output_root=tmp_path / "reports", force_refresh=True)
+
+    assert generated.report is not None
+    assert generated.report.selected_form == "EFFECT"
+    assert generated.report.source_form == "424B4"
+    assert "Selected row: EFFECT accession 0001234567-26-000004" in generated.markdown
+    assert "Parsed source: 424B4 accession 0001234567-26-000003 document 424b4.htm" in generated.markdown
+
+
+def test_complete_submission_fallback_when_primary_is_too_thin(tmp_path) -> None:
+    filing = _filing(primary_document="s1.htm")
+    complete_url = "https://www.sec.gov/Archives/edgar/data/1234567/000123456726000001/0001234567-26-000001.txt"
+    client = FakeSecClient(
+        tmp_path,
+        index_items={
+            filing.accession_number: [
+                {"name": "s1.htm", "type": "S-1", "description": "Registration Statement", "size": "1000"},
+                {"name": "0001234567-26-000001.txt", "type": "", "description": "Complete submission text file", "size": "200000"},
+            ]
+        },
+        documents={
+            filing.filing_url: "Short cover page.",
+            complete_url: SAMPLE_F1_TEXT * 30,
+        },
+    )
+
+    fetched = fetch_ipo_document_text_with_source(client, filing)
+
+    assert fetched.candidate.name == "0001234567-26-000001.txt"
+    assert "Complete-submission fallback" in fetched.candidate.selection_reason
+    assert "Prospectus Summary" in fetched.text
+
+
+def test_pipeline_reuses_parsed_field_cache_without_refetching_document(tmp_path) -> None:
+    filing = _filing(primary_document="s1.htm")
+    client = FakeSecClient(
+        tmp_path,
+        filings=[filing],
+        submissions={"0001234567": {"cik": "0001234567", "name": "Example IPO Inc.", "filings": {"recent": {}}}},
+        index_items={
+            filing.accession_number: [
+                {"name": "s1.htm", "type": "S-1", "description": "Registration Statement Prospectus", "size": "90000"},
+            ]
+        },
+        documents={filing.filing_url: SAMPLE_F1_TEXT * 30},
+    )
+
+    first = fetch_ipo_pipeline_snapshot(client, force_refresh=True, parse_documents=True, per_form_limit=20)
+    assert first.records[0].parse_status == "Parsed"
+    assert client.document_fetch_count == 1
+
+    (tmp_path / "ipo_pipeline_records.json").unlink()
+    client.document_fetch_count = 0
+    second = fetch_ipo_pipeline_snapshot(
+        client,
+        force_refresh=False,
+        parse_documents=True,
+        per_form_limit=20,
+        cache_max_age=timedelta(microseconds=0),
+    )
+
+    assert second.records[0].parse_status == "Cached"
+    assert second.records[0].parsed_from_cache is True
+    assert client.document_fetch_count == 0
 
 
 def test_ipo_filing_report_renders_markdown_and_pdf_from_same_content(tmp_path) -> None:

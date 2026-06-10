@@ -56,6 +56,8 @@ TABLE_COLUMNS = (
     ("underwriters", "Underwriters", 220, tk.W),
     ("auditor", "Auditor", 170, tk.W),
     ("risk_flags", "Risk flags", 260, tk.W),
+    ("parse_status", "Parse status", 150, tk.W),
+    ("parse_source", "Parsed source", 260, tk.W),
     ("filing_link", "Filing link", 420, tk.W),
 )
 
@@ -346,7 +348,10 @@ def _finish_ipo_refresh_success(self: tk.Tk, snapshot: IpoPipelineSnapshot) -> N
     _load_ipo_snapshot(self, snapshot)
     source = "cache" if snapshot.used_cache else "SEC"
     error_suffix = f" ({len(snapshot.errors)} nonblocking warnings)" if snapshot.errors else ""
-    self.ipo_pipeline_status_var.set(f"Loaded {len(snapshot.records)} IPO companies from {source}. Fetched {snapshot.fetched_at}.{error_suffix}")
+    parsed_count = sum(1 for record in snapshot.records if record.parse_status in {"Parsed", "Cached", "Partial"})
+    failed_count = sum(1 for record in snapshot.records if record.parse_status == "Parse failed")
+    parse_suffix = f" Parsed/cached {parsed_count}; failed {failed_count}." if snapshot.records else ""
+    self.ipo_pipeline_status_var.set(f"Loaded {len(snapshot.records)} IPO companies from {source}. Fetched {snapshot.fetched_at}.{parse_suffix}{error_suffix}")
 
 
 def _finish_ipo_refresh_error(self: tk.Tk, error: Exception) -> None:
@@ -481,8 +486,20 @@ def _record_values(record: IpoPipelineRecord) -> tuple[str, ...]:
         ", ".join(record.underwriters) if record.underwriters else "Not extracted yet",
         display_optional_text(record.auditor, missing="Not extracted yet"),
         ", ".join(record.risk_flags) if record.risk_flags else EMPTY_VALUE,
+        record.parse_status or EMPTY_VALUE,
+        _parse_source_label(record),
         record.filing_url,
     )
+
+
+def _parse_source_label(record: IpoPipelineRecord) -> str:
+    parts = [part for part in (record.parsed_source_form, record.parsed_source_document) if part]
+    label = " ".join(parts) if parts else EMPTY_VALUE
+    if record.parsed_from_cache and label != EMPTY_VALUE:
+        label = f"{label} (cache)"
+    if record.parse_diagnostics and label == EMPTY_VALUE:
+        return _truncate(record.parse_diagnostics, 120)
+    return _truncate(label, 120)
 
 
 def _draw_ipo_charts(self: tk.Tk) -> None:
@@ -549,7 +566,7 @@ def _generate_selected_filing_report(self: tk.Tk, *, force_refresh: bool) -> Non
         messagebox.showinfo("Generate Filing Report", "Select an IPO pipeline row first.")
         return
     if not reportable_ipo_form(record.form):
-        messagebox.showinfo("Generate Filing Report", "Filing reports are available for S-1, S-1/A, F-1, and F-1/A rows.")
+        messagebox.showinfo("Generate Filing Report", "Filing reports are available for S-1/F-1, 424B4, and EFFECT rows.")
         return
     _start_ipo_filing_report_job(self, record, force_refresh=force_refresh)
 
@@ -654,6 +671,9 @@ def _record_search_text(record: IpoPipelineRecord) -> str:
             record.industry or "",
             " ".join(record.underwriters),
             record.auditor or "",
+            record.parse_status or "",
+            record.parse_diagnostics or "",
+            record.parsed_source_document or "",
         ]
     ).lower()
 
@@ -683,6 +703,8 @@ def _sort_value(record: IpoPipelineRecord, column: str) -> Any:
         "underwriters": ", ".join(record.underwriters) if record.underwriters else None,
         "auditor": record.auditor,
         "risk_flags": len(record.risk_flags),
+        "parse_status": record.parse_status,
+        "parse_source": record.parsed_source_document or record.parsed_source_url,
         "filing_link": record.filing_url,
     }
     return mapping.get(column)

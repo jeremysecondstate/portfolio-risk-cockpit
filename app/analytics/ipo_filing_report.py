@@ -7,18 +7,19 @@ from pathlib import Path
 from typing import Iterable
 
 from app.analytics.ipo_pipeline import (
+    IpoDocumentCandidate,
     IpoPipelineRecord,
     ParsedIpoFields,
     analyze_text_risk_flags,
-    fetch_primary_ipo_document_text,
+    fetch_ipo_document_text_with_source,
     parse_ipo_filing_text,
-    primary_ipo_document_url,
+    related_prospectus_filing_for_report,
     unique_flags,
 )
 from app.data.sec_edgar import SecCurrentFiling, SecEdgarClient, normalize_cik
 
 
-REPORTABLE_IPO_FORMS = {"S-1", "S-1/A", "F-1", "F-1/A"}
+REPORTABLE_IPO_FORMS = {"S-1", "S-1/A", "F-1", "F-1/A", "424B4", "EFFECT"}
 DEFAULT_IPO_REPORT_DIR = Path("data") / "sec_ipo_reports"
 
 
@@ -41,6 +42,13 @@ class IpoFilingReport:
     accession_number: str
     filed_date: str
     source_url: str
+    selected_form: str
+    selected_accession_number: str
+    source_form: str
+    source_accession_number: str
+    source_document: str
+    source_document_size: int | None
+    source_selection_reason: str
     parsed: ParsedIpoFields
     business_description: str
     why_interesting: tuple[str, ...]
@@ -91,24 +99,28 @@ def generate_ipo_filing_report(
 
     paths = ipo_report_paths(record, output_root=output_root)
     if not force_refresh and paths.markdown_path.exists() and paths.pdf_path.exists():
-        return GeneratedIpoFilingReport(
-            report=None,
-            paths=paths,
-            cached=True,
-            markdown=_safe_read_text(paths.markdown_path),
-        )
+        cached_markdown = _safe_read_text(paths.markdown_path)
+        if "Parsed source:" in cached_markdown:
+            return GeneratedIpoFilingReport(
+                report=None,
+                paths=paths,
+                cached=True,
+                markdown=cached_markdown,
+            )
 
     if not reportable_ipo_form(record.form):
-        raise ValueError(f"IPO filing reports are supported for S-1/F-1 rows, not {record.form or 'unknown form'}.")
+        raise ValueError(f"IPO filing reports are supported for S-1/F-1, 424B4, and EFFECT rows, not {record.form or 'unknown form'}.")
 
     client = client or SecEdgarClient()
-    filing = sec_current_filing_from_record(record)
-    source_url = primary_ipo_document_url(client, filing)
-    text = fetch_primary_ipo_document_text(client, filing)
+    selected_filing = sec_current_filing_from_record(record)
+    source_filing = related_prospectus_filing_for_report(client, selected_filing)
+    fetched = fetch_ipo_document_text_with_source(client, source_filing)
     return save_ipo_filing_report(
         record,
-        text,
-        source_url=source_url,
+        fetched.text,
+        source_url=fetched.candidate.url,
+        source_filing=source_filing,
+        source_document=fetched.candidate,
         output_root=output_root,
         force_refresh=True,
     )
@@ -119,6 +131,8 @@ def save_ipo_filing_report(
     filing_text: str,
     *,
     source_url: str = "",
+    source_filing: SecCurrentFiling | None = None,
+    source_document: IpoDocumentCandidate | None = None,
     output_root: str | Path = DEFAULT_IPO_REPORT_DIR,
     force_refresh: bool = False,
 ) -> GeneratedIpoFilingReport:
@@ -131,7 +145,13 @@ def save_ipo_filing_report(
             markdown=_safe_read_text(paths.markdown_path),
         )
 
-    report = build_ipo_filing_report(record, filing_text, source_url=source_url)
+    report = build_ipo_filing_report(
+        record,
+        filing_text,
+        source_url=source_url,
+        source_filing=source_filing,
+        source_document=source_document,
+    )
     markdown = render_ipo_filing_report_markdown(report)
     paths.output_dir.mkdir(parents=True, exist_ok=True)
     _atomic_write_text(paths.markdown_path, markdown)
@@ -175,9 +195,13 @@ def build_ipo_filing_report(
     filing_text: str,
     *,
     source_url: str = "",
+    source_filing: SecCurrentFiling | None = None,
+    source_document: IpoDocumentCandidate | None = None,
 ) -> IpoFilingReport:
     normalized = _normalize_text(filing_text)
-    parsed = _enhance_report_fields(record, parse_ipo_filing_text(normalized, form=record.form), normalized)
+    source_form = (source_filing.form if source_filing is not None else record.form).strip().upper()
+    source_accession = source_filing.accession_number if source_filing is not None else record.accession_number
+    parsed = _enhance_report_fields(record, parse_ipo_filing_text(normalized, form=source_form), normalized)
     risks = tuple(unique_flags([*record.risk_flags, *parsed.risk_flags, *analyze_text_risk_flags(normalized)]))
     going_concern = any("going concern" in risk.lower() for risk in risks) or _has_going_concern_language(normalized)
     business = _business_description(record.company_name, normalized)
@@ -195,6 +219,13 @@ def build_ipo_filing_report(
         accession_number=record.accession_number,
         filed_date=record.filed_date,
         source_url=source_url or record.filing_url,
+        selected_form=record.form.strip().upper(),
+        selected_accession_number=record.accession_number,
+        source_form=source_form,
+        source_accession_number=source_accession,
+        source_document=source_document.name if source_document is not None else _primary_document_from_url(source_url or record.filing_url),
+        source_document_size=source_document.size if source_document is not None else None,
+        source_selection_reason=source_document.selection_reason if source_document is not None else "",
         parsed=parsed,
         business_description=business,
         why_interesting=tuple(_why_interesting_lines(record, normalized, business)),
@@ -219,6 +250,9 @@ def render_ipo_filing_report_markdown(report: IpoFilingReport) -> str:
         f"# {report.company_name} {report.form} Filing Report",
         "",
         f"Source: [{_source_label(report)}]({report.source_url})",
+        f"Selected row: {report.selected_form or report.form} accession {report.selected_accession_number or '--'}",
+        f"Parsed source: {report.source_form or report.form} accession {report.source_accession_number or '--'}"
+        + (f" document {report.source_document}" if report.source_document else ""),
         f"Filed: {report.filed_date or '--'} | CIK: {report.cik} | Accession: {report.accession_number or '--'}",
         "",
         "## The headline",
@@ -280,6 +314,10 @@ def render_ipo_filing_report_markdown(report: IpoFilingReport) -> str:
             "- This report is generated deterministically from the selected SEC filing text. It does not use an LLM or invent undisclosed terms.",
         ]
     )
+    if report.source_selection_reason:
+        lines.append(f"- Source selection: {report.source_selection_reason}")
+    if report.source_document_size is not None:
+        lines.append(f"- Source document size from SEC index: {report.source_document_size:,} bytes.")
     if report.raw_excerpt:
         lines.extend(["- Source excerpt used for fallback context:", "", report.raw_excerpt])
     return "\n".join(lines).strip() + "\n"
@@ -350,6 +388,12 @@ def _enhance_report_fields(record: IpoPipelineRecord, parsed: ParsedIpoFields, t
         auditor=parsed.auditor or record.auditor,
         risk_flags=tuple(unique_flags([*parsed.risk_flags, *record.risk_flags])),
         is_foreign_issuer=parsed.is_foreign_issuer if parsed.is_foreign_issuer is not None else record.is_foreign_issuer,
+        dilution_per_share=parsed.dilution_per_share,
+        going_concern=parsed.going_concern,
+        customer_concentration=parsed.customer_concentration,
+        related_party_transactions=parsed.related_party_transactions,
+        controlled_company=parsed.controlled_company,
+        vie_or_china_risk=parsed.vie_or_china_risk,
     )
 
 
@@ -402,9 +446,16 @@ def _extract_report_underwriters(text: str) -> list[str]:
 
 def _headline_lines(report: IpoFilingReport) -> list[str]:
     parsed = report.parsed
-    lines = [
-        f"- {report.company_name} filed a {report.form} registration statement for a proposed IPO.",
-    ]
+    if report.selected_form != report.source_form:
+        first_line = (
+            f"- Selected row is {report.selected_form}; this report parses the related "
+            f"{report.source_form} prospectus source."
+        )
+    elif report.form == "424B4":
+        first_line = f"- {report.company_name} filed a 424B4 final prospectus for the IPO."
+    else:
+        first_line = f"- {report.company_name} filed a {report.form} registration statement for a proposed IPO."
+    lines = [first_line]
     if parsed.shares_offered is not None:
         lines.append(f"- Shares offered: {_format_shares(parsed.shares_offered)}.")
     else:
@@ -950,7 +1001,8 @@ def _format_price_range(low: float, high: float) -> str:
 
 
 def _source_label(report: IpoFilingReport) -> str:
-    return f"SEC {report.form} primary filing"
+    document = f" {report.source_document}" if report.source_document else ""
+    return f"SEC {report.source_form or report.form}{document}"
 
 
 def _row_by_label(rows: Iterable[IpoReportFinancialRow], label: str) -> IpoReportFinancialRow | None:

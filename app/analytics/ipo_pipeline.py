@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -22,9 +23,16 @@ REGISTRATION_FORMS = {"S-1", "F-1"}
 AMENDMENT_FORMS = {"S-1/A", "F-1/A"}
 FINAL_PROSPECTUS_FORMS = {"424B4"}
 EFFECT_FORMS = {"EFFECT"}
+PROSPECTUS_SOURCE_FORMS = REGISTRATION_FORMS | AMENDMENT_FORMS | FINAL_PROSPECTUS_FORMS
 NOT_EXTRACTED = "Not extracted yet"
 NOT_DISCLOSED = "Not yet disclosed"
 EMPTY_VALUE = "--"
+PARSE_STATUS_NOT_PARSED = "Not parsed"
+PARSE_STATUS_PARSED = "Parsed"
+PARSE_STATUS_PARTIAL = "Partial"
+PARSE_STATUS_NO_DOCUMENT = "No prospectus doc"
+PARSE_STATUS_FAILED = "Parse failed"
+PARSE_STATUS_CACHED = "Cached"
 
 
 @dataclass(frozen=True)
@@ -47,6 +55,54 @@ class ParsedIpoFields:
     auditor: str | None = None
     risk_flags: tuple[str, ...] = ()
     is_foreign_issuer: bool | None = None
+    dilution_per_share: float | None = None
+    going_concern: bool | None = None
+    customer_concentration: bool | None = None
+    related_party_transactions: bool | None = None
+    controlled_company: bool | None = None
+    vie_or_china_risk: bool | None = None
+
+
+@dataclass(frozen=True)
+class IpoDocumentCandidate:
+    cik: str
+    company_name: str
+    form: str
+    filing_date: str
+    accession_number: str
+    name: str
+    url: str
+    document_type: str = ""
+    description: str = ""
+    sequence: str = ""
+    size: int | None = None
+    score: int = 0
+    selection_reason: str = ""
+    is_complete_submission: bool = False
+    source: str = "index"
+
+    @property
+    def accession_no_dashes(self) -> str:
+        return self.accession_number.replace("-", "")
+
+
+@dataclass(frozen=True)
+class IpoFetchedDocument:
+    candidate: IpoDocumentCandidate
+    text: str
+
+
+@dataclass(frozen=True)
+class IpoParseDiagnostics:
+    status: str
+    detail: str = ""
+    source_form: str = ""
+    source_accession_number: str = ""
+    source_document: str = ""
+    source_url: str = ""
+    source_size: int | None = None
+    source_reason: str = ""
+    cached: bool = False
 
 
 @dataclass(frozen=True)
@@ -83,6 +139,15 @@ class IpoPipelineRecord:
     is_foreign_issuer: bool = False
     has_final_prospectus: bool = False
     has_effect: bool = False
+    parse_status: str = PARSE_STATUS_NOT_PARSED
+    parse_diagnostics: str = ""
+    parsed_source_form: str = ""
+    parsed_source_accession_number: str = ""
+    parsed_source_document: str = ""
+    parsed_source_url: str = ""
+    parsed_source_size: int | None = None
+    parsed_source_reason: str = ""
+    parsed_from_cache: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -142,6 +207,103 @@ class IpoPipelineStore:
         temporary.replace(self.path)
 
 
+class IpoParsedFieldsStore:
+    def __init__(self, cache_dir: str | Path | None = None) -> None:
+        self.cache_dir = Path(cache_dir or DEFAULT_CACHE_DIR)
+        self.path = self.cache_dir / "ipo_parsed_fields.json"
+        self._payload: dict[str, Any] | None = None
+
+    def load(self, candidate: IpoDocumentCandidate) -> ParsedIpoFields | None:
+        entry = self._entries().get(ipo_parsed_field_cache_key(candidate))
+        if not isinstance(entry, dict):
+            return None
+        try:
+            return _parsed_fields_from_dict(entry.get("fields") or {})
+        except (TypeError, ValueError):
+            return None
+
+    def load_any(self, candidates: Iterable[IpoDocumentCandidate]) -> tuple[IpoDocumentCandidate, ParsedIpoFields] | None:
+        for candidate in candidates:
+            fields = self.load(candidate)
+            if fields is not None:
+                return candidate, fields
+        return None
+
+    def save(self, candidate: IpoDocumentCandidate, fields: ParsedIpoFields) -> None:
+        payload = self._load_payload()
+        entries = payload.setdefault("entries", {})
+        if not isinstance(entries, dict):
+            entries = {}
+            payload["entries"] = entries
+        entries[ipo_parsed_field_cache_key(candidate)] = {
+            "parsed_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            "metadata": {
+                "cik": candidate.cik,
+                "accession_number": candidate.accession_number,
+                "document": candidate.name,
+                "form": candidate.form,
+                "url": candidate.url,
+                "size": candidate.size,
+                "selection_reason": candidate.selection_reason,
+            },
+            "fields": _parsed_fields_to_dict(fields),
+        }
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        temporary.replace(self.path)
+        self._payload = payload
+
+    def _entries(self) -> dict[str, Any]:
+        entries = self._load_payload().get("entries")
+        return entries if isinstance(entries, dict) else {}
+
+    def _load_payload(self) -> dict[str, Any]:
+        if self._payload is not None:
+            return self._payload
+        if not self.path.exists():
+            self._payload = {"version": 1, "entries": {}}
+            return self._payload
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {"version": 1, "entries": {}}
+        if not isinstance(payload, dict):
+            payload = {"version": 1, "entries": {}}
+        payload.setdefault("version", 1)
+        payload.setdefault("entries", {})
+        self._payload = payload
+        return payload
+
+
+def ipo_parsed_field_cache_key(candidate: IpoDocumentCandidate) -> str:
+    raw = "|".join(
+        (
+            normalize_cik(candidate.cik),
+            candidate.accession_number,
+            candidate.name,
+            str(candidate.size or ""),
+            candidate.url,
+        )
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _parsed_fields_to_dict(fields: ParsedIpoFields) -> dict[str, Any]:
+    payload = asdict(fields)
+    payload["underwriters"] = list(fields.underwriters)
+    payload["risk_flags"] = list(fields.risk_flags)
+    return payload
+
+
+def _parsed_fields_from_dict(payload: dict[str, Any]) -> ParsedIpoFields:
+    values = dict(payload)
+    values["underwriters"] = tuple(values.get("underwriters") or ())
+    values["risk_flags"] = tuple(values.get("risk_flags") or ())
+    allowed = {field_name for field_name in ParsedIpoFields.__dataclass_fields__}
+    return ParsedIpoFields(**{key: value for key, value in values.items() if key in allowed})
+
+
 def is_ipo_form(form: str) -> bool:
     return form.strip().upper() in set(IPO_FORMS)
 
@@ -176,9 +338,11 @@ def build_ipo_pipeline_records(
     *,
     submissions_by_cik: dict[str, dict[str, Any]] | None = None,
     parsed_by_accession: dict[str, ParsedIpoFields] | None = None,
+    parse_diagnostics_by_cik: dict[str, IpoParseDiagnostics] | None = None,
 ) -> list[IpoPipelineRecord]:
     submissions_by_cik = submissions_by_cik or {}
     parsed_by_accession = parsed_by_accession or {}
+    parse_diagnostics_by_cik = parse_diagnostics_by_cik or {}
     grouped: dict[str, list[SecCurrentFiling]] = {}
     for filing in filings:
         if not is_ipo_form(filing.form):
@@ -192,6 +356,7 @@ def build_ipo_pipeline_records(
         forms = [filing.form for filing in sorted_group]
         submission = submissions_by_cik.get(cik) or {}
         parsed = _merge_parsed_fields([parsed_by_accession.get(filing.accession_number) for filing in sorted_group])
+        diagnostics = parse_diagnostics_by_cik.get(cik) or _default_parse_diagnostics(parsed_by_accession, sorted_group)
 
         ticker = parsed.proposed_ticker or _first_string(submission.get("tickers"))
         exchange = parsed.exchange or _first_string(submission.get("exchanges"))
@@ -240,6 +405,15 @@ def build_ipo_pipeline_records(
             is_foreign_issuer=is_foreign,
             has_final_prospectus=has_final,
             has_effect=has_effect,
+            parse_status=diagnostics.status,
+            parse_diagnostics=diagnostics.detail,
+            parsed_source_form=diagnostics.source_form,
+            parsed_source_accession_number=diagnostics.source_accession_number,
+            parsed_source_document=diagnostics.source_document,
+            parsed_source_url=diagnostics.source_url,
+            parsed_source_size=diagnostics.source_size,
+            parsed_source_reason=diagnostics.source_reason,
+            parsed_from_cache=diagnostics.cached,
         )
         risk_flags = unique_flags(
             [
@@ -264,7 +438,7 @@ def fetch_ipo_pipeline_snapshot(
     per_form_limit: int = 60,
     force_refresh: bool = False,
     parse_documents: bool = True,
-    parse_limit: int = 25,
+    parse_limit: int | None = None,
     enrich_limit: int = 120,
     cache_max_age: timedelta = timedelta(minutes=30),
 ) -> IpoPipelineSnapshot:
@@ -304,20 +478,72 @@ def fetch_ipo_pipeline_snapshot(
         except Exception as exc:
             errors.append(f"{cik} submissions: {exc}")
 
+    submission_filings: list[SecCurrentFiling] = []
+    current_company_names = _company_names_by_cik(filings)
+    for cik, submission in submissions_by_cik.items():
+        submission_filings.extend(
+            sec_current_filings_from_submission(
+                submission,
+                fallback_cik=cik,
+                fallback_company_name=current_company_names.get(cik, ""),
+            )
+        )
+
+    if submission_filings:
+        filings = _dedupe_filings([*filings, *submission_filings])
+        grouped = _group_filings_by_cik(filings)
+
     parsed_by_accession: dict[str, ParsedIpoFields] = {}
+    parse_diagnostics_by_cik: dict[str, IpoParseDiagnostics] = {}
     if parse_documents:
-        parse_candidates = _document_parse_candidates(grouped)[:parse_limit]
+        parsed_store = IpoParsedFieldsStore(client.cache_dir)
+        parse_candidates = _document_parse_candidates(grouped)
+        if parse_limit is not None:
+            parse_candidates = parse_candidates[: max(0, parse_limit)]
         for filing in parse_candidates:
+            cik = normalize_cik(filing.cik)
             try:
-                text = fetch_primary_ipo_document_text(client, filing)
-                parsed_by_accession[filing.accession_number] = parse_ipo_filing_text(text, form=filing.form)
+                document_candidates = ipo_document_candidates_for_filing(client, filing)
+                if not document_candidates:
+                    parse_diagnostics_by_cik[cik] = IpoParseDiagnostics(
+                        status=PARSE_STATUS_NO_DOCUMENT,
+                        detail=f"No prospectus-like document found in {filing.accession_number}.",
+                        source_form=filing.form,
+                        source_accession_number=filing.accession_number,
+                    )
+                    continue
+
+                cached = parsed_store.load_any(document_candidates)
+                if cached is not None:
+                    candidate, parsed = cached
+                    parsed_by_accession[candidate.accession_number] = parsed
+                    parse_diagnostics_by_cik[cik] = _parse_diagnostics_for_candidate(
+                        candidate,
+                        parsed,
+                        status=PARSE_STATUS_CACHED,
+                        cached=True,
+                    )
+                    continue
+
+                fetched = fetch_ipo_document_text_with_source(client, filing, candidates=document_candidates)
+                parsed = parse_ipo_filing_text(fetched.text, form=fetched.candidate.form)
+                parsed_store.save(fetched.candidate, parsed)
+                parsed_by_accession[fetched.candidate.accession_number] = parsed
+                parse_diagnostics_by_cik[cik] = _parse_diagnostics_for_candidate(fetched.candidate, parsed)
             except Exception as exc:
+                parse_diagnostics_by_cik[cik] = IpoParseDiagnostics(
+                    status=PARSE_STATUS_FAILED,
+                    detail=str(exc),
+                    source_form=filing.form,
+                    source_accession_number=filing.accession_number,
+                )
                 errors.append(f"{filing.accession_number} parse: {exc}")
 
     records = build_ipo_pipeline_records(
         filings,
         submissions_by_cik=submissions_by_cik,
         parsed_by_accession=parsed_by_accession,
+        parse_diagnostics_by_cik=parse_diagnostics_by_cik,
     )
     snapshot = IpoPipelineSnapshot(
         records=tuple(records),
@@ -330,42 +556,392 @@ def fetch_ipo_pipeline_snapshot(
     return snapshot
 
 
-def fetch_primary_ipo_document_text(client: SecEdgarClient, filing: SecCurrentFiling) -> str:
-    url = primary_ipo_document_url(client, filing)
-    return client.document_text_url(
-        url,
-        cache_name=f"ipo_document_{filing.cik}_{filing.accession_no_dashes}_{url.rsplit('/', 1)[-1]}.txt",
+def sec_current_filings_from_submission(
+    submission: dict[str, Any],
+    *,
+    fallback_cik: str = "",
+    fallback_company_name: str = "",
+) -> list[SecCurrentFiling]:
+    recent = ((submission.get("filings") or {}).get("recent") or {})
+    if not isinstance(recent, dict):
+        return []
+
+    cik = normalize_cik(submission.get("cik") or fallback_cik)
+    company_name = (
+        _clean_text(submission.get("name"))
+        or _clean_text(submission.get("entityName"))
+        or _clean_text(fallback_company_name)
+        or "Unknown company"
     )
+    sic = _clean_text(submission.get("sic"))
+    sic_description = _clean_text(submission.get("sicDescription"))
+
+    forms = list(recent.get("form") or [])
+    accessions = list(recent.get("accessionNumber") or [])
+    filing_dates = list(recent.get("filingDate") or [])
+    report_dates = list(recent.get("reportDate") or [])
+    primary_docs = list(recent.get("primaryDocument") or [])
+    acceptance_datetimes = list(recent.get("acceptanceDateTime") or [])
+
+    filings: list[SecCurrentFiling] = []
+    for index, raw_form in enumerate(forms):
+        form = str(raw_form or "").strip().upper()
+        if not is_ipo_form(form):
+            continue
+        accession = _safe_list_get(accessions, index)
+        if not accession:
+            continue
+        primary_document = _safe_list_get(primary_docs, index)
+        accession_no_dashes = accession.replace("-", "")
+        document_name = primary_document or f"{accession}-index.htm"
+        filing_url = f"{SEC_ARCHIVES_BASE_URL}/{int(cik)}/{accession_no_dashes}/{document_name}"
+        filings.append(
+            SecCurrentFiling(
+                company_name=company_name,
+                cik=cik,
+                form=form,
+                filing_date=_safe_list_get(filing_dates, index) or _safe_list_get(report_dates, index),
+                accession_number=accession,
+                filing_url=filing_url,
+                assigned_sic=sic,
+                assigned_sic_description=sic_description,
+                acceptance_datetime=_safe_list_get(acceptance_datetimes, index),
+                primary_document=primary_document,
+            )
+        )
+    return filings
+
+
+def related_prospectus_filing_for_report(client: SecEdgarClient, filing: SecCurrentFiling) -> SecCurrentFiling:
+    normalized_form = filing.form.strip().upper()
+    if normalized_form in PROSPECTUS_SOURCE_FORMS:
+        return filing
+
+    submission = client.get_submissions_by_cik(filing.cik)
+    related = sec_current_filings_from_submission(
+        submission,
+        fallback_cik=filing.cik,
+        fallback_company_name=filing.company_name,
+    )
+    selected = _best_prospectus_filing(related)
+    if selected is None:
+        raise RuntimeError(f"No related S-1/F-1/424B4 prospectus found for {filing.company_name} ({filing.cik}).")
+    return selected
+
+
+def fetch_primary_ipo_document_text(client: SecEdgarClient, filing: SecCurrentFiling) -> str:
+    return fetch_ipo_document_text_with_source(client, filing).text
+
+
+def fetch_ipo_document_text_with_source(
+    client: SecEdgarClient,
+    filing: SecCurrentFiling,
+    *,
+    candidates: tuple[IpoDocumentCandidate, ...] | None = None,
+) -> IpoFetchedDocument:
+    candidates = candidates or ipo_document_candidates_for_filing(client, filing)
+    if not candidates:
+        raise RuntimeError(f"No primary document URL found for {filing.accession_number}.")
+
+    primary = candidates[0]
+    text = _fetch_candidate_text(client, primary)
+    if primary.is_complete_submission or not _prospectus_text_is_too_thin(text):
+        return IpoFetchedDocument(candidate=primary, text=text)
+
+    complete = next((candidate for candidate in candidates if candidate.is_complete_submission), None)
+    if complete is None:
+        return IpoFetchedDocument(candidate=primary, text=text)
+
+    fallback_text = _fetch_candidate_text(client, complete)
+    if len(_collapse_text(fallback_text)) <= len(_collapse_text(text)):
+        return IpoFetchedDocument(candidate=primary, text=text)
+
+    fallback = IpoDocumentCandidate(
+        **{
+            **asdict(complete),
+            "selection_reason": f"Complete-submission fallback; primary candidate {primary.name} was too thin.",
+        }
+    )
+    return IpoFetchedDocument(candidate=fallback, text=fallback_text)
 
 
 def primary_ipo_document_url(client: SecEdgarClient, filing: SecCurrentFiling) -> str:
-    if filing.primary_document and not filing.primary_document.endswith("-index.htm"):
+    candidate = select_ipo_document_candidate(client, filing)
+    if candidate is not None:
+        return candidate.url
+    if filing.filing_url:
         return filing.filing_url
+    raise RuntimeError(f"No primary document URL found for {filing.accession_number}.")
 
-    items = client.filing_index_items_for_accession(filing.cik, filing.accession_number)
-    candidates: list[tuple[int, str]] = []
+
+def select_ipo_document_candidate(client: SecEdgarClient, filing: SecCurrentFiling) -> IpoDocumentCandidate | None:
+    candidates = ipo_document_candidates_for_filing(client, filing)
+    return candidates[0] if candidates else None
+
+
+def ipo_document_candidates_for_filing(client: SecEdgarClient, filing: SecCurrentFiling) -> tuple[IpoDocumentCandidate, ...]:
+    candidates_by_url: dict[str, IpoDocumentCandidate] = {}
+
+    primary_name = filing.primary_document.strip() if filing.primary_document else ""
+    if primary_name and _looks_like_text_filing_document(primary_name):
+        primary_candidate = _document_candidate_from_parts(
+            filing,
+            name=primary_name,
+            document_type=filing.form,
+            description="SEC primary document",
+            sequence="",
+            size=None,
+            source="primary",
+        )
+        candidates_by_url[primary_candidate.url] = primary_candidate
+
+    try:
+        items = client.filing_index_items_for_accession(filing.cik, filing.accession_number)
+    except Exception:
+        items = []
     for item in items:
         if not isinstance(item, dict):
             continue
         name = str(item.get("name") or "")
-        document_type = str(item.get("type") or "").upper()
-        if not _looks_like_text_filing_document(name):
+        if not name or name.endswith("/"):
             continue
-        score = 5
-        if document_type == filing.form.upper():
-            score = 0
-        elif _form_slug(filing.form) in name.lower():
-            score = 1
-        elif name.lower().endswith((".htm", ".html")):
-            score = 2
-        candidates.append((score, name))
+        candidate = _document_candidate_from_parts(
+            filing,
+            name=name,
+            document_type=str(item.get("type") or ""),
+            description=str(item.get("description") or ""),
+            sequence=str(item.get("sequence") or ""),
+            size=_to_int(item.get("size")),
+            source="index",
+        )
+        if candidate is None:
+            continue
+        previous = candidates_by_url.get(candidate.url)
+        if previous is None or _document_candidate_sort_key(candidate) < _document_candidate_sort_key(previous):
+            candidates_by_url[candidate.url] = candidate
 
-    if candidates:
-        name = sorted(candidates)[0][1]
-        return f"{SEC_ARCHIVES_BASE_URL}/{int(normalize_cik(filing.cik))}/{filing.accession_no_dashes}/{name}"
-    if filing.filing_url:
-        return filing.filing_url
-    raise RuntimeError(f"No primary document URL found for {filing.accession_number}.")
+    if not any(candidate.is_complete_submission for candidate in candidates_by_url.values()):
+        complete = _document_candidate_from_parts(
+            filing,
+            name=f"{filing.accession_number}.txt",
+            document_type="",
+            description="Complete submission text file",
+            sequence="",
+            size=None,
+            source="synthetic",
+        )
+        if complete is not None:
+            candidates_by_url.setdefault(complete.url, complete)
+
+    return tuple(sorted(candidates_by_url.values(), key=_document_candidate_sort_key))
+
+
+def _document_candidate_from_parts(
+    filing: SecCurrentFiling,
+    *,
+    name: str,
+    document_type: str,
+    description: str,
+    sequence: str,
+    size: int | None,
+    source: str,
+) -> IpoDocumentCandidate | None:
+    if not _looks_like_text_filing_document(name):
+        return None
+
+    cik = normalize_cik(filing.cik)
+    accession_no_dashes = filing.accession_number.replace("-", "")
+    url = f"{SEC_ARCHIVES_BASE_URL}/{int(cik)}/{accession_no_dashes}/{name}"
+    haystack = f"{document_type} {name} {description}".lower()
+    is_complete = _is_complete_submission_document(name, description)
+    score = _score_ipo_document_candidate(filing.form, name, document_type, description, is_complete=is_complete)
+    if score is None:
+        return None
+    return IpoDocumentCandidate(
+        cik=cik,
+        company_name=filing.company_name,
+        form=filing.form.strip().upper(),
+        filing_date=filing.filing_date,
+        accession_number=filing.accession_number,
+        name=name,
+        url=url,
+        document_type=document_type.strip().upper(),
+        description=description,
+        sequence=sequence,
+        size=size,
+        score=score,
+        selection_reason=_document_selection_reason(filing.form, name, document_type, description, is_complete=is_complete, haystack=haystack),
+        is_complete_submission=is_complete,
+        source=source,
+    )
+
+
+def _score_ipo_document_candidate(
+    filing_form: str,
+    name: str,
+    document_type: str,
+    description: str,
+    *,
+    is_complete: bool,
+) -> int | None:
+    lower_name = name.lower()
+    lower_type = document_type.strip().upper()
+    haystack = f"{document_type} {name} {description}".lower()
+    if _is_non_prospectus_document(lower_name, haystack):
+        return None
+    if is_complete:
+        return 80
+
+    form = filing_form.strip().upper()
+    form_slug = _form_slug(form)
+    normalized_haystack = haystack.replace("-", "").replace("_", "")
+    extension_bonus = 0 if lower_name.endswith((".htm", ".html")) else 8
+    size_bonus = -2 if "prospectus" in haystack else 0
+
+    if lower_type == form:
+        return 0 + extension_bonus + size_bonus
+    if form == "424B4" and ("424b4" in normalized_haystack or "final prospectus" in haystack):
+        return 1 + extension_bonus + size_bonus
+    if form_slug and form_slug in normalized_haystack:
+        return 2 + extension_bonus + size_bonus
+    if "prospectus" in haystack:
+        return 5 + extension_bonus
+    if lower_name.endswith((".htm", ".html")) and not _looks_like_exhibit(haystack):
+        return 20
+    if lower_name.endswith(".txt"):
+        return 50
+    return None
+
+
+def _document_selection_reason(
+    filing_form: str,
+    name: str,
+    document_type: str,
+    description: str,
+    *,
+    is_complete: bool,
+    haystack: str,
+) -> str:
+    form = filing_form.strip().upper()
+    if is_complete:
+        return "Complete submission text fallback."
+    if document_type.strip().upper() == form:
+        return f"Document type matches selected SEC form {form}."
+    if form == "424B4" and ("424b4" in haystack or "final prospectus" in haystack):
+        return "Final prospectus document matched 424B4/prospectus terms."
+    if _form_slug(form) in haystack.replace("-", "").replace("_", ""):
+        return f"Filename or description matches {form} prospectus form."
+    if "prospectus" in haystack:
+        return "Prospectus term found in filename or description."
+    return "Best available HTML filing document."
+
+
+def _document_candidate_sort_key(candidate: IpoDocumentCandidate) -> tuple[int, int, str]:
+    size_rank = -(candidate.size or 0)
+    return candidate.score, size_rank, candidate.name.lower()
+
+
+def _fetch_candidate_text(client: SecEdgarClient, candidate: IpoDocumentCandidate) -> str:
+    return client.document_text_url(
+        candidate.url,
+        cache_name=(
+            f"companies/{normalize_cik(candidate.cik)}/filings/{candidate.accession_no_dashes}/"
+            f"ipo_documents/{_safe_cache_part(candidate.name)}.txt"
+        ),
+    )
+
+
+def _prospectus_text_is_too_thin(text: str) -> bool:
+    clean = _collapse_text(text)
+    if len(clean) < 2500:
+        return True
+    lower = clean[:12000].lower()
+    return not any(term in lower for term in ("prospectus", "the offering", "risk factors", "use of proceeds"))
+
+
+def _is_complete_submission_document(name: str, description: str) -> bool:
+    lower = f"{name} {description}".lower()
+    return "complete submission" in lower or bool(re.fullmatch(r"\d{10}-\d{2}-\d{6}\.txt", name.lower()))
+
+
+def _is_non_prospectus_document(lower_name: str, haystack: str) -> bool:
+    if lower_name.endswith("-index.htm") or lower_name in {"index.htm", "index.html", "index.json"}:
+        return True
+    if lower_name.endswith((".xml", ".xsd", ".jpg", ".jpeg", ".png", ".gif", ".css", ".js", ".json")):
+        return True
+    if any(term in lower_name for term in ("filingsummary", "metadata", "calculation", "schema")):
+        return True
+    if _looks_like_exhibit(haystack):
+        return True
+    return False
+
+
+def _looks_like_exhibit(haystack: str) -> bool:
+    exhibit_terms = (
+        "ex-",
+        "exhibit",
+        "graphic",
+        "logo",
+        "opinion",
+        "consent",
+        "power of attorney",
+        "bylaws",
+        "certificate",
+        "xbrl",
+        "taxonomy",
+        "cover page interactive data",
+    )
+    if "complete submission" in haystack:
+        return False
+    if "prospectus" in haystack and not any(term in haystack for term in ("ex-99", "exhibit 99")):
+        return False
+    return any(term in haystack for term in exhibit_terms)
+
+
+def _parse_diagnostics_for_candidate(
+    candidate: IpoDocumentCandidate,
+    parsed: ParsedIpoFields,
+    *,
+    status: str | None = None,
+    cached: bool = False,
+) -> IpoParseDiagnostics:
+    field_count = _parsed_field_count(parsed)
+    resolved_status = status or (PARSE_STATUS_PARSED if field_count >= 3 else PARSE_STATUS_PARTIAL)
+    detail = f"{resolved_status}: {field_count} field(s) extracted from {candidate.name}."
+    if candidate.selection_reason:
+        detail = f"{detail} {candidate.selection_reason}"
+    return IpoParseDiagnostics(
+        status=resolved_status,
+        detail=detail,
+        source_form=candidate.form,
+        source_accession_number=candidate.accession_number,
+        source_document=candidate.name,
+        source_url=candidate.url,
+        source_size=candidate.size,
+        source_reason=candidate.selection_reason,
+        cached=cached,
+    )
+
+
+def _default_parse_diagnostics(
+    parsed_by_accession: dict[str, ParsedIpoFields],
+    filings: Iterable[SecCurrentFiling],
+) -> IpoParseDiagnostics:
+    for filing in filings:
+        parsed = parsed_by_accession.get(filing.accession_number)
+        if parsed is not None:
+            return IpoParseDiagnostics(status=PARSE_STATUS_PARSED if _parsed_field_count(parsed) >= 3 else PARSE_STATUS_PARTIAL)
+    return IpoParseDiagnostics(status=PARSE_STATUS_NOT_PARSED)
+
+
+def _parsed_field_count(parsed: ParsedIpoFields) -> int:
+    count = 0
+    for key, value in asdict(parsed).items():
+        if key in {"underwriters", "risk_flags"}:
+            count += 1 if value else 0
+        elif value not in (None, "", False):
+            count += 1
+    return count
 
 
 def parse_ipo_filing_text(text: str, *, form: str = "") -> ParsedIpoFields:
@@ -376,15 +952,31 @@ def parse_ipo_filing_text(text: str, *, form: str = "") -> ParsedIpoFields:
     price_low, price_high = _extract_price_range(clean_text)
     proposed_ticker = _extract_ticker(clean_text)
     exchange = _extract_exchange(clean_text)
-    revenue = _extract_money_after_terms(clean_text, ("revenue", "revenues", "net sales"))
-    net_income = _extract_money_after_terms(clean_text, ("net income", "net loss"))
+    table_multiplier = _table_amount_multiplier(clean_text)
+    revenue = (
+        _extract_financial_row_value(clean_text, (r"Revenue", r"Revenues", r"Net sales"), table_multiplier)
+        or _extract_money_after_terms(clean_text, ("revenue", "revenues", "net sales"))
+    )
+    gross_profit = _extract_financial_row_value(clean_text, (r"Gross profit",), table_multiplier)
+    net_income = (
+        _extract_financial_row_value(clean_text, (r"Net income \(loss\)", r"Net loss", r"Net income"), table_multiplier)
+        or _extract_money_after_terms(clean_text, ("net income", "net loss"))
+    )
     if net_income is not None and _near_term(clean_text, "net loss", net_income):
         net_income = -abs(net_income)
     gross_margin = _extract_percent_after_terms(clean_text, ("gross margin", "gross profit margin"))
+    if gross_margin is None and revenue not in (None, 0) and gross_profit is not None:
+        gross_margin = gross_profit / revenue * 100
     cash = _extract_money_after_terms(clean_text, ("cash and cash equivalents", "cash equivalents"))
     debt = _extract_money_after_terms(clean_text, ("total debt", "indebtedness"))
     risk_flags = analyze_text_risk_flags(clean_text)
     is_foreign = form.upper().startswith("F-1") or "foreign private issuer" in clean_text.lower()
+    lower = clean_text.lower()
+    going_concern = "going concern" in lower or "substantial doubt about our ability to continue" in lower
+    customer_concentration = any(term in lower for term in ("customer concentration", "major customer", "significant customer"))
+    related_party = any(term in lower for term in ("related party", "related-party", "transactions with related parties"))
+    controlled_company = "controlled company" in lower
+    vie_or_china = any(term in lower for term in ("variable interest entity", " vie ", "china-based", "prc"))
 
     return ParsedIpoFields(
         proposed_ticker=proposed_ticker,
@@ -405,6 +997,12 @@ def parse_ipo_filing_text(text: str, *, form: str = "") -> ParsedIpoFields:
         auditor=_extract_auditor(clean_text),
         risk_flags=tuple(risk_flags),
         is_foreign_issuer=is_foreign,
+        dilution_per_share=_extract_per_share_value_near(clean_text, ("immediate dilution", "dilution per share", "dilution to new investors")),
+        going_concern=going_concern,
+        customer_concentration=customer_concentration,
+        related_party_transactions=related_party,
+        controlled_company=controlled_company,
+        vie_or_china_risk=vie_or_china,
     )
 
 
@@ -563,6 +1161,12 @@ def _merge_parsed_fields(values: Iterable[ParsedIpoFields | None]) -> ParsedIpoF
         auditor=merged.get("auditor"),
         risk_flags=tuple(unique_flags(risk_flags)),
         is_foreign_issuer=merged.get("is_foreign_issuer"),
+        dilution_per_share=merged.get("dilution_per_share"),
+        going_concern=merged.get("going_concern"),
+        customer_concentration=merged.get("customer_concentration"),
+        related_party_transactions=merged.get("related_party_transactions"),
+        controlled_company=merged.get("controlled_company"),
+        vie_or_china_risk=merged.get("vie_or_china_risk"),
     )
 
 
@@ -587,10 +1191,45 @@ def _latest_ciks(grouped: dict[str, list[SecCurrentFiling]]) -> list[str]:
 def _document_parse_candidates(grouped: dict[str, list[SecCurrentFiling]]) -> list[SecCurrentFiling]:
     candidates: list[SecCurrentFiling] = []
     for filings in grouped.values():
-        parseable = [filing for filing in filings if filing.form in {"S-1", "S-1/A", "F-1", "F-1/A", "424B4"}]
-        if parseable:
-            candidates.append(sorted(parseable, key=lambda item: _date_sort_key(item.filing_date), reverse=True)[0])
+        selected = _best_prospectus_filing(filings)
+        if selected is not None:
+            candidates.append(selected)
     return sorted(candidates, key=lambda filing: _date_sort_key(filing.filing_date), reverse=True)
+
+
+def _best_prospectus_filing(
+    filings: Iterable[SecCurrentFiling],
+    *,
+    reference_date: str | None = None,
+) -> SecCurrentFiling | None:
+    parseable = [filing for filing in filings if filing.form.strip().upper() in PROSPECTUS_SOURCE_FORMS]
+    if reference_date:
+        dated = [filing for filing in parseable if _date_sort_key(filing.filing_date) <= _date_sort_key(reference_date)]
+        if dated:
+            parseable = dated
+    if not parseable:
+        return None
+    return sorted(parseable, key=_prospectus_filing_rank)[0]
+
+
+def _prospectus_filing_rank(filing: SecCurrentFiling) -> tuple[int, str, str]:
+    form = filing.form.strip().upper()
+    if form in FINAL_PROSPECTUS_FORMS:
+        form_score = 0
+    elif form in AMENDMENT_FORMS:
+        form_score = 1
+    elif form in REGISTRATION_FORMS:
+        form_score = 2
+    else:
+        form_score = 9
+    return form_score, _reverse_date_sort_key(filing.filing_date), filing.accession_number
+
+
+def _company_names_by_cik(filings: Iterable[SecCurrentFiling]) -> dict[str, str]:
+    names: dict[str, str] = {}
+    for filing in filings:
+        names.setdefault(normalize_cik(filing.cik), filing.company_name)
+    return names
 
 
 def _date_sort_key(value: str) -> str:
@@ -598,6 +1237,14 @@ def _date_sort_key(value: str) -> str:
         return datetime.strptime(value[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
     except (TypeError, ValueError):
         return "0000-00-00"
+
+
+def _reverse_date_sort_key(value: str) -> str:
+    try:
+        date = datetime.strptime(value[:10], "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return "9999-99-99"
+    return f"{9999 - date.year:04d}-{12 - date.month:02d}-{31 - date.day:02d}"
 
 
 def _looks_like_text_filing_document(name: str) -> bool:
@@ -626,6 +1273,27 @@ def _first_string(value: Any) -> str | None:
         return None
     clean = _clean_text(value)
     return clean or None
+
+
+def _safe_list_get(values: list[Any], index: int) -> str:
+    try:
+        return str(values[index] or "")
+    except IndexError:
+        return ""
+
+
+def _to_int(value: Any) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_cache_part(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(value).strip())
+    return safe.strip("._") or "_"
 
 
 def _collapse_text(text: str) -> str:
@@ -665,9 +1333,15 @@ def _extract_exchange(text: str) -> str | None:
 
 
 def _extract_price_range(text: str) -> tuple[float | None, float | None]:
-    match = re.search(r"between\s+\$?\s*([0-9]+(?:\.[0-9]+)?)\s+and\s+\$?\s*([0-9]+(?:\.[0-9]+)?)", text, flags=re.IGNORECASE)
-    if match:
-        return float(match.group(1)), float(match.group(2))
+    range_patterns = (
+        r"between\s+\$?\s*([0-9]+(?:\.[0-9]+)?)\s+and\s+\$?\s*([0-9]+(?:\.[0-9]+)?)",
+        r"price\s+range\s+(?:of\s+)?\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:-|to|and)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)",
+        r"estimated\s+(?:initial\s+)?public\s+offering\s+price\s+(?:range\s+)?(?:of\s+)?\$?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:-|to|and)\s*\$?\s*([0-9]+(?:\.[0-9]+)?)",
+    )
+    for pattern in range_patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return float(match.group(1)), float(match.group(2))
     match = re.search(r"(?:public offering price|initial public offering price)\s+(?:of|is)\s+\$?\s*([0-9]+(?:\.[0-9]+)?)", text, flags=re.IGNORECASE)
     if match:
         value = float(match.group(1))
@@ -685,6 +1359,56 @@ def _extract_money_after_terms(text: str, terms: tuple[str, ...]) -> float | Non
         if value is not None:
             return value
     return None
+
+
+def _extract_financial_row_value(text: str, labels: tuple[str, ...], default_multiplier: float) -> float | None:
+    for label in labels:
+        match = re.search(
+            rf"(?<![A-Za-z0-9]){label}(?![A-Za-z0-9])"
+            rf"[^$\d(]{{0,80}}"
+            rf"(\(?\$?\s*-?[0-9][0-9,.]*(?:\s*(?:billion|million|thousand|B|M|K))?\)?)"
+            rf"(?:\s+\(?\$?\s*-?[0-9][0-9,.]*(?:\s*(?:billion|million|thousand|B|M|K))?\)?)?",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            continue
+        value = _parse_money_amount(match.group(1), default_multiplier=default_multiplier)
+        if value is None:
+            continue
+        if "loss" in label.lower() or (label.lower() == "net income" and _near_term(text, "net loss", value)):
+            value = -abs(value)
+        return value
+    return None
+
+
+def _parse_money_amount(value: str | None, *, default_multiplier: float = 1) -> float | None:
+    if value is None:
+        return None
+    raw = value.strip()
+    negative = raw.startswith("-") or (raw.startswith("(") and raw.endswith(")"))
+    clean = raw.strip("()").replace("$", "").replace(",", "").replace(" ", "")
+    multiplier = default_multiplier
+    lower = clean.lower()
+    for suffix, scale in (("billion", 1_000_000_000), ("million", 1_000_000), ("thousand", 1_000), ("b", 1_000_000_000), ("m", 1_000_000), ("k", 1_000)):
+        if lower.endswith(suffix):
+            multiplier = scale
+            clean = clean[: -len(suffix)]
+            break
+    try:
+        parsed = float(clean) * multiplier
+    except ValueError:
+        return None
+    return -abs(parsed) if negative else parsed
+
+
+def _table_amount_multiplier(text: str) -> float:
+    head = text[:12000].lower()
+    if "in thousands" in head or "$ in thousands" in head:
+        return 1_000
+    if "in millions" in head or "$ in millions" in head:
+        return 1_000_000
+    return 1
 
 
 def _first_money_value(window: str) -> float | None:
@@ -723,7 +1447,11 @@ def _extract_percent_after_terms(text: str, terms: tuple[str, ...]) -> float | N
 
 
 def _extract_shares_offered(text: str) -> float | None:
-    match = re.search(r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*(million|thousand)?\s+shares", text, flags=re.IGNORECASE)
+    match = re.search(
+        r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*(million|thousand)?\s+(?:ordinary\s+shares|common\s+stock|shares)",
+        text,
+        flags=re.IGNORECASE,
+    )
     if not match:
         return None
     shares = float(match.group(1).replace(",", ""))
@@ -733,6 +1461,22 @@ def _extract_shares_offered(text: str) -> float | None:
     elif scale == "thousand":
         shares *= 1_000
     return shares
+
+
+def _extract_per_share_value_near(text: str, terms: tuple[str, ...]) -> float | None:
+    lower = text.lower()
+    for term in terms:
+        index = lower.find(term)
+        if index < 0:
+            continue
+        window = text[index : index + 520]
+        dollar_values = [float(value) for value in re.findall(r"\$\s*([0-9]+(?:\.[0-9]+)?)", window) if 0 <= float(value) < 200]
+        if dollar_values and "dilution" in term:
+            return dollar_values[0]
+        values = [float(value) for value in re.findall(r"\$?\s*([0-9]+(?:\.[0-9]+)?)", window) if 0 <= float(value) < 200]
+        if values:
+            return values[-1] if "dilution" in term else values[0]
+    return None
 
 
 def _extract_section_snippet(text: str, heading: str) -> str | None:
