@@ -228,7 +228,6 @@ class OpenAiIpoReportClient:
                         "strict": True,
                     }
                 },
-                temperature=0,
                 store=False,
             )
         except Exception as exc:

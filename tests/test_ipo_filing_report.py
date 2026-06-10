@@ -583,7 +583,7 @@ def test_openai_ipo_report_uses_responses_structured_outputs_with_mocked_client(
 
     call = fake_openai.responses.calls[0]
     assert call["model"] == "gpt-test"
-    assert call["temperature"] == 0
+    assert "temperature" not in call
     assert call["store"] is False
     assert call["text"]["format"]["type"] == "json_schema"
     assert call["text"]["format"]["strict"] is True
