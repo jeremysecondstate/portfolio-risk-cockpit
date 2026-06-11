@@ -748,6 +748,10 @@ def _verified_offering_terms(index: _FilingContextIndex) -> dict[str, Any]:
         facts["underwriters"] = _fact(underwriter_value, combined, underwriter_value.split(" is ")[0].split(" are ")[0])
     elif re.search(r"Roth Capital Partners", combined, flags=re.IGNORECASE) and re.search(r"Benchmark", combined, flags=re.IGNORECASE):
         facts["underwriters"] = _fact("Roth Capital Partners and Benchmark are joint book-running managers / representatives", combined, "Roth Capital Partners Benchmark")
+    bookrunner_value = _bookrunner_fact_value(combined)
+    if bookrunner_value:
+        facts["bookrunners"] = _fact(bookrunner_value, combined, bookrunner_value.split("\u2014", 1)[0].strip())
+        facts["bookrunners"]["instruction"] = "Use this exact value for any Bookrunners or Book-Runner offering-table row; do not mark bookrunners as Not disclosed."
 
     proceeds = _fact_source_text(index, names=("use_of_proceeds",), spec=_use_of_proceeds_spec(max_sections=1), fallback_terms=("net proceeds", "use of proceeds", "we intend to use"))
     if "net proceeds of approximately" not in proceeds.lower():
@@ -783,28 +787,19 @@ def _currency_prefix(value: str) -> str:
 
 
 def _underwriter_fact_value(text: str) -> str:
-    descriptor_match = re.search(r"\b(Sole\s+Book-?Runner|Joint\s+Book-Running Managers?|Joint\s+Book-?Runners?)\b", text or "", flags=re.IGNORECASE)
-    if descriptor_match:
-        prefix = (text or "")[max(0, descriptor_match.start() - 220) : descriptor_match.start()]
-        name_match = re.search(
-            r"([A-Z][A-Za-z0-9&,' \-]{2,120}(?:Co\.,\s*)?(?:LLC|L\.L\.C\.|Inc\.?|Ltd\.?|Company|Capital|Securities|Partners))\s*$",
-            prefix,
-            flags=re.IGNORECASE,
-        )
-        if name_match:
-            name = _clean_underwriter_phrase(name_match.group(1))
-            if _looks_like_underwriter_name(name):
-                descriptor = descriptor_match.group(1).lower()
-                if "sole" in descriptor:
-                    return f"{name} is sole book-runner / representative"
-                if "joint" in descriptor:
-                    return f"{name} are joint book-running managers / representatives"
-                return name
+    bookrunner = _bookrunner_name_and_role(text)
+    if bookrunner is not None:
+        name, role = bookrunner
+        if role.lower().startswith("sole"):
+            return f"{name} is sole book-runner / representative"
+        if role.lower().startswith("joint"):
+            return f"{name} are joint book-running managers / representatives"
+        return name
 
     lines = [re.sub(r"\s+", " ", line).strip(" .") for line in (text or "").splitlines()]
     for index, line in enumerate(lines):
         lower = line.lower()
-        if not re.search(r"\b(?:sole|joint)?\s*book-?runner|\bbook-running manager|\brepresentative\b", lower):
+        if not re.search(r"\b(?:sole|joint)?\s*book\s*-?\s*runner|\bbook\s*-?\s*running manager|\brepresentative\b", lower):
             continue
         for candidate in (lines[index - 1] if index > 0 else "", lines[index + 1] if index + 1 < len(lines) else ""):
             name = _clean_underwriter_phrase(candidate)
@@ -835,10 +830,60 @@ def _underwriter_fact_value(text: str) -> str:
     return ""
 
 
+def _bookrunner_fact_value(text: str) -> str:
+    bookrunner = _bookrunner_name_and_role(text)
+    if bookrunner is None:
+        return ""
+    name, role = bookrunner
+    return f"{name} \u2014 {role}"
+
+
+def _bookrunner_name_and_role(text: str) -> tuple[str, str] | None:
+    clean_text = re.sub(r"\s+", " ", text or "").strip()
+    descriptor_pattern = r"(Sole\s+Book\s*-?\s*Runner|Joint\s+Book\s*-?\s*Running\s+Managers?|Joint\s+Book\s*-?\s*Runners?)"
+    descriptor_match = re.search(rf"\b{descriptor_pattern}\b", clean_text, flags=re.IGNORECASE)
+    if descriptor_match:
+        prefix = clean_text[max(0, descriptor_match.start() - 260) : descriptor_match.start()]
+        prefix = re.split(r"(?<=[.;:])\s+", prefix.strip())[-1]
+        name_match = re.search(
+            r"([A-Z][A-Za-z0-9&.,' \-]{2,140}(?:Co\.,\s*)?(?:LLC|L\.L\.C\.|Inc\.?|Ltd\.?|Company|Capital|Securities|Partners))\s*$",
+            prefix,
+            flags=re.IGNORECASE,
+        )
+        if name_match:
+            name = _clean_underwriter_phrase(name_match.group(1))
+            if _looks_like_underwriter_name(name):
+                return name, _normalize_bookrunner_role(descriptor_match.group(1))
+
+    inline_patterns = (
+        rf"([A-Z][A-Za-z0-9&.,' \-]{{4,180}}?(?:LLC|L\.L\.C\.|Inc\.?|Ltd\.?|Company|Capital|Securities|Partners))\s*,?\s+(?:is|are|will act as)\s+(?:serving as\s+)?(?:the\s+)?{descriptor_pattern}",
+        rf"([A-Z][A-Za-z0-9&.,' \-]{{4,180}}?(?:LLC|L\.L\.C\.|Inc\.?|Ltd\.?|Company|Capital|Securities|Partners))[^.;]{{0,120}}\b{descriptor_pattern}\b",
+    )
+    for pattern in inline_patterns:
+        match = re.search(pattern, clean_text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        name = _clean_underwriter_phrase(match.group(1))
+        if _looks_like_underwriter_name(name):
+            return name, _normalize_bookrunner_role(match.group(2))
+    return None
+
+
+def _normalize_bookrunner_role(value: str) -> str:
+    lower = re.sub(r"\s+", " ", value or "").lower()
+    if "sole" in lower:
+        return "Sole Book-Runner"
+    if "joint" in lower and "running" in lower:
+        return "Joint Book-Running Managers"
+    if "joint" in lower:
+        return "Joint Book-Runners"
+    return "Book-Runner"
+
+
 def _clean_underwriter_phrase(value: str) -> str:
     clean = re.sub(r"\s+", " ", value or "").strip(" .,:;")
     clean = re.sub(r"\s+(?:is|are)\s+(?:acting as\s+)?(?:the\s+)?(?:sole|joint).*", "", clean, flags=re.IGNORECASE)
-    clean = re.sub(r"\s+(?:sole|joint)?\s*book-?runner.*", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\s+(?:sole|joint)?\s*book\s*-?\s*runner.*", "", clean, flags=re.IGNORECASE)
     clean = re.sub(r"^(?:the\s+)?", "", clean, flags=re.IGNORECASE)
     return clean.strip(" .,:;")
 
@@ -2156,17 +2201,54 @@ def _sections_for_spec(text: str, spec: _SectionSpec) -> list[IpoFilingSourceSec
 
 def _cover_page_section(text: str) -> IpoFilingSourceSection:
     lower = text.lower()
-    stop_candidates = [
-        index
-        for marker in ("table of contents", "prospectus summary")
-        if (index := lower.find(marker, 300)) > 0
-    ]
+    start = _cover_page_start_index(text)
+    stop_candidates: list[int] = []
+    for marker, heading in (("table of contents", "Table of Contents"), ("prospectus summary", "Prospectus Summary")):
+        search_from = start + 300
+        for match in re.finditer(re.escape(marker), lower[search_from:]):
+            candidate_start = search_from + match.start()
+            candidate_end = search_from + match.end()
+            line = _line_at_offset(text, candidate_start, candidate_end)
+            clean_line = re.sub(r"\s+", " ", line).strip(" \t:-").lower()
+            if marker == "table of contents" and clean_line == "table of contents":
+                following = text[candidate_start : min(len(text), candidate_start + 900)]
+                if _known_toc_entry_count(following) >= 2 or re.search(r"\bPage\b.*?\bPROSPECTUS SUMMARY\b", following, flags=re.IGNORECASE | re.DOTALL):
+                    stop_candidates.append(candidate_start)
+                    break
+            if marker == "prospectus summary" and _looks_like_section_heading_match(text, candidate_start, candidate_end, heading):
+                stop_candidates.append(candidate_start)
+                break
     if stop_candidates:
         end = min(stop_candidates)
     else:
-        end = min(len(text), 12_000)
-    body = _clean_section_text(text[: min(end, 14_000)], limit=14_000)
-    return IpoFilingSourceSection(name="cover_page", text=body, start_offset=0, end_offset=min(end, 14_000))
+        end = min(len(text), start + 12_000)
+    body = _clean_section_text(text[start : min(end, start + 14_000)], limit=14_000)
+    return IpoFilingSourceSection(name="cover_page", text=body, start_offset=start, end_offset=min(end, start + 14_000))
+
+
+def _cover_page_start_index(text: str) -> int:
+    lower = text.lower()
+    candidates: list[tuple[int, int]] = []
+    for match in re.finditer(r"(?m)^\s*(?:preliminary\s+)?prospectus\b", text or "", flags=re.IGNORECASE):
+        window = lower[match.start() : match.start() + 12_000]
+        score = 0
+        for term in (
+            "common shares",
+            "ordinary shares",
+            "american depositary shares",
+            "initial public offering",
+            "public offering price",
+            "under the symbol",
+            "book",
+            "underwriter",
+        ):
+            if term in window:
+                score += 1
+        if score >= 3:
+            candidates.append((match.start(), score))
+    if candidates:
+        return sorted(candidates, key=lambda item: item[0])[0][0]
+    return 0
 
 
 def _sections_between_headings(text: str, spec: _SectionSpec) -> list[IpoFilingSourceSection]:

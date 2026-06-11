@@ -108,8 +108,11 @@ We estimate that the initial public offering price will be between US$8.00 and U
 The assumed initial public offering price is US$9.00 per Common Share, the midpoint of the range.
 We have applied to list our Common Shares on the NYSE under the symbol "NCLA".
 This offering will not close unless the NYSE approves our Common Shares for listing.
+The underwriters expect to deliver the Common Shares to purchasers against payment on [*], 2026.
+Table of Contents
+We expect our total cash expenses for this offering to include expenses payable to our underwriters.
 Joseph Gunnar & Co., LLC
-Sole Book-Runner
+Sole Book -Runner
 
 TABLE OF CONTENTS
 Explanatory Note 1
@@ -483,6 +486,8 @@ def test_nuclea_overview_verified_facts_cover_dual_prospectus_failure_mode() -> 
     assert offering["expected_price_range"]["value"] == "US$8.00-US$10.00 per Common Share"
     assert offering["assumed_midpoint_price"]["value"] == "US$9.00 per Common Share"
     assert offering["underwriters"]["value"] == "Joseph Gunnar & Co., LLC is sole book-runner / representative"
+    assert offering["bookrunners"]["value"] == "Joseph Gunnar & Co., LLC \u2014 Sole Book-Runner"
+    assert "do not mark bookrunners as Not disclosed" in offering["bookrunners"]["instruction"]
     assert offering["over_allotment_option"]["value"] == "15% / 833,333 Common Shares over-allotment option"
 
     dual = facts["dual_prospectus_structure"]
