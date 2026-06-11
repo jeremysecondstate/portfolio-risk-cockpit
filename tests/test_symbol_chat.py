@@ -14,6 +14,7 @@ from app.analytics.symbol_chat import (
     build_symbol_chat_context,
     render_symbol_chat_transcript_markdown,
     save_symbol_chat_transcript,
+    symbol_chat_request_payload,
 )
 from app.analytics.technical_analysis import Candle, build_technical_command_center_report
 from app.core.portfolio import Portfolio, Position
@@ -66,18 +67,38 @@ class FakeStatus:
         self.value = value
 
 
+class FakeText:
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+    def get(self, *_args):
+        return self.value
+
+
+class FakeLabel:
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+    def cget(self, option: str) -> str:
+        assert option == "text"
+        return self.value
+
+
 class FakeTree:
-    def __init__(self, columns, values, selection=("row1",)) -> None:
+    def __init__(self, columns, values=None, selection=("row1",), rows=None) -> None:
         self._columns = columns
-        self._values = values
+        self._rows = rows if rows is not None else {"row1": values}
         self._selection = selection
 
     def selection(self):
         return self._selection
 
-    def item(self, _row_id, option):
+    def get_children(self):
+        return tuple(self._rows)
+
+    def item(self, row_id, option):
         assert option == "values"
-        return self._values
+        return self._rows[row_id]
 
     def __getitem__(self, key):
         assert key == "columns"
@@ -182,6 +203,189 @@ def test_symbol_chat_context_reuses_position_quote_technical_orders_and_filings(
     assert context.open_orders_summary[0]["order_id"] == "123"
     assert context.recent_orders_summary[0]["status"] == "FILLED"
     assert context.recent_filings_summary[0]["form"] == "10-Q"
+
+
+def test_symbol_chat_context_extracts_visible_schwab_holdings_table_position() -> None:
+    holdings = FakeTree(
+        ("symbol", "type", "qty", "last", "value", "pnl"),
+        rows={
+            "cash": ("USD (Schwab)", "Cash", "101185.40", "$1.00", "$101,185.40", "--"),
+            "goog": ("GOOG", "Equity", "20", "$353.65", "$7,073.00", "$2,426.77"),
+        },
+        selection=("goog",),
+    )
+    holdings._day_pnl_table = FakeTree(("day_pnl",), rows={"cash": ("--",), "goog": ("-$206.40",)}, selection=("goog",))
+    app = SimpleNamespace(
+        schwab_workspace_holdings_table=holdings,
+        cash_value_label=FakeLabel("$101,185.40"),
+        positions_value_label=FakeLabel("$33,057.13"),
+        total_value_label=FakeLabel("$134,242.53"),
+        pnl_value_label=FakeLabel("$2,147.90"),
+    )
+
+    context = build_symbol_chat_context(
+        "goog",
+        app_context=app,
+        sec_client=FakeSecClient(),
+        trade_memory_store=SimpleNamespace(find_snapshots_for_symbol=lambda _symbol: []),
+    )
+
+    position = context.schwab_position
+    assert position["is_held"] is True
+    assert position["source"] == "selected_schwab_holdings_table"
+    assert position["quantity"] == 20
+    assert position["last_price"] == 353.65
+    assert position["market_value"] == 7073.0
+    assert position["unrealized_pnl"] == 2426.77
+    assert position["day_pnl"] == -206.40
+    assert position["portfolio_cash"] == 101185.40
+    assert position["portfolio_value"] == 134242.53
+    assert abs(position["portfolio_weight"] - (7073.0 / 134242.53)) < 0.000001
+    assert any("selected_schwab_holdings_table" in item for item in context.source_metadata["available"])
+
+
+def test_symbol_chat_context_reuses_research_workspace_context_in_payload() -> None:
+    badge = lambda title, label, why: SimpleNamespace(title=title, label=label, status="info", score=67, why=why)
+    decision = SimpleNamespace(
+        overall=badge("Overall Read", "Constructive", "trend and evidence are supportive"),
+        risk_level=badge("Risk Level", "Moderate", "position size is manageable"),
+        action_bias=badge("Action Bias", "Protect gains", "held winner with defined risk"),
+        position_impact=badge("Position Impact", "Existing holding", "20 shares in portfolio"),
+        macro_backdrop=badge("Macro Backdrop", "Neutral", "macro context is mixed"),
+        thesis=SimpleNamespace(
+            trade_judgment="Thesis read: constructive but verify catalysts.",
+            recommendation="Keep analysis-only watchlist context.",
+            preferred_vehicle="Stock",
+            confidence="medium",
+            invalidation="Break below the risk line would weaken the thesis.",
+        ),
+        summary=["Alphabet has a loaded deterministic workspace summary."],
+        matters=["Search demand and AI capex matter most."],
+        changes_view=["A material earnings miss would change the view."],
+    )
+    research_context = SimpleNamespace(
+        symbol="GOOG",
+        is_held=True,
+        quantity=20,
+        average_cost=232.31,
+        last_price=353.65,
+        market_value=7073.0,
+        portfolio_value=134242.53,
+        portfolio_weight=7073.0 / 134242.53,
+        unrealized_pnl=2426.77,
+        day_pnl=-206.40,
+        cash_available=101185.40,
+    )
+    payload = SimpleNamespace(
+        symbol="GOOG",
+        company_name="Alphabet Inc.",
+        context=research_context,
+        indicators=SimpleNamespace(
+            latest_close=353.65,
+            trend="uptrend",
+            momentum="positive",
+            volatility="normal",
+            support=340.0,
+            resistance=360.0,
+            week_52_high=360.0,
+            week_52_low=200.0,
+            rsi_14=61.5,
+            atr_14=5.2,
+            notes=["Momentum is positive but extended."],
+        ),
+        command_center_report=SimpleNamespace(
+            symbol="GOOG",
+            overall_read="Constructive trend",
+            overall_score=67,
+            confidence="medium",
+            setup_classification=SimpleNamespace(setup="trend continuation", action_quality="watch for confirmation"),
+            warnings=["Capital-structure scanner flag is unverified without filing text."],
+        ),
+        decision=decision,
+        scenario_rows=[
+            SimpleNamespace(scenario="+5%", symbol_price=371.33, position_pnl=353.65, portfolio_pnl_impact=0.0026, new_portfolio_value=134596.18)
+        ],
+        earnings_text="Earnings / News\nOfficial earnings digest loaded from deterministic sources.",
+        fundamentals_text="Fundamentals\nRevenue and operating income context loaded from companyfacts.",
+        macro_text="Official Macro Snapshot\nRates and inflation context loaded.",
+        statuses=[SimpleNamespace(source="SEC companyfacts", status="fresh", fetched_at="2026-06-11T00:00:00Z", message="XBRL loaded.")],
+        recommendation_engine_read=SimpleNamespace(
+            recommendation_label="Constructive / defined-risk only",
+            confidence="medium",
+            confidence_score=70,
+            evidence_score=66,
+            confidence_adjusted_score=63,
+            why=("Evidence is constructive.",),
+            warnings=("Do not overstate filing keyword flags.",),
+            confirmation_lines=("Confirm above resistance.",),
+            invalidation_lines=("Break below support.",),
+            position_sizing_notes=("Existing 20-share position is visible.",),
+            what_would_change=("Earnings miss.",),
+            components=(),
+            expected_reward_risk=SimpleNamespace(label="Reward/risk defined", reward_risk_ratio=1.8, planning_probability=0.55, summary="Planning EV is positive.", reward_line="Upside scenario.", risk_line="Support break."),
+            data_confidence=SimpleNamespace(grade="B", score=75, reason="Core app data loaded.", missing=(), stale=()),
+        ),
+        operator_verdict=SimpleNamespace(
+            primary_action="WATCH / PROTECT",
+            primary_label="Held winner",
+            confidence="medium",
+            confidence_score=68,
+            summary="Use deterministic analysis to frame the position.",
+            right_now=SimpleNamespace(label="Right Now", action="WATCH", detail="Protect gains; no order action.", severity="info"),
+            reasons=("Position is held and research context is loaded.",),
+            warnings=("Analysis-only.",),
+            what_would_change=("Fresh earnings data.",),
+        ),
+        option_chain_rows=[],
+        option_chain_underlying_price=353.65,
+        greek_summary=SimpleNamespace(source="Schwab option chain", plain_english=["Greeks loaded."], warnings=[]),
+        security_kind="equity",
+        reporting_profile="domestic",
+    )
+    app = SimpleNamespace(
+        schwab_research_last_payload=payload,
+        schwab_research_overview_text=FakeText("Overview Explanation\nPlain-English summary from the Research Workspace."),
+        schwab_research_earnings_text=FakeText("Earnings text from widget."),
+        schwab_research_fundamentals_text=FakeText("Fundamentals text from widget."),
+        schwab_research_macro_text=FakeText("Macro text from widget."),
+        schwab_research_status_var=SimpleNamespace(get=lambda: "GOOG research updated at 2026-06-11 09:30:00"),
+    )
+
+    context = build_symbol_chat_context(
+        "GOOG",
+        app_context=app,
+        sec_client=FakeSecClient(),
+        trade_memory_store=SimpleNamespace(find_snapshots_for_symbol=lambda _symbol: []),
+    )
+    request_payload = symbol_chat_request_payload(context, "Generate an overview.", timeout_seconds=120)
+    research = request_payload["symbol_context"]["research_workspace_context"]
+
+    assert context.company_name == "Alphabet Inc."
+    assert context.schwab_position["is_held"] is True
+    assert context.schwab_position["quantity"] == 20
+    assert research["portfolio_context"]["quantity"] == 20
+    assert research["at_a_glance"]["thesis"]["trade_judgment"].startswith("Thesis read")
+    assert "Official earnings digest" in research["earnings_news"]["summary_text"]
+    assert "Research Workspace" in research["overview_text"]
+    assert "research_workspace_context" in " ".join(context.source_metadata["available"])
+
+
+def test_symbol_chat_optional_web_enrichment_provider_is_labeled_separately() -> None:
+    context = build_symbol_chat_context(
+        "AMD",
+        sec_client=FakeSecClient(),
+        trade_memory_store=SimpleNamespace(find_snapshots_for_symbol=lambda _symbol: []),
+        use_web_enrichment=True,
+        web_enrichment_provider=lambda symbol: {
+            "summary": f"Public web summary for {symbol}.",
+            "sources": [{"title": "Example source", "url": "https://example.test/amd"}],
+        },
+    )
+
+    assert context.web_enrichment["status"] == "available"
+    assert context.web_enrichment["summary"] == "Public web summary for AMD."
+    assert context.source_metadata["web_enrichment_mode"] == "requested"
+    assert any("web_enrichment" in item for item in context.source_metadata["available"])
 
 
 def test_symbol_chat_uses_responses_api_with_store_false_and_local_history() -> None:

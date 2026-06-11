@@ -34,6 +34,9 @@ SYMBOL_CHAT_OPENAI_TIMEOUT_SECONDS = 120.0
 SYMBOL_CHAT_REQUEST_CHAR_LIMIT = 70_000
 SYMBOL_CHAT_TECHNICAL_TEXT_LIMIT = 18_000
 SYMBOL_CHAT_THESIS_TEXT_LIMIT = 8_000
+SYMBOL_CHAT_RESEARCH_WORKSPACE_TEXT_LIMIT = 18_000
+SYMBOL_CHAT_RESEARCH_SECTION_TEXT_LIMIT = 3_500
+SYMBOL_CHAT_WEB_TEXT_LIMIT = 10_000
 SYMBOL_CHAT_APPROX_CHARS_PER_TOKEN = 4
 
 SYMBOL_CHAT_SYSTEM_PROMPT = """You are a company and stock analysis assistant inside Portfolio Risk Cockpit.
@@ -41,6 +44,10 @@ SYMBOL_CHAT_SYSTEM_PROMPT = """You are a company and stock analysis assistant in
 Analyze the selected symbol using only the provided app context and explicitly available sources.
 Do not invent missing financials, filings, quotes, ownership, catalysts, or technical levels.
 When a field is absent, say "Not available in the provided context." When a conclusion is uncertain, label it clearly.
+Treat explicit schwab_position data as authoritative for current position context. Do not say the user does not hold a position unless schwab_position.is_held is explicitly false from a loaded Schwab holdings, Schwab account, or portfolio source.
+Prefer research_workspace_context over thinner rebuilt technical context when both are available; it is deterministic app analysis already produced before this OpenAI call.
+Separate app-local deterministic context from optional web_enrichment facts. If web_enrichment is absent or unavailable, do not imply that public web research was performed.
+Treat keyword-only capital-structure, supply, dilution, or filing-risk flags as low-confidence prompts for verification unless actual filing text or a verified filing summary is included.
 
 Focus on company analysis, stock research, technical-analysis explanation, risk factors, catalysts, bull/bear framing, and diligence questions.
 Do not place trades. Do not tell the user to buy, sell, or hold. Do not produce personalized investment advice.
@@ -90,11 +97,13 @@ class SymbolChatContext:
     company_name: str = ""
     schwab_position: dict[str, Any] = field(default_factory=dict)
     quote_snapshot: dict[str, Any] = field(default_factory=dict)
+    research_workspace_context: dict[str, Any] = field(default_factory=dict)
     technical_analysis: dict[str, Any] = field(default_factory=dict)
     open_orders_summary: tuple[dict[str, Any], ...] = ()
     recent_orders_summary: tuple[dict[str, Any], ...] = ()
     recent_filings_summary: tuple[dict[str, Any], ...] = ()
     saved_thesis_or_notes: str = ""
+    web_enrichment: dict[str, Any] = field(default_factory=dict)
     source_metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -268,12 +277,16 @@ def create_symbol_chat_session(
     sec_client: SecEdgarClient | None = None,
     openai_client: Any | None = None,
     model: str | None = None,
+    use_web_enrichment: bool = False,
+    web_enrichment_provider: Callable[[str], Mapping[str, Any] | None] | None = None,
 ) -> SymbolChatSession:
     context = build_symbol_chat_context(
         symbol,
         app_context=app_context,
         schwab_session=schwab_session,
         sec_client=sec_client,
+        use_web_enrichment=use_web_enrichment,
+        web_enrichment_provider=web_enrichment_provider,
     )
     return SymbolChatSession(
         context,
@@ -288,6 +301,8 @@ def build_symbol_chat_context(
     schwab_session: Any | None = None,
     sec_client: SecEdgarClient | None = None,
     trade_memory_store: TradeMemoryStore | None = None,
+    use_web_enrichment: bool = False,
+    web_enrichment_provider: Callable[[str], Mapping[str, Any] | None] | None = None,
 ) -> SymbolChatContext:
     clean_symbol = normalize_symbol(symbol)
     if not clean_symbol:
@@ -313,23 +328,27 @@ def build_symbol_chat_context(
         except Exception as exc:
             _mark_unavailable(source_metadata, "company_name", f"SEC company lookup unavailable: {exc}")
 
-    schwab_position = _position_context(app_context, clean_symbol, source_metadata)
+    schwab_position = _position_context(app_context, schwab_session, clean_symbol, source_metadata)
     quote_snapshot = _quote_context(app_context, schwab_session, clean_symbol, schwab_position, source_metadata)
+    research_workspace_context = _research_workspace_context(app_context, clean_symbol, source_metadata)
     technical_analysis = _technical_context(app_context, schwab_session, clean_symbol, quote_snapshot, source_metadata)
     open_orders_summary, recent_orders_summary = _orders_context(app_context, schwab_session, clean_symbol, source_metadata)
     recent_filings_summary = _recent_filings_context(clean_symbol, sec_client, source_metadata)
     saved_thesis_or_notes = _saved_thesis_context(app_context, trade_memory_store, clean_symbol, source_metadata)
+    web_enrichment = _web_enrichment_context(app_context, clean_symbol, use_web_enrichment, web_enrichment_provider, source_metadata)
 
     return SymbolChatContext(
         symbol=clean_symbol,
         company_name=company_name,
         schwab_position=schwab_position,
         quote_snapshot=quote_snapshot,
+        research_workspace_context=research_workspace_context,
         technical_analysis=technical_analysis,
         open_orders_summary=tuple(open_orders_summary),
         recent_orders_summary=tuple(recent_orders_summary),
         recent_filings_summary=tuple(recent_filings_summary),
         saved_thesis_or_notes=saved_thesis_or_notes,
+        web_enrichment=web_enrichment,
         source_metadata=source_metadata,
     )
 
@@ -342,15 +361,22 @@ def symbol_chat_request_payload(context: SymbolChatContext, prompt: str, *, time
             "company_name": context.company_name or _not_available(),
             "schwab_position": context.schwab_position or _not_available(),
             "quote_snapshot": context.quote_snapshot or _not_available(),
+            "research_workspace_context": context.research_workspace_context or _not_available(),
             "technical_analysis": context.technical_analysis or _not_available(),
             "open_orders_summary": list(context.open_orders_summary) or _not_available(),
             "recent_orders_summary": list(context.recent_orders_summary) or _not_available(),
             "recent_filings_summary": list(context.recent_filings_summary) or _not_available(),
             "saved_thesis_or_notes": context.saved_thesis_or_notes or _not_available(),
+            "web_enrichment": context.web_enrichment or _not_available(),
             "source_metadata": context.source_metadata,
         },
         "grounding_rules": [
             "Use only symbol_context and conversation history for factual claims.",
+            "Use research_workspace_context as the primary deterministic app analysis when it is available.",
+            "Use schwab_position as the authority for current position context; do not infer not-held status from recent orders or missing fields.",
+            "If schwab_position is unavailable, say position context is unavailable instead of saying the symbol is not held.",
+            "Keep app-local context and optional web_enrichment facts separate in the answer.",
+            "Treat form-only or keyword-only filing/capital-structure flags as unverified until actual filing text or a verified summary is present.",
             'Say "Not available in the provided context." when a requested fact is absent.',
             "Separate confirmed facts from assumptions, caveats, and questions to verify.",
             "Do not infer undisclosed financials, filings, quotes, ownership, catalysts, or technical levels.",
@@ -461,11 +487,45 @@ def _company_name_from_app_payload(app_context: Any | None, symbol: str) -> str:
     return ""
 
 
-def _position_context(app_context: Any | None, symbol: str, source_metadata: dict[str, Any]) -> dict[str, Any]:
+def _position_context(app_context: Any | None, schwab_session: Any | None, symbol: str, source_metadata: dict[str, Any]) -> dict[str, Any]:
     portfolio = _portfolio_from_app(app_context)
-    if portfolio is None:
-        _mark_unavailable(source_metadata, "schwab_position", "No current portfolio object was available.")
-        return {}
+    summary = _portfolio_summary_from_app(app_context, portfolio)
+
+    table_context = _position_context_from_holdings_tables(app_context, symbol, summary)
+    if table_context:
+        _mark_available(source_metadata, "schwab_position", f"Loaded from {table_context.get('source', 'visible Schwab holdings table')}.")
+        return table_context
+
+    research_context = _position_context_from_research_payload(app_context, symbol)
+    if research_context:
+        _mark_available(source_metadata, "schwab_position", "Loaded from current Schwab Research Workspace portfolio context.")
+        return _merge_portfolio_summary(research_context, summary)
+
+    if portfolio is not None:
+        portfolio_context = _position_context_from_portfolio(portfolio, symbol, source="current_broker_portfolio")
+        if portfolio_context:
+            if portfolio_context.get("is_held") is True:
+                _mark_available(source_metadata, "schwab_position", "Loaded from current broker/portfolio position.")
+            elif _portfolio_source_is_loaded(portfolio, summary):
+                _mark_unavailable(source_metadata, "schwab_position", f"No {symbol} position in the loaded current broker/portfolio object.")
+            else:
+                portfolio_context = {}
+        if portfolio_context:
+            return _merge_portfolio_summary(portfolio_context, summary)
+
+    live_context = _position_context_from_live_schwab_account(schwab_session, symbol, source_metadata)
+    if live_context:
+        return live_context
+
+    if _has_loaded_schwab_holdings_table(app_context):
+        _mark_unavailable(source_metadata, "schwab_position", f"No {symbol} row in the loaded Schwab Holdings table.")
+        return _not_held_position_context(symbol, "loaded_schwab_holdings_table", summary)
+
+    _mark_unavailable(source_metadata, "schwab_position", "No Schwab holdings, Schwab account, or current portfolio position source was available.")
+    return {}
+
+
+def _position_context_from_portfolio(portfolio: Any, symbol: str, *, source: str) -> dict[str, Any]:
     position = None
     try:
         position = portfolio.get_position(symbol) if hasattr(portfolio, "get_position") else None
@@ -474,8 +534,17 @@ def _position_context(app_context: Any | None, symbol: str, source_metadata: dic
     if position is None:
         position = getattr(portfolio, "positions", {}).get(symbol)
     if position is None:
-        _mark_unavailable(source_metadata, "schwab_position", f"No Schwab/current portfolio position for {symbol}.")
-        return {"is_held": False, "portfolio_cash": _safe_number(getattr(portfolio, "cash", None)), "portfolio_value": _safe_number(getattr(portfolio, "total_value", None))}
+        return _not_held_position_context(
+            symbol,
+            source,
+            {
+                "portfolio_cash": _safe_number(getattr(portfolio, "cash", None)),
+                "portfolio_value": _safe_number(getattr(portfolio, "total_value", None)),
+                "positions_value": _safe_number(getattr(portfolio, "positions_value", None)),
+                "portfolio_unrealized_pnl": _safe_number(getattr(portfolio, "unrealized_profit_loss", None)),
+                "portfolio_day_pnl": _safe_number(getattr(portfolio, "day_profit_loss", None)),
+            },
+        )
 
     market_value = _safe_number(getattr(position, "market_value", None))
     portfolio_value = _safe_number(getattr(portfolio, "total_value", None))
@@ -494,10 +563,281 @@ def _position_context(app_context: Any | None, symbol: str, source_metadata: dic
         "day_pnl_percent": _safe_number(getattr(position, "day_profit_loss_percent", None)),
         "portfolio_cash": _safe_number(getattr(portfolio, "cash", None)),
         "portfolio_value": portfolio_value,
+        "positions_value": _safe_number(getattr(portfolio, "positions_value", None)),
+        "portfolio_unrealized_pnl": _safe_number(getattr(portfolio, "unrealized_profit_loss", None)),
+        "portfolio_day_pnl": _safe_number(getattr(portfolio, "day_profit_loss", None)),
         "portfolio_weight": (market_value / portfolio_value) if market_value is not None and portfolio_value and portfolio_value > 0 else None,
+        "source": source,
     }
-    _mark_available(source_metadata, "schwab_position", "Loaded from current broker/portfolio position.")
     return {key: value for key, value in context.items() if value not in (None, "")}
+
+
+def _position_context_from_holdings_tables(app_context: Any | None, symbol: str, summary: Mapping[str, Any]) -> dict[str, Any]:
+    table = getattr(app_context, "schwab_workspace_holdings_table", None)
+    if table is None:
+        return {}
+
+    selected = _matching_holdings_row(table, symbol, selected_only=True)
+    if selected is not None:
+        return _position_context_from_holdings_row(symbol, selected, summary, source="selected_schwab_holdings_table")
+
+    visible = _matching_holdings_row(table, symbol, selected_only=False)
+    if visible is not None:
+        return _position_context_from_holdings_row(symbol, visible, summary, source="visible_schwab_holdings_table")
+
+    return {}
+
+
+def _matching_holdings_row(table: Any, symbol: str, *, selected_only: bool) -> dict[str, Any] | None:
+    row_ids: list[Any] = []
+    if selected_only:
+        try:
+            row_ids = list(table.selection() or [])
+        except Exception:
+            row_ids = []
+    else:
+        try:
+            row_ids = list(table.get_children() or [])
+        except Exception:
+            row_ids = []
+
+    for row_id in row_ids:
+        values = _tree_values_by_column(table, row_id)
+        if not values:
+            continue
+        if str(values.get("type", "")).strip().lower() == "cash":
+            continue
+        if normalize_symbol(values.get("symbol")) == symbol:
+            day_pnl = _day_pnl_from_companion_table(table, row_id)
+            if day_pnl not in (None, ""):
+                values["day_pnl"] = day_pnl
+            return values
+    return None
+
+
+def _tree_values_by_column(table: Any, row_id: Any) -> dict[str, Any]:
+    try:
+        raw_values = table.item(row_id, "values")
+        columns = tuple(table["columns"])
+    except Exception:
+        return {}
+    return {str(column): raw_values[index] for index, column in enumerate(columns) if index < len(raw_values)}
+
+
+def _day_pnl_from_companion_table(table: Any, row_id: Any) -> Any:
+    day_table = getattr(table, "_day_pnl_table", None)
+    if day_table is None:
+        return None
+    try:
+        raw_values = day_table.item(row_id, "values")
+    except Exception:
+        return None
+    if isinstance(raw_values, (list, tuple)) and raw_values:
+        return raw_values[0]
+    return None
+
+
+def _position_context_from_holdings_row(symbol: str, row: Mapping[str, Any], summary: Mapping[str, Any], *, source: str) -> dict[str, Any]:
+    quantity = _display_number(row.get("qty"))
+    last_price = _display_number(row.get("last"))
+    market_value = _display_number(row.get("value"))
+    if last_price is None and market_value is not None and quantity not in (None, 0):
+        last_price = abs(market_value / quantity)
+    portfolio_value = _safe_number(summary.get("portfolio_value"))
+    context = {
+        "is_held": quantity is None or abs(quantity) > 0.00000001,
+        "symbol": symbol,
+        "asset_type": str(row.get("type") or ""),
+        "quantity": quantity,
+        "last_price": last_price,
+        "market_value": market_value,
+        "unrealized_pnl": _display_number(row.get("pnl")),
+        "day_pnl": _display_number(row.get("day_pnl")),
+        "portfolio_cash": _safe_number(summary.get("portfolio_cash")),
+        "portfolio_value": portfolio_value,
+        "positions_value": _safe_number(summary.get("positions_value")),
+        "portfolio_unrealized_pnl": _safe_number(summary.get("portfolio_unrealized_pnl")),
+        "portfolio_day_pnl": _safe_number(summary.get("portfolio_day_pnl")),
+        "portfolio_weight": (market_value / portfolio_value) if market_value is not None and portfolio_value and portfolio_value > 0 else None,
+        "source": source,
+    }
+    return {key: value for key, value in context.items() if value not in (None, "")}
+
+
+def _position_context_from_research_payload(app_context: Any | None, symbol: str) -> dict[str, Any]:
+    payload = getattr(app_context, "schwab_research_last_payload", None)
+    if payload is None or normalize_symbol(getattr(payload, "symbol", "")) != symbol:
+        return {}
+    context = getattr(payload, "context", None)
+    if context is None or normalize_symbol(getattr(context, "symbol", symbol)) != symbol:
+        return {}
+    result = {
+        "is_held": bool(getattr(context, "is_held", False)),
+        "symbol": symbol,
+        "quantity": _safe_number(getattr(context, "quantity", None)),
+        "average_cost": _safe_number(getattr(context, "average_cost", None)),
+        "last_price": _safe_number(getattr(context, "last_price", None)),
+        "market_value": _safe_number(getattr(context, "market_value", None)),
+        "unrealized_pnl": _safe_number(getattr(context, "unrealized_pnl", None)),
+        "day_pnl": _safe_number(getattr(context, "day_pnl", None)),
+        "portfolio_cash": _safe_number(getattr(context, "cash_available", None)),
+        "portfolio_value": _safe_number(getattr(context, "portfolio_value", None)),
+        "portfolio_weight": _safe_number(getattr(context, "portfolio_weight", None)),
+        "source": "schwab_research_workspace_portfolio_context",
+    }
+    return {key: value for key, value in result.items() if value not in (None, "")}
+
+
+def _position_context_from_live_schwab_account(schwab_session: Any | None, symbol: str, source_metadata: dict[str, Any]) -> dict[str, Any]:
+    if schwab_session is None or not hasattr(schwab_session, "get_account"):
+        return {}
+    try:
+        status_code, account_payload = schwab_session.get_account(fields="positions")
+        if status_code != 200:
+            _mark_unavailable(source_metadata, "schwab_position", f"Live Schwab account positions returned HTTP {status_code}: {_shorten(account_payload, 300)}")
+            return {}
+        from app.brokers.schwab.account_adapter import portfolio_from_schwab_account
+
+        portfolio, _source_message = portfolio_from_schwab_account(account_payload)
+        context = _position_context_from_portfolio(portfolio, symbol, source="live_schwab_account_positions")
+        if context.get("is_held") is True:
+            _mark_available(source_metadata, "schwab_position", "Loaded from live Schwab account positions.")
+        else:
+            _mark_unavailable(source_metadata, "schwab_position", f"No {symbol} position in live Schwab account positions.")
+        return context
+    except Exception as exc:
+        _mark_unavailable(source_metadata, "schwab_position", f"Live Schwab account positions unavailable: {exc}")
+        return {}
+
+
+def _not_held_position_context(symbol: str, source: str, summary: Mapping[str, Any]) -> dict[str, Any]:
+    context = {
+        "is_held": False,
+        "symbol": symbol,
+        "portfolio_cash": _safe_number(summary.get("portfolio_cash")),
+        "portfolio_value": _safe_number(summary.get("portfolio_value")),
+        "positions_value": _safe_number(summary.get("positions_value")),
+        "portfolio_unrealized_pnl": _safe_number(summary.get("portfolio_unrealized_pnl")),
+        "portfolio_day_pnl": _safe_number(summary.get("portfolio_day_pnl")),
+        "source": source,
+    }
+    return {key: value for key, value in context.items() if value not in (None, "")}
+
+
+def _merge_portfolio_summary(context: Mapping[str, Any], summary: Mapping[str, Any]) -> dict[str, Any]:
+    merged = dict(context)
+    for target, source in (
+        ("portfolio_cash", "portfolio_cash"),
+        ("portfolio_value", "portfolio_value"),
+        ("positions_value", "positions_value"),
+        ("portfolio_unrealized_pnl", "portfolio_unrealized_pnl"),
+        ("portfolio_day_pnl", "portfolio_day_pnl"),
+    ):
+        if merged.get(target) in (None, "", 0) and summary.get(source) not in (None, ""):
+            merged[target] = summary.get(source)
+    market_value = _safe_number(merged.get("market_value"))
+    portfolio_value = _safe_number(merged.get("portfolio_value"))
+    if merged.get("portfolio_weight") in (None, "") and market_value is not None and portfolio_value and portfolio_value > 0:
+        merged["portfolio_weight"] = market_value / portfolio_value
+    return {key: value for key, value in merged.items() if value not in (None, "")}
+
+
+def _portfolio_summary_from_app(app_context: Any | None, portfolio: Any | None) -> dict[str, float]:
+    values = {
+        "portfolio_cash": _first_display_number(app_context, ("cash_value_label", "schwab_research_cash_var", "options_cash_available_var")),
+        "positions_value": _first_display_number(app_context, ("positions_value_label", "schwab_research_positions_var")),
+        "portfolio_value": _first_display_number(app_context, ("total_value_label", "schwab_research_total_var", "options_portfolio_value_var")),
+        "portfolio_unrealized_pnl": _first_display_number(app_context, ("pnl_value_label", "schwab_research_pnl_var")),
+        "portfolio_day_pnl": _first_display_number(app_context, ("day_pnl_value_label", "day_pnl_var")),
+    }
+    if values["positions_value"] is None:
+        values["positions_value"] = _positions_value_from_holdings_table(app_context)
+    if portfolio is not None:
+        fallback = {
+            "portfolio_cash": _safe_number(getattr(portfolio, "cash", None)),
+            "positions_value": _safe_number(getattr(portfolio, "positions_value", None)),
+            "portfolio_value": _safe_number(getattr(portfolio, "total_value", None)),
+            "portfolio_unrealized_pnl": _safe_number(getattr(portfolio, "unrealized_profit_loss", None)),
+            "portfolio_day_pnl": _safe_number(getattr(portfolio, "day_profit_loss", None)),
+        }
+        for key, value in fallback.items():
+            if values.get(key) in (None, ""):
+                values[key] = value
+    if values["portfolio_value"] is None and values["portfolio_cash"] is not None and values["positions_value"] is not None:
+        values["portfolio_value"] = round(values["portfolio_cash"] + values["positions_value"], 2)
+    return {key: value for key, value in values.items() if value is not None}
+
+
+def _first_display_number(app_context: Any | None, attr_names: tuple[str, ...]) -> float | None:
+    for name in attr_names:
+        value = _display_number(_app_attr_display_value(app_context, name))
+        if value is not None:
+            return value
+    return None
+
+
+def _app_attr_display_value(app_context: Any | None, name: str) -> Any:
+    value = getattr(app_context, name, None)
+    if value is None:
+        return None
+    getter = getattr(value, "get", None)
+    if callable(getter):
+        try:
+            return getter()
+        except Exception:
+            pass
+    cget = getattr(value, "cget", None)
+    if callable(cget):
+        try:
+            return cget("text")
+        except Exception:
+            pass
+    return value
+
+
+def _positions_value_from_holdings_table(app_context: Any | None) -> float | None:
+    table = getattr(app_context, "schwab_workspace_holdings_table", None)
+    if table is None:
+        return None
+    total = 0.0
+    found = False
+    try:
+        row_ids = list(table.get_children() or [])
+    except Exception:
+        return None
+    for row_id in row_ids:
+        values = _tree_values_by_column(table, row_id)
+        if str(values.get("type", "")).strip().lower() == "cash":
+            continue
+        value = _display_number(values.get("value"))
+        if value is not None:
+            total += value
+            found = True
+    return round(total, 2) if found else None
+
+
+def _has_loaded_schwab_holdings_table(app_context: Any | None) -> bool:
+    table = getattr(app_context, "schwab_workspace_holdings_table", None)
+    if table is None:
+        return False
+    try:
+        return bool(table.get_children())
+    except Exception:
+        try:
+            return bool(table.selection())
+        except Exception:
+            return False
+
+
+def _portfolio_source_is_loaded(portfolio: Any, summary: Mapping[str, Any]) -> bool:
+    positions = getattr(portfolio, "positions", None)
+    if isinstance(positions, Mapping) and positions:
+        return True
+    for key in ("portfolio_value", "portfolio_cash", "positions_value"):
+        value = _safe_number(summary.get(key))
+        if value is not None and abs(value) > 0.00000001:
+            return True
+    return False
 
 
 def _portfolio_from_app(app_context: Any | None) -> Any | None:
@@ -548,6 +888,367 @@ def _quote_context(
 
     _mark_unavailable(source_metadata, "quote_snapshot", "No quote context was available.")
     return {}
+
+
+def _research_workspace_context(app_context: Any | None, symbol: str, source_metadata: dict[str, Any]) -> dict[str, Any]:
+    payload = getattr(app_context, "schwab_research_last_payload", None)
+    if payload is None:
+        _mark_unavailable(source_metadata, "research_workspace_context", "No Schwab Research Workspace payload was available.")
+        return {}
+    if normalize_symbol(getattr(payload, "symbol", "")) != symbol:
+        _mark_unavailable(
+            source_metadata,
+            "research_workspace_context",
+            f"Loaded Schwab Research Workspace payload is for {getattr(payload, 'symbol', '--')}, not {symbol}.",
+        )
+        return {}
+
+    context = {
+        "source": "schwab_research_workspace",
+        "symbol": symbol,
+        "workspace_status": _app_attr_display_value(app_context, "schwab_research_status_var") or "",
+        "security_kind": str(getattr(payload, "security_kind", "") or ""),
+        "reporting_profile": str(getattr(payload, "reporting_profile", "") or ""),
+        "portfolio_context": _portfolio_symbol_context_dict(getattr(payload, "context", None)),
+        "at_a_glance": _research_at_glance_context(payload),
+        "technicals": _research_technical_context(payload),
+        "risk_scenarios": _research_scenario_context(app_context, payload),
+        "options_strategy": _research_options_context(app_context, payload),
+        "greeks": _research_greeks_context(app_context, payload),
+        "earnings_news": _research_text_section(
+            "earnings_news",
+            getattr(payload, "earnings_text", "") or _text_widget_content(getattr(app_context, "schwab_research_earnings_text", None)),
+        ),
+        "fundamentals": _research_text_section(
+            "fundamentals",
+            getattr(payload, "fundamentals_text", "") or _text_widget_content(getattr(app_context, "schwab_research_fundamentals_text", None)),
+        ),
+        "macro_context": _research_text_section(
+            "macro_context",
+            getattr(payload, "macro_text", "") or _text_widget_content(getattr(app_context, "schwab_research_macro_text", None)),
+        ),
+        "overview_text": _shorten(
+            _text_widget_content(getattr(app_context, "schwab_research_overview_text", None)) or _short_research_payload_summary(payload),
+            SYMBOL_CHAT_RESEARCH_SECTION_TEXT_LIMIT,
+        ),
+        "source_statuses": _source_status_context(getattr(payload, "statuses", []) or []),
+        "filing_context_note": (
+            "Filing/capital-structure flags from deterministic scanners are verification prompts unless actual filing text "
+            "or a verified filing-analysis summary is present in this context."
+        ),
+        "analysis_policy": "Analysis-only deterministic app context. No broker action is authorized by this readout.",
+    }
+    compact = _drop_empty(context)
+    if compact:
+        _mark_available(source_metadata, "research_workspace_context", "Loaded current Schwab Research + Risk Workspace deterministic analysis.")
+    return _limit_research_workspace_context(compact)
+
+
+def _research_at_glance_context(payload: Any) -> dict[str, Any]:
+    decision = getattr(payload, "decision", None)
+    thesis = getattr(decision, "thesis", None)
+    read = getattr(payload, "recommendation_engine_read", None)
+    verdict = getattr(payload, "operator_verdict", None)
+    return _drop_empty(
+        {
+            "overall": _badge_context(getattr(decision, "overall", None)),
+            "risk_level": _badge_context(getattr(decision, "risk_level", None)),
+            "action_bias": _badge_context(getattr(decision, "action_bias", None)),
+            "position_impact": _badge_context(getattr(decision, "position_impact", None)),
+            "macro_backdrop": _badge_context(getattr(decision, "macro_backdrop", None)),
+            "thesis": _drop_empty(
+                {
+                    "trade_judgment": str(getattr(thesis, "trade_judgment", "") or ""),
+                    "recommendation": str(getattr(thesis, "recommendation", "") or ""),
+                    "preferred_vehicle": str(getattr(thesis, "preferred_vehicle", "") or ""),
+                    "confidence": str(getattr(thesis, "confidence", "") or ""),
+                    "invalidation": str(getattr(thesis, "invalidation", "") or ""),
+                }
+            ),
+            "summary": _short_text_list(getattr(decision, "summary", []) or [], limit=6),
+            "what_matters": _short_text_list(getattr(decision, "matters", []) or [], limit=6),
+            "what_would_change": _short_text_list(getattr(decision, "changes_view", []) or [], limit=6),
+            "operator_verdict": _operator_verdict_context(verdict),
+            "recommendation_engine": _recommendation_engine_context(read),
+        }
+    )
+
+
+def _research_technical_context(payload: Any) -> dict[str, Any]:
+    indicators = getattr(payload, "indicators", None)
+    report = getattr(payload, "command_center_report", None)
+    return _drop_empty(
+        {
+            "indicator_snapshot": _drop_empty(
+                {
+                    "latest_close": _safe_number(getattr(indicators, "latest_close", None)),
+                    "trend": str(getattr(indicators, "trend", "") or ""),
+                    "momentum": str(getattr(indicators, "momentum", "") or ""),
+                    "volatility": str(getattr(indicators, "volatility", "") or ""),
+                    "support": _safe_number(getattr(indicators, "support", None)),
+                    "resistance": _safe_number(getattr(indicators, "resistance", None)),
+                    "week_52_high": _safe_number(getattr(indicators, "week_52_high", None)),
+                    "week_52_low": _safe_number(getattr(indicators, "week_52_low", None)),
+                    "rsi_14": _safe_number(getattr(indicators, "rsi_14", None)),
+                    "atr_14": _safe_number(getattr(indicators, "atr_14", None)),
+                    "notes": _short_text_list(getattr(indicators, "notes", []) or [], limit=6),
+                }
+            ),
+            "command_center": _drop_empty(
+                {
+                    "overall_read": str(getattr(report, "overall_read", "") or ""),
+                    "overall_score": _safe_number(getattr(report, "overall_score", None)),
+                    "confidence": str(getattr(report, "confidence", "") or ""),
+                    "setup": str(getattr(getattr(report, "setup_classification", None), "setup", "") or ""),
+                    "action_quality": str(getattr(getattr(report, "setup_classification", None), "action_quality", "") or ""),
+                    "warnings": _short_text_list(getattr(report, "warnings", []) or [], limit=8),
+                }
+            ),
+        }
+    )
+
+
+def _research_scenario_context(app_context: Any | None, payload: Any) -> dict[str, Any]:
+    rows = []
+    for row in list(getattr(payload, "scenario_rows", []) or [])[:8]:
+        rows.append(
+            _drop_empty(
+                {
+                    "scenario": str(getattr(row, "scenario", "") or ""),
+                    "symbol_price": _safe_number(getattr(row, "symbol_price", None)),
+                    "position_pnl": _safe_number(getattr(row, "position_pnl", None)),
+                    "portfolio_pnl_impact": _safe_number(getattr(row, "portfolio_pnl_impact", None)),
+                    "new_portfolio_value": _safe_number(getattr(row, "new_portfolio_value", None)),
+                    "probability": _safe_number(getattr(row, "probability", None)),
+                    "likelihood": str(getattr(row, "likelihood", "") or ""),
+                    "why": str(getattr(row, "why", "") or ""),
+                }
+            )
+        )
+    frame = getattr(app_context, "schwab_research_scenarios_frame", None)
+    scenario_text = _text_widget_content(getattr(frame, "scenario_note_text", None))
+    return _drop_empty(
+        {
+            "scenario_rows": [row for row in rows if row],
+            "summary_text": _shorten(scenario_text, SYMBOL_CHAT_RESEARCH_SECTION_TEXT_LIMIT) if scenario_text else "",
+            "generated_risk_budget": _app_attr_display_value(app_context, "schwab_research_max_risk_var") or "",
+        }
+    )
+
+
+def _research_options_context(app_context: Any | None, payload: Any) -> dict[str, Any]:
+    frame = getattr(app_context, "schwab_research_options_frame", None)
+    if frame is None:
+        frame = getattr(app_context, "schwab_options_strategy_frame", None)
+    detail = _text_widget_content(getattr(frame, "detail_text", None))
+    candidates = getattr(app_context, "schwab_research_option_candidates", []) or []
+    return _drop_empty(
+        {
+            "loaded_chain_rows": len(getattr(payload, "option_chain_rows", None) or []),
+            "underlying_price": _safe_number(getattr(payload, "option_chain_underlying_price", None)),
+            "candidate_count": len(candidates) if isinstance(candidates, list) else None,
+            "summary_text": _shorten(detail, SYMBOL_CHAT_RESEARCH_SECTION_TEXT_LIMIT) if detail else "",
+        }
+    )
+
+
+def _research_greeks_context(app_context: Any | None, payload: Any) -> dict[str, Any]:
+    summary = getattr(payload, "greek_summary", None)
+    frame = getattr(app_context, "schwab_research_greeks_frame", None)
+    detail = _text_widget_content(getattr(frame, "detail_text", None))
+    return _drop_empty(
+        {
+            "source": str(getattr(summary, "source", "") or ""),
+            "plain_english": _short_text_list(getattr(summary, "plain_english", []) or [], limit=5),
+            "warnings": _short_text_list(getattr(summary, "warnings", []) or [], limit=5),
+            "summary_text": _shorten(detail, SYMBOL_CHAT_RESEARCH_SECTION_TEXT_LIMIT) if detail else "",
+        }
+    )
+
+
+def _research_text_section(name: str, text: Any) -> dict[str, Any]:
+    clean = str(text or "").strip()
+    if not clean:
+        return {}
+    return {
+        "source": name,
+        "summary_text": _shorten(clean, SYMBOL_CHAT_RESEARCH_SECTION_TEXT_LIMIT),
+    }
+
+
+def _portfolio_symbol_context_dict(context: Any) -> dict[str, Any]:
+    if context is None:
+        return {}
+    return _drop_empty(
+        {
+            "symbol": str(getattr(context, "symbol", "") or ""),
+            "is_held": bool(getattr(context, "is_held", False)),
+            "quantity": _safe_number(getattr(context, "quantity", None)),
+            "average_cost": _safe_number(getattr(context, "average_cost", None)),
+            "last_price": _safe_number(getattr(context, "last_price", None)),
+            "market_value": _safe_number(getattr(context, "market_value", None)),
+            "portfolio_value": _safe_number(getattr(context, "portfolio_value", None)),
+            "portfolio_weight": _safe_number(getattr(context, "portfolio_weight", None)),
+            "unrealized_pnl": _safe_number(getattr(context, "unrealized_pnl", None)),
+            "day_pnl": _safe_number(getattr(context, "day_pnl", None)),
+            "cash_available": _safe_number(getattr(context, "cash_available", None)),
+        }
+    )
+
+
+def _badge_context(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    return _drop_empty(
+        {
+            "title": str(getattr(value, "title", "") or ""),
+            "label": str(getattr(value, "label", "") or ""),
+            "status": str(getattr(value, "status", "") or ""),
+            "score": _safe_number(getattr(value, "score", None)),
+            "why": str(getattr(value, "why", "") or ""),
+        }
+    )
+
+
+def _operator_verdict_context(verdict: Any) -> dict[str, Any]:
+    if verdict is None:
+        return {}
+    return _drop_empty(
+        {
+            "primary_action": str(getattr(verdict, "primary_action", "") or ""),
+            "primary_label": str(getattr(verdict, "primary_label", "") or ""),
+            "confidence": str(getattr(verdict, "confidence", "") or ""),
+            "confidence_score": _safe_number(getattr(verdict, "confidence_score", None)),
+            "summary": str(getattr(verdict, "summary", "") or ""),
+            "right_now": _operator_action_line_context(getattr(verdict, "right_now", None)),
+            "if_confirms": _operator_action_line_context(getattr(verdict, "if_confirms", None)),
+            "if_breaks_down": _operator_action_line_context(getattr(verdict, "if_breaks_down", None)),
+            "best_hedge": _operator_action_line_context(getattr(verdict, "best_hedge", None)),
+            "preferred_vehicle": _operator_action_line_context(getattr(verdict, "preferred_vehicle", None)),
+            "confirmation": _operator_action_line_context(getattr(verdict, "confirmation", None)),
+            "invalidation": _operator_action_line_context(getattr(verdict, "invalidation", None)),
+            "reasons": _short_text_list(getattr(verdict, "reasons", []) or [], limit=6),
+            "warnings": _short_text_list(getattr(verdict, "warnings", []) or [], limit=6),
+            "what_would_change": _short_text_list(getattr(verdict, "what_would_change", []) or [], limit=6),
+        }
+    )
+
+
+def _operator_action_line_context(line: Any) -> dict[str, Any]:
+    if line is None:
+        return {}
+    return _drop_empty(
+        {
+            "label": str(getattr(line, "label", "") or ""),
+            "action": str(getattr(line, "action", "") or ""),
+            "detail": str(getattr(line, "detail", "") or ""),
+            "severity": str(getattr(line, "severity", "") or ""),
+        }
+    )
+
+
+def _recommendation_engine_context(read: Any) -> dict[str, Any]:
+    if read is None:
+        return {}
+    components = []
+    for component in list(getattr(read, "components", []) or [])[:10]:
+        vote = getattr(component, "vote", None)
+        components.append(
+            _drop_empty(
+                {
+                    "key": str(getattr(component, "key", "") or ""),
+                    "label": str(getattr(component, "label", "") or ""),
+                    "status": str(getattr(component, "status", "") or ""),
+                    "score": _safe_number(getattr(vote, "score", None)),
+                    "confidence": _safe_number(getattr(vote, "confidence", None)),
+                    "reason": str(getattr(vote, "reason", "") or ""),
+                    "details": _short_text_list(getattr(component, "details", []) or [], limit=3),
+                    "missing": _short_text_list(getattr(component, "missing", []) or [], limit=3),
+                }
+            )
+        )
+    reward_risk = getattr(read, "expected_reward_risk", None)
+    data_confidence = getattr(read, "data_confidence", None)
+    return _drop_empty(
+        {
+            "recommendation_label": str(getattr(read, "recommendation_label", "") or ""),
+            "confidence": str(getattr(read, "confidence", "") or ""),
+            "confidence_score": _safe_number(getattr(read, "confidence_score", None)),
+            "evidence_score": _safe_number(getattr(read, "evidence_score", None)),
+            "confidence_adjusted_score": _safe_number(getattr(read, "confidence_adjusted_score", None)),
+            "why": _short_text_list(getattr(read, "why", []) or [], limit=6),
+            "warnings": _short_text_list(getattr(read, "warnings", []) or [], limit=6),
+            "confirmation_lines": _short_text_list(getattr(read, "confirmation_lines", []) or [], limit=6),
+            "invalidation_lines": _short_text_list(getattr(read, "invalidation_lines", []) or [], limit=6),
+            "position_sizing_notes": _short_text_list(getattr(read, "position_sizing_notes", []) or [], limit=6),
+            "what_would_change": _short_text_list(getattr(read, "what_would_change", []) or [], limit=6),
+            "expected_reward_risk": _drop_empty(
+                {
+                    "label": str(getattr(reward_risk, "label", "") or ""),
+                    "reward_risk_ratio": _safe_number(getattr(reward_risk, "reward_risk_ratio", None)),
+                    "planning_probability": _safe_number(getattr(reward_risk, "planning_probability", None)),
+                    "summary": str(getattr(reward_risk, "summary", "") or ""),
+                    "reward_line": str(getattr(reward_risk, "reward_line", "") or ""),
+                    "risk_line": str(getattr(reward_risk, "risk_line", "") or ""),
+                }
+            ),
+            "data_confidence": _drop_empty(
+                {
+                    "grade": str(getattr(data_confidence, "grade", "") or ""),
+                    "score": _safe_number(getattr(data_confidence, "score", None)),
+                    "reason": str(getattr(data_confidence, "reason", "") or ""),
+                    "missing": _short_text_list(getattr(data_confidence, "missing", []) or [], limit=5),
+                    "stale": _short_text_list(getattr(data_confidence, "stale", []) or [], limit=5),
+                }
+            ),
+            "components": [component for component in components if component],
+        }
+    )
+
+
+def _source_status_context(statuses: Iterable[Any]) -> list[dict[str, Any]]:
+    rows = []
+    for status in list(statuses)[:12]:
+        rows.append(
+            _drop_empty(
+                {
+                    "source": str(getattr(status, "source", "") or ""),
+                    "status": str(getattr(status, "status", "") or ""),
+                    "fetched_at": str(getattr(status, "fetched_at", "") or ""),
+                    "message": str(getattr(status, "message", "") or ""),
+                }
+            )
+        )
+    return [row for row in rows if row]
+
+
+def _short_text_list(values: Iterable[Any], *, limit: int) -> list[str]:
+    result = []
+    for value in values:
+        clean = str(value or "").strip()
+        if clean:
+            result.append(_shorten(clean, 600))
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _drop_empty(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: item for key, item in value.items() if item not in (None, "", [], {}, ())}
+
+
+def _limit_research_workspace_context(context: dict[str, Any]) -> dict[str, Any]:
+    serialized = _serialize_request_payload(context)
+    if len(serialized) <= SYMBOL_CHAT_RESEARCH_WORKSPACE_TEXT_LIMIT:
+        return context
+    limited = dict(context)
+    for section_name in ("earnings_news", "fundamentals", "macro_context", "risk_scenarios", "options_strategy", "greeks"):
+        section = limited.get(section_name)
+        if isinstance(section, dict) and section.get("summary_text"):
+            section["summary_text"] = _shorten(section["summary_text"], 1_600)
+    if isinstance(limited.get("overview_text"), str):
+        limited["overview_text"] = _shorten(limited["overview_text"], 1_800)
+    return limited
 
 
 def _technical_context(
@@ -763,6 +1464,75 @@ def _recent_filings_context(symbol: str, sec_client: SecEdgarClient | None, sour
     return rows
 
 
+def _web_enrichment_context(
+    app_context: Any | None,
+    symbol: str,
+    enabled: bool,
+    provider: Callable[[str], Mapping[str, Any] | None] | None,
+    source_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    if not enabled:
+        source_metadata["web_enrichment_mode"] = "disabled"
+        return {}
+
+    active_provider = provider or getattr(app_context, "symbol_chat_web_enrichment_provider", None)
+    source_metadata["web_enrichment_mode"] = "requested"
+    if not callable(active_provider):
+        _mark_unavailable(source_metadata, "web_enrichment", "Web enrichment was requested, but no Symbol Chat web-enrichment provider is configured.")
+        return {
+            "enabled": True,
+            "status": "unavailable",
+            "reason": "No web-enrichment provider is configured in this build.",
+            "source": "symbol_chat_web_enrichment_stub",
+        }
+
+    try:
+        result = active_provider(symbol)
+    except Exception as exc:
+        _mark_unavailable(source_metadata, "web_enrichment", f"Web enrichment provider failed: {exc}")
+        return {
+            "enabled": True,
+            "status": "error",
+            "reason": str(exc),
+            "source": "symbol_chat_web_enrichment_provider",
+        }
+
+    if not isinstance(result, Mapping) or not result:
+        _mark_unavailable(source_metadata, "web_enrichment", "Web enrichment provider returned no public context.")
+        return {
+            "enabled": True,
+            "status": "empty",
+            "source": "symbol_chat_web_enrichment_provider",
+        }
+
+    context = _json_safe(dict(result))
+    if isinstance(context, Mapping):
+        compact = dict(context)
+    else:
+        compact = {"summary": context}
+    compact.setdefault("enabled", True)
+    compact.setdefault("status", "available")
+    compact.setdefault("source", "symbol_chat_web_enrichment_provider")
+    _mark_available(source_metadata, "web_enrichment", "Loaded optional public web/search enrichment from configured provider.")
+    return _limit_web_enrichment_context(compact)
+
+
+def _limit_web_enrichment_context(context: dict[str, Any]) -> dict[str, Any]:
+    if len(_serialize_request_payload(context)) <= SYMBOL_CHAT_WEB_TEXT_LIMIT:
+        return context
+    limited = dict(context)
+    for key in ("summary", "company_profile", "recent_news", "earnings", "fundamentals", "filings"):
+        value = limited.get(key)
+        if isinstance(value, str):
+            limited[key] = _shorten(value, 1_500)
+        elif isinstance(value, list):
+            limited[key] = value[:6]
+    if len(_serialize_request_payload(limited)) <= SYMBOL_CHAT_WEB_TEXT_LIMIT:
+        return limited
+    limited["truncation_note"] = f"Web enrichment was truncated to fit the {SYMBOL_CHAT_WEB_TEXT_LIMIT} character sub-budget."
+    return limited
+
+
 def _saved_thesis_context(app_context: Any | None, trade_memory_store: TradeMemoryStore | None, symbol: str, source_metadata: dict[str, Any]) -> str:
     pieces: list[str] = []
     payload = getattr(app_context, "schwab_research_last_payload", None)
@@ -849,6 +1619,10 @@ def _string_var_value(app_context: Any | None, name: str, default: str = "") -> 
 
 
 def _source_mode(context: SymbolChatContext) -> str:
+    if context.web_enrichment:
+        if str(context.web_enrichment.get("status") or "").lower() == "available":
+            return "symbol_context_bundle_plus_web_enrichment"
+        return "symbol_context_bundle_web_enrichment_requested_unavailable"
     available = context.source_metadata.get("available", [])
     if not available:
         return "symbol_only"
@@ -863,6 +1637,10 @@ def _source_debug_lines(request_payload: Mapping[str, Any], diagnostics: Mapping
     unavailable = metadata.get("unavailable", []) if isinstance(metadata, Mapping) else []
     lines.append(f"available_context={len(available)}")
     lines.append(f"unavailable_context={len(unavailable)}")
+    layers = sorted({str(item).split(":", 1)[0].strip() for item in available if str(item).strip()})
+    lines.append("context_layers=" + (",".join(layers) if layers else "none"))
+    if isinstance(metadata, Mapping) and metadata.get("web_enrichment_mode"):
+        lines.append(f"web_enrichment_mode={metadata.get('web_enrichment_mode')}")
     lines.extend(_diagnostic_debug_lines(diagnostics))
     return lines
 
@@ -877,6 +1655,17 @@ def _enforce_request_payload_budget(payload: dict[str, Any]) -> dict[str, Any]:
         return payload
     context = payload.get("symbol_context")
     if isinstance(context, dict):
+        research = context.get("research_workspace_context")
+        if isinstance(research, dict):
+            for section_name in ("earnings_news", "fundamentals", "macro_context", "risk_scenarios", "options_strategy", "greeks"):
+                section = research.get(section_name)
+                if isinstance(section, dict) and section.get("summary_text"):
+                    section["summary_text"] = _shorten(str(section["summary_text"]), 1_500)
+            if isinstance(research.get("overview_text"), str):
+                research["overview_text"] = _shorten(str(research["overview_text"]), 1_500)
+        web = context.get("web_enrichment")
+        if isinstance(web, dict):
+            context["web_enrichment"] = _limit_web_enrichment_context(web)
         technical = context.get("technical_analysis")
         if isinstance(technical, dict) and technical.get("summary_text"):
             technical["summary_text"] = _shorten(str(technical["summary_text"]), 8_000)
@@ -969,6 +1758,26 @@ def _safe_number(value: Any) -> float | None:
         return float(text)
     except (TypeError, ValueError):
         return None
+
+
+def _display_number(value: Any) -> float | None:
+    parsed = _safe_number(value)
+    if parsed is not None:
+        return parsed
+    text = str(value or "").strip()
+    if not text or text in {"--", "N/A", "n/a"}:
+        return None
+    match = re.search(r"\(?\s*-?\$?\s*\d[\d,]*(?:\.\d+)?\s*%?\)?", text)
+    if not match:
+        return None
+    token = match.group(0)
+    negative = "(" in token and ")" in token
+    token = token.replace("$", "").replace(",", "").replace("%", "").replace("(", "").replace(")", "").strip()
+    try:
+        number = float(token)
+    except ValueError:
+        return None
+    return -abs(number) if negative else number
 
 
 def _first_text(mapping: Mapping[str, Any], *keys: str) -> str:

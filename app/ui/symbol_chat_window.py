@@ -71,6 +71,7 @@ class SymbolChatWindow(tk.Toplevel):
 
         self.status_var = tk.StringVar(value=f"Loading {self.symbol} context...")
         self.header_title_var = tk.StringVar(value=f"{self.symbol} Symbol Chat")
+        self.web_enrichment_var = tk.BooleanVar(value=False)
         self._build_header()
         self._build_transcript()
         self._build_prompt_area()
@@ -94,6 +95,13 @@ class SymbolChatWindow(tk.Toplevel):
         actions.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         self.refresh_button = ttk.Button(actions, text="Refresh Context", command=self._refresh_context)
         self.refresh_button.pack(side=tk.LEFT)
+        self.web_enrichment_check = ttk.Checkbutton(
+            actions,
+            text="Web Research",
+            variable=self.web_enrichment_var,
+            command=self._on_web_enrichment_toggled,
+        )
+        self.web_enrichment_check.pack(side=tk.LEFT, padx=(8, 0))
         self.open_filings_button = ttk.Button(actions, text="Open Recent Filings", command=self._open_recent_filings, state=tk.DISABLED)
         self.open_filings_button.pack(side=tk.LEFT, padx=(8, 0))
         self.save_button = ttk.Button(actions, text="Save Transcript Markdown", command=self._save_transcript, state=tk.DISABLED)
@@ -160,6 +168,8 @@ class SymbolChatWindow(tk.Toplevel):
             symbol,
             app_context=self.app_context,
             schwab_session=self.schwab_session,
+            use_web_enrichment=bool(self.web_enrichment_var.get()),
+            web_enrichment_provider=getattr(self.app_context, "symbol_chat_web_enrichment_provider", None),
         )
 
     def _load_session_in_background(self) -> None:
@@ -192,12 +202,13 @@ class SymbolChatWindow(tk.Toplevel):
         self.header_title_var.set(session.context.display_name)
         available_count = len(session.context.source_metadata.get("available", []) or [])
         unavailable_count = len(session.context.source_metadata.get("unavailable", []) or [])
-        self.status_var.set(f"Ready - {available_count} context sources loaded, {unavailable_count} limited.")
+        mode = self._context_mode_label(session)
+        self.status_var.set(f"Ready - {mode}; {available_count} sources loaded, {unavailable_count} limited.")
         self._set_controls_enabled(True)
         filings_available = bool(session.context.recent_filings_summary)
         self.open_filings_button.configure(state=tk.NORMAL if filings_available else tk.DISABLED)
         self._append_system_line(
-            f"{self.symbol} context loaded. Answers are analysis-only and grounded in the provided app context."
+            f"{self.symbol} context loaded using {mode}. Answers are analysis-only and grounded in the provided context."
         )
 
     def _finish_session_error(self, error: Exception) -> None:
@@ -217,6 +228,15 @@ class SymbolChatWindow(tk.Toplevel):
         self._append_system_line(f"Refreshing {self.symbol} context...")
         self._load_session_in_background()
 
+    def _on_web_enrichment_toggled(self) -> None:
+        if self._request_running:
+            self.status_var.set("Web research mode will apply after the current response finishes.")
+            return
+        mode = "app context + web enrichment" if self.web_enrichment_var.get() else "app context only"
+        self.status_var.set(f"Refreshing {self.symbol} context for {mode}...")
+        self._append_system_line(f"Refreshing {self.symbol} context for {mode}...")
+        self._load_session_in_background()
+
     def _set_controls_enabled(self, enabled: bool) -> None:
         state = tk.NORMAL if enabled else tk.DISABLED
         self.prompt_box.configure(state=state)
@@ -224,8 +244,18 @@ class SymbolChatWindow(tk.Toplevel):
         self.save_button.configure(state=tk.NORMAL if enabled else tk.DISABLED)
         self.refresh_button.configure(state=tk.NORMAL if not self._request_running else tk.DISABLED)
         self.cancel_button.configure(state=tk.NORMAL if self._request_running and not enabled else tk.DISABLED)
+        if hasattr(self, "web_enrichment_check"):
+            self.web_enrichment_check.configure(state=tk.NORMAL if not self._request_running and enabled else tk.DISABLED)
         for button in self.quick_buttons:
             button.configure(state=state)
+
+    def _context_mode_label(self, session: SymbolChatSession) -> str:
+        if not session.context.web_enrichment:
+            return "app context only"
+        status = str(session.context.web_enrichment.get("status") or "").lower()
+        if status == "available":
+            return "app context + web enrichment"
+        return "app context; web enrichment unavailable"
 
     def _send_current_prompt(self) -> str:
         prompt = self.prompt_box.get("1.0", tk.END).strip()
