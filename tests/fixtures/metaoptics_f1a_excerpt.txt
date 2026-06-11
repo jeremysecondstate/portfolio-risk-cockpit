@@ -31,6 +31,9 @@ MANAGEMENT'S DISCUSSION AND ANALYSIS OF FINANCIAL CONDITION AND RESULTS OF OPERA
 INDUSTRY 58
 BUSINESS 68
 PRINCIPAL SHAREHOLDERS 119
+RELATED PARTY TRANSACTIONS 121
+SHARES ELIGIBLE FOR FUTURE SALE 141
+DESCRIPTION OF AMERICAN DEPOSITARY SHARES 152
 UNDERWRITING 160
 
 PROSPECTUS SUMMARY
@@ -64,7 +67,10 @@ the symbol "MOT."
 RISK FACTORS
 We have a substantial customer and supplier concentration, and any adverse change
 in these relationships could materially and adversely impact our business,
-results of operations and financial condition. We have registered eight patents in
+results of operations and financial condition. Haur-Jye Technology, Taiwan,
+accounted for 74.6% of our FY2025 revenue. MMI Systems Pte Ltd, Singapore,
+accounted for 81.0% of our FY2025 purchases and is a wholly owned subsidiary of
+MMI Holdings Limited, one of our principal shareholders. We have registered eight patents in
 Taiwan and four patents in the PRC. China customers, PRC patents, and China market
 data are discussed in this filing, but the company does not disclose a variable
 interest entity, VIE structure, or contractual-control arrangement.
@@ -136,9 +142,56 @@ BUSINESS
 We conduct operations through wholly-owned subsidiaries in Singapore and the
 United States.
 
+Customers and Suppliers
+Haur-Jye Technology, Taiwan, was our largest customer and accounted for 74.6% of
+our FY2025 revenue. MMI Systems Pte Ltd, Singapore, was our major supplier and
+accounted for 81.0% of our FY2025 purchases. MMI Systems Pte Ltd is a wholly
+owned subsidiary of MMI Holdings Limited, one of our principal shareholders.
+
+License Agreements
+We license key intellectual property from Accelerate Technologies Pte Ltd, the
+commercialization arm of the Agency for Science, Technology and Research
+("A*STAR"). The August 2023 License Agreement requires gross revenues of at least
+S$3.0 million within five years from August 1, 2023. The December 2023 License
+Agreement requires gross revenues of at least S$5.0 million within five years
+from December 25, 2023. Some commercialization obligations had not been fulfilled,
+but waivers were granted and the obligations were removed, amended, waived, or
+extended.
+
+Internal Control over Financial Reporting
+We identified material weaknesses in our internal control over financial
+reporting. Our policies and procedures did not comprehensively cover multiple
+control areas, including segregation of duties, payroll, and purchases and
+payables. We had insufficient accounting and financial reporting personnel with
+IFRS knowledge, gaps in comprehensive accounting and reporting policies, and prior
+corrections and restatements of previously issued financial statements.
+
 PRINCIPAL SHAREHOLDERS
 All directors and executive officers as a group hold 35.9% before this offering.
-Principal shareholders include Angelling Capital Holdings Limited and MST SingCo.
+Principal shareholders include Angelling Capital Holdings Limited, MST SingCo,
+and MMI Holdings Limited.
+
+RELATED PARTY TRANSACTIONS
+MMI Systems Pte Ltd is a wholly owned subsidiary of MMI Holdings Limited, one of
+our principal shareholders, and accounted for 81.0% of our FY2025 purchases. The
+amount due to MST SingCo is related to the 2021 License Agreement, under which
+consideration of S$2,880,000 was paid on our behalf directly by MST SingCo and we
+are obligated to repay that amount.
+
+SHARES ELIGIBLE FOR FUTURE SALE
+The company and certain directors, officers, and shareholders owning more than
+50% of our ordinary shares prior to this offering have agreed to a 180-day
+lock-up. SGX-ST Catalist moratorium restrictions remain in place until September
+8, 2026 for our promoters, MST SingCo, Angelling Capital Holdings Limited,
+indirect shareholders, pre-SGX IPO investors, and certain other shareholders.
+
+DESCRIPTION OF AMERICAN DEPOSITARY SHARES
+Our ordinary shares trade on SGX-ST Catalist under stock code 9MT and the ADSs
+are proposed for Nasdaq trading under MOT. Each ADS represents 12 ordinary
+shares. Holders may convert ordinary shares into ADSs and may surrender ADSs for
+delivery of ordinary shares, subject to depositary procedures and applicable
+market restrictions. Investors should reconcile the SGX ordinary share trading
+price with the U.S. ADS price range using the 1 ADS to 12 ordinary share ratio.
 
 UNDERWRITING
 Roth Capital Partners, LLC and The Benchmark Company, LLC are acting as the

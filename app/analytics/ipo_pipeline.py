@@ -1680,31 +1680,49 @@ def _extract_money_after_terms(text: str, terms: tuple[str, ...]) -> float | Non
 
 def _extract_financial_row_value(text: str, labels: tuple[str, ...], default_multiplier: float) -> float | None:
     for label in labels:
-        match = re.search(
+        matches = re.finditer(
             rf"(?<![A-Za-z0-9]){label}(?![A-Za-z0-9])"
             rf"([^\n]{{0,220}})",
             text,
             flags=re.IGNORECASE,
         )
-        if not match:
-            continue
-        tokens = re.findall(
-            r"\(?(?:US\$|S\$|HK\$|\$)?\s*-?[0-9][0-9,.]*(?:\s*(?:billion|million|thousand|B|M|K)\b)?\)?",
-            match.group(1),
-            flags=re.IGNORECASE,
-        )
-        tokens = [token for token in tokens if _parse_money_amount(token, default_multiplier=default_multiplier) is not None]
-        if len(tokens) >= 3 and _looks_like_financial_note_number(tokens[0], tokens[1:3]):
-            tokens = tokens[1:]
-        if not tokens:
-            continue
-        value = _parse_money_amount(tokens[0], default_multiplier=default_multiplier)
-        if value is None:
-            continue
-        if "loss" in label.lower() or (label.lower() == "net income" and _near_term(text, "net loss", value)):
-            value = -abs(value)
-        return value
+        for match in matches:
+            if _looks_like_concentration_percentage_context(text, match.start(), match.end() + 220):
+                continue
+            token_matches = re.finditer(
+                r"\(?(?:US\$|S\$|HK\$|\$)?\s*-?[0-9][0-9,.]*(?:\s*(?:billion|million|thousand|B|M|K)\b)?\)?",
+                match.group(1),
+                flags=re.IGNORECASE,
+            )
+            tokens = [
+                token_match.group(0)
+                for token_match in token_matches
+                if not re.match(r"\s*%", match.group(1)[token_match.end() : token_match.end() + 3])
+            ]
+            tokens = [token for token in tokens if _parse_money_amount(token, default_multiplier=default_multiplier) is not None]
+            if len(tokens) >= 3 and _looks_like_financial_note_number(tokens[0], tokens[1:3]):
+                tokens = tokens[1:]
+            if not tokens:
+                continue
+            value = _parse_money_amount(tokens[0], default_multiplier=default_multiplier)
+            if value is None:
+                continue
+            if "loss" in label.lower() or (label.lower() == "net income" and _near_term(text, "net loss", value)):
+                value = -abs(value)
+            return value
     return None
+
+
+def _looks_like_concentration_percentage_context(text: str, start: int, end: int) -> bool:
+    window = text[max(0, start - 140) : min(len(text), end + 140)].lower()
+    if "%" not in window:
+        return False
+    return bool(
+        re.search(
+            r"\b(accounted for|customer|supplier|purchases?|major customer|major supplier|concentration)\b",
+            window,
+        )
+    )
 
 
 def _looks_like_financial_note_number(token: str, following: Iterable[str]) -> bool:

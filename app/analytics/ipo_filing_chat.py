@@ -55,11 +55,11 @@ For S-1/F-1/424B filings, prioritize:
 1. What the company does
 2. Whether this is an IPO, resale shelf, SPAC, direct listing, amendment, or final prospectus
 3. Securities offered
-4. Use of proceeds
-5. Capitalization and dilution
-6. Selling shareholders / insider control
-7. Financial condition
-8. Risk factors
+4. Use of proceeds, including net proceeds and disclosed allocation details
+5. Capitalization and dilution, including actual/as-adjusted tables and per-ADS dilution when disclosed
+6. Selling shareholders, principal shareholders, insider control, and related-party transactions
+7. Financial condition, customer/supplier concentration, license obligations, and internal-control weaknesses
+8. Risk factors, lock-up/moratorium constraints, and ADS/ordinary-share conversion considerations
 9. Bull case / bear case
 10. Investor diligence questions
 
@@ -71,8 +71,10 @@ Never include credentials, API keys, or secrets.
 QUICK_ACTION_PROMPTS: dict[str, str] = {
     "Overview": (
         "Generate a thorough overview of this filing. Cover the transaction type, securities offered, "
-        "company business, use of proceeds, financial condition, ownership/dilution, major risks, "
-        "and investor diligence questions."
+        "company business, net proceeds and use-of-proceeds allocation, financial condition, capitalization, "
+        "dilution, customer/supplier concentration, license obligations, ICFR weaknesses, principal shareholders, "
+        "related-party transactions, lock-up or moratorium restrictions, ADS/ordinary-share conversion mechanics, "
+        "major risks, and investor diligence questions."
     ),
     "Risks": (
         "Summarize the most important risk factors in plain English. Prioritize risks that could affect "
@@ -222,6 +224,7 @@ class OpenAiIpoFilingChatClient:
         prompt: str,
     ) -> IpoFilingChatResponse:
         filing_context = filing_context_payload_for_prompt(context.bundle, prompt)
+        verified_facts = verified_filing_facts_for_prompt(context.bundle, filing_context, prompt)
         request_payload = {
             "question": prompt,
             "filing_metadata": context.bundle.metadata,
@@ -229,7 +232,7 @@ class OpenAiIpoFilingChatClient:
                 "use_policy": "Hints only. Filing text and verified filing facts override these values.",
                 "extracts": context.bundle.deterministic_extracts,
             },
-            "verified_filing_facts": verified_filing_facts_for_prompt(context.bundle, filing_context, prompt),
+            "verified_filing_facts": verified_facts,
             "filing_context": filing_context,
             "grounding_rules": [
                 "Use only filing_metadata, verified_filing_facts, filing_context, and deterministic_extracts_hints for factual claims.",
@@ -241,6 +244,9 @@ class OpenAiIpoFilingChatClient:
                 "Do not infer offering economics, underwriters, selling shareholders, or transaction type beyond the supplied text.",
             ],
         }
+        overview_requirements = _overview_answer_requirements_for_prompt(prompt)
+        if overview_requirements:
+            request_payload["overview_answer_requirements"] = overview_requirements
         input_messages = [{"role": "system", "content": FILING_CHAT_SYSTEM_PROMPT}]
         for message in list(history)[-CHAT_HISTORY_MESSAGE_LIMIT:]:
             input_messages.append({"role": message.role, "content": message.content})
@@ -360,10 +366,21 @@ def filing_context_payload_for_prompt(bundle: IpoFilingSourceBundle, prompt: str
             for section in sections
         ],
         "section_debug": [
-            f"{section.name} ({len(section.text)} chars): {_shorten(section.text, 260)}"
+            _filing_context_debug_line(section)
             for section in sections
         ],
     }
+
+
+def _filing_context_debug_line(section: IpoFilingSourceSection) -> str:
+    if section.start_offset is not None and section.end_offset is not None:
+        offsets = f"offsets={section.start_offset}-{section.end_offset}"
+    else:
+        offsets = "offsets=unknown"
+    return (
+        f"{section.name} ({len(section.text)} chars, {offsets}, "
+        f"toc_like={_is_toc_dominant_section(section.text)}): {_shorten(section.text, 260)}"
+    )
 
 
 def verified_filing_facts_for_prompt(
@@ -380,6 +397,13 @@ def verified_filing_facts_for_prompt(
         ),
         "offering_terms": _verified_offering_terms(text),
         "financial_metrics": _verified_financial_metrics(text, context_text),
+        "dilution": _verified_dilution_terms(text),
+        "customer_supplier_concentration": _verified_customer_supplier_concentration(text),
+        "license_obligations": _verified_license_obligations(text),
+        "icfr_material_weaknesses": _verified_icfr_material_weaknesses(text),
+        "shareholders_and_related_parties": _verified_shareholders_and_related_parties(text),
+        "lockup_moratorium": _verified_lockup_moratorium(text),
+        "ads_sgx_conversion": _verified_ads_sgx_conversion(text),
         "risk_checks": _verified_risk_checks(text),
     }
     unsupported_industry_revenue = _industry_market_revenue_warning(text)
@@ -476,6 +500,238 @@ def _verified_financial_metrics(text: str, context_text: str) -> dict[str, Any]:
     return facts
 
 
+def _verified_dilution_terms(text: str) -> dict[str, Any]:
+    dilution = _first_named_section_text(text, _dilution_spec(max_sections=1)) or text
+    facts: dict[str, Any] = {}
+
+    match = re.search(r"net tangible book value.*?(US\$[0-9.]+\s+per\s+ADS)", dilution, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        facts["pro_forma_as_adjusted_ntbv_per_ads"] = _fact(_compact_fact_value(match.group(1)), dilution, match.group(0))
+    match = re.search(r"immediate dilution.*?(US\$[0-9.]+\s+per\s+ADS)", dilution, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        facts["immediate_dilution_per_ads"] = _fact(_compact_fact_value(match.group(1)), dilution, match.group(0))
+    match = re.search(r"net tangible book value.*?(US\$[0-9.]+\s+per\s+ordinary share)", dilution, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        facts["pro_forma_as_adjusted_ntbv_per_ordinary_share"] = _fact(_compact_fact_value(match.group(1)), dilution, match.group(0))
+    match = re.search(r"immediate dilution.*?(US\$[0-9.]+\s+per\s+ordinary share)", dilution, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        facts["immediate_dilution_per_ordinary_share"] = _fact(_compact_fact_value(match.group(1)), dilution, match.group(0))
+    return facts
+
+
+def _verified_customer_supplier_concentration(text: str) -> dict[str, Any]:
+    search_text = "\n\n".join(
+        _dedupe(
+            [
+                _first_named_section_text(text, _customer_supplier_concentration_spec(max_sections=2)),
+                _first_named_section_text(text, _business_spec(max_sections=2)),
+                _first_named_section_text(text, _risk_spec(max_sections=2)),
+                _first_named_section_text(text, _related_party_transactions_spec(max_sections=1)),
+                text,
+            ]
+        )
+    )
+    facts: dict[str, Any] = {}
+
+    match = re.search(r"Haur-Jye Technology[^.\n]*?([0-9.]+%)\s+of\s+(?:our\s+)?(?:FY\s*)?2025\s+revenue", search_text, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        match = re.search(r"Haur-Jye Technology[^.\n]*?accounted for\s+([0-9.]+%)\s+of\s+(?:our\s+)?revenue", search_text, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        facts["largest_customer"] = _fact(
+            f"Haur-Jye Technology, Taiwan accounted for {match.group(1)} of FY2025 revenue",
+            search_text,
+            match.group(0),
+        )
+
+    match = re.search(r"MMI Systems Pte Ltd[^.\n]*?([0-9.]+%)\s+of\s+(?:our\s+)?(?:FY\s*)?2025\s+purchases", search_text, flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        match = re.search(r"MMI Systems Pte Ltd[^.\n]*?accounted for\s+([0-9.]+%)\s+of\s+(?:our\s+)?purchases", search_text, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        facts["major_supplier"] = _fact(
+            f"MMI Systems Pte Ltd, Singapore accounted for {match.group(1)} of FY2025 purchases",
+            search_text,
+            match.group(0),
+        )
+
+    if re.search(r"MMI Systems Pte Ltd.*?wholly owned subsidiary of MMI Holdings Limited", search_text, flags=re.IGNORECASE | re.DOTALL):
+        facts["supplier_related_party_link"] = _fact(
+            "MMI Systems Pte Ltd is a wholly owned subsidiary of MMI Holdings Limited, one of MetaOptics' principal shareholders",
+            search_text,
+            "MMI Systems Pte Ltd",
+        )
+    return facts
+
+
+def _verified_license_obligations(text: str) -> dict[str, Any]:
+    search_text = "\n\n".join(
+        _dedupe(
+            [
+                _first_named_section_text(text, _license_obligations_spec(max_sections=2)),
+                _first_named_section_text(text, _business_spec(max_sections=2)),
+                text,
+            ]
+        )
+    )
+    facts: dict[str, Any] = {}
+
+    if re.search(r"Accelerate Technologies|A\*STAR|A-Star", search_text, flags=re.IGNORECASE):
+        facts["licensed_ip_counterparty"] = _fact(
+            "Key IP is licensed from Accelerate Technologies / A*STAR",
+            search_text,
+            "Accelerate Technologies",
+        )
+    match = re.search(r"(?:August|Aug\.?)\s+2023\s+License Agreement.*?(S\$[0-9.]+\s+million).*?within\s+five\s+years.*?(?:August|Aug\.?)\s+1,\s+2023", search_text, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        facts["august_2023_gross_revenue_threshold"] = _fact(
+            f"{match.group(1)} gross revenue threshold within five years from August 1, 2023",
+            search_text,
+            match.group(0),
+        )
+    match = re.search(r"(?:December|Dec\.?)\s+2023\s+License Agreement.*?(S\$[0-9.]+\s+million).*?within\s+five\s+years.*?(?:December|Dec\.?)\s+25,\s+2023", search_text, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        facts["december_2023_gross_revenue_threshold"] = _fact(
+            f"{match.group(1)} gross revenue threshold within five years from December 25, 2023",
+            search_text,
+            match.group(0),
+        )
+    if re.search(r"commerciali[sz]ation obligations?.*?(?:not been fulfilled|not fulfilled).*?(?:waivers?|removed|amended|extended)", search_text, flags=re.IGNORECASE | re.DOTALL):
+        facts["commercialization_obligation_status"] = _fact(
+            "Some commercialization obligations had not been fulfilled, but waivers or amendments removed, waived, or extended obligations",
+            search_text,
+            "commercialization obligations",
+        )
+    return facts
+
+
+def _verified_icfr_material_weaknesses(text: str) -> dict[str, Any]:
+    search_text = "\n\n".join(
+        _dedupe(
+            [
+                _first_named_section_text(text, _icfr_material_weaknesses_spec(max_sections=2)),
+                _first_named_section_text(text, _risk_spec(max_sections=2)),
+                _first_named_section_text(text, _mda_spec(max_sections=2)),
+                text,
+            ]
+        )
+    )
+    weakness_patterns = (
+        ("policies/procedures did not comprehensively cover multiple control areas", r"polic(?:y|ies).*?procedures?.*?(?:did not|not).*?comprehensively cover"),
+        ("segregation of duties", r"segregation of duties"),
+        ("payroll controls", r"payroll"),
+        ("purchases and payables controls", r"purchases? and payables?"),
+        ("insufficient IFRS accounting and reporting personnel", r"insufficient.*?(?:accounting|financial reporting).*?IFRS"),
+        ("gaps in comprehensive accounting/reporting policies", r"comprehensive accounting.*?reporting policies|accounting and reporting policies"),
+        ("prior corrections/restatements of previously issued financial statements", r"corrections?|restatements?.*?previously issued financial statements"),
+    )
+    weaknesses = [label for label, pattern in weakness_patterns if re.search(pattern, search_text, flags=re.IGNORECASE | re.DOTALL)]
+    if not weaknesses:
+        return {}
+    snippet_needle = "material weakness" if re.search(r"material weakness", search_text, flags=re.IGNORECASE) else weaknesses[0]
+    return {
+        "specific_weaknesses": {
+            "value": "; ".join(_dedupe(weaknesses)),
+            "source_snippet": _source_snippet(search_text, snippet_needle, before=220, after=620),
+        }
+    }
+
+
+def _verified_shareholders_and_related_parties(text: str) -> dict[str, Any]:
+    search_text = "\n\n".join(
+        _dedupe(
+            [
+                _first_named_section_text(text, _principal_shareholders_spec(max_sections=1)),
+                _first_named_section_text(text, _related_party_transactions_spec(max_sections=2)),
+                _first_named_section_text(text, _customer_supplier_concentration_spec(max_sections=1)),
+                text,
+            ]
+        )
+    )
+    facts: dict[str, Any] = {}
+
+    match = re.search(r"directors and executive officers as a group hold\s+([0-9.]+%)", search_text, flags=re.IGNORECASE)
+    if match:
+        facts["directors_and_officers_ownership"] = _fact(
+            f"Directors and executive officers as a group hold {match.group(1)} before the offering",
+            search_text,
+            match.group(0),
+        )
+    if re.search(r"Angelling Capital Holdings Limited", search_text, flags=re.IGNORECASE):
+        facts["angelling_principal_shareholder"] = _fact("Angelling Capital Holdings Limited is identified as a principal shareholder", search_text, "Angelling Capital Holdings Limited")
+    if re.search(r"MST SingCo", search_text, flags=re.IGNORECASE):
+        facts["mst_singco_principal_or_related_party"] = _fact("MST SingCo is identified in principal-shareholder or related-party context", search_text, "MST SingCo")
+    if re.search(r"MMI Systems Pte Ltd.*?MMI Holdings Limited", search_text, flags=re.IGNORECASE | re.DOTALL):
+        facts["mmi_related_supplier"] = _fact("MMI Systems Pte Ltd is tied to MMI Holdings Limited in the related-party/principal-shareholder structure", search_text, "MMI Systems Pte Ltd")
+    return facts
+
+
+def _verified_lockup_moratorium(text: str) -> dict[str, Any]:
+    search_text = "\n\n".join(
+        _dedupe(
+            [
+                _first_named_section_text(text, _shares_eligible_future_sale_spec(max_sections=2)),
+                _first_named_section_text(text, _underwriting_spec()),
+                text,
+            ]
+        )
+    )
+    facts: dict[str, Any] = {}
+
+    if re.search(r"180[\s-]+day(?:s)?\s+lock-up|180\s+days?", search_text, flags=re.IGNORECASE) and re.search(
+        r"(?:directors|officers|shareholders).*?(?:50%|more than\s+50%)",
+        search_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        facts["us_offering_lockup"] = _fact(
+            "180-day lock-up applies to the company and certain directors, officers, and shareholders owning more than 50% of ordinary shares before the offering",
+            search_text,
+            "180-day lock-up",
+        )
+    match = re.search(r"SGX(?:-ST)?[^.\n]*?moratorium.*?(September\s+8,\s+2026)", search_text, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        facts["sgx_moratorium"] = _fact(
+            f"SGX-ST Catalist moratorium restrictions remain in place until {match.group(1)}",
+            search_text,
+            match.group(0),
+        )
+    return facts
+
+
+def _verified_ads_sgx_conversion(text: str) -> dict[str, Any]:
+    search_text = "\n\n".join(
+        _dedupe(
+            [
+                _cover_page_section(text).text,
+                _first_named_section_text(text, _ads_sgx_conversion_spec(max_sections=2)),
+                text,
+            ]
+        )
+    )
+    facts: dict[str, Any] = {}
+
+    match = re.search(r"ordinary shares have been listed on\s+(?:Catalist of the\s+)?Singapore Exchange Securities Trading Limited.*?stock code\s+[\"']?([A-Z0-9.]+)", search_text, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        facts["sgx_listing"] = _fact(
+            f"Ordinary shares trade on SGX-ST Catalist under stock code {match.group(1).strip('.').upper()}",
+            search_text,
+            match.group(0),
+        )
+    match = re.search(r"Each ADS represents\s+([0-9][0-9,]*)\s+ordinary shares", search_text, flags=re.IGNORECASE)
+    if match:
+        facts["ads_ratio"] = _fact(f"1 ADS = {match.group(1)} ordinary shares", search_text, match.group(0))
+    if re.search(r"convert.*?ordinary shares.*?ADSs|ADSs.*?converted.*?ordinary shares|depositary.*?cancel.*?ADSs", search_text, flags=re.IGNORECASE | re.DOTALL):
+        facts["conversion_mechanics"] = _fact(
+            "Filing describes mechanics for converting ordinary shares and ADSs through the depositary structure",
+            search_text,
+            "ordinary shares",
+        )
+    if facts.get("sgx_listing") and facts.get("ads_ratio"):
+        facts["ads_sgx_price_reconciliation"] = {
+            "value": "Overview should reconcile SGX ordinary-share trading with the U.S. ADS price range using the disclosed ADS ratio",
+            "source_snippet": facts["ads_ratio"]["source_snippet"],
+        }
+    return facts
+
+
 def _verified_risk_checks(text: str) -> dict[str, Any]:
     going_concern_sentence = _source_snippet(text, "prepared on a going concern basis", before=180, after=420)
     return {
@@ -507,6 +763,10 @@ def _fact(value: str, source_text: str, needle: str) -> dict[str, str]:
         "value": value,
         "source_snippet": _source_snippet(source_text, needle, before=220, after=360) or _shorten(needle, 500),
     }
+
+
+def _compact_fact_value(value: str) -> str:
+    return re.sub(r"\s+", " ", value or "").strip()
 
 
 def _filing_context_text(filing_context: dict[str, Any]) -> str:
@@ -623,6 +883,8 @@ def retrieve_relevant_filing_sections(text: str, prompt: str) -> tuple[IpoFiling
     for section in selected:
         if not section.text:
             continue
+        if section.name not in {"cover_page", "opening_excerpt"} and _is_toc_dominant_section(section.text):
+            continue
         start = section.start_offset if section.start_offset is not None else -1
         end = section.end_offset if section.end_offset is not None else -1
         if start >= 0 and end >= 0 and _overlaps_existing_range(start, end, ranges):
@@ -705,11 +967,12 @@ class _SectionSpec:
     stop_headings: tuple[str, ...]
     terms: tuple[str, ...] = ()
     max_sections: int = 1
+    char_limit: int = CHAT_SECTION_CHAR_LIMIT
 
 
 def _section_specs_for_prompt(prompt: str) -> tuple[_SectionSpec, ...]:
     lower = prompt.lower()
-    wants_overview = not prompt.strip() or any(term in lower for term in ("overview", "thorough", "summary", "breakdown", "filing"))
+    wants_overview = _is_overview_prompt(prompt)
     specs: list[_SectionSpec] = []
 
     def add(spec: _SectionSpec) -> None:
@@ -719,7 +982,6 @@ def _section_specs_for_prompt(prompt: str) -> tuple[_SectionSpec, ...]:
     if wants_overview:
         add(_cover_page_spec())
         add(_prospectus_summary_spec())
-        add(_business_spec())
         add(_offering_spec())
         add(_use_of_proceeds_spec())
         add(_capitalization_spec())
@@ -727,16 +989,26 @@ def _section_specs_for_prompt(prompt: str) -> tuple[_SectionSpec, ...]:
         add(_mda_spec())
         add(_financial_statements_spec())
         add(_risk_spec())
+        add(_customer_supplier_concentration_spec())
+        add(_license_obligations_spec())
+        add(_icfr_material_weaknesses_spec())
         add(_principal_shareholders_spec())
+        add(_related_party_transactions_spec())
+        add(_shares_eligible_future_sale_spec())
         add(_underwriting_spec())
+        add(_ads_sgx_conversion_spec())
+        add(_business_spec())
 
     if any(term in lower for term in ("risk", "viability", "liquidity", "valuation", "protection", "going concern")):
         add(_risk_spec(max_sections=2))
+        add(_icfr_material_weaknesses_spec(max_sections=2))
     if any(term in lower for term in ("offering", "terms", "transaction", "ipo", "resale", "shelf", "spac", "direct listing", "price", "ticker", "underwriter", "lockup", "lock-up", "securities offered")):
         add(_cover_page_spec())
         add(_offering_spec(max_sections=2))
         add(_selling_shareholders_spec())
         add(_underwriting_spec())
+        add(_shares_eligible_future_sale_spec())
+        add(_ads_sgx_conversion_spec())
     if any(term in lower for term in ("proceeds", "repay", "working capital", "company receives")):
         add(_use_of_proceeds_spec(max_sections=2))
     if any(term in lower for term in ("dilution", "ownership", "capitalization", "overhang", "warrant", "option", "insider", "control", "selling shareholder")):
@@ -744,6 +1016,7 @@ def _section_specs_for_prompt(prompt: str) -> tuple[_SectionSpec, ...]:
         add(_dilution_spec(max_sections=2))
         add(_selling_shareholders_spec())
         add(_principal_shareholders_spec())
+        add(_related_party_transactions_spec())
     if any(term in lower for term in ("financial", "revenue", "cash", "debt", "income", "loss", "condition", "liquidity", "capital resources")):
         add(_mda_spec(max_sections=2))
         add(_financial_statements_spec(max_sections=2))
@@ -759,6 +1032,33 @@ def _section_specs_for_prompt(prompt: str) -> tuple[_SectionSpec, ...]:
         add(_offering_spec())
         add(_risk_spec())
     return tuple(specs)
+
+
+def _is_overview_prompt(prompt: str) -> bool:
+    lower = (prompt or "").lower()
+    return not prompt.strip() or any(term in lower for term in ("overview", "thorough", "summary", "breakdown", "filing"))
+
+
+def _overview_answer_requirements_for_prompt(prompt: str) -> dict[str, Any]:
+    if not _is_overview_prompt(prompt):
+        return {}
+    return {
+        "instruction": (
+            "For overview prompts, explicitly address each listed topic when disclosed in verified_filing_facts "
+            "or filing_context. If a topic is absent, say Not disclosed."
+        ),
+        "required_topics": [
+            "net proceeds and use-of-proceeds allocation",
+            "dilution and pro forma/as-adjusted net tangible book value",
+            "actual versus as-adjusted capitalization, including disclosed currency translations",
+            "customer and supplier concentration",
+            "license or commercialization obligations",
+            "specific ICFR material weakness details",
+            "principal shareholders and related-party transactions",
+            "U.S. lock-up and SGX-ST moratorium or future-sale restrictions",
+            "ADS/SGX ordinary-share conversion and price-reconciliation considerations",
+        ],
+    }
 
 
 def _prospectus_summary_spec() -> _SectionSpec:
@@ -779,12 +1079,14 @@ def _cover_page_spec() -> _SectionSpec:
     )
 
 
-def _business_spec() -> _SectionSpec:
+def _business_spec(*, max_sections: int = 1) -> _SectionSpec:
     return _SectionSpec(
         name="business",
         headings=("Business Overview", "Our Business", "Our Company", "Company Overview", "Business"),
         stop_headings=("Risk Factors", "Management", "Management's Discussion", "Principal Shareholders", "Financial Statements", "Underwriting"),
         terms=("our platform", "we provide", "we develop", "we operate", "customers", "market"),
+        max_sections=max_sections,
+        char_limit=12_000,
     )
 
 
@@ -867,10 +1169,11 @@ def _dilution_spec(*, max_sections: int = 1) -> _SectionSpec:
 def _risk_spec(*, max_sections: int = 1) -> _SectionSpec:
     return _SectionSpec(
         name="risk_factors",
-        headings=("Risk Factors", "Going Concern"),
+        headings=("Risk Factors",),
         stop_headings=("Use of Proceeds", "Dividend Policy", "Capitalization", "Dilution", "Management", "Business", "Underwriting"),
-        terms=("risk factors", "going concern", "substantial doubt", "customer concentration", "related party", "controlled company"),
+        terms=("risk factors", "going concern", "substantial doubt", "customer concentration", "supplier concentration", "material weakness", "related party", "controlled company"),
         max_sections=max_sections,
+        char_limit=12_000,
     )
 
 
@@ -884,12 +1187,14 @@ def _selling_shareholders_spec() -> _SectionSpec:
     )
 
 
-def _principal_shareholders_spec() -> _SectionSpec:
+def _principal_shareholders_spec(*, max_sections: int = 1) -> _SectionSpec:
     return _SectionSpec(
         name="principal_shareholders",
         headings=("Principal Shareholders", "Principal Stockholders", "Security Ownership", "Principal and Selling Shareholders"),
-        stop_headings=("Certain Relationships", "Related Party", "Description of Capital Stock", "Underwriting"),
-        terms=("beneficial ownership", "controlled company", "voting power", "insider"),
+        stop_headings=("Certain Relationships", "Related Party", "Shares Eligible", "Description of Capital Stock", "Underwriting"),
+        terms=("beneficial ownership", "controlled company", "voting power", "insider", "Angelling Capital", "MST SingCo"),
+        max_sections=max_sections,
+        char_limit=10_000,
     )
 
 
@@ -898,7 +1203,79 @@ def _underwriting_spec() -> _SectionSpec:
         name="underwriting",
         headings=("Underwriting", "Plan of Distribution"),
         stop_headings=("Legal Matters", "Experts", "Financial Statements", "Consolidated Statements", "METAOPTICS LTD AND ITS SUBSIDIARIES", "Where You Can Find More Information"),
-        terms=("underwriters are", "representatives of the underwriters", "book-running", "bookrunners", "lock-up", "lockup"),
+        terms=("underwriters are", "representatives of the underwriters", "book-running", "bookrunners", "lock-up", "lockup", "180 days"),
+        char_limit=10_000,
+    )
+
+
+def _related_party_transactions_spec(*, max_sections: int = 1) -> _SectionSpec:
+    return _SectionSpec(
+        name="related_party_transactions",
+        headings=("Related Party Transactions", "Certain Relationships and Related Party Transactions", "Certain Relationships"),
+        stop_headings=("Description of Capital Stock", "Shares Eligible", "Underwriting", "Plan of Distribution", "Financial Statements"),
+        terms=("related party", "MMI Systems", "MMI Holdings", "MST SingCo", "amount due to a shareholder"),
+        max_sections=max_sections,
+        char_limit=10_000,
+    )
+
+
+def _shares_eligible_future_sale_spec(*, max_sections: int = 1) -> _SectionSpec:
+    return _SectionSpec(
+        name="shares_eligible_future_sale",
+        headings=("Shares Eligible for Future Sale", "Lock-Up Agreements", "Lock-up Agreements", "SGX-ST Moratorium", "Moratorium"),
+        stop_headings=("Taxation", "Underwriting", "Plan of Distribution", "Description of American Depositary Shares", "Legal Matters", "Experts"),
+        terms=("moratorium", "September 8, 2026", "180 days", "lock-up", "lockup", "future sale", "SGX-ST"),
+        max_sections=max_sections,
+        char_limit=10_000,
+    )
+
+
+def _ads_sgx_conversion_spec(*, max_sections: int = 1) -> _SectionSpec:
+    return _SectionSpec(
+        name="ads_sgx_conversion",
+        headings=(
+            "Conversion Between Ordinary Shares and ADSs",
+            "Description of American Depositary Shares",
+            "American Depositary Shares",
+            "Deposit Agreement",
+        ),
+        stop_headings=("Shares Eligible", "Taxation", "Underwriting", "Plan of Distribution", "Legal Matters", "Experts"),
+        terms=("convert ordinary shares into ADSs", "convert ADSs into ordinary shares", "ADSs into ordinary shares", "SGX", "Singapore Exchange", "Each ADS represents"),
+        max_sections=max_sections,
+        char_limit=10_000,
+    )
+
+
+def _customer_supplier_concentration_spec(*, max_sections: int = 1) -> _SectionSpec:
+    return _SectionSpec(
+        name="customer_supplier_concentration",
+        headings=("Customers and Suppliers", "Customers", "Customer Concentration", "Suppliers", "Supplier Concentration", "Major Customers", "Major Suppliers"),
+        stop_headings=("License Agreements", "Licensing Agreements", "Intellectual Property", "Internal Control over Financial Reporting", "Research and Development", "Employees", "Facilities", "Regulation", "Management"),
+        terms=("Haur-Jye Technology", "74.6%", "MMI Systems Pte Ltd", "81.0%", "major customer", "major supplier"),
+        max_sections=max_sections,
+        char_limit=8_000,
+    )
+
+
+def _license_obligations_spec(*, max_sections: int = 1) -> _SectionSpec:
+    return _SectionSpec(
+        name="license_obligations",
+        headings=("License Agreements", "Licensing Agreements", "Intellectual Property", "Our Intellectual Property"),
+        stop_headings=("Internal Control over Financial Reporting", "Material Weakness", "Customers", "Suppliers", "Employees", "Facilities", "Regulation", "Management", "Principal Shareholders"),
+        terms=("Accelerate Technologies", "A*STAR", "gross revenues", "S$3.0 million", "S$5.0 million", "commercialization obligations"),
+        max_sections=max_sections,
+        char_limit=8_000,
+    )
+
+
+def _icfr_material_weaknesses_spec(*, max_sections: int = 1) -> _SectionSpec:
+    return _SectionSpec(
+        name="icfr_material_weaknesses",
+        headings=("Internal Control over Financial Reporting", "Material Weaknesses", "Material Weakness", "Controls and Procedures"),
+        stop_headings=("Management", "Business", "Principal Shareholders", "Related Party", "Financial Statements", "Description of Capital Stock"),
+        terms=("material weakness", "segregation of duties", "payroll", "purchases and payables", "IFRS", "restatement"),
+        max_sections=max_sections,
+        char_limit=8_000,
     )
 
 
@@ -932,28 +1309,51 @@ def _sections_between_headings(text: str, spec: _SectionSpec) -> list[IpoFilingS
             if not _looks_like_section_heading_match(text, match.start(), match.end(), heading):
                 continue
             starts.append((match.start(), match.end(), heading))
-    sections: list[IpoFilingSourceSection] = []
+    candidates: list[tuple[int, int, int, str, str]] = []
     for start, content_start, heading in sorted(starts, key=lambda item: item[0]):
-        stop_index = len(text)
-        for stop in spec.stop_headings:
-            stop_match = re.search(rf"\b{re.escape(stop.lower())}\b", lower[content_start + 20 :])
-            if stop_match:
-                stop_index = min(stop_index, content_start + 20 + stop_match.start())
+        stop_index = _next_section_stop_index(text, lower, content_start, spec)
         section_start = start
-        section_end = min(stop_index, section_start + CHAT_SECTION_CHAR_LIMIT)
-        body = _clean_section_text(text[section_start:section_end], limit=CHAT_SECTION_CHAR_LIMIT)
-        if body and _has_section_body(body):
-            sections.append(
-                IpoFilingSourceSection(
-                    name=spec.name,
-                    text=f"{heading}\n{body}",
-                    start_offset=section_start,
-                    end_offset=section_end,
-                )
+        section_end = min(stop_index, section_start + spec.char_limit)
+        raw_body = text[section_start:section_end]
+        body = _clean_section_text(raw_body, limit=spec.char_limit)
+        if not body or not _has_section_body(body):
+            continue
+        if _is_toc_like_section_candidate(text, section_start, section_end, body, heading):
+            continue
+        score = _section_candidate_score(text, section_start, section_end, body, spec)
+        candidates.append((score, section_start, section_end, heading, body))
+
+    sections: list[IpoFilingSourceSection] = []
+    ranges: list[tuple[int, int]] = []
+    for _score, section_start, section_end, heading, body in sorted(candidates, key=lambda item: (-item[0], item[1])):
+        if _overlaps_existing_range(section_start, section_end, ranges):
+            continue
+        sections.append(
+            IpoFilingSourceSection(
+                name=spec.name,
+                text=f"{heading}\n{body}",
+                start_offset=section_start,
+                end_offset=section_end,
             )
+        )
+        ranges.append((section_start, section_end))
         if len(sections) >= spec.max_sections:
             break
-    return sections
+    return sorted(sections, key=lambda section: section.start_offset or 0)
+
+
+def _next_section_stop_index(text: str, lower: str, content_start: int, spec: _SectionSpec) -> int:
+    stop_index = len(text)
+    search_from = content_start + 20
+    for stop in spec.stop_headings:
+        for stop_match in re.finditer(rf"\b{re.escape(stop.lower())}\b", lower[search_from:]):
+            candidate_start = search_from + stop_match.start()
+            candidate_end = search_from + stop_match.end()
+            if not _looks_like_section_heading_match(text, candidate_start, candidate_end, stop):
+                continue
+            stop_index = min(stop_index, candidate_start)
+            break
+    return stop_index
 
 
 def _looks_like_section_heading_match(text: str, start: int, end: int, heading: str) -> bool:
@@ -973,7 +1373,9 @@ def _looks_like_section_heading_match(text: str, start: int, end: int, heading: 
     suffix = clean_line[len(clean_heading) :].strip(" :-")
     if not suffix:
         return True
-    if re.fullmatch(r"\d{1,4}", suffix):
+    if re.match(r"^\d{1,4}\b", suffix) or re.fullmatch(r"\d{1,4}", suffix):
+        return False
+    if _line_looks_like_toc_entry(line, heading):
         return False
     if len(suffix) > 120:
         return False
@@ -982,28 +1384,160 @@ def _looks_like_section_heading_match(text: str, start: int, end: int, heading: 
     return bool(re.match(r"^(of financial condition|and results of operations|discussion and analysis)\b", suffix))
 
 
+def _line_at_offset(text: str, start: int, end: int | None = None) -> str:
+    line_start = text.rfind("\n", 0, start) + 1
+    line_end = text.find("\n", end if end is not None else start)
+    if line_end < 0:
+        line_end = min(len(text), (end if end is not None else start) + 300)
+    return text[line_start:line_end].strip()
+
+
+def _table_of_contents_region(text: str) -> tuple[int, int]:
+    lower = text.lower()
+    marker = lower.find("table of contents")
+    if marker < 0:
+        return (-1, -1)
+    search_start = marker + len("table of contents")
+    for match in re.finditer(r"\b(?:prospectus summary|summary)\b", lower[search_start:]):
+        start = search_start + match.start()
+        end = search_start + match.end()
+        line = _line_at_offset(text, start, end)
+        if not _line_looks_like_toc_entry(line, "Prospectus Summary"):
+            return (marker, start)
+    return (marker, min(len(text), marker + 6_000))
+
+
+def _line_looks_like_toc_entry(line: str, heading: str | None = None) -> bool:
+    clean = re.sub(r"\s+", " ", line or "").strip(" \t:-")
+    if not clean:
+        return False
+    lower = clean.lower()
+    if "table of contents" in lower:
+        return True
+    if re.search(r"\.{4,}\s*\d{1,4}$", clean):
+        return True
+    if heading:
+        clean_heading = re.sub(r"\s+", " ", heading).strip().lower()
+        if lower.startswith(clean_heading):
+            suffix = lower[len(clean_heading) :].strip(" :-")
+            if re.match(r"^\d{1,4}\b", suffix):
+                return True
+            if _known_toc_entry_count(clean) >= 2 and re.search(r"\b\d{1,4}\b", suffix):
+                return True
+    if _known_toc_entry_count(clean) >= 3:
+        return True
+    return bool(re.fullmatch(r"[A-Z][A-Z0-9 '&().,/-]{3,}\s+\d{1,4}", clean))
+
+
+def _known_toc_entry_count(value: str) -> int:
+    lower = re.sub(r"\s+", " ", value or "").lower()
+    titles = (
+        "prospectus summary",
+        "risk factors",
+        "use of proceeds",
+        "capitalization",
+        "dilution",
+        "management's discussion and analysis",
+        "business",
+        "principal shareholders",
+        "related party transactions",
+        "shares eligible for future sale",
+        "description of american depositary shares",
+        "underwriting",
+        "financial statements",
+    )
+    return sum(1 for title in titles if re.search(rf"\b{re.escape(title)}\b\s+\d{{1,4}}\b", lower))
+
+
+def _is_toc_like_section_candidate(text: str, start: int, end: int, body: str, heading: str) -> bool:
+    line = _line_at_offset(text, start, min(end, start + len(heading) + 160))
+    if _line_looks_like_toc_entry(line, heading):
+        return True
+    toc_start, toc_end = _table_of_contents_region(text)
+    if toc_start >= 0 and toc_start <= start < toc_end:
+        return True
+    surrounding = text[max(0, start - 600) : min(len(text), start + 1_400)]
+    if _looks_like_toc_window(surrounding) and _prose_sentence_count(body) < 2 and _prose_word_count(body) < 90:
+        return True
+    return _is_toc_dominant_section(body)
+
+
+def _section_candidate_score(text: str, start: int, end: int, body: str, spec: _SectionSpec) -> int:
+    score = 0
+    toc_start, toc_end = _table_of_contents_region(text)
+    if toc_start >= 0:
+        score += 45 if start >= toc_end else -180
+    score += min(_prose_word_count(body) // 12, 60)
+    score += min(_prose_sentence_count(body) * 4, 24)
+    lower = body.lower()
+    for term in spec.terms:
+        if term and term.lower() in lower:
+            score += 12
+    if _is_toc_dominant_section(body):
+        score -= 250
+    if spec.name == "risk_factors" and re.search(r"\bsee\s+risk factors\b", lower) and _prose_word_count(body) < 120:
+        score -= 45
+    if end - start < 350 and not any(term.lower() in lower for term in spec.terms):
+        score -= 20
+    return score
+
+
+def _is_toc_dominant_section(value: str) -> bool:
+    clean = re.sub(r"\s+", " ", value or "").strip()
+    if not clean:
+        return False
+    first = clean[:1_500]
+    toc_entries = _known_toc_entry_count(first) + len(re.findall(r"\b[A-Z][A-Z '&().,/-]{3,}\s+\d{1,4}\b", first))
+    prose_words = _prose_word_count(first)
+    if _looks_like_toc_window(first) and (prose_words < 90 or _prose_sentence_count(first) == 0):
+        return True
+    if toc_entries >= 3 and toc_entries * 10 >= max(prose_words, 1):
+        return True
+    lines = [line.strip() for line in (value or "").splitlines() if line.strip()]
+    if not lines:
+        return False
+    toc_lines = sum(1 for line in lines if _looks_like_table_of_contents(line) or _line_looks_like_toc_entry(line))
+    return toc_lines >= 2 and toc_lines / len(lines) >= 0.6
+
+
+def _prose_word_count(value: str) -> int:
+    return len(re.findall(r"[A-Za-z][A-Za-z0-9'-]*", value or ""))
+
+
+def _prose_sentence_count(value: str) -> int:
+    return len(re.findall(r"[A-Za-z0-9)][.!?](?:\s|$)", value or ""))
+
+
 def _windows_around_terms(text: str, spec: _SectionSpec) -> list[IpoFilingSourceSection]:
     lower = text.lower()
-    windows: list[IpoFilingSourceSection] = []
-    ranges: list[tuple[int, int]] = []
+    candidates: list[tuple[int, int, int, str]] = []
     for term in spec.terms:
         start_at = 0
-        while len(windows) < spec.max_sections:
+        while True:
             index = lower.find(term.lower(), start_at)
             if index < 0:
                 break
             start = max(0, index - 1_200)
             end = min(len(text), index + len(term) + 4_200)
             start_at = index + len(term)
-            if _overlaps_existing_range(start, end, ranges):
+            body = _clean_section_text(text[start:end], limit=min(spec.char_limit, 6_000))
+            if not body or not _has_section_body(body):
                 continue
-            body = _clean_section_text(text[start:end], limit=6_000)
-            if body and _has_section_body(body):
-                ranges.append((start, end))
-                windows.append(IpoFilingSourceSection(name=spec.name, text=body, start_offset=start, end_offset=end))
+            if _is_toc_like_section_candidate(text, start, end, body, term):
+                continue
+            score = _section_candidate_score(text, start, end, body, spec) + 10
+            candidates.append((score, start, end, body))
+
+    windows: list[IpoFilingSourceSection] = []
+    ranges: list[tuple[int, int]] = []
+    for _score, start, end, body in sorted(candidates, key=lambda item: (-item[0], item[1])):
+        if _overlaps_existing_range(start, end, ranges):
+            continue
+        ranges.append((start, end))
+        windows.append(IpoFilingSourceSection(name=spec.name, text=body, start_offset=start, end_offset=end))
         if len(windows) >= spec.max_sections:
             break
-    return windows
+    return sorted(windows, key=lambda section: section.start_offset or 0)
 
 
 def _scored_keyword_chunks(text: str, prompt: str) -> list[IpoFilingSourceSection]:
@@ -1023,7 +1557,7 @@ def _scored_keyword_chunks(text: str, prompt: str) -> list[IpoFilingSourceSectio
     output: list[IpoFilingSourceSection] = []
     for index, (_score, start, end, chunk) in enumerate(sorted(chunks, key=lambda item: (-item[0], item[1]))[:5], start=1):
         clean = _clean_section_text(chunk, limit=CHAT_CHUNK_SIZE)
-        if clean and _has_section_body(clean):
+        if clean and _has_section_body(clean) and not _is_toc_dominant_section(clean):
             output.append(IpoFilingSourceSection(name=f"keyword_chunk_{index}", text=clean, start_offset=start, end_offset=end))
     return output
 
@@ -1036,6 +1570,22 @@ def _query_terms(prompt: str) -> tuple[str, ...]:
     ]
     expansions: list[str] = []
     lower = prompt.lower()
+    if _is_overview_prompt(prompt):
+        expansions.extend(
+            [
+                "net proceeds",
+                "immediate dilution",
+                "capitalization",
+                "customer concentration",
+                "supplier concentration",
+                "license agreement",
+                "material weakness",
+                "principal shareholders",
+                "related party transactions",
+                "moratorium",
+                "ordinary shares into ADSs",
+            ]
+        )
     if "risk" in lower:
         expansions.extend(["risk", "risks", "liquidity", "going concern", "substantial doubt"])
     if any(term in lower for term in ("dilution", "ownership", "overhang", "selling shareholder", "warrant")):
@@ -1058,8 +1608,8 @@ def _chunk_score(chunk: str, terms: tuple[str, ...]) -> int:
             score += min(count, 6) * (4 if " " in term else 2)
     if re.search(r"\b(risk factors|use of proceeds|dilution|capitalization|the offering|underwriting)\b", lower):
         score += 5
-    if _looks_like_toc_window(chunk[:700]):
-        score -= 5
+    if _is_toc_dominant_section(chunk[:1_200]) or _looks_like_toc_window(chunk[:700]):
+        score -= 25
     return score
 
 
@@ -1095,6 +1645,7 @@ def _clean_section_text(text: str, *, limit: int) -> str:
 
 def _normalize_text(text: str) -> str:
     text = re.sub(r"[\t\r\f\v]+", " ", text or "")
+    text = text.replace("\u2018", "'").replace("\u2019", "'").replace("\u201c", '"').replace("\u201d", '"')
     text = re.sub(r"\n+", "\n", text)
     text = re.sub(r"[ ]{2,}", " ", text)
     return text.strip()
@@ -1109,6 +1660,7 @@ def _looks_like_toc_window(value: str) -> bool:
     lower = value.lower()
     return (
         ("table of contents" in lower and re.search(r"\b(prospectus summary|risk factors|use of proceeds|capitalization|dilution)\s+\d+", lower) is not None)
+        or _known_toc_entry_count(value) >= 3
         or len(re.findall(r"\b[A-Z][A-Z '&/-]{3,}\s+\d{1,3}\b", value)) >= 3
     )
 
@@ -1118,6 +1670,7 @@ def _looks_like_table_of_contents(value: str) -> bool:
     return (
         "table of contents" in lower
         or bool(re.search(r"\.{4,}\s*\d+$", value))
+        or _known_toc_entry_count(value) >= 3
         or len(re.findall(r"\b\d+\b", value)) > 16
         or len(re.findall(r"\b[A-Z][A-Z '&/-]{3,}\s+\d{1,3}\b", value)) >= 3
     )

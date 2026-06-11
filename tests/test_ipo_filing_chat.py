@@ -242,15 +242,49 @@ def test_metaoptics_overview_retrieval_forces_core_filing_sections() -> None:
         "mda_results",
         "financial_statements",
         "risk_factors",
+        "customer_supplier_concentration",
+        "license_obligations",
+        "icfr_material_weaknesses",
         "principal_shareholders",
+        "related_party_transactions",
+        "shares_eligible_future_sale",
         "underwriting",
+        "ads_sgx_conversion",
     } <= set(names)
+    sections_by_name = {section["name"]: section for section in payload["sections"]}
+    for name in (
+        "capitalization",
+        "dilution",
+        "risk_factors",
+        "principal_shareholders",
+        "related_party_transactions",
+        "use_of_proceeds",
+    ):
+        assert "TABLE OF CONTENTS" not in sections_by_name[name]["text"]
+        assert "CAPITALIZATION 37" not in sections_by_name[name]["text"]
+        assert "DILUTION 38" not in sections_by_name[name]["text"]
+        assert "PRINCIPAL SHAREHOLDERS 119" not in sections_by_name[name]["text"]
     assert "3,000,000 American Depositary Shares Representing 36,000,000 Ordinary Shares" in joined
     assert "US$14.3 million" in joined
     assert "Cash and cash equivalents 8,789,537 6,845,071 27,141,117 21,136,822" in joined
+    assert "US$5.16 per" in joined
+    assert "US$0.84 per" in joined
     assert "Revenue 787,388" in joined
     assert "Loss after income tax and total comprehensive loss (5,445,573)" in joined
+    assert "Haur-Jye Technology, Taiwan" in joined
+    assert "74.6% of" in joined
+    assert "MMI Systems Pte Ltd, Singapore" in joined
+    assert "81.0% of" in joined
+    assert "Accelerate Technologies Pte Ltd" in joined
+    assert "S$3.0 million" in joined
+    assert "S$5.0 million" in joined
+    assert "segregation of duties" in joined
+    assert "purchases and payables" in " ".join(joined.split())
+    assert "RELATED PARTY TRANSACTIONS" in joined
+    assert "September 8, 2026" in " ".join(joined.split())
+    assert "convert ordinary shares into ADSs" in joined
     assert "Roth Capital Partners, LLC and The Benchmark Company, LLC" in joined
+    assert all("offsets=" in entry and "toc_like=False" in entry for entry in payload["section_debug"] if "opening_excerpt" not in entry)
 
 
 def test_metaoptics_chat_payload_marks_parser_values_as_hints_and_adds_verified_facts() -> None:
@@ -267,10 +301,28 @@ def test_metaoptics_chat_payload_marks_parser_values_as_hints_and_adds_verified_
     facts = request_payload["verified_filing_facts"]
     offering = facts["offering_terms"]
     financials = facts["financial_metrics"]
+    dilution = facts["dilution"]
+    concentration = facts["customer_supplier_concentration"]
+    licenses = facts["license_obligations"]
+    icfr = facts["icfr_material_weaknesses"]
+    related = facts["shareholders_and_related_parties"]
+    lockup = facts["lockup_moratorium"]
+    conversion = facts["ads_sgx_conversion"]
     risk_checks = facts["risk_checks"]
 
     assert "deterministic_extracts" not in request_payload
     assert request_payload["deterministic_extracts_hints"]["use_policy"].startswith("Hints only")
+    assert request_payload["overview_answer_requirements"]["required_topics"] == [
+        "net proceeds and use-of-proceeds allocation",
+        "dilution and pro forma/as-adjusted net tangible book value",
+        "actual versus as-adjusted capitalization, including disclosed currency translations",
+        "customer and supplier concentration",
+        "license or commercialization obligations",
+        "specific ICFR material weakness details",
+        "principal shareholders and related-party transactions",
+        "U.S. lock-up and SGX-ST moratorium or future-sale restrictions",
+        "ADS/SGX ordinary-share conversion and price-reconciliation considerations",
+    ]
     assert offering["securities_offered"]["value"] == "3,000,000 ADSs representing 36,000,000 ordinary shares"
     assert offering["ads_ratio"]["value"] == "1 ADS = 12 ordinary shares"
     assert offering["expected_price_range"]["value"] == "US$5.00-US$7.00 per ADS"
@@ -280,6 +332,24 @@ def test_metaoptics_chat_payload_marks_parser_values_as_hints_and_adds_verified_
     assert financials["fy2025_net_loss"]["value"] == "S$5,445,573"
     assert financials["cash_and_cash_equivalents"]["value"] == "Actual S$8,789,537 / US$6,845,071; as adjusted S$27,141,117 / US$21,136,822"
     assert financials["total_debt"]["value"] == "Actual S$2,106,147 / US$1,640,215; as adjusted S$2,106,147 / US$1,640,215"
+    assert dilution["immediate_dilution_per_ads"]["value"] == "US$5.16 per ADS"
+    assert dilution["pro_forma_as_adjusted_ntbv_per_ads"]["value"] == "US$0.84 per ADS"
+    assert concentration["largest_customer"]["value"] == "Haur-Jye Technology, Taiwan accounted for 74.6% of FY2025 revenue"
+    assert concentration["major_supplier"]["value"] == "MMI Systems Pte Ltd, Singapore accounted for 81.0% of FY2025 purchases"
+    assert "principal shareholders" in concentration["supplier_related_party_link"]["value"]
+    assert licenses["licensed_ip_counterparty"]["value"] == "Key IP is licensed from Accelerate Technologies / A*STAR"
+    assert licenses["august_2023_gross_revenue_threshold"]["value"] == "S$3.0 million gross revenue threshold within five years from August 1, 2023"
+    assert licenses["december_2023_gross_revenue_threshold"]["value"] == "S$5.0 million gross revenue threshold within five years from December 25, 2023"
+    assert "waivers or amendments" in licenses["commercialization_obligation_status"]["value"]
+    assert "segregation of duties" in icfr["specific_weaknesses"]["value"]
+    assert "purchases and payables controls" in icfr["specific_weaknesses"]["value"]
+    assert related["directors_and_officers_ownership"]["value"] == "Directors and executive officers as a group hold 35.9% before the offering"
+    assert "Angelling Capital Holdings Limited" in related["angelling_principal_shareholder"]["value"]
+    assert lockup["us_offering_lockup"]["value"].startswith("180-day lock-up")
+    assert lockup["sgx_moratorium"]["value"] == "SGX-ST Catalist moratorium restrictions remain in place until September 8, 2026"
+    assert conversion["sgx_listing"]["value"] == "Ordinary shares trade on SGX-ST Catalist under stock code 9MT"
+    assert conversion["ads_ratio"]["value"] == "1 ADS = 12 ordinary shares"
+    assert "reconcile SGX ordinary-share trading" in conversion["ads_sgx_price_reconciliation"]["value"]
     assert facts["company_revenue_guardrail"]["warning"] == "US$2.3 million is an industry-market figure, not company revenue."
     assert risk_checks["going_concern_risk_detected"]["value"] is False
     assert risk_checks["vie_structure_detected"]["value"] is False
