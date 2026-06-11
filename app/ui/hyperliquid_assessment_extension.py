@@ -32,6 +32,7 @@ HYPERLIQUID_ADDRESS_ENV_KEYS = tuple(
     for _label, keys in HYPERLIQUID_ACCOUNT_ENV_GROUPS
     for key in keys
 )
+_PLACEHOLDER_ENV_VALUES = {"key in here", "changeme", "todo", "none", "null"}
 
 
 def install_hyperliquid_assessment_extension(app_cls: Type[tk.Tk]) -> None:
@@ -41,7 +42,8 @@ def install_hyperliquid_assessment_extension(app_cls: Type[tk.Tk]) -> None:
 
 
 def _clean_env_value(value: str) -> str:
-    return value.strip().strip("'\"")
+    cleaned = value.strip().strip("'\"")
+    return "" if cleaned.lower() in _PLACEHOLDER_ENV_VALUES else cleaned
 
 
 def _hyperliquid_accounts_from_env() -> list[HyperliquidAccountTarget]:
