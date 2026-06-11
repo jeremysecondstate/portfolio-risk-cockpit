@@ -46,10 +46,14 @@ class IpoFilingChatWindow(tk.Toplevel):
         self.session_factory = session_factory or _default_session_factory
         self.session: IpoFilingChatSession | None = None
         self._request_running = False
+        self._cancel_requested = False
+        self._closed = False
+        self._request_generation = 0
 
         title_company = record.company_name.strip() or "Selected filing"
         title_form = record.form.strip().upper() or "SEC filing"
         self.title(f"AI Filing Chat - {title_company} {title_form}")
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         polished_theme.configure_toplevel(self)
         self.geometry("980x760")
         self.minsize(760, 560)
@@ -136,19 +140,23 @@ class IpoFilingChatWindow(tk.Toplevel):
         self.prompt_box.bind("<Control-Return>", lambda _event: self._send_current_prompt(), add="+")
         self.send_button = ttk.Button(frame, text="Send", command=self._send_current_prompt, style="Accent.TButton")
         self.send_button.grid(row=0, column=1, sticky="ns", padx=(8, 0))
+        self.cancel_button = ttk.Button(frame, text="Cancel", command=self._cancel_request, state=tk.DISABLED)
+        self.cancel_button.grid(row=0, column=2, sticky="ns", padx=(8, 0))
 
     def _load_session_in_background(self) -> None:
         def worker() -> None:
             try:
                 session = self.session_factory(self.record)
             except Exception as exc:
-                self.after(0, lambda error=exc: self._finish_session_error(error))
+                self._post_to_ui(lambda error=exc: self._finish_session_error(error))
                 return
-            self.after(0, lambda loaded=session: self._finish_session_loaded(loaded))
+            self._post_to_ui(lambda loaded=session: self._finish_session_loaded(loaded))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _finish_session_loaded(self, session: IpoFilingChatSession) -> None:
+        if self._closed:
+            return
         self.session = session
         metadata = session.context.bundle.metadata
         source_label = " ".join(str(metadata.get(key) or "") for key in ("source_form", "source_document")).strip()
@@ -159,6 +167,8 @@ class IpoFilingChatWindow(tk.Toplevel):
         )
 
     def _finish_session_error(self, error: Exception) -> None:
+        if self._closed:
+            return
         self.status_var.set("Filing chat could not load context.")
         self._append_system_line(f"Context load failed: {error}")
         messagebox.showerror("AI Filing Chat", str(error))
@@ -167,6 +177,7 @@ class IpoFilingChatWindow(tk.Toplevel):
         state = tk.NORMAL if enabled else tk.DISABLED
         self.prompt_box.configure(state=state)
         self.send_button.configure(state=state)
+        self.cancel_button.configure(state=tk.DISABLED if enabled else (tk.NORMAL if self._request_running else tk.DISABLED))
         self.save_button.configure(state=tk.NORMAL if enabled else tk.DISABLED)
         for button in self.quick_buttons:
             button.configure(state=state)
@@ -189,33 +200,87 @@ class IpoFilingChatWindow(tk.Toplevel):
         if not clean_prompt:
             return
         self._request_running = True
+        self._cancel_requested = False
+        self._request_generation += 1
+        request_generation = self._request_generation
         self._set_controls_enabled(False)
         self._append_message("user", clean_prompt)
-        self.status_var.set("Asking OpenAI against the selected filing...")
+        self.status_var.set("Retrieving filing sections...")
+
+        def progress(message: str) -> None:
+            self._post_to_ui(lambda value=message: self._update_request_status(value, request_generation))
 
         def worker() -> None:
             try:
-                response = self.session.ask(clean_prompt)
+                response = self.session.ask(clean_prompt, progress_callback=progress)
             except Exception as exc:
-                self.after(0, lambda error=exc: self._finish_prompt_error(error))
+                self._post_to_ui(lambda error=exc: self._finish_prompt_error(error, request_generation))
                 return
-            self.after(0, lambda answer=response: self._finish_prompt_success(answer))
+            self._post_to_ui(lambda answer=response: self._finish_prompt_success(answer, request_generation))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_prompt_success(self, response: IpoFilingChatResponse) -> None:
+    def _update_request_status(self, message: str, request_generation: int) -> None:
+        if self._closed or request_generation != self._request_generation or self._cancel_requested:
+            return
+        self.status_var.set(message)
+
+    def _finish_prompt_success(self, response: IpoFilingChatResponse, request_generation: int | None = None) -> None:
+        if self._closed or (request_generation is not None and request_generation != self._request_generation):
+            return
         self._request_running = False
+        was_cancelled = self._cancel_requested
+        self._cancel_requested = False
         self._set_controls_enabled(True)
+        if was_cancelled:
+            self.status_var.set("Ready.")
+            self._append_system_line("Request canceled. The completed OpenAI response was not added to the transcript.")
+            return
         self._append_message("assistant", response.answer)
         source_note = f" Source: {response.source_mode}." if response.source_mode else ""
         self.status_var.set(f"Ready.{source_note}")
 
-    def _finish_prompt_error(self, error: Exception) -> None:
+    def _finish_prompt_error(self, error: Exception, request_generation: int | None = None) -> None:
+        if self._closed or (request_generation is not None and request_generation != self._request_generation):
+            return
         self._request_running = False
+        was_cancelled = self._cancel_requested
+        self._cancel_requested = False
         self._set_controls_enabled(True)
+        if was_cancelled:
+            self.status_var.set("Ready.")
+            self._append_system_line(f"Canceled request ended with error: {error}")
+            return
         self.status_var.set("OpenAI filing chat failed.")
         self._append_system_line(f"OpenAI request failed: {error}")
         messagebox.showerror("AI Filing Chat failed", str(error))
+
+    def _cancel_request(self) -> None:
+        if not self._request_running:
+            return
+        self._cancel_requested = True
+        self.status_var.set("Cancel requested. Waiting for the current OpenAI call to finish or time out...")
+        self.cancel_button.configure(state=tk.DISABLED)
+
+    def _post_to_ui(self, callback: Callable[[], None]) -> None:
+        if self._closed:
+            return
+
+        def run_if_open() -> None:
+            if not self._closed:
+                callback()
+
+        try:
+            self.after(0, run_if_open)
+        except tk.TclError:
+            self._closed = True
+
+    def _on_close(self) -> None:
+        self._closed = True
+        try:
+            self.destroy()
+        except tk.TclError:
+            pass
 
     def _append_message(self, role: str, content: str) -> None:
         label = "You" if role == "user" else "AI Filing Analyst"

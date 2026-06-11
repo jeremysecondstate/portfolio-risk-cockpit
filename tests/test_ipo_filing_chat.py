@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.analytics.ipo_filing_chat import (
     CHAT_FULL_TEXT_CHAR_LIMIT,
+    CHAT_REQUEST_CHAR_LIMIT,
+    CHAT_RETRIEVED_CHAR_LIMIT,
     FILING_CHAT_SYSTEM_PROMPT,
     IpoFilingChatSession,
     OpenAiIpoFilingChatClient,
@@ -21,6 +24,7 @@ from app.analytics.openai_ipo_report import build_ipo_filing_source_bundle
 from app.analytics.ipo_pipeline import IpoPipelineRecord
 from app.data.sec_edgar import SEC_ARCHIVES_BASE_URL
 from app.ui import ipo_pipeline_extension
+from app.ui.ipo_filing_chat_window import IpoFilingChatWindow
 
 
 SAMPLE_FILING_TEXT = """
@@ -353,6 +357,94 @@ def test_metaoptics_chat_payload_marks_parser_values_as_hints_and_adds_verified_
     assert facts["company_revenue_guardrail"]["warning"] == "US$2.3 million is an industry-market figure, not company revenue."
     assert risk_checks["going_concern_risk_detected"]["value"] is False
     assert risk_checks["vie_structure_detected"]["value"] is False
+
+
+def test_large_overview_chat_payload_is_bounded_fast_and_uses_timeout() -> None:
+    text = _metaoptics_f1a_text()
+    filler = "Generic F-1/A overview boilerplate that should stay out of the final payload.\n" * 2_000
+    context = build_ipo_filing_chat_context(_metaoptics_record(), client=FakeSecClient(text + "\n" + filler))
+    fake_openai = FakeOpenAiClient(answer="## Overview\nBounded grounded answer.")
+    session = IpoFilingChatSession(
+        context,
+        chat_client=OpenAiIpoFilingChatClient(openai_client=fake_openai, model="gpt-test", timeout_seconds=42),
+    )
+    progress_events: list[str] = []
+
+    started = time.perf_counter()
+    response = session.ask("Generate an overview of this filing.", progress_callback=progress_events.append)
+    elapsed = time.perf_counter() - started
+
+    call = fake_openai.responses.calls[0]
+    payload_text = call["input"][-1]["content"]
+    payload = json.loads(payload_text)
+    sections = payload["filing_context"]["sections"]
+    names = {section["name"] for section in sections}
+
+    assert elapsed < 8.0
+    assert len(payload_text) <= CHAT_REQUEST_CHAR_LIMIT
+    assert payload["filing_context"]["retrieved_char_count"] <= CHAT_RETRIEVED_CHAR_LIMIT
+    assert call["store"] is False
+    assert call["timeout"] == 42
+    assert "Retrieving filing sections..." in progress_events
+    assert "Verifying filing facts..." in progress_events
+    assert any(event.startswith("Calling OpenAI") for event in progress_events)
+    assert {"cover_page", "offering_terms", "use_of_proceeds", "capitalization", "dilution", "risk_factors", "underwriting", "ads_sgx_conversion"} <= names
+    assert any("payload_chars=" in entry for entry in response.source_debug)
+
+
+def test_filing_chat_timeout_error_is_friendly_and_passes_finite_timeout() -> None:
+    class TimeoutResponses:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            raise TimeoutError("request timed out for sk-test-secret123456789")
+
+    failing_openai = SimpleNamespace(responses=TimeoutResponses())
+    context = build_ipo_filing_chat_context(_record(), client=FakeSecClient(SAMPLE_FILING_TEXT * 20))
+    session = IpoFilingChatSession(
+        context,
+        chat_client=OpenAiIpoFilingChatClient(
+            openai_client=failing_openai,
+            api_key="sk-test-secret123456789",
+            model="gpt-test",
+            timeout_seconds=12,
+        ),
+    )
+
+    try:
+        session.ask("Summarize risks.")
+    except OpenAiIpoFilingChatError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("Expected OpenAiIpoFilingChatError")
+
+    assert failing_openai.responses.calls[0]["timeout"] == 12
+    assert "timed out after 12 seconds" in message
+    assert "sk-test-secret" not in message
+
+
+def test_filing_chat_window_reenables_controls_on_prompt_error() -> None:
+    window = object.__new__(IpoFilingChatWindow)
+    window._closed = False
+    window._request_generation = 1
+    window._request_running = True
+    window._cancel_requested = False
+    window.status_var = FakeStatus()
+    enabled_states = []
+    system_lines = []
+    window._set_controls_enabled = lambda enabled: enabled_states.append(enabled)
+    window._append_system_line = lambda content: system_lines.append(content)
+
+    with patch("app.ui.ipo_filing_chat_window.messagebox.showerror") as showerror:
+        IpoFilingChatWindow._finish_prompt_error(window, OpenAiIpoFilingChatError("timed out"), 1)
+
+    assert enabled_states == [True]
+    assert window._request_running is False
+    assert window.status_var.value == "OpenAI filing chat failed."
+    assert system_lines == ["OpenAI request failed: timed out"]
+    showerror.assert_called_once_with("AI Filing Chat failed", "timed out")
 
 
 def test_filing_chat_transcript_saves_markdown(tmp_path) -> None:

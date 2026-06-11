@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Literal
+from typing import Any, Callable, Iterable, Literal
 
 from dotenv import load_dotenv
 
@@ -34,12 +36,18 @@ from app.analytics.openai_ipo_report import (
 from app.data.sec_edgar import SecCurrentFiling, SecEdgarClient
 
 
-CHAT_FULL_TEXT_CHAR_LIMIT = 120_000
-CHAT_RETRIEVED_CHAR_LIMIT = 120_000
+LOGGER = logging.getLogger(__name__)
+
+CHAT_FULL_TEXT_CHAR_LIMIT = 60_000
+CHAT_RETRIEVED_CHAR_LIMIT = 75_000
+CHAT_REQUEST_CHAR_LIMIT = 95_000
 CHAT_SECTION_CHAR_LIMIT = 18_000
 CHAT_CHUNK_SIZE = 8_000
 CHAT_CHUNK_OVERLAP = 900
 CHAT_HISTORY_MESSAGE_LIMIT = 8
+CHAT_OPENAI_TIMEOUT_SECONDS = 150.0
+CHAT_APPROX_CHARS_PER_TOKEN = 4
+CHAT_FACT_SNIPPET_CHAR_LIMIT = 420
 
 FILING_CHAT_SYSTEM_PROMPT = """You are an SEC filing analyst inside Portfolio Risk Cockpit.
 
@@ -169,6 +177,17 @@ class IpoFilingChatResponse:
     source_debug: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class _FilingContextIndex:
+    text: str
+    context_text: str
+    section_map: dict[str, tuple[str, ...]]
+    allow_full_text_scan: bool
+
+
+ProgressCallback = Callable[[str], None]
+
+
 class IpoFilingChatSession:
     def __init__(
         self,
@@ -185,12 +204,12 @@ class IpoFilingChatSession:
     def model(self) -> str:
         return self.chat_client.model
 
-    def ask(self, prompt: str) -> IpoFilingChatResponse:
+    def ask(self, prompt: str, *, progress_callback: ProgressCallback | None = None) -> IpoFilingChatResponse:
         clean_prompt = _clean_prompt(prompt)
         if not clean_prompt:
             raise OpenAiIpoFilingChatError("Enter a filing question before sending.")
 
-        response = self.chat_client.ask(self.context, self.messages, clean_prompt)
+        response = self.chat_client.ask(self.context, self.messages, clean_prompt, progress_callback=progress_callback)
         self.messages.append(IpoFilingChatMessage(role="user", content=clean_prompt))
         self.messages.append(
             IpoFilingChatMessage(
@@ -211,20 +230,47 @@ class OpenAiIpoFilingChatClient:
         openai_client: Any | None = None,
         api_key: str | None = None,
         model: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> None:
         load_dotenv()
         self._openai_client = openai_client
         self._api_key = api_key
         self.model = (model or os.getenv("OPENAI_IPO_REPORT_MODEL") or DEFAULT_OPENAI_IPO_REPORT_MODEL).strip()
+        self.timeout_seconds = _positive_timeout_seconds(timeout_seconds, os.getenv("OPENAI_IPO_CHAT_TIMEOUT_SECONDS"))
 
     def ask(
         self,
         context: IpoFilingChatContext,
         history: Iterable[IpoFilingChatMessage],
         prompt: str,
+        *,
+        progress_callback: ProgressCallback | None = None,
     ) -> IpoFilingChatResponse:
+        started_at = time.perf_counter()
+        history_messages = list(history)
+        LOGGER.debug(
+            "AI filing chat request started company=%s model=%s loaded_full_text_chars=%s history_messages=%s",
+            context.company_name,
+            self.model,
+            len(context.bundle.full_text or ""),
+            len(history_messages),
+        )
+        _notify_progress(progress_callback, "Retrieving filing sections...")
+        retrieval_started = time.perf_counter()
         filing_context = filing_context_payload_for_prompt(context.bundle, prompt)
+        retrieval_elapsed = time.perf_counter() - retrieval_started
+        LOGGER.debug(
+            "AI filing chat retrieval complete company=%s source_mode=%s context_chars=%s elapsed=%.3fs",
+            context.company_name,
+            filing_context.get("source_mode"),
+            _filing_context_char_count(filing_context),
+            retrieval_elapsed,
+        )
+
+        _notify_progress(progress_callback, "Verifying filing facts...")
+        facts_started = time.perf_counter()
         verified_facts = verified_filing_facts_for_prompt(context.bundle, filing_context, prompt)
+        facts_elapsed = time.perf_counter() - facts_started
         request_payload = {
             "question": prompt,
             "filing_metadata": context.bundle.metadata,
@@ -247,21 +293,71 @@ class OpenAiIpoFilingChatClient:
         overview_requirements = _overview_answer_requirements_for_prompt(prompt)
         if overview_requirements:
             request_payload["overview_answer_requirements"] = overview_requirements
+        request_payload["request_budget"] = {
+            "filing_context_char_limit": CHAT_RETRIEVED_CHAR_LIMIT,
+            "request_payload_char_limit": CHAT_REQUEST_CHAR_LIMIT,
+            "openai_timeout_seconds": self.timeout_seconds,
+        }
+        request_payload = _enforce_request_payload_budget(request_payload)
+        payload_text = _serialize_request_payload(request_payload)
+        payload_chars = len(payload_text)
+        approx_tokens = _approx_token_count(payload_chars)
+        context_chars = _filing_context_char_count(request_payload.get("filing_context", {}))
+        diagnostics = {
+            "retrieval_seconds": round(retrieval_elapsed, 3),
+            "verified_facts_seconds": round(facts_elapsed, 3),
+            "filing_context_chars": context_chars,
+            "request_payload_chars": payload_chars,
+            "request_payload_approx_tokens": approx_tokens,
+            "request_payload_char_limit": CHAT_REQUEST_CHAR_LIMIT,
+            "openai_timeout_seconds": self.timeout_seconds,
+        }
+        LOGGER.debug(
+            "AI filing chat payload ready company=%s context_chars=%s payload_chars=%s approx_tokens=%s facts_elapsed=%.3fs",
+            context.company_name,
+            context_chars,
+            payload_chars,
+            approx_tokens,
+            facts_elapsed,
+        )
         input_messages = [{"role": "system", "content": FILING_CHAT_SYSTEM_PROMPT}]
-        for message in list(history)[-CHAT_HISTORY_MESSAGE_LIMIT:]:
+        for message in history_messages[-CHAT_HISTORY_MESSAGE_LIMIT:]:
             input_messages.append({"role": message.role, "content": message.content})
-        input_messages.append({"role": "user", "content": json.dumps(request_payload, ensure_ascii=False, indent=2)})
+        input_messages.append({"role": "user", "content": payload_text})
 
         try:
+            _notify_progress(progress_callback, f"Calling OpenAI (timeout {self.timeout_seconds:g}s)...")
+            openai_started = time.perf_counter()
+            LOGGER.debug("AI filing chat OpenAI request started company=%s model=%s timeout=%ss", context.company_name, self.model, self.timeout_seconds)
             response = self._client().responses.create(
                 model=self.model,
                 input=input_messages,
                 store=False,
+                timeout=self.timeout_seconds,
             )
         except Exception as exc:
-            message = _redact_api_key(f"OpenAI IPO filing chat failed: {exc}", self._current_api_key())
+            if _is_timeout_exception(exc):
+                message = (
+                    f"OpenAI IPO filing chat timed out after {self.timeout_seconds:g} seconds. "
+                    "Try a narrower filing question or retry later."
+                )
+            else:
+                message = f"OpenAI IPO filing chat failed: {exc}"
+            message = _redact_api_key(message, self._current_api_key())
+            LOGGER.warning("AI filing chat OpenAI request failed company=%s elapsed=%.3fs error=%s", context.company_name, time.perf_counter() - started_at, message)
             raise OpenAiIpoFilingChatError(message) from None
 
+        openai_elapsed = time.perf_counter() - openai_started
+        diagnostics["openai_seconds"] = round(openai_elapsed, 3)
+        diagnostics["total_seconds"] = round(time.perf_counter() - started_at, 3)
+        LOGGER.debug(
+            "AI filing chat OpenAI request completed company=%s response_id=%s openai_elapsed=%.3fs total_elapsed=%.3fs",
+            context.company_name,
+            getattr(response, "id", "") or "",
+            openai_elapsed,
+            diagnostics["total_seconds"],
+        )
+        _notify_progress(progress_callback, "OpenAI response received.")
         answer = _clean_answer(_response_output_text(response))
         if not answer:
             raise OpenAiIpoFilingChatError("OpenAI IPO filing chat returned an empty response.")
@@ -269,8 +365,11 @@ class OpenAiIpoFilingChatClient:
             answer=answer,
             response_id=str(getattr(response, "id", "") or ""),
             model=self.model,
-            source_mode=str(filing_context.get("source_mode") or ""),
-            source_debug=tuple(str(entry) for entry in filing_context.get("section_debug", ())),
+            source_mode=str(request_payload.get("filing_context", {}).get("source_mode") or ""),
+            source_debug=(
+                *tuple(str(entry) for entry in request_payload.get("filing_context", {}).get("section_debug", ())),
+                *_diagnostic_debug_lines(diagnostics),
+            ),
         )
 
     def _client(self) -> Any:
@@ -286,7 +385,7 @@ class OpenAiIpoFilingChatClient:
         except ImportError as exc:
             raise OpenAiIpoFilingChatError("The openai package is not installed. Run pip install -r requirements.txt.") from exc
 
-        self._openai_client = OpenAI(api_key=api_key)
+        self._openai_client = OpenAI(api_key=api_key, timeout=self.timeout_seconds)
         return self._openai_client
 
     def _current_api_key(self) -> str:
@@ -348,14 +447,20 @@ def filing_context_payload_for_prompt(bundle: IpoFilingSourceBundle, prompt: str
         return {
             "source_mode": "full_prospectus_text",
             "full_prospectus_text": bundle.full_text,
+            "full_text_char_count": len(bundle.full_text),
+            "approx_token_estimate": _approx_token_count(len(bundle.full_text)),
             "section_debug": [
                 f"full_prospectus_text ({len(bundle.full_text)} chars): {_shorten(bundle.full_text, 260)}",
             ],
         }
 
     sections = retrieve_relevant_filing_sections(bundle.full_text, prompt)
+    retrieved_chars = sum(len(section.text) for section in sections)
     return {
         "source_mode": "retrieved_filing_chunks",
+        "retrieval_budget_chars": CHAT_RETRIEVED_CHAR_LIMIT,
+        "retrieved_char_count": retrieved_chars,
+        "approx_token_estimate": _approx_token_count(retrieved_chars),
         "sections": [
             {
                 "name": section.name,
@@ -383,38 +488,174 @@ def _filing_context_debug_line(section: IpoFilingSourceSection) -> str:
     )
 
 
+def _serialize_request_payload(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _enforce_request_payload_budget(payload: dict[str, Any]) -> dict[str, Any]:
+    output = dict(payload)
+    output["filing_context"] = _copy_filing_context(payload.get("filing_context", {}))
+    output["verified_filing_facts"] = _copy_json_like(payload.get("verified_filing_facts", {}))
+
+    if len(_serialize_request_payload(output)) <= CHAT_REQUEST_CHAR_LIMIT:
+        return output
+
+    context = output.get("filing_context")
+    if isinstance(context, dict):
+        overage = len(_serialize_request_payload(output)) - CHAT_REQUEST_CHAR_LIMIT
+        target_context_chars = max(24_000, _filing_context_char_count(context) - overage - 2_000)
+        output["filing_context"] = _trim_filing_context_to_budget(context, target_context_chars)
+
+    if len(_serialize_request_payload(output)) <= CHAT_REQUEST_CHAR_LIMIT:
+        return output
+
+    output["verified_filing_facts"] = _trim_fact_snippets(output.get("verified_filing_facts", {}), max_snippet_chars=260)
+    if len(_serialize_request_payload(output)) <= CHAT_REQUEST_CHAR_LIMIT:
+        return output
+
+    context = output.get("filing_context")
+    if isinstance(context, dict):
+        output["filing_context"] = _trim_filing_context_to_budget(context, 20_000)
+    return output
+
+
+def _copy_filing_context(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    return json.loads(json.dumps(value, ensure_ascii=False))
+
+
+def _copy_json_like(value: Any) -> Any:
+    return json.loads(json.dumps(value, ensure_ascii=False))
+
+
+def _trim_filing_context_to_budget(filing_context: dict[str, Any], budget_chars: int) -> dict[str, Any]:
+    trimmed = _copy_filing_context(filing_context)
+    full_text = trimmed.get("full_prospectus_text")
+    if isinstance(full_text, str):
+        trimmed["full_prospectus_text"] = full_text[: max(0, budget_chars)].strip()
+        trimmed["full_text_char_count"] = len(trimmed["full_prospectus_text"])
+        trimmed["approx_token_estimate"] = _approx_token_count(len(trimmed["full_prospectus_text"]))
+        trimmed["section_debug"] = [
+            f"full_prospectus_text ({len(trimmed['full_prospectus_text'])} chars after request-budget trim): {_shorten(trimmed['full_prospectus_text'], 260)}"
+        ]
+        return trimmed
+
+    sections = trimmed.get("sections")
+    if not isinstance(sections, list):
+        return trimmed
+    kept: list[dict[str, Any]] = []
+    char_count = 0
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        text = str(section.get("text") or "")
+        room = budget_chars - char_count
+        if room <= 0:
+            break
+        copy = dict(section)
+        copy["text"] = text[:room].strip()
+        if not copy["text"]:
+            continue
+        kept.append(copy)
+        char_count += len(copy["text"])
+    trimmed["sections"] = kept
+    trimmed["retrieved_char_count"] = char_count
+    trimmed["approx_token_estimate"] = _approx_token_count(char_count)
+    trimmed["section_debug"] = [_filing_context_debug_line(_section_from_payload(section)) for section in kept]
+    return trimmed
+
+
+def _section_from_payload(section: dict[str, Any]) -> IpoFilingSourceSection:
+    return IpoFilingSourceSection(
+        name=str(section.get("name") or ""),
+        text=str(section.get("text") or ""),
+        start_offset=section.get("start_offset") if isinstance(section.get("start_offset"), int) else None,
+        end_offset=section.get("end_offset") if isinstance(section.get("end_offset"), int) else None,
+    )
+
+
+def _trim_fact_snippets(value: Any, *, max_snippet_chars: int) -> Any:
+    if isinstance(value, dict):
+        output: dict[str, Any] = {}
+        for key, item in value.items():
+            if key == "source_snippet" and isinstance(item, str):
+                output[key] = _shorten(item, max_snippet_chars)
+            else:
+                output[key] = _trim_fact_snippets(item, max_snippet_chars=max_snippet_chars)
+        return output
+    if isinstance(value, list):
+        return [_trim_fact_snippets(item, max_snippet_chars=max_snippet_chars) for item in value]
+    return value
+
+
+def _filing_context_char_count(filing_context: Any) -> int:
+    if not isinstance(filing_context, dict):
+        return 0
+    full_text = filing_context.get("full_prospectus_text")
+    if isinstance(full_text, str):
+        return len(full_text)
+    sections = filing_context.get("sections")
+    if not isinstance(sections, list):
+        return 0
+    return sum(len(str(section.get("text") or "")) for section in sections if isinstance(section, dict))
+
+
+def _approx_token_count(char_count: int) -> int:
+    return max(1, (max(0, char_count) + CHAT_APPROX_CHARS_PER_TOKEN - 1) // CHAT_APPROX_CHARS_PER_TOKEN)
+
+
+def _diagnostic_debug_lines(diagnostics: dict[str, Any]) -> tuple[str, ...]:
+    return (
+        (
+            "timing "
+            f"retrieval={diagnostics.get('retrieval_seconds')}s "
+            f"facts={diagnostics.get('verified_facts_seconds')}s "
+            f"openai={diagnostics.get('openai_seconds')}s "
+            f"total={diagnostics.get('total_seconds')}s"
+        ),
+        (
+            "payload "
+            f"context_chars={diagnostics.get('filing_context_chars')} "
+            f"payload_chars={diagnostics.get('request_payload_chars')} "
+            f"approx_tokens={diagnostics.get('request_payload_approx_tokens')} "
+            f"limit={diagnostics.get('request_payload_char_limit')}"
+        ),
+        f"openai_timeout={diagnostics.get('openai_timeout_seconds')}s",
+    )
+
+
 def verified_filing_facts_for_prompt(
     bundle: IpoFilingSourceBundle,
     filing_context: dict[str, Any],
     prompt: str,
 ) -> dict[str, Any]:
-    text = bundle.full_text
-    context_text = _filing_context_text(filing_context)
+    index = _filing_context_index(bundle, filing_context)
     facts: dict[str, Any] = {
         "policy": (
             "These facts were extracted from filing text as a local verification aid. "
             "Use them only when supported by the accompanying source snippets; otherwise say Not confidently extracted."
         ),
-        "offering_terms": _verified_offering_terms(text),
-        "financial_metrics": _verified_financial_metrics(text, context_text),
-        "dilution": _verified_dilution_terms(text),
-        "customer_supplier_concentration": _verified_customer_supplier_concentration(text),
-        "license_obligations": _verified_license_obligations(text),
-        "icfr_material_weaknesses": _verified_icfr_material_weaknesses(text),
-        "shareholders_and_related_parties": _verified_shareholders_and_related_parties(text),
-        "lockup_moratorium": _verified_lockup_moratorium(text),
-        "ads_sgx_conversion": _verified_ads_sgx_conversion(text),
-        "risk_checks": _verified_risk_checks(text),
+        "offering_terms": _verified_offering_terms(index),
+        "financial_metrics": _verified_financial_metrics(index),
+        "dilution": _verified_dilution_terms(index),
+        "customer_supplier_concentration": _verified_customer_supplier_concentration(index),
+        "license_obligations": _verified_license_obligations(index),
+        "icfr_material_weaknesses": _verified_icfr_material_weaknesses(index),
+        "shareholders_and_related_parties": _verified_shareholders_and_related_parties(index),
+        "lockup_moratorium": _verified_lockup_moratorium(index),
+        "ads_sgx_conversion": _verified_ads_sgx_conversion(index),
+        "risk_checks": _verified_risk_checks(index),
     }
-    unsupported_industry_revenue = _industry_market_revenue_warning(text)
+    unsupported_industry_revenue = _industry_market_revenue_warning(index)
     if unsupported_industry_revenue:
         facts["company_revenue_guardrail"] = unsupported_industry_revenue
     return facts
 
 
-def _verified_offering_terms(text: str) -> dict[str, Any]:
-    cover = _cover_page_section(text).text
-    offering = _first_named_section_text(text, _offering_spec(max_sections=1)) or cover
+def _verified_offering_terms(index: _FilingContextIndex) -> dict[str, Any]:
+    cover = _fact_source_text(index, names=("cover_page",), spec=_cover_page_spec(), fallback_terms=("American Depositary Shares", "Ordinary Shares", "Nasdaq"))
+    offering = _fact_source_text(index, names=("offering_terms",), spec=_offering_spec(max_sections=1), fallback_terms=("we are offering", "initial public offering price", "under the symbol")) or cover
     combined = f"{cover}\n\n{offering}"
     facts: dict[str, Any] = {}
 
@@ -444,9 +685,9 @@ def _verified_offering_terms(text: str) -> dict[str, Any]:
     if re.search(r"Roth Capital Partners", combined, flags=re.IGNORECASE) and re.search(r"Benchmark", combined, flags=re.IGNORECASE):
         facts["underwriters"] = _fact("Roth Capital Partners and Benchmark are joint book-running managers / representatives", combined, "Roth Capital Partners Benchmark")
 
-    proceeds = _first_named_section_text(text, _use_of_proceeds_spec(max_sections=1))
+    proceeds = _fact_source_text(index, names=("use_of_proceeds",), spec=_use_of_proceeds_spec(max_sections=1), fallback_terms=("net proceeds", "use of proceeds", "we intend to use"))
     if "net proceeds of approximately" not in proceeds.lower():
-        proceeds = text
+        proceeds = _targeted_fact_windows(index.text, ("net proceeds of approximately", "over-allotment option"), max_chars=10_000)
     match = re.search(r"net proceeds of approximately\s+(US\$[0-9.]+\s+million).*?\(\s*(?:or\s+)?(US\$[0-9.]+\s+million)\s+if the underwriters exercise", proceeds, flags=re.IGNORECASE | re.DOTALL)
     if match:
         facts["net_proceeds"] = _fact(
@@ -457,8 +698,8 @@ def _verified_offering_terms(text: str) -> dict[str, Any]:
     return facts
 
 
-def _verified_financial_metrics(text: str, context_text: str) -> dict[str, Any]:
-    financial_text = _financial_verification_text(text, context_text)
+def _verified_financial_metrics(index: _FilingContextIndex) -> dict[str, Any]:
+    financial_text = _financial_verification_text(index)
     facts: dict[str, Any] = {}
 
     match = re.search(r"Our revenue amounted to\s+(S\$[0-9,]+)\s+and\s+S\$[0-9,]+\s+in\s+2025\s+and\s+2024", financial_text, flags=re.IGNORECASE)
@@ -482,7 +723,7 @@ def _verified_financial_metrics(text: str, context_text: str) -> dict[str, Any]:
     if match:
         facts["fy2025_gross_margin"] = _fact(match.group(1), financial_text, match.group(0))
 
-    capitalization = _first_named_section_text(text, _capitalization_spec(max_sections=1))
+    capitalization = _fact_source_text(index, names=("capitalization",), spec=_capitalization_spec(max_sections=1), fallback_terms=("Cash and cash equivalents", "Total debt", "as adjusted"))
     match = re.search(r"Cash and cash equivalents\s+([0-9,]+)\s+([0-9,]+)\s+([0-9,]+)\s+([0-9,]+)", capitalization, flags=re.IGNORECASE)
     if match:
         facts["cash_and_cash_equivalents"] = _fact(
@@ -500,8 +741,8 @@ def _verified_financial_metrics(text: str, context_text: str) -> dict[str, Any]:
     return facts
 
 
-def _verified_dilution_terms(text: str) -> dict[str, Any]:
-    dilution = _first_named_section_text(text, _dilution_spec(max_sections=1)) or text
+def _verified_dilution_terms(index: _FilingContextIndex) -> dict[str, Any]:
+    dilution = _fact_source_text(index, names=("dilution",), spec=_dilution_spec(max_sections=1), fallback_terms=("immediate dilution", "net tangible book value", "per ADS")) or index.context_text
     facts: dict[str, Any] = {}
 
     match = re.search(r"net tangible book value.*?(US\$[0-9.]+\s+per\s+ADS)", dilution, flags=re.IGNORECASE | re.DOTALL)
@@ -519,15 +760,15 @@ def _verified_dilution_terms(text: str) -> dict[str, Any]:
     return facts
 
 
-def _verified_customer_supplier_concentration(text: str) -> dict[str, Any]:
+def _verified_customer_supplier_concentration(index: _FilingContextIndex) -> dict[str, Any]:
     search_text = "\n\n".join(
         _dedupe(
             [
-                _first_named_section_text(text, _customer_supplier_concentration_spec(max_sections=2)),
-                _first_named_section_text(text, _business_spec(max_sections=2)),
-                _first_named_section_text(text, _risk_spec(max_sections=2)),
-                _first_named_section_text(text, _related_party_transactions_spec(max_sections=1)),
-                text,
+                _fact_source_text(index, names=("customer_supplier_concentration",), spec=_customer_supplier_concentration_spec(max_sections=2), fallback_terms=("Haur-Jye Technology", "MMI Systems Pte Ltd", "customer concentration", "supplier concentration")),
+                _fact_source_text(index, names=("business",), spec=_business_spec(max_sections=2), fallback_terms=("customers", "suppliers")),
+                _fact_source_text(index, names=("risk_factors",), spec=_risk_spec(max_sections=2), fallback_terms=("customer concentration", "supplier concentration")),
+                _fact_source_text(index, names=("related_party_transactions",), spec=_related_party_transactions_spec(max_sections=1), fallback_terms=("MMI Systems Pte Ltd", "MMI Holdings Limited")),
+                _targeted_fact_windows(index.text, ("Haur-Jye Technology", "MMI Systems Pte Ltd"), max_chars=12_000),
             ]
         )
     )
@@ -562,13 +803,13 @@ def _verified_customer_supplier_concentration(text: str) -> dict[str, Any]:
     return facts
 
 
-def _verified_license_obligations(text: str) -> dict[str, Any]:
+def _verified_license_obligations(index: _FilingContextIndex) -> dict[str, Any]:
     search_text = "\n\n".join(
         _dedupe(
             [
-                _first_named_section_text(text, _license_obligations_spec(max_sections=2)),
-                _first_named_section_text(text, _business_spec(max_sections=2)),
-                text,
+                _fact_source_text(index, names=("license_obligations",), spec=_license_obligations_spec(max_sections=2), fallback_terms=("Accelerate Technologies", "A*STAR", "gross revenues", "commercialization obligations")),
+                _fact_source_text(index, names=("business",), spec=_business_spec(max_sections=2), fallback_terms=("License Agreements", "Intellectual Property")),
+                _targeted_fact_windows(index.text, ("Accelerate Technologies", "A*STAR", "S$3.0 million", "S$5.0 million"), max_chars=12_000),
             ]
         )
     )
@@ -603,14 +844,14 @@ def _verified_license_obligations(text: str) -> dict[str, Any]:
     return facts
 
 
-def _verified_icfr_material_weaknesses(text: str) -> dict[str, Any]:
+def _verified_icfr_material_weaknesses(index: _FilingContextIndex) -> dict[str, Any]:
     search_text = "\n\n".join(
         _dedupe(
             [
-                _first_named_section_text(text, _icfr_material_weaknesses_spec(max_sections=2)),
-                _first_named_section_text(text, _risk_spec(max_sections=2)),
-                _first_named_section_text(text, _mda_spec(max_sections=2)),
-                text,
+                _fact_source_text(index, names=("icfr_material_weaknesses",), spec=_icfr_material_weaknesses_spec(max_sections=2), fallback_terms=("material weakness", "segregation of duties", "purchases and payables")),
+                _fact_source_text(index, names=("risk_factors",), spec=_risk_spec(max_sections=2), fallback_terms=("material weakness", "internal control")),
+                _fact_source_text(index, names=("mda_results",), spec=_mda_spec(max_sections=2), fallback_terms=("material weakness", "controls and procedures")),
+                _targeted_fact_windows(index.text, ("material weakness", "segregation of duties", "purchases and payables"), max_chars=12_000),
             ]
         )
     )
@@ -635,14 +876,14 @@ def _verified_icfr_material_weaknesses(text: str) -> dict[str, Any]:
     }
 
 
-def _verified_shareholders_and_related_parties(text: str) -> dict[str, Any]:
+def _verified_shareholders_and_related_parties(index: _FilingContextIndex) -> dict[str, Any]:
     search_text = "\n\n".join(
         _dedupe(
             [
-                _first_named_section_text(text, _principal_shareholders_spec(max_sections=1)),
-                _first_named_section_text(text, _related_party_transactions_spec(max_sections=2)),
-                _first_named_section_text(text, _customer_supplier_concentration_spec(max_sections=1)),
-                text,
+                _fact_source_text(index, names=("principal_shareholders",), spec=_principal_shareholders_spec(max_sections=1), fallback_terms=("Principal Shareholders", "directors and executive officers", "Angelling Capital")),
+                _fact_source_text(index, names=("related_party_transactions",), spec=_related_party_transactions_spec(max_sections=2), fallback_terms=("Related Party Transactions", "MMI Systems", "MST SingCo")),
+                _fact_source_text(index, names=("customer_supplier_concentration",), spec=_customer_supplier_concentration_spec(max_sections=1), fallback_terms=("MMI Systems Pte Ltd",)),
+                _targeted_fact_windows(index.text, ("directors and executive officers", "Angelling Capital", "MST SingCo", "MMI Systems Pte Ltd"), max_chars=12_000),
             ]
         )
     )
@@ -664,13 +905,13 @@ def _verified_shareholders_and_related_parties(text: str) -> dict[str, Any]:
     return facts
 
 
-def _verified_lockup_moratorium(text: str) -> dict[str, Any]:
+def _verified_lockup_moratorium(index: _FilingContextIndex) -> dict[str, Any]:
     search_text = "\n\n".join(
         _dedupe(
             [
-                _first_named_section_text(text, _shares_eligible_future_sale_spec(max_sections=2)),
-                _first_named_section_text(text, _underwriting_spec()),
-                text,
+                _fact_source_text(index, names=("shares_eligible_future_sale",), spec=_shares_eligible_future_sale_spec(max_sections=2), fallback_terms=("moratorium", "September 8, 2026", "future sale")),
+                _fact_source_text(index, names=("underwriting",), spec=_underwriting_spec(), fallback_terms=("lock-up", "180 days", "underwriters")),
+                _targeted_fact_windows(index.text, ("moratorium", "September 8, 2026", "180-day", "lock-up"), max_chars=12_000),
             ]
         )
     )
@@ -696,13 +937,13 @@ def _verified_lockup_moratorium(text: str) -> dict[str, Any]:
     return facts
 
 
-def _verified_ads_sgx_conversion(text: str) -> dict[str, Any]:
+def _verified_ads_sgx_conversion(index: _FilingContextIndex) -> dict[str, Any]:
     search_text = "\n\n".join(
         _dedupe(
             [
-                _cover_page_section(text).text,
-                _first_named_section_text(text, _ads_sgx_conversion_spec(max_sections=2)),
-                text,
+                _fact_source_text(index, names=("cover_page",), spec=_cover_page_spec(), fallback_terms=("Each ADS represents", "Ordinary Shares")),
+                _fact_source_text(index, names=("ads_sgx_conversion",), spec=_ads_sgx_conversion_spec(max_sections=2), fallback_terms=("convert ordinary shares into ADSs", "Singapore Exchange", "Each ADS represents")),
+                _targeted_fact_windows(index.text, ("convert ordinary shares into ADSs", "Singapore Exchange", "Each ADS represents"), max_chars=12_000),
             ]
         )
     )
@@ -732,23 +973,40 @@ def _verified_ads_sgx_conversion(text: str) -> dict[str, Any]:
     return facts
 
 
-def _verified_risk_checks(text: str) -> dict[str, Any]:
-    going_concern_sentence = _source_snippet(text, "prepared on a going concern basis", before=180, after=420)
+def _verified_risk_checks(index: _FilingContextIndex) -> dict[str, Any]:
+    search_text = "\n\n".join(
+        _dedupe(
+            [
+                _fact_source_text(index, names=("risk_factors",), spec=_risk_spec(max_sections=2), fallback_terms=("going concern", "substantial doubt", "variable interest entity", "VIE")),
+                _fact_source_text(index, names=("financial_statements",), spec=_financial_statements_spec(max_sections=1), fallback_terms=("going concern",)),
+                _targeted_fact_windows(index.text, ("prepared on a going concern basis", "substantial doubt", "variable interest entity", "wholly-owned subsidiaries"), max_chars=12_000),
+            ]
+        )
+    )
+    going_concern_sentence = _source_snippet(search_text, "prepared on a going concern basis", before=180, after=420)
     return {
         "going_concern_risk_detected": {
-            "value": _has_adverse_going_concern_language(text),
+            "value": _has_adverse_going_concern_language(search_text),
             "source_snippet": going_concern_sentence,
             "instruction": "Do not describe a material going-concern warning unless adverse substantial-doubt or material-uncertainty language is present.",
         },
         "vie_structure_detected": {
-            "value": _has_vie_structure_language(text),
-            "source_snippet": _source_snippet(text, "variable interest entity", before=180, after=420) or _source_snippet(text, "wholly-owned subsidiaries", before=180, after=420),
+            "value": _has_vie_structure_language(search_text),
+            "source_snippet": _source_snippet(search_text, "variable interest entity", before=180, after=420) or _source_snippet(search_text, "wholly-owned subsidiaries", before=180, after=420),
             "instruction": "Do not flag China/VIE risk from generic China, PRC, customer, patent, or market-report references.",
         },
     }
 
 
-def _industry_market_revenue_warning(text: str) -> dict[str, str]:
+def _industry_market_revenue_warning(index: _FilingContextIndex) -> dict[str, str]:
+    text = "\n\n".join(
+        _dedupe(
+            [
+                index.context_text,
+                _targeted_fact_windows(index.text, ("Global revenue grew from about", "Independent Market Report"), max_chars=8_000),
+            ]
+        )
+    )
     match = re.search(r"Global revenue grew from about\s+(US\$[0-9.]+\s+million).*?according to the Independent Market Report", text, flags=re.IGNORECASE | re.DOTALL)
     if not match:
         return {}
@@ -761,7 +1019,7 @@ def _industry_market_revenue_warning(text: str) -> dict[str, str]:
 def _fact(value: str, source_text: str, needle: str) -> dict[str, str]:
     return {
         "value": value,
-        "source_snippet": _source_snippet(source_text, needle, before=220, after=360) or _shorten(needle, 500),
+        "source_snippet": _source_snippet(source_text, needle, before=180, after=300) or _shorten(needle, CHAT_FACT_SNIPPET_CHAR_LIMIT),
     }
 
 
@@ -769,24 +1027,97 @@ def _compact_fact_value(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
 
 
-def _filing_context_text(filing_context: dict[str, Any]) -> str:
+def _filing_context_text(filing_context: dict[str, Any], *, limit: int = CHAT_RETRIEVED_CHAR_LIMIT) -> str:
     full_text = filing_context.get("full_prospectus_text")
     if isinstance(full_text, str):
-        return full_text
+        return full_text[:limit]
     sections = filing_context.get("sections")
     if not isinstance(sections, list):
         return ""
-    return "\n\n".join(str(section.get("text") or "") for section in sections if isinstance(section, dict))
+    return "\n\n".join(str(section.get("text") or "") for section in sections if isinstance(section, dict))[:limit]
 
 
-def _financial_verification_text(text: str, context_text: str) -> str:
+def _filing_context_section_map(filing_context: dict[str, Any]) -> dict[str, tuple[str, ...]]:
+    sections = filing_context.get("sections")
+    if not isinstance(sections, list):
+        return {}
+    grouped: dict[str, list[str]] = {}
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        name = str(section.get("name") or "").strip()
+        text = str(section.get("text") or "").strip()
+        if name and text:
+            grouped.setdefault(name, []).append(text)
+    return {name: tuple(values) for name, values in grouped.items()}
+
+
+def _filing_context_index(bundle: IpoFilingSourceBundle, filing_context: dict[str, Any]) -> _FilingContextIndex:
+    text = _normalize_text(bundle.full_text)
+    source_mode = str(filing_context.get("source_mode") or "")
+    return _FilingContextIndex(
+        text=text,
+        context_text=_filing_context_text(filing_context),
+        section_map=_filing_context_section_map(filing_context),
+        allow_full_text_scan=source_mode == "full_prospectus_text" or len(text) <= CHAT_FULL_TEXT_CHAR_LIMIT,
+    )
+
+
+def _financial_verification_text(index: _FilingContextIndex) -> str:
     pieces = [
-        _first_named_section_text(text, _mda_spec(max_sections=1)),
-        _first_named_section_text(text, _financial_statements_spec(max_sections=2)),
-        _first_named_section_text(text, _capitalization_spec(max_sections=1)),
-        context_text,
+        _fact_source_text(index, names=("mda_results",), spec=_mda_spec(max_sections=1), fallback_terms=("revenue", "net loss", "Results of Operations")),
+        _fact_source_text(index, names=("financial_statements",), spec=_financial_statements_spec(max_sections=2), fallback_terms=("Revenue", "Loss after income tax", "Consolidated Statements")),
+        _fact_source_text(index, names=("capitalization",), spec=_capitalization_spec(max_sections=1), fallback_terms=("Cash and cash equivalents", "Total debt")),
+        index.context_text,
     ]
     return "\n\n".join(_dedupe([piece for piece in pieces if piece]))
+
+
+def _fact_source_text(
+    index: _FilingContextIndex,
+    *,
+    names: tuple[str, ...],
+    spec: "_SectionSpec | None" = None,
+    fallback_terms: tuple[str, ...] = (),
+    max_chars: int = 28_000,
+) -> str:
+    pieces: list[str] = []
+    for name in names:
+        pieces.extend(index.section_map.get(name, ()))
+    if not pieces and spec is not None and index.allow_full_text_scan:
+        pieces.append(index.context_text or _first_named_section_text(index.text, spec))
+    if fallback_terms and (not pieces or not index.allow_full_text_scan):
+        pieces.append(_targeted_fact_windows(index.text, fallback_terms, max_chars=min(max_chars, 12_000)))
+    return "\n\n".join(_dedupe(pieces))[:max_chars]
+
+
+def _targeted_fact_windows(text: str, terms: tuple[str, ...], *, max_chars: int) -> str:
+    if not text or not terms or max_chars <= 0:
+        return ""
+    lower = text.lower()
+    windows: list[str] = []
+    used_ranges: list[tuple[int, int]] = []
+    per_window = min(3_000, max(1_200, max_chars // max(1, min(len(terms), 4))))
+    for term in terms:
+        clean_term = term.strip()
+        if not clean_term:
+            continue
+        start_at = 0
+        while True:
+            index = lower.find(clean_term.lower(), start_at)
+            if index < 0:
+                break
+            start = max(0, index - per_window // 3)
+            end = min(len(text), index + len(clean_term) + (per_window * 2 // 3))
+            start_at = index + len(clean_term)
+            if _overlaps_existing_range(start, end, used_ranges):
+                continue
+            windows.append(_clean_section_text(text[start:end], limit=per_window))
+            used_ranges.append((start, end))
+            break
+        if sum(len(window) for window in windows) >= max_chars:
+            break
+    return "\n\n".join(_dedupe(window for window in windows if window))[:max_chars]
 
 
 def _first_named_section_text(text: str, spec: _SectionSpec) -> str:
@@ -880,6 +1211,7 @@ def retrieve_relevant_filing_sections(text: str, prompt: str) -> tuple[IpoFiling
     output: list[IpoFilingSourceSection] = []
     ranges: list[tuple[int, int]] = []
     char_count = 0
+    budget = CHAT_RETRIEVED_CHAR_LIMIT
     for section in selected:
         if not section.text:
             continue
@@ -889,10 +1221,11 @@ def retrieve_relevant_filing_sections(text: str, prompt: str) -> tuple[IpoFiling
         end = section.end_offset if section.end_offset is not None else -1
         if start >= 0 and end >= 0 and _overlaps_existing_range(start, end, ranges):
             continue
-        room = CHAT_RETRIEVED_CHAR_LIMIT - char_count
+        room = budget - char_count
         if room <= 0:
             break
-        text_slice = section.text[:room].strip()
+        text_limit = min(room, _retrieved_section_char_limit(section.name, prompt))
+        text_slice = _trim_retrieved_section_text(section.name, section.text, prompt, text_limit)
         if not text_slice:
             continue
         output.append(
@@ -907,6 +1240,94 @@ def retrieve_relevant_filing_sections(text: str, prompt: str) -> tuple[IpoFiling
         if start >= 0 and end >= 0:
             ranges.append((start, end))
     return tuple(output)
+
+
+def _retrieved_section_char_limit(name: str, prompt: str) -> int:
+    overview_limits = {
+        "cover_page": 4_500,
+        "prospectus_summary": 4_000,
+        "offering_terms": 4_500,
+        "use_of_proceeds": 4_500,
+        "capitalization": 4_500,
+        "dilution": 4_500,
+        "mda_results": 5_000,
+        "financial_statements": 5_500,
+        "risk_factors": 5_500,
+        "customer_supplier_concentration": 3_500,
+        "license_obligations": 3_500,
+        "icfr_material_weaknesses": 3_500,
+        "principal_shareholders": 4_000,
+        "related_party_transactions": 4_000,
+        "shares_eligible_future_sale": 4_000,
+        "underwriting": 4_000,
+        "ads_sgx_conversion": 4_000,
+        "business": 2_500,
+        "opening_excerpt": 2_000,
+    }
+    focused_limits = {
+        "cover_page": 6_000,
+        "opening_excerpt": 2_500,
+    }
+    if name.startswith("keyword_chunk"):
+        return 2_500 if _is_overview_prompt(prompt) else 4_000
+    if _is_overview_prompt(prompt):
+        return overview_limits.get(name, 3_500)
+    return focused_limits.get(name, min(CHAT_SECTION_CHAR_LIMIT, 10_000))
+
+
+def _trim_retrieved_section_text(name: str, text: str, prompt: str, limit: int) -> str:
+    clean = (text or "").strip()
+    if limit <= 0 or not clean:
+        return ""
+    if len(clean) <= limit:
+        return clean
+
+    terms = _section_preserve_terms(name, prompt)
+    head_limit = min(len(clean), max(900, limit // 3))
+    pieces = [clean[:head_limit].strip()]
+    lower = clean.lower()
+    window = max(900, (limit - head_limit) // max(1, min(len(terms), 4)))
+    ranges: list[tuple[int, int]] = [(0, head_limit)]
+    for term in terms:
+        index = lower.find(term.lower())
+        if index < 0:
+            continue
+        start = max(0, index - window // 3)
+        end = min(len(clean), index + len(term) + (window * 2 // 3))
+        if _overlaps_existing_range(start, end, ranges):
+            continue
+        pieces.append(clean[start:end].strip())
+        ranges.append((start, end))
+        if sum(len(piece) for piece in pieces) >= limit:
+            break
+    trimmed = "\n...\n".join(_dedupe(piece for piece in pieces if piece))
+    if len(trimmed) > limit:
+        trimmed = trimmed[: max(0, limit - 3)].rstrip(" ,.;") + "..."
+    return trimmed.strip()
+
+
+def _section_preserve_terms(name: str, prompt: str) -> tuple[str, ...]:
+    terms_by_name = {
+        "cover_page": ("American Depositary Shares", "Ordinary Shares", "Nasdaq", "Joint Book-Running Managers"),
+        "prospectus_summary": ("we are", "our business", "market", "customers"),
+        "offering_terms": ("American Depositary Shares", "we are offering", "initial public offering price", "Nasdaq", "underwriters"),
+        "use_of_proceeds": ("net proceeds", "use the net proceeds", "working capital", "over-allotment"),
+        "capitalization": ("Cash and cash equivalents", "Total debt", "as adjusted", "total capitalization"),
+        "dilution": ("net tangible book value", "immediate dilution", "per ADS", "per ordinary share"),
+        "mda_results": ("Our revenue amounted", "revenue", "net losses", "liquidity", "capital resources"),
+        "financial_statements": ("Revenue", "Loss after income tax", "Gross profit", "Cash and cash equivalents"),
+        "risk_factors": ("going concern", "customer concentration", "supplier concentration", "material weakness", "related party"),
+        "customer_supplier_concentration": ("Haur-Jye Technology", "MMI Systems Pte Ltd", "major customer", "major supplier"),
+        "license_obligations": ("Accelerate Technologies", "A*STAR", "S$3.0 million", "S$5.0 million", "commercialization obligations"),
+        "icfr_material_weaknesses": ("material weakness", "segregation of duties", "payroll", "purchases and payables", "IFRS"),
+        "principal_shareholders": ("directors and executive officers", "Angelling Capital", "MST SingCo", "beneficial ownership"),
+        "related_party_transactions": ("RELATED PARTY TRANSACTIONS", "MMI Systems Pte Ltd", "MST SingCo", "related party"),
+        "shares_eligible_future_sale": ("September 8, 2026", "moratorium", "180 days", "lock-up", "future sale"),
+        "underwriting": ("Roth Capital Partners", "Benchmark", "underwriters", "lock-up", "180 days"),
+        "ads_sgx_conversion": ("convert ordinary shares into ADSs", "Each ADS represents", "Singapore Exchange", "SGX-ST"),
+        "business": ("customers", "suppliers", "License Agreements", "Intellectual Property"),
+    }
+    return tuple(_dedupe([*terms_by_name.get(name, ()), *_query_terms(prompt)]))
 
 
 def render_ipo_filing_chat_transcript_markdown(session: IpoFilingChatSession) -> str:
@@ -1623,6 +2044,34 @@ def _overlaps_existing_range(start: int, end: int, ranges: Iterable[tuple[int, i
 
 def _clean_prompt(prompt: str) -> str:
     return re.sub(r"\s+", " ", prompt or "").strip()
+
+
+def _notify_progress(progress_callback: ProgressCallback | None, message: str) -> None:
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(message)
+    except Exception:
+        LOGGER.debug("AI filing chat progress callback failed", exc_info=True)
+
+
+def _positive_timeout_seconds(value: float | None, env_value: str | None) -> float:
+    raw = value if value is not None else env_value
+    if raw is None or raw == "":
+        return CHAT_OPENAI_TIMEOUT_SECONDS
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        LOGGER.warning("Invalid OPENAI_IPO_CHAT_TIMEOUT_SECONDS=%r; using %ss", raw, CHAT_OPENAI_TIMEOUT_SECONDS)
+        return CHAT_OPENAI_TIMEOUT_SECONDS
+    if seconds <= 0:
+        return CHAT_OPENAI_TIMEOUT_SECONDS
+    return seconds
+
+
+def _is_timeout_exception(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(marker in text for marker in ("timeout", "timed out", "deadline exceeded", "read timed out"))
 
 
 def _clean_answer(answer: str) -> str:
