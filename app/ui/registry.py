@@ -20,6 +20,7 @@ from app.ui.hyperliquid_spot_symbol_display_extension import install_hyperliquid
 from app.ui.hyperliquid_submit_flow import install_hyperliquid_submit_flow
 from app.ui.hyperliquid_symbol_alias_extension import install_hyperliquid_symbol_alias_extension
 from app.ui.hyperliquid_trading_extension import install_hyperliquid_trading_extension
+from app.ui.hyperliquid_workspace_layout_guard import install_hyperliquid_workspace_layout_guard
 from app.ui.earnings_radar_extension import install_earnings_radar_extension
 from app.ui.ipo_pipeline_extension import install_ipo_pipeline_extension
 from app.ui.options_candidate_actionability_extension import install_options_candidate_actionability_extension
@@ -68,6 +69,7 @@ def install_ui_extensions(app_cls: Type[tk.Tk]) -> None:
     install_hyperliquid_trading_extension(app_cls)
     install_unified_refresh_extension(app_cls)
     install_hyperliquid_notifications(app_cls)
+    install_hyperliquid_workspace_layout_guard(app_cls)
     install_trading_workspace_extension(app_cls)
     install_hyperliquid_chain_health_extension(app_cls)
     install_options_what_if_enhancement_extension(app_cls)
