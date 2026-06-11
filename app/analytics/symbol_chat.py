@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,11 +15,19 @@ from dotenv import load_dotenv
 
 from app.analytics.capital_structure_pressure import analyze_capital_structure_pressure, unknown_capital_structure_report
 from app.analytics.openai_ipo_report import DEFAULT_OPENAI_IPO_REPORT_MODEL, _redact_api_key, _response_output_text
+from app.analytics.symbol_context_validation import (
+    symbol_context_validation_to_payload,
+    validate_symbol_chat_context,
+)
 from app.analytics.symbol_web_enrichment import (
+    SymbolRecentMarketNewsProvider,
     SymbolWebEnrichmentProvider,
     configured_default_symbol_web_provider,
+    configured_default_symbol_market_news_provider,
     provider_display_name,
+    symbol_market_news_to_payload,
     symbol_web_enrichment_to_payload,
+    unavailable_symbol_market_news_payload,
     unavailable_symbol_web_enrichment_payload,
 )
 from app.analytics.technical_analysis import (
@@ -113,6 +122,7 @@ class SymbolChatContext:
     recent_filings_summary: tuple[dict[str, Any], ...] = ()
     saved_thesis_or_notes: str = ""
     web_enrichment: dict[str, Any] = field(default_factory=dict)
+    context_validation: dict[str, Any] = field(default_factory=dict)
     source_metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -207,6 +217,11 @@ class OpenAiSymbolChatClient:
             "request_payload_char_limit": SYMBOL_CHAT_REQUEST_CHAR_LIMIT,
             "openai_timeout_seconds": self.timeout_seconds,
         }
+        request_budget = request_payload.get("request_budget") if isinstance(request_payload, Mapping) else {}
+        if isinstance(request_budget, Mapping):
+            for key in ("pre_trim_payload_chars", "final_payload_chars", "budget_trimmed"):
+                if key in request_budget:
+                    diagnostics[f"request_payload_{key}"] = request_budget.get(key)
         LOGGER.debug(
             "AI symbol chat payload ready symbol=%s payload_chars=%s approx_tokens=%s history_messages=%s",
             context.symbol,
@@ -288,6 +303,7 @@ def create_symbol_chat_session(
     model: str | None = None,
     use_web_enrichment: bool = False,
     web_enrichment_provider: SymbolWebEnrichmentProvider | Callable[[str], Mapping[str, Any] | None] | None = None,
+    market_news_provider: SymbolRecentMarketNewsProvider | Callable[[str], Mapping[str, Any] | None] | None = None,
 ) -> SymbolChatSession:
     context = build_symbol_chat_context(
         symbol,
@@ -296,6 +312,7 @@ def create_symbol_chat_session(
         sec_client=sec_client,
         use_web_enrichment=use_web_enrichment,
         web_enrichment_provider=web_enrichment_provider,
+        market_news_provider=market_news_provider,
     )
     return SymbolChatSession(
         context,
@@ -312,6 +329,7 @@ def build_symbol_chat_context(
     trade_memory_store: TradeMemoryStore | None = None,
     use_web_enrichment: bool = False,
     web_enrichment_provider: SymbolWebEnrichmentProvider | Callable[[str], Mapping[str, Any] | None] | None = None,
+    market_news_provider: SymbolRecentMarketNewsProvider | Callable[[str], Mapping[str, Any] | None] | None = None,
 ) -> SymbolChatContext:
     clean_symbol = normalize_symbol(symbol)
     if not clean_symbol:
@@ -351,9 +369,22 @@ def build_symbol_chat_context(
         recent_filings_summary,
         use_web_enrichment,
         web_enrichment_provider,
+        market_news_provider,
         sec_client,
         source_metadata,
     )
+    validation_result = validate_symbol_chat_context(
+        symbol=clean_symbol,
+        quote_snapshot=quote_snapshot,
+        research_workspace_context=research_workspace_context,
+        technical_analysis=technical_analysis,
+        web_enrichment=web_enrichment,
+        source_metadata=source_metadata,
+    )
+    context_validation = symbol_context_validation_to_payload(validation_result)
+    _record_context_validation_metadata(source_metadata, context_validation)
+    research_workspace_context = _apply_validation_overrides_to_research_workspace_context(research_workspace_context, context_validation)
+    technical_analysis = _apply_validation_overrides_to_technical_analysis(technical_analysis, context_validation)
 
     return SymbolChatContext(
         symbol=clean_symbol,
@@ -367,11 +398,13 @@ def build_symbol_chat_context(
         recent_filings_summary=tuple(recent_filings_summary),
         saved_thesis_or_notes=saved_thesis_or_notes,
         web_enrichment=web_enrichment,
+        context_validation=context_validation,
         source_metadata=source_metadata,
     )
 
 
 def symbol_chat_request_payload(context: SymbolChatContext, prompt: str, *, timeout_seconds: float) -> dict[str, Any]:
+    context_validation = context.context_validation or _validation_payload_for_context(context)
     payload = {
         "question": prompt,
         "symbol_context": {
@@ -386,10 +419,14 @@ def symbol_chat_request_payload(context: SymbolChatContext, prompt: str, *, time
             "recent_filings_summary": list(context.recent_filings_summary) or _not_available(),
             "saved_thesis_or_notes": context.saved_thesis_or_notes or _not_available(),
             "web_enrichment": context.web_enrichment or _not_available(),
+            "context_validation": context_validation,
             "source_metadata": context.source_metadata,
         },
         "grounding_rules": [
             "Use only symbol_context and conversation history for factual claims.",
+            "Treat context_validation warnings as authoritative for this request.",
+            "Do not rely on technical levels marked stale_or_misaligned as current support, resistance, confirmation, invalidation, or 52-week levels.",
+            "If quote, candle, technical-level, 52-week, or option-chain data conflicts, explain the conflict and use only the consistent layers.",
             "Use research_workspace_context as the primary deterministic app analysis when it is available.",
             "Use schwab_position as the authority for current position context; do not infer not-held status from recent orders or missing fields.",
             "If schwab_position is unavailable, say position context is unavailable instead of saying the symbol is not held.",
@@ -408,7 +445,163 @@ def symbol_chat_request_payload(context: SymbolChatContext, prompt: str, *, time
             "openai_timeout_seconds": timeout_seconds,
         },
     }
+    _apply_validation_overrides_to_payload(payload)
     return _enforce_request_payload_budget(payload)
+
+
+def _validation_payload_for_context(context: SymbolChatContext) -> dict[str, Any]:
+    result = validate_symbol_chat_context(
+        symbol=context.symbol,
+        quote_snapshot=context.quote_snapshot,
+        research_workspace_context=context.research_workspace_context,
+        technical_analysis=context.technical_analysis,
+        web_enrichment=context.web_enrichment,
+        source_metadata=context.source_metadata,
+    )
+    return symbol_context_validation_to_payload(result)
+
+
+def _record_context_validation_metadata(source_metadata: dict[str, Any], validation: Mapping[str, Any]) -> None:
+    status = str(validation.get("status") or "valid")
+    issues = validation.get("issues") if isinstance(validation.get("issues"), list) else []
+    source_metadata["context_validation_status"] = status
+    source_metadata["context_validation_issue_count"] = len(issues)
+    if status == "valid":
+        _mark_available(source_metadata, "context_validation", "Market-data alignment checks passed.")
+        return
+    _mark_warning(source_metadata, f"Context validation status {status}; {len(issues)} issue(s) detected.")
+    for issue in issues[:8]:
+        if not isinstance(issue, Mapping):
+            continue
+        code = str(issue.get("code") or "validation_issue")
+        message = str(issue.get("message") or "").strip()
+        if message:
+            _mark_warning(source_metadata, f"context_validation.{code}: {message}")
+
+
+def _apply_validation_overrides_to_payload(payload: dict[str, Any]) -> None:
+    symbol_context = payload.get("symbol_context")
+    if not isinstance(symbol_context, dict):
+        return
+    validation = symbol_context.get("context_validation")
+    if not isinstance(validation, Mapping):
+        return
+    symbol_context["research_workspace_context"] = _apply_validation_overrides_to_research_workspace_context(
+        symbol_context.get("research_workspace_context"),
+        validation,
+    )
+    symbol_context["technical_analysis"] = _apply_validation_overrides_to_technical_analysis(
+        symbol_context.get("technical_analysis"),
+        validation,
+    )
+
+
+def _apply_validation_overrides_to_research_workspace_context(context: Any, validation: Mapping[str, Any]) -> Any:
+    if not isinstance(context, dict) or not _validation_has_demotions(validation):
+        return context
+    updated = deepcopy(context)
+    demoted_reason = _validation_demote_reason(validation)
+    overrides = validation.get("safe_context_overrides") if isinstance(validation.get("safe_context_overrides"), Mapping) else {}
+
+    if "technical_levels" in overrides or "technical_52_week_range" in overrides:
+        technicals = updated.get("technicals")
+        if isinstance(technicals, dict):
+            technicals["validation_status"] = "stale_or_misaligned"
+            technicals["validation_instruction"] = "Do not rely on demoted technical levels as current until quote/candle basis is reconciled."
+            technicals["validation_warning"] = demoted_reason
+            indicator = technicals.get("indicator_snapshot")
+            if isinstance(indicator, dict):
+                demoted_fields = {}
+                for key in ("support", "resistance", "week_52_high", "week_52_low"):
+                    if key in indicator:
+                        demoted_fields[key] = indicator.pop(key)
+                if demoted_fields:
+                    technicals["demoted_indicator_levels"] = {
+                        "status": "stale_or_misaligned",
+                        "reason": demoted_reason,
+                        "values": demoted_fields,
+                    }
+            command = technicals.get("command_center")
+            if isinstance(command, dict):
+                warnings = list(command.get("warnings") or [])
+                warnings.insert(0, demoted_reason)
+                command["warnings"] = _dedupe_text_values(warnings)[:8]
+
+    if "option_context" in overrides:
+        for section_name in ("options_strategy", "greeks"):
+            section = updated.get(section_name)
+            if not isinstance(section, dict):
+                continue
+            section["validation_status"] = "stale_or_misaligned"
+            section["validation_instruction"] = "Do not rely on option-chain or Greek source prices until refreshed against the current quote."
+            section["validation_warning"] = demoted_reason
+            demoted_prices = {}
+            for key in ("underlying_price", "source_price"):
+                if key in section:
+                    demoted_prices[key] = section.pop(key)
+            if demoted_prices:
+                section["demoted_prices"] = {
+                    "status": "stale_or_misaligned",
+                    "reason": demoted_reason,
+                    "values": demoted_prices,
+                }
+
+    return updated
+
+
+def _apply_validation_overrides_to_technical_analysis(context: Any, validation: Mapping[str, Any]) -> Any:
+    if not isinstance(context, dict) or not _validation_has_demotions(validation):
+        return context
+    updated = deepcopy(context)
+    demoted_reason = _validation_demote_reason(validation)
+    overrides = validation.get("safe_context_overrides") if isinstance(validation.get("safe_context_overrides"), Mapping) else {}
+    if "technical_levels" not in overrides and "technical_52_week_range" not in overrides:
+        return updated
+
+    updated["validation_status"] = "stale_or_misaligned"
+    updated["validation_instruction"] = "Do not rely on demoted technical levels as current until quote/candle basis is reconciled."
+    warnings = list(updated.get("warnings") or [])
+    warnings.insert(0, demoted_reason)
+    updated["warnings"] = _dedupe_text_values(warnings)[:8]
+
+    levels = updated.get("levels")
+    if isinstance(levels, dict):
+        demoted = {}
+        for key in ("support", "resistance", "confirmation", "invalidation", "confirmation_level", "invalidation_level", "week_52_high", "week_52_low"):
+            if key in levels:
+                demoted[key] = levels.pop(key)
+        if demoted:
+            updated["demoted_levels"] = {"status": "stale_or_misaligned", "reason": demoted_reason, "values": demoted}
+    if isinstance(updated.get("key_triggers"), list):
+        updated["demoted_key_triggers"] = {
+            "status": "stale_or_misaligned",
+            "reason": demoted_reason,
+            "values": updated.pop("key_triggers"),
+        }
+    if isinstance(updated.get("summary_text"), str):
+        updated["summary_text"] = (
+            "CONTEXT VALIDATION WARNING: technical levels were demoted because quote/candle/level data appears "
+            f"stale or misaligned. Reason: {demoted_reason}\n\n"
+            "The original technical level narrative is omitted from the OpenAI request; use the validation warning "
+            "and consistent app-local context instead."
+        )
+    return updated
+
+
+def _validation_has_demotions(validation: Mapping[str, Any]) -> bool:
+    overrides = validation.get("safe_context_overrides")
+    return isinstance(overrides, Mapping) and bool(overrides)
+
+
+def _validation_demote_reason(validation: Mapping[str, Any]) -> str:
+    issues = validation.get("issues") if isinstance(validation.get("issues"), list) else []
+    for issue in issues:
+        if not isinstance(issue, Mapping):
+            continue
+        message = str(issue.get("message") or "").strip()
+        if message:
+            return message
+    return "Context validation marked one or more market-data layers stale or misaligned."
 
 
 def render_symbol_chat_transcript_markdown(session: SymbolChatSession) -> str:
@@ -433,6 +626,7 @@ def render_symbol_chat_transcript_markdown(session: SymbolChatSession) -> str:
     lines.extend(f"- {redact_symbol_chat_secrets(item)}" for item in (unavailable or ["None"]))
     lines.append("")
     lines.extend(_web_enrichment_transcript_lines(context))
+    lines.extend(_context_validation_transcript_lines(context))
 
     if not session.messages:
         lines.append("_No chat messages yet._")
@@ -450,6 +644,40 @@ def render_symbol_chat_transcript_markdown(session: SymbolChatSession) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def _context_validation_transcript_lines(context: SymbolChatContext) -> list[str]:
+    validation = context.context_validation if isinstance(context.context_validation, Mapping) else {}
+    if not validation:
+        return []
+    status = str(validation.get("status") or "valid")
+    issues = validation.get("issues") if isinstance(validation.get("issues"), list) else []
+    overrides = validation.get("safe_context_overrides") if isinstance(validation.get("safe_context_overrides"), Mapping) else {}
+    lines = [
+        "## Context Validation",
+        "",
+        f"Status: {redact_symbol_chat_secrets(status)}",
+        f"Issue count: {len(issues)}",
+    ]
+    if issues:
+        lines.extend(["", "Issues:"])
+        for issue in issues[:10]:
+            if not isinstance(issue, Mapping):
+                continue
+            code = str(issue.get("code") or "validation_issue")
+            severity = str(issue.get("severity") or "warning")
+            message = str(issue.get("message") or "").strip()
+            affected = issue.get("affected_layers")
+            affected_text = ", ".join(str(item) for item in affected) if isinstance(affected, list) else ""
+            suffix = f" [{affected_text}]" if affected_text else ""
+            lines.append(f"- {severity}/{code}: {redact_symbol_chat_secrets(message)}{suffix}")
+    if overrides:
+        lines.extend(["", "Safe Overrides:"])
+        for layer, detail in overrides.items():
+            status_text = str(detail.get("status") or "") if isinstance(detail, Mapping) else str(detail)
+            lines.append(f"- {redact_symbol_chat_secrets(str(layer))}: {redact_symbol_chat_secrets(status_text)}")
+    lines.append("")
+    return lines
+
+
 def _web_enrichment_transcript_lines(context: SymbolChatContext) -> list[str]:
     metadata = context.source_metadata
     web = context.web_enrichment if isinstance(context.web_enrichment, Mapping) else {}
@@ -460,6 +688,7 @@ def _web_enrichment_transcript_lines(context: SymbolChatContext) -> list[str]:
     sources = web.get("sources") if isinstance(web.get("sources"), list) else []
     warnings = web.get("warnings") if isinstance(web.get("warnings"), list) else []
     source_debug = web.get("source_debug") if isinstance(web.get("source_debug"), list) else []
+    market_news = web.get("recent_market_news") if isinstance(web.get("recent_market_news"), Mapping) else {}
 
     lines = [
         "## Web Enrichment",
@@ -492,7 +721,46 @@ def _web_enrichment_transcript_lines(context: SymbolChatContext) -> list[str]:
     if source_debug:
         lines.extend(["", "Provider Debug:"])
         lines.extend(f"- {redact_symbol_chat_secrets(str(item))}" for item in source_debug[:12] if str(item).strip())
+    if market_news:
+        lines.extend(_market_news_transcript_lines(market_news))
     lines.append("")
+    return lines
+
+
+def _market_news_transcript_lines(market_news: Mapping[str, Any]) -> list[str]:
+    provider_name = str(market_news.get("provider_name") or "none")
+    provider_configured = bool(market_news.get("provider_configured"))
+    status = str(market_news.get("status") or "unavailable")
+    sources = market_news.get("sources") if isinstance(market_news.get("sources"), list) else []
+    recent_news = market_news.get("recent_news") if isinstance(market_news.get("recent_news"), list) else []
+    snapshot = market_news.get("market_snapshot") if isinstance(market_news.get("market_snapshot"), Mapping) else {}
+    lines = [
+        "",
+        "Recent Market/News:",
+        f"- Provider configured: {'yes' if provider_configured else 'no'}",
+        f"- Provider: {redact_symbol_chat_secrets(provider_display_name(provider_name))}",
+        f"- Status: {redact_symbol_chat_secrets(status)}",
+        f"- Source count: {len(sources)}",
+    ]
+    reason = str(market_news.get("reason") or "").strip()
+    if reason:
+        lines.append(f"- Reason: {redact_symbol_chat_secrets(reason)}")
+    if snapshot:
+        snapshot_bits = []
+        for key in ("quote_timestamp", "latest_candle_timestamp", "latest_close", "price_move_percent", "volume_context"):
+            value = snapshot.get(key)
+            if value not in (None, ""):
+                snapshot_bits.append(f"{key}={value}")
+        if snapshot_bits:
+            lines.append(f"- Market snapshot: {redact_symbol_chat_secrets('; '.join(snapshot_bits[:5]))}")
+    if recent_news:
+        lines.append("- Recent news:")
+        for source in recent_news[:6]:
+            if not isinstance(source, Mapping):
+                continue
+            title = str(source.get("title") or "Untitled source").strip()
+            url = str(source.get("url") or "").strip()
+            lines.append(f"  - {redact_symbol_chat_secrets(title)}: {redact_symbol_chat_secrets(url or '--')}")
     return lines
 
 
@@ -1068,6 +1336,8 @@ def _research_technical_context(payload: Any) -> dict[str, Any]:
                     "confidence": str(getattr(report, "confidence", "") or ""),
                     "setup": str(getattr(getattr(report, "setup_classification", None), "setup", "") or ""),
                     "action_quality": str(getattr(getattr(report, "setup_classification", None), "action_quality", "") or ""),
+                    "confirmation_level": _safe_number(getattr(getattr(report, "setup_classification", None), "confirmation_level", None)),
+                    "invalidation_level": _safe_number(getattr(getattr(report, "setup_classification", None), "invalidation_level", None)),
                     "warnings": _short_text_list(getattr(report, "warnings", []) or [], limit=8),
                 }
             ),
@@ -1300,6 +1570,21 @@ def _short_text_list(values: Iterable[Any], *, limit: int) -> list[str]:
     return result
 
 
+def _dedupe_text_values(values: Iterable[Any]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return result
+
+
 def _drop_empty(value: Mapping[str, Any]) -> dict[str, Any]:
     return {key: item for key, item in value.items() if item not in (None, "", [], {}, ())}
 
@@ -1395,6 +1680,7 @@ def _build_live_technical_report(schwab_session: Any, symbol: str, quote_context
 
 
 def _technical_report_context(report: Any, *, source: str) -> dict[str, Any]:
+    snapshot = _preferred_technical_snapshot_context(report)
     context = {
         "source": source,
         "symbol": str(getattr(report, "symbol", "") or ""),
@@ -1403,6 +1689,9 @@ def _technical_report_context(report: Any, *, source: str) -> dict[str, Any]:
         "confidence": str(getattr(report, "confidence", "") or ""),
         "setup": str(getattr(getattr(report, "setup_classification", None), "setup", "") or ""),
         "action_quality": str(getattr(getattr(report, "setup_classification", None), "action_quality", "") or ""),
+        "snapshot": snapshot,
+        "levels": _technical_report_levels(report, snapshot),
+        "key_triggers": _technical_key_trigger_context(getattr(report, "key_triggers", []) or []),
         "warnings": list(getattr(report, "warnings", []) or [])[:8],
     }
     try:
@@ -1411,6 +1700,78 @@ def _technical_report_context(report: Any, *, source: str) -> dict[str, Any]:
         summary_text = str(report)
     context["summary_text"] = _shorten(summary_text, SYMBOL_CHAT_TECHNICAL_TEXT_LIMIT)
     return {key: value for key, value in context.items() if value not in (None, "", [])}
+
+
+def _preferred_technical_snapshot_context(report: Any) -> dict[str, Any]:
+    snapshots = getattr(report, "snapshots", None)
+    if not isinstance(snapshots, Mapping):
+        return {}
+    for key in ("timing_5m", "setup_30m", "daily_1y", "timing_1m"):
+        snapshot = snapshots.get(key)
+        if snapshot is not None and _safe_number(getattr(snapshot, "latest_close", None)) is not None:
+            return _technical_snapshot_context(snapshot)
+    for snapshot in snapshots.values():
+        if snapshot is not None:
+            return _technical_snapshot_context(snapshot)
+    return {}
+
+
+def _technical_snapshot_context(snapshot: Any) -> dict[str, Any]:
+    return _drop_empty(
+        {
+            "key": str(getattr(snapshot, "key", "") or ""),
+            "label": str(getattr(snapshot, "label", "") or ""),
+            "role": str(getattr(snapshot, "role", "") or ""),
+            "candle_count": _safe_number(getattr(snapshot, "candle_count", None)),
+            "latest_close": _safe_number(getattr(snapshot, "latest_close", None)),
+            "atr_14": _safe_number(getattr(snapshot, "atr_14", None)),
+            "atr_percent": _safe_number(getattr(snapshot, "atr_percent", None)),
+            "recent_high": _safe_number(getattr(snapshot, "recent_high", None)),
+            "recent_low": _safe_number(getattr(snapshot, "recent_low", None)),
+            "vwap": _safe_number(getattr(snapshot, "vwap", None)),
+            "vwap_distance_percent": _safe_number(getattr(snapshot, "vwap_distance_percent", None)),
+        }
+    )
+
+
+def _technical_report_levels(report: Any, snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    setup = getattr(report, "setup_classification", None)
+    levels = {
+        "confirmation": _safe_number(getattr(setup, "confirmation_level", None)),
+        "invalidation": _safe_number(getattr(setup, "invalidation_level", None)),
+    }
+    snapshots = getattr(report, "snapshots", None)
+    active_snapshot = None
+    if isinstance(snapshots, Mapping):
+        active_key = str(snapshot.get("key") or "")
+        active_snapshot = snapshots.get(active_key) if active_key else None
+    if active_snapshot is not None:
+        support = getattr(getattr(active_snapshot, "level_proximity", None), "nearest_support", None)
+        resistance = getattr(getattr(active_snapshot, "level_proximity", None), "nearest_resistance", None)
+        if support is None:
+            support_zones = list(getattr(active_snapshot, "support_zones", []) or [])
+            support = support_zones[0] if support_zones else None
+        if resistance is None:
+            resistance_zones = list(getattr(active_snapshot, "resistance_zones", []) or [])
+            resistance = resistance_zones[0] if resistance_zones else None
+        levels["support"] = _safe_number(getattr(support, "center", None))
+        levels["resistance"] = _safe_number(getattr(resistance, "center", None))
+    return _drop_empty(levels)
+
+
+def _technical_key_trigger_context(triggers: Iterable[Any]) -> list[dict[str, Any]]:
+    rows = []
+    for trigger in list(triggers)[:8]:
+        rows.append(
+            _drop_empty(
+                {
+                    "label": str(getattr(trigger, "label", "") or ""),
+                    "price": _safe_number(getattr(trigger, "price", None)),
+                    "reason": str(getattr(trigger, "reason", "") or ""),
+                }
+            )
+        )
+    return [row for row in rows if row]
 
 
 def _analysis_only_technical_text(report: Any) -> str:
@@ -1538,6 +1899,7 @@ def _web_enrichment_context(
     recent_filings: Iterable[Mapping[str, Any]],
     enabled: bool,
     provider: SymbolWebEnrichmentProvider | Callable[[str], Mapping[str, Any] | None] | None,
+    market_news_provider: SymbolRecentMarketNewsProvider | Callable[[str], Mapping[str, Any] | None] | None,
     sec_client: SecEdgarClient | None,
     source_metadata: dict[str, Any],
 ) -> dict[str, Any]:
@@ -1557,7 +1919,9 @@ def _web_enrichment_context(
         source_metadata["web_enrichment_provider_configured"] = False
         source_metadata["web_enrichment_provider"] = "none"
         source_metadata["web_enrichment_source_count"] = 0
-        return unavailable_symbol_web_enrichment_payload(symbol, "No web-enrichment provider is configured in this build.")
+        payload = unavailable_symbol_web_enrichment_payload(symbol, "No web-enrichment provider is configured in this build.")
+        payload["recent_market_news"] = _recent_market_news_context(app_context, symbol, company_name, market_news_provider, source_metadata)
+        return payload
 
     provider_name = str(getattr(active_provider, "provider_name", "") or getattr(active_provider, "__name__", "") or type(active_provider).__name__)
     source_metadata["web_enrichment_provider_configured"] = True
@@ -1572,54 +1936,54 @@ def _web_enrichment_context(
     except Exception as exc:
         _mark_unavailable(source_metadata, "web_enrichment", f"Web enrichment provider failed: {exc}")
         source_metadata["web_enrichment_source_count"] = 0
-        return _limit_web_enrichment_context(
-            {
-                "mode": "requested_error",
-                "enabled": True,
-                "status": "error",
-                "provider_configured": True,
-                "provider_name": provider_name,
-                "reason": str(exc),
-                "sources": [],
-                "warnings": [str(exc)],
-                "source_debug": [f"provider={provider_name}", "status=error", "sources=0"],
-            }
-        )
+        payload = {
+            "mode": "requested_error",
+            "enabled": True,
+            "status": "error",
+            "provider_configured": True,
+            "provider_name": provider_name,
+            "reason": str(exc),
+            "sources": [],
+            "warnings": [str(exc)],
+            "source_debug": [f"provider={provider_name}", "status=error", "sources=0"],
+        }
+        payload["recent_market_news"] = _recent_market_news_context(app_context, symbol, company_name, market_news_provider, source_metadata)
+        return _limit_web_enrichment_context(payload)
 
     if result is None or result == {}:
         _mark_unavailable(source_metadata, "web_enrichment", "Web enrichment provider returned no public context.")
         source_metadata["web_enrichment_source_count"] = 0
-        return _limit_web_enrichment_context(
-            {
-                "mode": "enabled",
-                "enabled": True,
-                "status": "empty",
-                "provider_configured": True,
-                "provider_name": provider_name,
-                "sources": [],
-                "warnings": ["Web enrichment provider returned no public context."],
-                "source_debug": [f"provider={provider_name}", "status=empty", "sources=0"],
-            }
-        )
+        payload = {
+            "mode": "enabled",
+            "enabled": True,
+            "status": "empty",
+            "provider_configured": True,
+            "provider_name": provider_name,
+            "sources": [],
+            "warnings": ["Web enrichment provider returned no public context."],
+            "source_debug": [f"provider={provider_name}", "status=empty", "sources=0"],
+        }
+        payload["recent_market_news"] = _recent_market_news_context(app_context, symbol, company_name, market_news_provider, source_metadata)
+        return _limit_web_enrichment_context(payload)
 
     try:
         compact = symbol_web_enrichment_to_payload(result)
     except Exception as exc:
         _mark_unavailable(source_metadata, "web_enrichment", f"Web enrichment provider returned unsupported context: {exc}")
         source_metadata["web_enrichment_source_count"] = 0
-        return _limit_web_enrichment_context(
-            {
-                "mode": "requested_error",
-                "enabled": True,
-                "status": "error",
-                "provider_configured": True,
-                "provider_name": provider_name,
-                "reason": f"Unsupported provider response: {exc}",
-                "sources": [],
-                "warnings": [f"Unsupported provider response: {exc}"],
-                "source_debug": [f"provider={provider_name}", "status=error", "sources=0"],
-            }
-        )
+        payload = {
+            "mode": "requested_error",
+            "enabled": True,
+            "status": "error",
+            "provider_configured": True,
+            "provider_name": provider_name,
+            "reason": f"Unsupported provider response: {exc}",
+            "sources": [],
+            "warnings": [f"Unsupported provider response: {exc}"],
+            "source_debug": [f"provider={provider_name}", "status=error", "sources=0"],
+        }
+        payload["recent_market_news"] = _recent_market_news_context(app_context, symbol, company_name, market_news_provider, source_metadata)
+        return _limit_web_enrichment_context(payload)
     compact.setdefault("enabled", True)
     compact.setdefault("mode", "enabled")
     compact.setdefault("status", "available")
@@ -1640,6 +2004,8 @@ def _web_enrichment_context(
     else:
         detail = str(compact.get("reason") or "Provider returned limited public context.")
         _mark_unavailable(source_metadata, "web_enrichment", f"Web enrichment provider returned {status or 'limited'} context: {detail}")
+    if "recent_market_news" not in compact:
+        compact["recent_market_news"] = _recent_market_news_context(app_context, symbol, company_name, market_news_provider, source_metadata)
     return _limit_web_enrichment_context(compact)
 
 
@@ -1647,16 +2013,141 @@ def _limit_web_enrichment_context(context: dict[str, Any]) -> dict[str, Any]:
     if len(_serialize_request_payload(context)) <= SYMBOL_CHAT_WEB_TEXT_LIMIT:
         return context
     limited = dict(context)
-    for key in ("summary", "company_profile", "recent_news", "earnings", "earnings_context", "fundamentals", "filings", "recent_filings", "filing_summaries"):
+    for key in (
+        "summary",
+        "company_profile",
+        "recent_news",
+        "earnings",
+        "earnings_context",
+        "fundamentals",
+        "filings",
+        "recent_filings",
+        "filing_summaries",
+        "recent_market_news",
+    ):
         value = limited.get(key)
         if isinstance(value, str):
             limited[key] = _shorten(value, 1_500)
         elif isinstance(value, list):
             limited[key] = value[:6]
+        elif key == "recent_market_news" and isinstance(value, dict):
+            limited[key] = _limit_market_news_context(value)
     if len(_serialize_request_payload(limited)) <= SYMBOL_CHAT_WEB_TEXT_LIMIT:
         return limited
     limited["truncation_note"] = f"Web enrichment was truncated to fit the {SYMBOL_CHAT_WEB_TEXT_LIMIT} character sub-budget."
     return limited
+
+
+def _limit_market_news_context(context: dict[str, Any]) -> dict[str, Any]:
+    limited = dict(context)
+    for key in ("recent_news", "earnings_ir", "sources"):
+        value = limited.get(key)
+        if isinstance(value, list):
+            limited[key] = value[:6]
+    snapshot = limited.get("market_snapshot")
+    if isinstance(snapshot, dict):
+        limited["market_snapshot"] = {key: snapshot[key] for key in list(snapshot)[:12]}
+    return limited
+
+
+def _recent_market_news_context(
+    app_context: Any | None,
+    symbol: str,
+    company_name: str,
+    provider: SymbolRecentMarketNewsProvider | Callable[[str], Mapping[str, Any] | None] | None,
+    source_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    active_provider = provider or getattr(app_context, "symbol_chat_market_news_provider", None)
+    if active_provider is None:
+        active_provider = configured_default_symbol_market_news_provider()
+    source_metadata["market_news_requested"] = True
+    if active_provider is None:
+        reason = "No recent market/news provider is configured in this build."
+        _mark_unavailable(source_metadata, "recent_market_news", reason)
+        source_metadata["market_news_provider_configured"] = False
+        source_metadata["market_news_provider"] = "none"
+        source_metadata["market_news_source_count"] = 0
+        return unavailable_symbol_market_news_payload(symbol, reason)
+
+    provider_name = str(getattr(active_provider, "provider_name", "") or getattr(active_provider, "__name__", "") or type(active_provider).__name__)
+    source_metadata["market_news_provider_configured"] = True
+    source_metadata["market_news_provider"] = provider_name
+    try:
+        result = _call_market_news_provider(active_provider, symbol, company_name=company_name)
+    except Exception as exc:
+        _mark_unavailable(source_metadata, "recent_market_news", f"Recent market/news provider failed: {exc}")
+        source_metadata["market_news_source_count"] = 0
+        return {
+            "mode": "recent_market_news",
+            "enabled": True,
+            "status": "error",
+            "provider_configured": True,
+            "provider_name": provider_name,
+            "symbol": symbol,
+            "reason": str(exc),
+            "market_snapshot": {},
+            "recent_news": [],
+            "earnings_ir": [],
+            "sources": [],
+            "warnings": [str(exc)],
+            "source_debug": [f"provider={provider_name}", "status=error", "sources=0"],
+        }
+
+    if result is None or result == {}:
+        reason = "Recent market/news provider returned no context."
+        _mark_unavailable(source_metadata, "recent_market_news", reason)
+        source_metadata["market_news_source_count"] = 0
+        return {
+            "mode": "recent_market_news",
+            "enabled": True,
+            "status": "empty",
+            "provider_configured": True,
+            "provider_name": provider_name,
+            "symbol": symbol,
+            "reason": reason,
+            "market_snapshot": {},
+            "recent_news": [],
+            "earnings_ir": [],
+            "sources": [],
+            "warnings": [reason],
+            "source_debug": [f"provider={provider_name}", "status=empty", "sources=0"],
+        }
+
+    try:
+        compact = symbol_market_news_to_payload(result)
+    except Exception as exc:
+        _mark_unavailable(source_metadata, "recent_market_news", f"Recent market/news provider returned unsupported context: {exc}")
+        source_metadata["market_news_source_count"] = 0
+        return {
+            "mode": "recent_market_news",
+            "enabled": True,
+            "status": "error",
+            "provider_configured": True,
+            "provider_name": provider_name,
+            "symbol": symbol,
+            "reason": f"Unsupported provider response: {exc}",
+            "market_snapshot": {},
+            "recent_news": [],
+            "earnings_ir": [],
+            "sources": [],
+            "warnings": [f"Unsupported provider response: {exc}"],
+            "source_debug": [f"provider={provider_name}", "status=error", "sources=0"],
+        }
+
+    compact.setdefault("provider_name", provider_name)
+    compact.setdefault("provider_configured", True)
+    compact.setdefault("status", "available")
+    source_count = len(compact.get("sources") or [])
+    source_metadata["market_news_provider"] = str(compact.get("provider_name") or provider_name)
+    source_metadata["market_news_provider_configured"] = bool(compact.get("provider_configured"))
+    source_metadata["market_news_source_count"] = source_count
+    status = str(compact.get("status") or "").lower()
+    if status == "available":
+        _mark_available(source_metadata, "recent_market_news", f"Loaded recent market/news context from {provider_display_name(str(compact.get('provider_name') or provider_name))}.")
+    else:
+        detail = str(compact.get("reason") or "Provider returned limited recent market/news context.")
+        _mark_unavailable(source_metadata, "recent_market_news", f"Recent market/news provider returned {status or 'limited'} context: {detail}")
+    return _limit_market_news_context(compact)
 
 
 def _call_web_enrichment_provider(
@@ -1678,6 +2169,35 @@ def _call_web_enrichment_provider(
     if callable(provider):
         return provider(symbol)
     raise TypeError(f"Web enrichment provider is not callable: {provider!r}")
+
+
+def _call_market_news_provider(
+    provider: SymbolRecentMarketNewsProvider | Callable[[str], Mapping[str, Any] | None],
+    symbol: str,
+    *,
+    company_name: str,
+) -> Any:
+    enrich = getattr(provider, "enrich_market_news", None)
+    if callable(enrich):
+        try:
+            return enrich(symbol, company_name=company_name)
+        except TypeError as exc:
+            try:
+                return enrich(symbol)
+            except TypeError:
+                raise exc
+    enrich = getattr(provider, "enrich", None)
+    if callable(enrich):
+        try:
+            return enrich(symbol, company_name=company_name)
+        except TypeError as exc:
+            try:
+                return enrich(symbol)
+            except TypeError:
+                raise exc
+    if callable(provider):
+        return provider(symbol)
+    raise TypeError(f"Recent market/news provider is not callable: {provider!r}")
 
 
 def _saved_thesis_context(app_context: Any | None, trade_memory_store: TradeMemoryStore | None, symbol: str, source_metadata: dict[str, Any]) -> str:
@@ -1727,7 +2247,7 @@ def _short_research_payload_summary(payload: Any) -> str:
 
 
 def _quote_snapshot_dict(snapshot: Any) -> dict[str, Any]:
-    return {
+    row = {
         "symbol": getattr(snapshot, "symbol", ""),
         "bid": getattr(snapshot, "bid", None),
         "ask": getattr(snapshot, "ask", None),
@@ -1736,6 +2256,63 @@ def _quote_snapshot_dict(snapshot: Any) -> dict[str, Any]:
         "total_volume": getattr(snapshot, "total_volume", None),
         "data_quality_warnings": list(getattr(snapshot, "data_quality_warnings", []) or []),
     }
+    raw = getattr(snapshot, "raw", None)
+    timestamps = _quote_timestamp_fields(raw)
+    row.update(timestamps)
+    return {key: value for key, value in row.items() if value not in (None, "", [])}
+
+
+def _quote_timestamp_fields(raw: Any) -> dict[str, Any]:
+    if raw is None:
+        return {}
+    return _drop_empty(
+        {
+            "quote_timestamp": _first_nested_value(
+                raw,
+                (
+                    "quoteTimestamp",
+                    "quoteTime",
+                    "quoteTimeInLong",
+                    "quote_time",
+                    "quote_timestamp",
+                ),
+            ),
+            "trade_timestamp": _first_nested_value(
+                raw,
+                (
+                    "tradeTime",
+                    "tradeTimeInLong",
+                    "lastTimestamp",
+                    "lastTime",
+                    "regularMarketTradeTime",
+                    "regularMarketTime",
+                ),
+            ),
+        }
+    )
+
+
+def _first_nested_value(payload: Any, keys: tuple[str, ...]) -> Any:
+    if not isinstance(payload, dict):
+        return None
+    stack: list[Any] = [payload]
+    seen: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if not isinstance(current, dict):
+            continue
+        current_id = id(current)
+        if current_id in seen:
+            continue
+        seen.add(current_id)
+        for key in keys:
+            value = current.get(key)
+            if value not in (None, ""):
+                return value
+        for value in current.values():
+            if isinstance(value, dict):
+                stack.append(value)
+    return None
 
 
 def _technical_ticket_from_context(app_context: Any | None) -> TechnicalTicket:
@@ -1811,6 +2388,42 @@ def _source_debug_lines(request_payload: Mapping[str, Any], diagnostics: Mapping
         source_debug = web.get("source_debug") if isinstance(web.get("source_debug"), list) else []
         for entry in source_debug[:8]:
             lines.append(f"web_debug={entry}")
+        market_news = web.get("recent_market_news") if isinstance(web.get("recent_market_news"), Mapping) else {}
+        if market_news:
+            provider = str(market_news.get("provider_name") or metadata.get("market_news_provider") or "")
+            status = str(market_news.get("status") or "")
+            sources = market_news.get("sources") if isinstance(market_news.get("sources"), list) else []
+            if provider:
+                lines.append(f"market_news_provider={provider}")
+            if status:
+                lines.append(f"market_news_status={status}")
+            lines.append(f"market_news_source_count={len(sources)}")
+            for entry in (market_news.get("source_debug") if isinstance(market_news.get("source_debug"), list) else [])[:6]:
+                lines.append(f"market_news_debug={entry}")
+    validation = context.get("context_validation") if isinstance(context, Mapping) else {}
+    if isinstance(validation, Mapping):
+        lines.append(f"context_validation_status={validation.get('status', 'valid')}")
+        issues = validation.get("issues") if isinstance(validation.get("issues"), list) else []
+        lines.append(f"context_validation_issue_count={len(issues)}")
+        for issue in issues[:8]:
+            if not isinstance(issue, Mapping):
+                continue
+            code = str(issue.get("code") or "validation_issue")
+            severity = str(issue.get("severity") or "warning")
+            message = str(issue.get("message") or "").strip()
+            affected = issue.get("affected_layers")
+            affected_text = ",".join(str(item) for item in affected) if isinstance(affected, list) else ""
+            detail = " | ".join(part for part in (severity, code, affected_text, message) if part)
+            lines.append(f"context_validation_issue={detail}")
+        overrides = validation.get("safe_context_overrides") if isinstance(validation.get("safe_context_overrides"), Mapping) else {}
+        for key, value in overrides.items():
+            status = str(value.get("status") or "") if isinstance(value, Mapping) else str(value)
+            lines.append(f"context_validation_override={key}:{status}")
+    request_budget = request_payload.get("request_budget") if isinstance(request_payload, Mapping) else {}
+    if isinstance(request_budget, Mapping):
+        for key in ("pre_trim_payload_chars", "final_payload_chars", "budget_trimmed", "request_payload_char_limit"):
+            if key in request_budget:
+                lines.append(f"{key}={request_budget.get(key)}")
     lines.extend(_diagnostic_debug_lines(diagnostics))
     return lines
 
@@ -1820,9 +2433,14 @@ def _diagnostic_debug_lines(diagnostics: Mapping[str, Any]) -> list[str]:
 
 
 def _enforce_request_payload_budget(payload: dict[str, Any]) -> dict[str, Any]:
-    serialized = _serialize_request_payload(payload)
-    if len(serialized) <= SYMBOL_CHAT_REQUEST_CHAR_LIMIT:
-        return payload
+    pre_trim_chars = len(_serialize_request_payload(payload))
+    trimmed = pre_trim_chars > SYMBOL_CHAT_REQUEST_CHAR_LIMIT
+    if not trimmed:
+        _finalize_request_budget(payload, pre_trim_chars, trimmed=False)
+        if _payload_within_budget(payload):
+            return payload
+        trimmed = True
+
     context = payload.get("symbol_context")
     if isinstance(context, dict):
         research = context.get("research_workspace_context")
@@ -1842,14 +2460,217 @@ def _enforce_request_payload_budget(payload: dict[str, Any]) -> dict[str, Any]:
         thesis = context.get("saved_thesis_or_notes")
         if isinstance(thesis, str):
             context["saved_thesis_or_notes"] = _shorten(thesis, 4_000)
-    serialized = _serialize_request_payload(payload)
-    if len(serialized) <= SYMBOL_CHAT_REQUEST_CHAR_LIMIT:
-        return payload
+    if _payload_within_budget(payload):
+        _finalize_request_budget(payload, pre_trim_chars, trimmed=True)
+        if _payload_within_budget(payload):
+            return payload
     if isinstance(context, dict):
         context["recent_orders_summary"] = _short_list(context.get("recent_orders_summary"), 6)
         context["open_orders_summary"] = _short_list(context.get("open_orders_summary"), 4)
         context["recent_filings_summary"] = _short_list(context.get("recent_filings_summary"), 6)
+    if _payload_within_budget(payload):
+        _finalize_request_budget(payload, pre_trim_chars, trimmed=True)
+        if _payload_within_budget(payload):
+            return payload
+    _trim_payload_to_budget(payload, SYMBOL_CHAT_REQUEST_CHAR_LIMIT)
+    _finalize_request_budget(payload, pre_trim_chars, trimmed=True)
+    if not _payload_within_budget(payload):
+        _last_resort_payload_trim(payload, SYMBOL_CHAT_REQUEST_CHAR_LIMIT)
+        _finalize_request_budget(payload, pre_trim_chars, trimmed=True)
     return payload
+
+
+def _payload_within_budget(payload: Mapping[str, Any]) -> bool:
+    return len(_serialize_request_payload(payload)) <= SYMBOL_CHAT_REQUEST_CHAR_LIMIT
+
+
+def _finalize_request_budget(payload: dict[str, Any], pre_trim_chars: int, *, trimmed: bool) -> None:
+    request_budget = payload.setdefault("request_budget", {})
+    if not isinstance(request_budget, dict):
+        payload["request_budget"] = request_budget = {}
+    request_budget["request_payload_char_limit"] = SYMBOL_CHAT_REQUEST_CHAR_LIMIT
+    request_budget["pre_trim_payload_chars"] = pre_trim_chars
+    request_budget["budget_trimmed"] = bool(trimmed)
+    last = None
+    for _ in range(5):
+        current = len(_serialize_request_payload(payload))
+        if current == last:
+            break
+        request_budget["final_payload_chars"] = current
+        last = current
+
+
+def _trim_payload_to_budget(payload: dict[str, Any], limit: int) -> None:
+    context = payload.get("symbol_context")
+    if not isinstance(context, dict):
+        return
+
+    web = context.get("web_enrichment")
+    if isinstance(web, dict):
+        _trim_web_context_for_budget(web)
+    if _serialized_len(payload) <= limit:
+        return
+
+    research = context.get("research_workspace_context")
+    if isinstance(research, dict):
+        for section_name in ("earnings_news", "fundamentals", "macro_context", "risk_scenarios", "options_strategy", "greeks"):
+            section = research.get(section_name)
+            if isinstance(section, dict) and isinstance(section.get("summary_text"), str):
+                section["summary_text"] = _shorten(section["summary_text"], 900)
+        if isinstance(research.get("overview_text"), str):
+            research["overview_text"] = _shorten(research["overview_text"], 900)
+        source_statuses = research.get("source_statuses")
+        if isinstance(source_statuses, list):
+            research["source_statuses"] = source_statuses[:6]
+        at_a_glance = research.get("at_a_glance")
+        if isinstance(at_a_glance, dict):
+            recommendation = at_a_glance.get("recommendation_engine")
+            if isinstance(recommendation, dict) and isinstance(recommendation.get("components"), list):
+                recommendation["components"] = recommendation["components"][:6]
+    if _serialized_len(payload) <= limit:
+        return
+
+    technical = context.get("technical_analysis")
+    if isinstance(technical, dict):
+        if isinstance(technical.get("summary_text"), str):
+            technical["summary_text"] = _shorten(technical["summary_text"], 2_000)
+        if isinstance(technical.get("warnings"), list):
+            technical["warnings"] = technical["warnings"][:6]
+    if _serialized_len(payload) <= limit:
+        return
+
+    thesis = context.get("saved_thesis_or_notes")
+    if isinstance(thesis, str):
+        context["saved_thesis_or_notes"] = _shorten(thesis, 1_500)
+    for key, list_limit in (("recent_orders_summary", 3), ("open_orders_summary", 3), ("recent_filings_summary", 4)):
+        context[key] = _short_list(context.get(key), list_limit)
+    metadata = context.get("source_metadata")
+    if isinstance(metadata, dict):
+        for key in ("available", "unavailable", "warnings"):
+            values = metadata.get(key)
+            if isinstance(values, list):
+                metadata[key] = [_shorten(value, 300) for value in values[:12]]
+
+
+def _trim_web_context_for_budget(web: dict[str, Any]) -> None:
+    for key in ("sources", "recent_news", "earnings_context", "recent_filings"):
+        if isinstance(web.get(key), list):
+            web[key] = web[key][:6]
+    filing_summaries = web.get("filing_summaries")
+    if isinstance(filing_summaries, list):
+        for row in filing_summaries:
+            if isinstance(row, dict) and isinstance(row.get("summary"), str):
+                row["summary"] = _shorten(row["summary"], 700)
+        web["filing_summaries"] = filing_summaries[:3]
+    capital = web.get("capital_structure")
+    if isinstance(capital, dict):
+        if isinstance(capital.get("signals"), list):
+            capital["signals"] = capital["signals"][:4]
+        if isinstance(capital.get("warnings"), list):
+            capital["warnings"] = capital["warnings"][:4]
+    market_news = web.get("recent_market_news")
+    if isinstance(market_news, dict):
+        for key in ("sources", "recent_news", "earnings_ir"):
+            if isinstance(market_news.get(key), list):
+                market_news[key] = market_news[key][:5]
+
+
+def _last_resort_payload_trim(payload: dict[str, Any], limit: int) -> None:
+    context = payload.get("symbol_context")
+    if not isinstance(context, dict):
+        return
+
+    web = context.get("web_enrichment")
+    if isinstance(web, dict) and _serialized_len(payload) > limit:
+        context["web_enrichment"] = _minimal_web_context(web)
+    research = context.get("research_workspace_context")
+    if isinstance(research, dict) and _serialized_len(payload) > limit:
+        context["research_workspace_context"] = _minimal_research_context(research)
+    technical = context.get("technical_analysis")
+    if isinstance(technical, dict) and _serialized_len(payload) > limit:
+        context["technical_analysis"] = _minimal_technical_context(technical)
+    for key in ("saved_thesis_or_notes",):
+        if isinstance(context.get(key), str) and _serialized_len(payload) > limit:
+            context[key] = _shorten(context[key], 500)
+    metadata = context.get("source_metadata")
+    if isinstance(metadata, dict) and _serialized_len(payload) > limit:
+        for key in ("available", "unavailable", "warnings"):
+            values = metadata.get(key)
+            if isinstance(values, list):
+                metadata[key] = [_shorten(value, 160) for value in values[:6]]
+
+
+def _minimal_web_context(web: Mapping[str, Any]) -> dict[str, Any]:
+    return _drop_empty(
+        {
+            "mode": web.get("mode"),
+            "enabled": web.get("enabled"),
+            "status": web.get("status"),
+            "provider_configured": web.get("provider_configured"),
+            "provider_name": web.get("provider_name"),
+            "reason": web.get("reason"),
+            "sources": _short_list(web.get("sources"), 4),
+            "recent_market_news": _minimal_market_news_context(web.get("recent_market_news")),
+            "truncation_note": "Web enrichment was reduced to source metadata to fit the Symbol Chat request budget.",
+        }
+    )
+
+
+def _minimal_market_news_context(value: Any) -> Any:
+    if not isinstance(value, Mapping):
+        return {}
+    return _drop_empty(
+        {
+            "mode": value.get("mode"),
+            "enabled": value.get("enabled"),
+            "status": value.get("status"),
+            "provider_configured": value.get("provider_configured"),
+            "provider_name": value.get("provider_name"),
+            "reason": value.get("reason"),
+            "market_snapshot": value.get("market_snapshot"),
+            "sources": _short_list(value.get("sources"), 4),
+        }
+    )
+
+
+def _minimal_research_context(research: Mapping[str, Any]) -> dict[str, Any]:
+    return _drop_empty(
+        {
+            "source": research.get("source"),
+            "symbol": research.get("symbol"),
+            "workspace_status": research.get("workspace_status"),
+            "security_kind": research.get("security_kind"),
+            "reporting_profile": research.get("reporting_profile"),
+            "portfolio_context": research.get("portfolio_context"),
+            "at_a_glance": research.get("at_a_glance"),
+            "technicals": research.get("technicals"),
+            "analysis_policy": research.get("analysis_policy"),
+            "truncation_note": "Long Research Workspace text sections were reduced to fit the Symbol Chat request budget.",
+        }
+    )
+
+
+def _minimal_technical_context(technical: Mapping[str, Any]) -> dict[str, Any]:
+    return _drop_empty(
+        {
+            "source": technical.get("source"),
+            "symbol": technical.get("symbol"),
+            "overall_read": technical.get("overall_read"),
+            "overall_score": technical.get("overall_score"),
+            "confidence": technical.get("confidence"),
+            "validation_status": technical.get("validation_status"),
+            "validation_instruction": technical.get("validation_instruction"),
+            "warnings": _short_list(technical.get("warnings"), 4),
+            "snapshot": technical.get("snapshot"),
+            "levels": technical.get("levels"),
+            "demoted_levels": technical.get("demoted_levels"),
+            "summary_text": _shorten(technical.get("summary_text"), 700) if isinstance(technical.get("summary_text"), str) else "",
+        }
+    )
+
+
+def _serialized_len(payload: Mapping[str, Any]) -> int:
+    return len(_serialize_request_payload(payload))
 
 
 def _serialize_request_payload(payload: Mapping[str, Any]) -> str:

@@ -6,10 +6,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.analytics.symbol_chat import (
+    SYMBOL_CHAT_REQUEST_CHAR_LIMIT,
     SYMBOL_CHAT_QUICK_PROMPTS,
     SYMBOL_CHAT_SYSTEM_PROMPT,
     OpenAiSymbolChatClient,
     OpenAiSymbolChatError,
+    SymbolChatContext,
     SymbolChatSession,
     build_symbol_chat_context,
     render_symbol_chat_transcript_markdown,
@@ -377,6 +379,165 @@ def test_symbol_chat_context_reuses_research_workspace_context_in_payload() -> N
     assert "research_workspace_context" in " ".join(context.source_metadata["available"])
 
 
+def test_symbol_chat_validation_demotes_misaligned_quote_technical_52_week_and_option_context() -> None:
+    payload = SimpleNamespace(
+        symbol="SNDK",
+        company_name="Sandisk Corp.",
+        context=SimpleNamespace(symbol="SNDK", is_held=False, quantity=0, last_price=1887.19),
+        quote={
+            "SNDK": {
+                "quote": {
+                    "lastPrice": 1887.19,
+                    "mark": 1887.19,
+                    "quoteTimeInLong": 1781213400000,
+                }
+            }
+        },
+        indicators=SimpleNamespace(
+            latest_close=1643.23,
+            trend="mixed",
+            momentum="neutral",
+            volatility="elevated",
+            support=1625.0,
+            resistance=1661.0,
+            week_52_high=1861.0,
+            week_52_low=900.0,
+            rsi_14=50.0,
+            atr_14=25.0,
+            notes=[],
+        ),
+        command_center_report=SimpleNamespace(
+            symbol="SNDK",
+            overall_read="Mixed technical context",
+            overall_score=52,
+            confidence="low",
+            setup_classification=SimpleNamespace(
+                setup="range",
+                action_quality="wait",
+                confirmation_level=1661.0,
+                invalidation_level=1625.0,
+            ),
+            warnings=[],
+        ),
+        option_chain_rows=[],
+        option_chain_underlying_price=1643.23,
+        greek_summary=SimpleNamespace(source="Schwab option chain", plain_english=["Greeks loaded."], warnings=[]),
+    )
+    app = SimpleNamespace(schwab_research_last_payload=payload)
+
+    context = build_symbol_chat_context(
+        "SNDK",
+        app_context=app,
+        sec_client=FakeSecClient(),
+        trade_memory_store=SimpleNamespace(find_snapshots_for_symbol=lambda _symbol: []),
+    )
+    request_payload = symbol_chat_request_payload(context, "Summarize the main risks.", timeout_seconds=120)
+    symbol_context = request_payload["symbol_context"]
+    validation = symbol_context["context_validation"]
+    codes = {issue["code"] for issue in validation["issues"]}
+    technicals = symbol_context["research_workspace_context"]["technicals"]
+    options = symbol_context["research_workspace_context"]["options_strategy"]
+
+    assert validation["status"] == "warning"
+    assert "quote_technical_price_mismatch" in codes
+    assert "quote_52_week_high_mismatch" in codes
+    assert "technical_levels_track_stale_close" in codes
+    assert "option_underlying_mismatch" in codes
+    assert technicals["validation_status"] == "stale_or_misaligned"
+    assert "support" not in technicals["indicator_snapshot"]
+    assert "resistance" not in technicals["indicator_snapshot"]
+    assert "week_52_high" not in technicals["indicator_snapshot"]
+    assert technicals["demoted_indicator_levels"]["values"]["support"] == 1625.0
+    assert options["validation_status"] == "stale_or_misaligned"
+    assert "underlying_price" not in options
+    assert "context_validation warnings" in " ".join(request_payload["grounding_rules"])
+
+    fake_openai = FakeOpenAiClient(answer="Quote and technical levels conflict; stale levels are not used as current support.")
+    session = SymbolChatSession(context, chat_client=OpenAiSymbolChatClient(openai_client=fake_openai, model="gpt-test"))
+    response = session.ask("Summarize the main risks.")
+    markdown = render_symbol_chat_transcript_markdown(session)
+
+    assert any("context_validation_issue=warning | quote_technical_price_mismatch" in item for item in response.source_debug)
+    assert "## Context Validation" in markdown
+    assert "technical_levels: stale_or_misaligned" in markdown
+
+
+def test_symbol_chat_validation_flags_stale_quote_and_candle_timestamps() -> None:
+    context = SymbolChatContext(
+        symbol="AMD",
+        quote_snapshot={"symbol": "AMD", "last": 100.0, "quote_timestamp": "2026-05-30T20:00:00+00:00"},
+        research_workspace_context={
+            "source": "schwab_research_workspace",
+            "symbol": "AMD",
+            "technicals": {
+                "indicator_snapshot": {
+                    "latest_close": 100.0,
+                    "latest_candle_timestamp": "2026-05-30T20:00:00+00:00",
+                    "atr_percent": 2.0,
+                    "support": 98.0,
+                    "resistance": 102.0,
+                }
+            },
+        },
+        source_metadata={"loaded_at_utc": "2026-06-11T20:00:00+00:00"},
+    )
+
+    request_payload = symbol_chat_request_payload(context, "Check freshness.", timeout_seconds=120)
+    validation = request_payload["symbol_context"]["context_validation"]
+    codes = {issue["code"] for issue in validation["issues"]}
+    technicals = request_payload["symbol_context"]["research_workspace_context"]["technicals"]
+
+    assert "stale_quote_timestamp" in codes
+    assert "stale_candle_timestamp" in codes
+    assert technicals["validation_status"] == "stale_or_misaligned"
+
+
+def test_symbol_chat_final_payload_budget_is_enforced_after_web_enrichment_and_validation() -> None:
+    huge_text = "SEC filing summary detail. " * 7000
+    context = SymbolChatContext(
+        symbol="HUGE",
+        quote_snapshot={"symbol": "HUGE", "last": 250.0},
+        research_workspace_context={
+            "source": "schwab_research_workspace",
+            "symbol": "HUGE",
+            "portfolio_context": {"symbol": "HUGE", "is_held": False},
+            "at_a_glance": {"summary": ["Core deterministic read should remain."]},
+            "technicals": {"indicator_snapshot": {"latest_close": 200.0, "support": 198.0, "resistance": 205.0, "week_52_high": 220.0}},
+            "earnings_news": {"summary_text": huge_text},
+            "fundamentals": {"summary_text": huge_text},
+            "macro_context": {"summary_text": huge_text},
+            "overview_text": huge_text,
+        },
+        technical_analysis={"source": "test", "summary_text": huge_text, "levels": {"support": 198.0, "resistance": 205.0}},
+        web_enrichment={
+            "mode": "enabled",
+            "enabled": True,
+            "status": "available",
+            "provider_name": "mock_web",
+            "sources": [{"title": f"Source {index}", "url": f"https://example.test/{index}"} for index in range(30)],
+            "filing_summaries": [{"form": "10-Q", "summary": huge_text, "url": "https://example.test/10q"} for _ in range(8)],
+            "recent_market_news": {
+                "status": "unavailable",
+                "provider_configured": False,
+                "provider_name": "none",
+                "reason": "No recent market/news provider is configured in this build.",
+                "sources": [],
+            },
+        },
+        saved_thesis_or_notes=huge_text,
+        source_metadata={"loaded_at_utc": "2026-06-11T20:00:00+00:00", "available": [huge_text], "unavailable": [huge_text]},
+    )
+
+    request_payload = symbol_chat_request_payload(context, "Fit the budget.", timeout_seconds=120)
+    serialized = json.dumps(request_payload, ensure_ascii=True, sort_keys=True, indent=2)
+
+    assert len(serialized) <= SYMBOL_CHAT_REQUEST_CHAR_LIMIT
+    assert request_payload["request_budget"]["pre_trim_payload_chars"] > SYMBOL_CHAT_REQUEST_CHAR_LIMIT
+    assert request_payload["request_budget"]["final_payload_chars"] <= SYMBOL_CHAT_REQUEST_CHAR_LIMIT
+    assert request_payload["request_budget"]["budget_trimmed"] is True
+    assert request_payload["symbol_context"]["context_validation"]["status"] == "warning"
+
+
 def test_symbol_chat_optional_web_enrichment_provider_is_labeled_separately() -> None:
     context = build_symbol_chat_context(
         "AMD",
@@ -406,6 +567,7 @@ def test_symbol_chat_web_enrichment_unavailable_state_is_truthful() -> None:
 
     payload = symbol_chat_request_payload(context, "Summarize risks.", timeout_seconds=120)
     web = payload["symbol_context"]["web_enrichment"]
+    market_news = web["recent_market_news"]
     session = SymbolChatSession(context, chat_client=OpenAiSymbolChatClient(openai_client=FakeOpenAiClient(), model="gpt-test"))
     markdown = render_symbol_chat_transcript_markdown(session)
 
@@ -418,6 +580,11 @@ def test_symbol_chat_web_enrichment_unavailable_state_is_truthful() -> None:
     assert "Requested: yes" in markdown
     assert "Provider configured: no" in markdown
     assert "Status: unavailable" in markdown
+    assert market_news["status"] == "unavailable"
+    assert market_news["provider_configured"] is False
+    assert "No recent market/news provider is configured" in market_news["reason"]
+    assert "Recent Market/News:" in markdown
+    assert "No recent market/news provider is configured" in markdown
 
 
 def test_symbol_chat_structured_web_provider_keeps_payload_layers_separate() -> None:
@@ -495,6 +662,68 @@ def test_symbol_chat_structured_web_provider_keeps_payload_layers_separate() -> 
     assert "Provider: mock public web" in markdown
     assert "AMD public news item" in markdown
     assert "https://example.test/amd-news" in markdown
+
+
+def test_symbol_chat_recent_market_news_provider_path_is_included_with_web_research() -> None:
+    class MarketNewsProvider:
+        provider_name = "mock_recent_market_news"
+
+        def enrich_market_news(self, symbol: str, *, company_name: str = ""):
+            assert symbol == "AMD"
+            assert company_name == "AMD Corp."
+            return {
+                "symbol": symbol,
+                "provider_name": self.provider_name,
+                "status": "available",
+                "market_snapshot": {
+                    "latest_close": 121.5,
+                    "latest_candle_timestamp": "2026-06-11T19:55:00+00:00",
+                    "quote_timestamp": "2026-06-11T19:56:00+00:00",
+                    "price_move_percent": 1.2,
+                    "volume_context": "above 20-day average",
+                },
+                "recent_news": [
+                    {
+                        "title": "AMD market headline",
+                        "url": "https://example.test/amd-headline",
+                        "publisher": "Example News",
+                        "published_at": "2026-06-11",
+                        "source_type": "public_news",
+                    }
+                ],
+                "sources": [
+                    {
+                        "title": "AMD market headline",
+                        "url": "https://example.test/amd-headline",
+                        "publisher": "Example News",
+                        "published_at": "2026-06-11",
+                        "source_type": "public_news",
+                    }
+                ],
+                "source_debug": ["provider=mock_recent_market_news", "sources=1"],
+            }
+
+    context = build_symbol_chat_context(
+        "AMD",
+        sec_client=FakeSecClient(),
+        trade_memory_store=SimpleNamespace(find_snapshots_for_symbol=lambda _symbol: []),
+        use_web_enrichment=True,
+        web_enrichment_provider=lambda symbol: {
+            "summary": f"SEC-compatible public web summary for {symbol}.",
+            "sources": [{"title": "Example source", "url": "https://example.test/amd"}],
+        },
+        market_news_provider=MarketNewsProvider(),
+    )
+    payload = symbol_chat_request_payload(context, "Summarize market context.", timeout_seconds=120)
+    market_news = payload["symbol_context"]["web_enrichment"]["recent_market_news"]
+    markdown = render_symbol_chat_transcript_markdown(SymbolChatSession(context, chat_client=OpenAiSymbolChatClient(openai_client=FakeOpenAiClient(), model="gpt-test")))
+
+    assert market_news["status"] == "available"
+    assert market_news["provider_name"] == "mock_recent_market_news"
+    assert market_news["market_snapshot"]["latest_close"] == 121.5
+    assert market_news["recent_news"][0]["title"] == "AMD market headline"
+    assert "mock recent market news" in markdown
+    assert "AMD market headline" in markdown
 
 
 def test_sec_symbol_web_enrichment_provider_builds_official_filing_packet() -> None:

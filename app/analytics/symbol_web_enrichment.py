@@ -12,6 +12,7 @@ from app.data.sec_edgar import SecEdgarClient, SecFiling
 
 
 DEFAULT_SYMBOL_WEB_PROVIDER = "sec_edgar_public_filings"
+DEFAULT_SYMBOL_MARKET_NEWS_PROVIDER = "none"
 SYMBOL_WEB_SOURCE_LIMIT = 16
 SYMBOL_WEB_FILING_SUMMARY_LIMIT = 4
 
@@ -46,6 +47,22 @@ class SymbolWebEnrichment:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class SymbolRecentMarketNewsContext:
+    symbol: str
+    generated_at_utc: str = ""
+    provider_name: str = ""
+    provider_configured: bool = True
+    status: str = "available"
+    market_snapshot: dict[str, Any] = field(default_factory=dict)
+    recent_news: tuple[SymbolWebSource, ...] = ()
+    earnings_ir: tuple[SymbolWebSource, ...] = ()
+    sources: tuple[SymbolWebSource, ...] = ()
+    warnings: tuple[str, ...] = ()
+    source_debug: tuple[str, ...] = ()
+    reason: str = ""
+
+
 @runtime_checkable
 class SymbolWebEnrichmentProvider(Protocol):
     provider_name: str
@@ -57,6 +74,19 @@ class SymbolWebEnrichmentProvider(Protocol):
         company_name: str = "",
         recent_filings: Iterable[Mapping[str, Any]] = (),
     ) -> SymbolWebEnrichment | Mapping[str, Any]:
+        ...
+
+
+@runtime_checkable
+class SymbolRecentMarketNewsProvider(Protocol):
+    provider_name: str
+
+    def enrich_market_news(
+        self,
+        symbol: str,
+        *,
+        company_name: str = "",
+    ) -> SymbolRecentMarketNewsContext | Mapping[str, Any]:
         ...
 
 
@@ -307,6 +337,13 @@ def configured_default_symbol_web_provider(sec_client: SecEdgarClient | None = N
     return None
 
 
+def configured_default_symbol_market_news_provider() -> SymbolRecentMarketNewsProvider | None:
+    provider_id = os.getenv("SYMBOL_CHAT_MARKET_NEWS_PROVIDER", DEFAULT_SYMBOL_MARKET_NEWS_PROVIDER).strip().lower()
+    if provider_id in {"", "none", "disabled", "off", "unconfigured"}:
+        return None
+    return None
+
+
 def symbol_web_enrichment_to_payload(enrichment: SymbolWebEnrichment | Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(enrichment, SymbolWebEnrichment):
         payload = asdict(enrichment)
@@ -324,6 +361,30 @@ def symbol_web_enrichment_to_payload(enrichment: SymbolWebEnrichment | Mapping[s
     payload["earnings_context"] = _coerce_sources(payload.get("earnings_context") or payload.get("earnings"))
     payload["recent_filings"] = _coerce_sources(payload.get("recent_filings") or payload.get("filings"))
     payload["filing_summaries"] = _coerce_mapping_list(payload.get("filing_summaries"))
+    if payload.get("recent_market_news") is not None:
+        payload["recent_market_news"] = symbol_market_news_to_payload(payload.get("recent_market_news"))
+    payload["warnings"] = _coerce_text_list(payload.get("warnings"))
+    payload["source_debug"] = _coerce_text_list(payload.get("source_debug"))
+    return _drop_empty(payload)
+
+
+def symbol_market_news_to_payload(context: SymbolRecentMarketNewsContext | Mapping[str, Any]) -> dict[str, Any]:
+    if isinstance(context, SymbolRecentMarketNewsContext):
+        payload = asdict(context)
+    else:
+        payload = dict(context)
+
+    payload.setdefault("mode", "recent_market_news")
+    payload.setdefault("enabled", True)
+    payload.setdefault("status", "available")
+    payload.setdefault("provider_configured", True)
+    payload.setdefault("provider_name", payload.get("source") or "symbol_market_news_provider")
+    payload.setdefault("generated_at_utc", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    snapshot = payload.get("market_snapshot")
+    payload["market_snapshot"] = {str(key): _json_safe_scalar(value) for key, value in snapshot.items()} if isinstance(snapshot, Mapping) else {}
+    payload["recent_news"] = _coerce_sources(payload.get("recent_news"))
+    payload["earnings_ir"] = _coerce_sources(payload.get("earnings_ir") or payload.get("earnings_context"))
+    payload["sources"] = _coerce_sources(payload.get("sources") or _derived_sources(payload))
     payload["warnings"] = _coerce_text_list(payload.get("warnings"))
     payload["source_debug"] = _coerce_text_list(payload.get("source_debug"))
     return _drop_empty(payload)
@@ -346,6 +407,31 @@ def unavailable_symbol_web_enrichment_payload(
         "symbol": _normalize_symbol(symbol),
         "reason": reason,
         "sources": [],
+        "warnings": [reason],
+        "source_debug": [f"provider={provider_name or 'none'}", "status=unavailable", "sources=0"],
+    }
+
+
+def unavailable_symbol_market_news_payload(
+    symbol: str,
+    reason: str,
+    *,
+    provider_name: str = "",
+    generated_at_utc: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "mode": "recent_market_news",
+        "enabled": True,
+        "status": "unavailable",
+        "provider_configured": False,
+        "provider_name": provider_name or "none",
+        "generated_at_utc": generated_at_utc or datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "symbol": _normalize_symbol(symbol),
+        "market_snapshot": {},
+        "recent_news": [],
+        "earnings_ir": [],
+        "sources": [],
+        "reason": reason,
         "warnings": [reason],
         "source_debug": [f"provider={provider_name or 'none'}", "status=unavailable", "sources=0"],
     }
@@ -477,7 +563,7 @@ def _latest_sec_date(*sources: Any) -> str:
 
 def _derived_sources(payload: Mapping[str, Any]) -> list[Any]:
     sources: list[Any] = []
-    for key in ("recent_news", "earnings_context", "recent_filings", "filings", "earnings"):
+    for key in ("recent_news", "earnings_context", "earnings_ir", "recent_filings", "filings", "earnings"):
         value = payload.get(key)
         if isinstance(value, list):
             sources.extend(value)

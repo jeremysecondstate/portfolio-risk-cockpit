@@ -170,6 +170,7 @@ class SymbolChatWindow(tk.Toplevel):
             schwab_session=self.schwab_session,
             use_web_enrichment=bool(self.web_enrichment_var.get()),
             web_enrichment_provider=getattr(self.app_context, "symbol_chat_web_enrichment_provider", None),
+            market_news_provider=getattr(self.app_context, "symbol_chat_market_news_provider", None),
         )
 
     def _load_session_in_background(self) -> None:
@@ -204,7 +205,10 @@ class SymbolChatWindow(tk.Toplevel):
         unavailable_count = len(session.context.source_metadata.get("unavailable", []) or [])
         mode = self._context_mode_label(session)
         web_notice = self._web_enrichment_notice(session)
-        if web_notice:
+        validation_notice = self._validation_notice(session)
+        if validation_notice:
+            self.status_var.set(validation_notice)
+        elif web_notice:
             self.status_var.set(web_notice)
         else:
             self.status_var.set(f"Ready - {mode}; {available_count} sources loaded, {unavailable_count} limited.")
@@ -216,6 +220,8 @@ class SymbolChatWindow(tk.Toplevel):
         )
         if web_notice:
             self._append_system_line(web_notice)
+        if validation_notice:
+            self._append_system_line(validation_notice)
 
     def _finish_session_error(self, error: Exception) -> None:
         if self._closed:
@@ -280,6 +286,23 @@ class SymbolChatWindow(tk.Toplevel):
         if status in {"unavailable", "error", "empty"}:
             return f"Web enrichment unavailable: {reason}. App-local Symbol Chat remains available."
         return ""
+
+    def _validation_notice(self, session: SymbolChatSession) -> str:
+        validation = session.context.context_validation
+        if not validation:
+            return ""
+        status = str(validation.get("status") or "valid").lower()
+        if status == "valid":
+            return ""
+        issues = validation.get("issues") if isinstance(validation.get("issues"), list) else []
+        first = ""
+        for issue in issues:
+            if isinstance(issue, dict):
+                first = str(issue.get("message") or "").strip()
+                if first:
+                    break
+        detail = first or f"{len(issues)} validation issue(s) detected"
+        return f"Context warning: {detail} Affected stale/misaligned levels were demoted."
 
     def _send_current_prompt(self) -> str:
         prompt = self.prompt_box.get("1.0", tk.END).strip()
