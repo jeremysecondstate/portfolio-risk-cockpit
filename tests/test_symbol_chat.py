@@ -16,8 +16,15 @@ from app.analytics.symbol_chat import (
     save_symbol_chat_transcript,
     symbol_chat_request_payload,
 )
+from app.analytics.symbol_web_enrichment import (
+    SecEdgarSymbolWebEnrichmentProvider,
+    SymbolWebEnrichment,
+    SymbolWebSource,
+    symbol_web_enrichment_to_payload,
+)
 from app.analytics.technical_analysis import Candle, build_technical_command_center_report
 from app.core.portfolio import Portfolio, Position
+from app.data.sec_edgar import SecCompany, SecFiling
 from app.ui import schwab_trading_tab
 from app.ui.symbol_chat_window import SymbolChatWindow
 
@@ -386,6 +393,152 @@ def test_symbol_chat_optional_web_enrichment_provider_is_labeled_separately() ->
     assert context.web_enrichment["summary"] == "Public web summary for AMD."
     assert context.source_metadata["web_enrichment_mode"] == "requested"
     assert any("web_enrichment" in item for item in context.source_metadata["available"])
+
+
+def test_symbol_chat_web_enrichment_unavailable_state_is_truthful() -> None:
+    with patch.dict(os.environ, {"SYMBOL_CHAT_WEB_ENRICHMENT_PROVIDER": "none"}):
+        context = build_symbol_chat_context(
+            "AMD",
+            sec_client=FakeSecClient(),
+            trade_memory_store=SimpleNamespace(find_snapshots_for_symbol=lambda _symbol: []),
+            use_web_enrichment=True,
+        )
+
+    payload = symbol_chat_request_payload(context, "Summarize risks.", timeout_seconds=120)
+    web = payload["symbol_context"]["web_enrichment"]
+    session = SymbolChatSession(context, chat_client=OpenAiSymbolChatClient(openai_client=FakeOpenAiClient(), model="gpt-test"))
+    markdown = render_symbol_chat_transcript_markdown(session)
+
+    assert web["mode"] == "requested_unavailable"
+    assert web["status"] == "unavailable"
+    assert web["provider_configured"] is False
+    assert context.source_metadata["web_enrichment_provider"] == "none"
+    assert "No web-enrichment provider is configured" in web["reason"]
+    assert "## Web Enrichment" in markdown
+    assert "Requested: yes" in markdown
+    assert "Provider configured: no" in markdown
+    assert "Status: unavailable" in markdown
+
+
+def test_symbol_chat_structured_web_provider_keeps_payload_layers_separate() -> None:
+    class StructuredProvider:
+        provider_name = "mock_public_web"
+
+        def enrich(self, symbol: str, *, company_name: str = "", recent_filings=()):
+            assert symbol == "AMD"
+            assert company_name == "AMD Corp."
+            assert list(recent_filings)
+            return SymbolWebEnrichment(
+                symbol=symbol,
+                company_name=company_name,
+                provider_name=self.provider_name,
+                generated_at_utc="2026-06-11T12:00:00+00:00",
+                company_profile={"business": "Public source says AMD designs semiconductors."},
+                recent_news=(
+                    SymbolWebSource(
+                        title="AMD public news item",
+                        url="https://example.test/amd-news",
+                        publisher="Example News",
+                        published_at="2026-06-10",
+                        source_type="public_news",
+                        snippet="Snippet only; verify source.",
+                    ),
+                ),
+                sources=(
+                    SymbolWebSource(
+                        title="AMD public news item",
+                        url="https://example.test/amd-news",
+                        publisher="Example News",
+                        published_at="2026-06-10",
+                        source_type="public_news",
+                    ),
+                ),
+                source_debug=("provider=mock_public_web", "sources=1"),
+            )
+
+    filing = SimpleNamespace(
+        form="10-Q",
+        filing_date="2026-05-01",
+        report_date="2026-03-31",
+        description="Quarterly report",
+        accession_number="0000000000-26-000001",
+        filing_url="https://example.test/amd-10q.htm",
+    )
+    portfolio = Portfolio(cash=1_000, positions={"AMD": Position(symbol="AMD", quantity=5, average_cost=100, last_price=120)})
+    app = SimpleNamespace(broker=FakeBroker(portfolio))
+    context = build_symbol_chat_context(
+        "AMD",
+        app_context=app,
+        sec_client=FakeSecClient(filings=[filing]),
+        trade_memory_store=SimpleNamespace(find_snapshots_for_symbol=lambda _symbol: []),
+        use_web_enrichment=True,
+        web_enrichment_provider=StructuredProvider(),
+    )
+    request_payload = symbol_chat_request_payload(context, "Summarize risks.", timeout_seconds=120)
+    web = request_payload["symbol_context"]["web_enrichment"]
+
+    assert request_payload["symbol_context"]["schwab_position"]["is_held"] is True
+    assert request_payload["symbol_context"]["schwab_position"]["quantity"] == 5
+    assert web["provider_name"] == "mock_public_web"
+    assert web["status"] == "available"
+    assert web["sources"][0]["url"] == "https://example.test/amd-news"
+    assert "Do not use web_enrichment to infer account holdings" in " ".join(request_payload["grounding_rules"])
+
+    fake_openai = FakeOpenAiClient(answer="Uses app-local position separately from web source.")
+    session = SymbolChatSession(context, chat_client=OpenAiSymbolChatClient(openai_client=fake_openai, model="gpt-test"))
+    response = session.ask("Summarize risks.")
+    markdown = render_symbol_chat_transcript_markdown(session)
+
+    assert response.source_mode == "symbol_context_bundle_plus_web_enrichment"
+    assert "web_provider=mock_public_web" in response.source_debug
+    assert any("web_source_1=public_news | Example News | AMD public news item | https://example.test/amd-news" == item for item in response.source_debug)
+    assert "Provider: mock public web" in markdown
+    assert "AMD public news item" in markdown
+    assert "https://example.test/amd-news" in markdown
+
+
+def test_sec_symbol_web_enrichment_provider_builds_official_filing_packet() -> None:
+    company = SecCompany(ticker="AMD", cik="0000002488", title="ADVANCED MICRO DEVICES INC")
+    filing = SecFiling(
+        company=company,
+        accession_number="0000002488-26-000001",
+        filing_date="2026-05-01",
+        report_date="2026-03-31",
+        form="10-Q",
+        primary_document="amd-20260331.htm",
+        description="Quarterly report",
+    )
+
+    class OfficialSecClient:
+        def company_for_ticker(self, _ticker: str) -> SecCompany:
+            return company
+
+        def recent_filings(self, _ticker: str, *, forms=None, limit: int = 16):
+            return [filing]
+
+        def latest_earnings_release(self, _ticker: str):
+            return None
+
+        def latest_formal_earnings_report(self, _ticker: str):
+            return None
+
+        def document_text_url(self, _url: str, *, cache_name=None, ttl=None) -> str:
+            return (
+                "Revenue increased 12% to $123 million. Net income was $20 million. "
+                "Risk Factors include demand and margin pressure. The company may issue securities under an offering."
+            )
+
+    provider = SecEdgarSymbolWebEnrichmentProvider(sec_client=OfficialSecClient(), max_recent_filings=4, max_filing_summaries=1)  # type: ignore[arg-type]
+    enrichment = provider.enrich("AMD")
+    payload = symbol_web_enrichment_to_payload(enrichment)
+
+    assert payload["provider_name"] == "sec_edgar_public_filings"
+    assert payload["status"] == "available"
+    assert payload["company_profile"]["cik"] == "0000002488"
+    assert payload["recent_filings"][0]["source_type"] == "sec_filing"
+    assert payload["filing_summaries"][0]["form"] == "10-Q"
+    assert "Revenue increased" in payload["filing_summaries"][0]["summary"]
+    assert any("recent_filings=sec:1" in item for item in payload["source_debug"])
 
 
 def test_symbol_chat_uses_responses_api_with_store_false_and_local_history() -> None:

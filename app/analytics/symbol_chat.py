@@ -14,6 +14,13 @@ from dotenv import load_dotenv
 
 from app.analytics.capital_structure_pressure import analyze_capital_structure_pressure, unknown_capital_structure_report
 from app.analytics.openai_ipo_report import DEFAULT_OPENAI_IPO_REPORT_MODEL, _redact_api_key, _response_output_text
+from app.analytics.symbol_web_enrichment import (
+    SymbolWebEnrichmentProvider,
+    configured_default_symbol_web_provider,
+    provider_display_name,
+    symbol_web_enrichment_to_payload,
+    unavailable_symbol_web_enrichment_payload,
+)
 from app.analytics.technical_analysis import (
     DEFAULT_COMMAND_CENTER_TIMEFRAMES,
     TechnicalTicket,
@@ -47,6 +54,8 @@ When a field is absent, say "Not available in the provided context." When a conc
 Treat explicit schwab_position data as authoritative for current position context. Do not say the user does not hold a position unless schwab_position.is_held is explicitly false from a loaded Schwab holdings, Schwab account, or portfolio source.
 Prefer research_workspace_context over thinner rebuilt technical context when both are available; it is deterministic app analysis already produced before this OpenAI call.
 Separate app-local deterministic context from optional web_enrichment facts. If web_enrichment is absent or unavailable, do not imply that public web research was performed.
+Treat web_enrichment as public research context only: cite/source-label web-derived facts in prose and do not use them to infer account holdings, order status, cost basis, or portfolio exposure.
+Do not overstate search snippets or filing snippets as verified facts; label them as snippets unless an actual filing summary or source text supports the point.
 Treat keyword-only capital-structure, supply, dilution, or filing-risk flags as low-confidence prompts for verification unless actual filing text or a verified filing summary is included.
 
 Focus on company analysis, stock research, technical-analysis explanation, risk factors, catalysts, bull/bear framing, and diligence questions.
@@ -278,7 +287,7 @@ def create_symbol_chat_session(
     openai_client: Any | None = None,
     model: str | None = None,
     use_web_enrichment: bool = False,
-    web_enrichment_provider: Callable[[str], Mapping[str, Any] | None] | None = None,
+    web_enrichment_provider: SymbolWebEnrichmentProvider | Callable[[str], Mapping[str, Any] | None] | None = None,
 ) -> SymbolChatSession:
     context = build_symbol_chat_context(
         symbol,
@@ -302,7 +311,7 @@ def build_symbol_chat_context(
     sec_client: SecEdgarClient | None = None,
     trade_memory_store: TradeMemoryStore | None = None,
     use_web_enrichment: bool = False,
-    web_enrichment_provider: Callable[[str], Mapping[str, Any] | None] | None = None,
+    web_enrichment_provider: SymbolWebEnrichmentProvider | Callable[[str], Mapping[str, Any] | None] | None = None,
 ) -> SymbolChatContext:
     clean_symbol = normalize_symbol(symbol)
     if not clean_symbol:
@@ -335,7 +344,16 @@ def build_symbol_chat_context(
     open_orders_summary, recent_orders_summary = _orders_context(app_context, schwab_session, clean_symbol, source_metadata)
     recent_filings_summary = _recent_filings_context(clean_symbol, sec_client, source_metadata)
     saved_thesis_or_notes = _saved_thesis_context(app_context, trade_memory_store, clean_symbol, source_metadata)
-    web_enrichment = _web_enrichment_context(app_context, clean_symbol, use_web_enrichment, web_enrichment_provider, source_metadata)
+    web_enrichment = _web_enrichment_context(
+        app_context,
+        clean_symbol,
+        company_name,
+        recent_filings_summary,
+        use_web_enrichment,
+        web_enrichment_provider,
+        sec_client,
+        source_metadata,
+    )
 
     return SymbolChatContext(
         symbol=clean_symbol,
@@ -375,7 +393,9 @@ def symbol_chat_request_payload(context: SymbolChatContext, prompt: str, *, time
             "Use research_workspace_context as the primary deterministic app analysis when it is available.",
             "Use schwab_position as the authority for current position context; do not infer not-held status from recent orders or missing fields.",
             "If schwab_position is unavailable, say position context is unavailable instead of saying the symbol is not held.",
-            "Keep app-local context and optional web_enrichment facts separate in the answer.",
+            "Keep app-local context and optional web_enrichment facts separate in the answer; label public web/filing/earnings sources when using them.",
+            "Do not use web_enrichment to infer account holdings, order status, cost basis, portfolio exposure, or any other Schwab-local fact.",
+            "Treat web/search snippets as leads unless source text, SEC filing summaries, or deterministic app context verify the claim.",
             "Treat form-only or keyword-only filing/capital-structure flags as unverified until actual filing text or a verified summary is present.",
             'Say "Not available in the provided context." when a requested fact is absent.',
             "Separate confirmed facts from assumptions, caveats, and questions to verify.",
@@ -412,6 +432,7 @@ def render_symbol_chat_transcript_markdown(session: SymbolChatSession) -> str:
     lines.extend(["", "Unavailable / limited:"])
     lines.extend(f"- {redact_symbol_chat_secrets(item)}" for item in (unavailable or ["None"]))
     lines.append("")
+    lines.extend(_web_enrichment_transcript_lines(context))
 
     if not session.messages:
         lines.append("_No chat messages yet._")
@@ -427,6 +448,52 @@ def render_symbol_chat_transcript_markdown(session: SymbolChatSession) -> str:
                     lines.append(f"- {redact_symbol_chat_secrets(entry)}")
                 lines.append("")
     return "\n".join(lines).strip() + "\n"
+
+
+def _web_enrichment_transcript_lines(context: SymbolChatContext) -> list[str]:
+    metadata = context.source_metadata
+    web = context.web_enrichment if isinstance(context.web_enrichment, Mapping) else {}
+    requested = bool(metadata.get("web_enrichment_requested")) or bool(web)
+    provider_configured = web.get("provider_configured", metadata.get("web_enrichment_provider_configured", False))
+    provider_name = str(web.get("provider_name") or metadata.get("web_enrichment_provider") or "none")
+    status = str(web.get("status") or ("not requested" if not requested else "unavailable"))
+    sources = web.get("sources") if isinstance(web.get("sources"), list) else []
+    warnings = web.get("warnings") if isinstance(web.get("warnings"), list) else []
+    source_debug = web.get("source_debug") if isinstance(web.get("source_debug"), list) else []
+
+    lines = [
+        "## Web Enrichment",
+        "",
+        f"Requested: {'yes' if requested else 'no'}",
+        f"Provider configured: {'yes' if provider_configured else 'no'}",
+        f"Provider: {redact_symbol_chat_secrets(provider_display_name(provider_name))}",
+        f"Status: {redact_symbol_chat_secrets(status)}",
+        f"Source count: {len(sources)}",
+    ]
+    reason = str(web.get("reason") or "").strip()
+    if reason:
+        lines.append(f"Reason: {redact_symbol_chat_secrets(reason)}")
+    if sources:
+        lines.extend(["", "Sources:"])
+        for source in sources[:10]:
+            if not isinstance(source, Mapping):
+                continue
+            title = str(source.get("title") or "Untitled source").strip()
+            publisher = str(source.get("publisher") or "").strip()
+            published_at = str(source.get("published_at") or "").strip()
+            source_type = str(source.get("source_type") or "").strip()
+            url = str(source.get("url") or "").strip()
+            detail = ", ".join(piece for piece in (publisher, published_at, source_type) if piece)
+            suffix = f" ({detail})" if detail else ""
+            lines.append(f"- {redact_symbol_chat_secrets(title)}{suffix}: {redact_symbol_chat_secrets(url or '--')}")
+    if warnings:
+        lines.extend(["", "Warnings:"])
+        lines.extend(f"- {redact_symbol_chat_secrets(str(item))}" for item in warnings[:8] if str(item).strip())
+    if source_debug:
+        lines.extend(["", "Provider Debug:"])
+        lines.extend(f"- {redact_symbol_chat_secrets(str(item))}" for item in source_debug[:12] if str(item).strip())
+    lines.append("")
+    return lines
 
 
 def save_symbol_chat_transcript(
@@ -1467,53 +1534,112 @@ def _recent_filings_context(symbol: str, sec_client: SecEdgarClient | None, sour
 def _web_enrichment_context(
     app_context: Any | None,
     symbol: str,
+    company_name: str,
+    recent_filings: Iterable[Mapping[str, Any]],
     enabled: bool,
-    provider: Callable[[str], Mapping[str, Any] | None] | None,
+    provider: SymbolWebEnrichmentProvider | Callable[[str], Mapping[str, Any] | None] | None,
+    sec_client: SecEdgarClient | None,
     source_metadata: dict[str, Any],
 ) -> dict[str, Any]:
     if not enabled:
         source_metadata["web_enrichment_mode"] = "disabled"
+        source_metadata["web_enrichment_requested"] = False
         return {}
 
     active_provider = provider or getattr(app_context, "symbol_chat_web_enrichment_provider", None)
+    if active_provider is None:
+        active_provider = configured_default_symbol_web_provider(sec_client)
     source_metadata["web_enrichment_mode"] = "requested"
-    if not callable(active_provider):
-        _mark_unavailable(source_metadata, "web_enrichment", "Web enrichment was requested, but no Symbol Chat web-enrichment provider is configured.")
-        return {
-            "enabled": True,
-            "status": "unavailable",
-            "reason": "No web-enrichment provider is configured in this build.",
-            "source": "symbol_chat_web_enrichment_stub",
-        }
+    source_metadata["web_enrichment_requested"] = True
+    if active_provider is None:
+        reason = "Web enrichment was requested, but no Symbol Chat web-enrichment provider is configured."
+        _mark_unavailable(source_metadata, "web_enrichment", reason)
+        source_metadata["web_enrichment_provider_configured"] = False
+        source_metadata["web_enrichment_provider"] = "none"
+        source_metadata["web_enrichment_source_count"] = 0
+        return unavailable_symbol_web_enrichment_payload(symbol, "No web-enrichment provider is configured in this build.")
 
+    provider_name = str(getattr(active_provider, "provider_name", "") or getattr(active_provider, "__name__", "") or type(active_provider).__name__)
+    source_metadata["web_enrichment_provider_configured"] = True
+    source_metadata["web_enrichment_provider"] = provider_name
     try:
-        result = active_provider(symbol)
+        result = _call_web_enrichment_provider(
+            active_provider,
+            symbol,
+            company_name=company_name,
+            recent_filings=recent_filings,
+        )
     except Exception as exc:
         _mark_unavailable(source_metadata, "web_enrichment", f"Web enrichment provider failed: {exc}")
-        return {
-            "enabled": True,
-            "status": "error",
-            "reason": str(exc),
-            "source": "symbol_chat_web_enrichment_provider",
-        }
+        source_metadata["web_enrichment_source_count"] = 0
+        return _limit_web_enrichment_context(
+            {
+                "mode": "requested_error",
+                "enabled": True,
+                "status": "error",
+                "provider_configured": True,
+                "provider_name": provider_name,
+                "reason": str(exc),
+                "sources": [],
+                "warnings": [str(exc)],
+                "source_debug": [f"provider={provider_name}", "status=error", "sources=0"],
+            }
+        )
 
-    if not isinstance(result, Mapping) or not result:
+    if result is None or result == {}:
         _mark_unavailable(source_metadata, "web_enrichment", "Web enrichment provider returned no public context.")
-        return {
-            "enabled": True,
-            "status": "empty",
-            "source": "symbol_chat_web_enrichment_provider",
-        }
+        source_metadata["web_enrichment_source_count"] = 0
+        return _limit_web_enrichment_context(
+            {
+                "mode": "enabled",
+                "enabled": True,
+                "status": "empty",
+                "provider_configured": True,
+                "provider_name": provider_name,
+                "sources": [],
+                "warnings": ["Web enrichment provider returned no public context."],
+                "source_debug": [f"provider={provider_name}", "status=empty", "sources=0"],
+            }
+        )
 
-    context = _json_safe(dict(result))
-    if isinstance(context, Mapping):
-        compact = dict(context)
-    else:
-        compact = {"summary": context}
+    try:
+        compact = symbol_web_enrichment_to_payload(result)
+    except Exception as exc:
+        _mark_unavailable(source_metadata, "web_enrichment", f"Web enrichment provider returned unsupported context: {exc}")
+        source_metadata["web_enrichment_source_count"] = 0
+        return _limit_web_enrichment_context(
+            {
+                "mode": "requested_error",
+                "enabled": True,
+                "status": "error",
+                "provider_configured": True,
+                "provider_name": provider_name,
+                "reason": f"Unsupported provider response: {exc}",
+                "sources": [],
+                "warnings": [f"Unsupported provider response: {exc}"],
+                "source_debug": [f"provider={provider_name}", "status=error", "sources=0"],
+            }
+        )
     compact.setdefault("enabled", True)
+    compact.setdefault("mode", "enabled")
     compact.setdefault("status", "available")
-    compact.setdefault("source", "symbol_chat_web_enrichment_provider")
-    _mark_available(source_metadata, "web_enrichment", "Loaded optional public web/search enrichment from configured provider.")
+    compact.setdefault("provider_name", provider_name)
+    compact.setdefault("provider_configured", True)
+    compact.setdefault("source", provider_name)
+    source_metadata["web_enrichment_provider"] = str(compact.get("provider_name") or provider_name)
+    source_metadata["web_enrichment_provider_configured"] = bool(compact.get("provider_configured"))
+    source_count = len(compact.get("sources") or [])
+    source_metadata["web_enrichment_source_count"] = source_count
+    status = str(compact.get("status") or "").lower()
+    if status == "available":
+        _mark_available(
+            source_metadata,
+            "web_enrichment",
+            f"Loaded optional public web/filing enrichment from {provider_display_name(str(compact.get('provider_name') or provider_name))} with {source_count} source(s).",
+        )
+    else:
+        detail = str(compact.get("reason") or "Provider returned limited public context.")
+        _mark_unavailable(source_metadata, "web_enrichment", f"Web enrichment provider returned {status or 'limited'} context: {detail}")
     return _limit_web_enrichment_context(compact)
 
 
@@ -1521,7 +1647,7 @@ def _limit_web_enrichment_context(context: dict[str, Any]) -> dict[str, Any]:
     if len(_serialize_request_payload(context)) <= SYMBOL_CHAT_WEB_TEXT_LIMIT:
         return context
     limited = dict(context)
-    for key in ("summary", "company_profile", "recent_news", "earnings", "fundamentals", "filings"):
+    for key in ("summary", "company_profile", "recent_news", "earnings", "earnings_context", "fundamentals", "filings", "recent_filings", "filing_summaries"):
         value = limited.get(key)
         if isinstance(value, str):
             limited[key] = _shorten(value, 1_500)
@@ -1531,6 +1657,27 @@ def _limit_web_enrichment_context(context: dict[str, Any]) -> dict[str, Any]:
         return limited
     limited["truncation_note"] = f"Web enrichment was truncated to fit the {SYMBOL_CHAT_WEB_TEXT_LIMIT} character sub-budget."
     return limited
+
+
+def _call_web_enrichment_provider(
+    provider: SymbolWebEnrichmentProvider | Callable[[str], Mapping[str, Any] | None],
+    symbol: str,
+    *,
+    company_name: str,
+    recent_filings: Iterable[Mapping[str, Any]],
+) -> Any:
+    enrich = getattr(provider, "enrich", None)
+    if callable(enrich):
+        try:
+            return enrich(symbol, company_name=company_name, recent_filings=recent_filings)
+        except TypeError as exc:
+            try:
+                return enrich(symbol)
+            except TypeError:
+                raise exc
+    if callable(provider):
+        return provider(symbol)
+    raise TypeError(f"Web enrichment provider is not callable: {provider!r}")
 
 
 def _saved_thesis_context(app_context: Any | None, trade_memory_store: TradeMemoryStore | None, symbol: str, source_metadata: dict[str, Any]) -> str:
@@ -1641,6 +1788,29 @@ def _source_debug_lines(request_payload: Mapping[str, Any], diagnostics: Mapping
     lines.append("context_layers=" + (",".join(layers) if layers else "none"))
     if isinstance(metadata, Mapping) and metadata.get("web_enrichment_mode"):
         lines.append(f"web_enrichment_mode={metadata.get('web_enrichment_mode')}")
+    web = context.get("web_enrichment") if isinstance(context, Mapping) else {}
+    if isinstance(web, Mapping) and (metadata.get("web_enrichment_requested") or web.get("provider_name") or web.get("enabled")):
+        provider = str(web.get("provider_name") or metadata.get("web_enrichment_provider") or "")
+        status = str(web.get("status") or "")
+        sources = web.get("sources") if isinstance(web.get("sources"), list) else []
+        if provider:
+            lines.append(f"web_provider={provider}")
+        if status:
+            lines.append(f"web_status={status}")
+        lines.append(f"web_source_count={len(sources)}")
+        for index, source in enumerate(sources[:6], start=1):
+            if not isinstance(source, Mapping):
+                continue
+            title = str(source.get("title") or "").strip()
+            publisher = str(source.get("publisher") or "").strip()
+            source_type = str(source.get("source_type") or "").strip()
+            url = str(source.get("url") or "").strip()
+            parts = [part for part in (source_type, publisher, title, url) if part]
+            if parts:
+                lines.append(f"web_source_{index}=" + " | ".join(parts))
+        source_debug = web.get("source_debug") if isinstance(web.get("source_debug"), list) else []
+        for entry in source_debug[:8]:
+            lines.append(f"web_debug={entry}")
     lines.extend(_diagnostic_debug_lines(diagnostics))
     return lines
 
