@@ -19,6 +19,7 @@ from app.analytics.ipo_filing_chat import (
     filing_context_payload_for_prompt,
     render_ipo_filing_chat_transcript_markdown,
     save_ipo_filing_chat_transcript,
+    verified_filing_facts_for_prompt,
 )
 from app.analytics.openai_ipo_report import build_ipo_filing_source_bundle
 from app.analytics.ipo_pipeline import IpoPipelineRecord
@@ -78,6 +79,104 @@ def _metaoptics_record() -> IpoPipelineRecord:
         accession_number="0001213900-26-067164",
         is_foreign_issuer=True,
     )
+
+
+def _nuclea_record() -> IpoPipelineRecord:
+    return IpoPipelineRecord(
+        cik="2101996",
+        company_name="Nuclea Energy Inc.",
+        proposed_ticker=None,
+        form="F-1/A",
+        filed_date="2026-06-09",
+        ipo_status="Filed",
+        sic="",
+        sector=None,
+        industry="Nuclear energy technology",
+        exchange=None,
+        filing_url=f"{SEC_ARCHIVES_BASE_URL}/2101996/000121390026066889/ea0270043-16.htm",
+        accession_number="0001213900-26-066889",
+        is_foreign_issuer=True,
+    )
+
+
+def _nuclea_f1a_excerpt() -> str:
+    return """
+NUCLEA ENERGY INC.
+PRELIMINARY PROSPECTUS
+5,555,556 Common Shares
+We estimate that the initial public offering price will be between US$8.00 and US$10.00 per Common Share.
+The assumed initial public offering price is US$9.00 per Common Share, the midpoint of the range.
+We have applied to list our Common Shares on the NYSE under the symbol "NCLA".
+This offering will not close unless the NYSE approves our Common Shares for listing.
+Joseph Gunnar & Co., LLC
+Sole Book-Runner
+
+TABLE OF CONTENTS
+Explanatory Note 1
+Prospectus Summary 3
+Risk Factors 12
+Use of Proceeds 35
+Capitalization 40
+Dilution 42
+Taxation 120
+Financial Statements F-1
+
+Explanatory Note
+This Registration Statement contains two prospectuses: a Public Offering Prospectus and a Resale Prospectus.
+The Public Offering Prospectus relates to the initial public offering by the Company of 5,555,556 Common Shares.
+The Resale Prospectus relates to the resale from time to time by the Selling Shareholders of 2,817,294 Common Shares.
+The Resale Offering is separate from the initial public offering and we will not receive any proceeds from shares sold by Selling Shareholders.
+No resale sales may be made until the Common Shares sold in the initial public offering begin trading on the NYSE.
+Consummation of the Resale Prospectus offering is conditioned on consummation of the initial public offering.
+The Resale Prospectus omits Capitalization and Dilution, includes a Selling Shareholders section, and replaces Underwriting with a Selling Shareholder Plan of Distribution.
+Alternate Pages for the Resale Prospectus include a Selling Shareholders table and plan of distribution.
+
+Prospectus Summary
+Nuclea Energy Inc. is a development-stage nuclear energy technology company focused on the Morpheus Microreactor.
+
+The Offering
+We are offering 5,555,556 Common Shares. The underwriter has a 45-day over-allotment option to purchase up to an additional 15% or 833,333 Common Shares.
+
+Use of Proceeds
+We intend to use net proceeds for reactor development, licensing activities, working capital, and the Moltex Asset Acquisition.
+
+Recent Developments
+Moltex Asset Acquisition. We entered into an exclusivity agreement for the proposed acquisition of assets from Moltex Energy Limited.
+The purchase price is \u00a36,183,793, equivalent to CAD$11.5 million or approximately US$8.5 million.
+The target assets consist primarily of intellectual property and related rights, including patents, patent applications, technical know-how, engineering designs, technical documentation, experimental and modeling data, software, and regulatory work product.
+The assets are expected to relate to Moltex's Stable Salt Reactor - Wasteburner (SSR-W) and WAste To Stable Salt (WATSS) spent fuel recycling process.
+Moltex Energy Limited is in administration and the assets are distressed assets. Based on available information, Nuclea does not expect to assume historical liabilities.
+We paid a non-refundable exclusivity fee of \u00a3268,861, a first extension fee of \u00a3110,000, and a second extension fee of \u00a3400,000.
+We may obtain a further extension through July 8, 2026 for \u00a3200,000. The transaction remains subject to due diligence and negotiation of a definitive sale agreement.
+
+Regulatory Status
+We have begun preliminary pre-application engagement with the NRC through NuMark Associates.
+We have also had limited informal exchange with CNSC's advanced reactor review division.
+No formal applications have been submitted in either jurisdiction.
+Our projected timeline depends on funding, manufacturing partners, test site and community support, design iterations, and regulatory process changes.
+We expect approximately US$100 million of capital will be required through 2028 for development, demonstration, and licensing activities, with potentially higher spending for 2029 through 2031 that is not yet clear.
+
+Management's Discussion and Analysis
+Going Concern
+We have recurring losses and negative cash flows from operations. Conditions and events raise substantial doubt about the Company's ability to continue as a going concern within one year.
+Management's plans do not alleviate the substantial doubt because they depend on financing outside the Company's control and no binding financing arrangements are in place.
+
+Financial Statements
+Consolidated Balance Sheets
+Cash and cash equivalents 1,200 800
+Total assets 2,400 1,100
+Total liabilities 6,800 4,500
+Consolidated Statements of Operations
+Revenue 0 0
+Net loss 12,500 8,100
+Notes to Consolidated Financial Statements
+Note 3 Going Concern
+Conditions and events raise substantial doubt about the Company's ability to continue as a going concern within one year.
+
+Taxation
+A U.S. Holder generally will recognize capital gain or loss equal to the difference between the amount realized upon the disposition of Common Shares and such U.S. Holder's tax basis.
+Such capital gain or loss generally will be treated as long-term capital gain or loss if the U.S. Holder's holding period exceeds one year.
+"""
 
 
 def _record(*, form: str = "F-1") -> IpoPipelineRecord:
@@ -317,9 +416,14 @@ def test_metaoptics_chat_payload_marks_parser_values_as_hints_and_adds_verified_
     assert "deterministic_extracts" not in request_payload
     assert request_payload["deterministic_extracts_hints"]["use_policy"].startswith("Hints only")
     assert request_payload["overview_answer_requirements"]["required_topics"] == [
+        "cover-page exchange/ticker, price range/midpoint, and named underwriters or bookrunners",
+        "dual public-offering plus resale-prospectus structures, selling-shareholder supply, resale proceeds, and resale timing/conditions",
         "net proceeds and use-of-proceeds allocation",
+        "material recent developments or acquisitions, including price, assets, fees, and closing/diligence risk",
+        "regulatory status, pre-application engagement, formal application status, timeline dependencies, and capital needs",
         "dilution and pro forma/as-adjusted net tangible book value",
         "actual versus as-adjusted capitalization, including disclosed currency translations",
+        "substantial-doubt going-concern language when present",
         "customer and supplier concentration",
         "license or commercialization obligations",
         "specific ICFR material weakness details",
@@ -357,6 +461,77 @@ def test_metaoptics_chat_payload_marks_parser_values_as_hints_and_adds_verified_
     assert facts["company_revenue_guardrail"]["warning"] == "US$2.3 million is an industry-market figure, not company revenue."
     assert risk_checks["going_concern_risk_detected"]["value"] is False
     assert risk_checks["vie_structure_detected"]["value"] is False
+
+
+def test_nuclea_overview_verified_facts_cover_dual_prospectus_failure_mode() -> None:
+    filler = "Generic F-1/A boilerplate that should not crowd out named Nuclea sections.\n" * ((CHAT_FULL_TEXT_CHAR_LIMIT // 75) + 80)
+    text = _nuclea_f1a_excerpt() + "\n" + filler
+    record = _nuclea_record()
+    bundle = build_ipo_filing_source_bundle(record, text, source_url=record.filing_url)
+
+    payload = filing_context_payload_for_prompt(bundle, "Create an overview report of the Nuclea Energy Inc. F-1-A filing.")
+    facts = verified_filing_facts_for_prompt(bundle, payload, "Create an overview report of the Nuclea Energy Inc. F-1-A filing.")
+    section_names = {section["name"] for section in payload["sections"]}
+
+    assert payload["source_mode"] == "retrieved_filing_chunks"
+    assert {"cover_page", "explanatory_note", "recent_developments", "regulatory_status", "financial_statements"} <= section_names
+
+    offering = facts["offering_terms"]
+    assert offering["securities_offered"]["value"] == "5,555,556 Common Shares offered by the company"
+    assert offering["listing"]["value"] == "NYSE under symbol NCLA"
+    assert offering["listing_condition"]["value"] == "Offering closing is conditioned on exchange listing approval"
+    assert offering["expected_price_range"]["value"] == "US$8.00-US$10.00 per Common Share"
+    assert offering["assumed_midpoint_price"]["value"] == "US$9.00 per Common Share"
+    assert offering["underwriters"]["value"] == "Joseph Gunnar & Co., LLC is sole book-runner / representative"
+    assert offering["over_allotment_option"]["value"] == "15% / 833,333 Common Shares over-allotment option"
+
+    dual = facts["dual_prospectus_structure"]
+    assert dual["structure_detected"]["value"].startswith("Registration statement contains separate")
+    assert dual["public_offering"]["value"] == "Public Offering Prospectus covers company sale of 5,555,556 Common Shares"
+    assert dual["resale_offering"]["value"] == "Resale Prospectus covers resale from time to time by Selling Shareholders of 2,817,294 Common Shares"
+    assert dual["resale_proceeds"]["value"] == "Company will not receive proceeds from shares sold by Selling Shareholders"
+    assert dual["resale_trading_condition"]["value"] == "No resale sales occur until IPO shares begin trading on the exchange"
+    assert dual["resale_ipo_condition"]["value"] == "Resale offering is conditioned on consummation of the initial public offering"
+    assert "replace Underwriting" in dual["alternate_page_changes"]["value"]
+
+    risk_checks = facts["risk_checks"]
+    assert risk_checks["going_concern_risk_detected"]["value"] is True
+    assert "substantial doubt" in risk_checks["going_concern_risk_detected"]["source_snippet"]
+    assert "do not alleviate" in risk_checks["going_concern_risk_detected"]["source_snippet"]
+
+    recent = facts["recent_developments"]
+    assert recent["material_acquisition_detected"]["value"] == "Moltex Asset Acquisition is disclosed as a material recent development"
+    assert recent["purchase_price"]["value"] == "\u00a36,183,793 / CAD$11.5 million / approximately US$8.5 million"
+    assert "patents/applications" in recent["target_assets"]["value"]
+    assert recent["distressed_status"]["value"] == "Moltex Energy Limited is in administration and the assets are distressed assets"
+    assert recent["extension_and_exclusivity_fees"]["value"] == (
+        "non-refundable exclusivity fee \u00a3268,861; first extension fee \u00a3110,000; "
+        "second extension fee \u00a3400,000; possible further extension fee \u00a3200,000"
+    )
+    assert recent["closing_risk"]["value"] == "Terms remain subject to due diligence and negotiation of a definitive sale agreement"
+
+    regulatory = facts["regulatory_status"]
+    assert regulatory["nrc_pre_application"]["value"] == "Preliminary NRC pre-application engagement through NuMark Associates is disclosed"
+    assert regulatory["cnsc_informal_exchange"]["value"] == "Limited informal exchange with CNSC's advanced reactor review division is disclosed"
+    assert regulatory["formal_applications"]["value"] == "No formal NRC/CNSC applications have been submitted"
+    assert regulatory["development_capital_need"]["value"] == "About US$100 million required through 2028 for development, demonstration, and licensing activities"
+    assert regulatory["later_spending_uncertainty"]["value"] == "Potentially higher 2029-2031 spending remains unclear"
+
+
+def test_nuclea_taxation_text_is_not_labeled_financial_statements() -> None:
+    filler = "Generic securities-law filler.\n" * ((CHAT_FULL_TEXT_CHAR_LIMIT // 30) + 80)
+    text = _nuclea_f1a_excerpt() + "\n" + filler
+    record = _nuclea_record()
+    bundle = build_ipo_filing_source_bundle(record, text, source_url=record.filing_url)
+
+    payload = filing_context_payload_for_prompt(bundle, "Create an overview report of the Nuclea Energy Inc. F-1-A filing.")
+    financial_sections = [section for section in payload["sections"] if section["name"] == "financial_statements"]
+
+    assert financial_sections
+    assert any("Consolidated Balance Sheets" in section["text"] for section in financial_sections)
+    assert all("U.S. Holder" not in section["text"] for section in financial_sections)
+    assert all("capital gain or loss" not in section["text"] for section in financial_sections)
+    assert all("amount realized upon the disposition" not in entry for entry in payload["section_debug"] if entry.startswith("financial_statements"))
 
 
 def test_large_overview_chat_payload_is_bounded_fast_and_uses_timeout() -> None:

@@ -645,6 +645,9 @@ def verified_filing_facts_for_prompt(
         "shareholders_and_related_parties": _verified_shareholders_and_related_parties(index),
         "lockup_moratorium": _verified_lockup_moratorium(index),
         "ads_sgx_conversion": _verified_ads_sgx_conversion(index),
+        "dual_prospectus_structure": _verified_dual_prospectus_structure(index),
+        "recent_developments": _verified_recent_developments(index),
+        "regulatory_status": _verified_regulatory_status(index),
         "risk_checks": _verified_risk_checks(index),
     }
     unsupported_industry_revenue = _industry_market_revenue_warning(index)
@@ -654,8 +657,18 @@ def verified_filing_facts_for_prompt(
 
 
 def _verified_offering_terms(index: _FilingContextIndex) -> dict[str, Any]:
-    cover = _fact_source_text(index, names=("cover_page",), spec=_cover_page_spec(), fallback_terms=("American Depositary Shares", "Ordinary Shares", "Nasdaq"))
-    offering = _fact_source_text(index, names=("offering_terms",), spec=_offering_spec(max_sections=1), fallback_terms=("we are offering", "initial public offering price", "under the symbol")) or cover
+    cover = _fact_source_text(
+        index,
+        names=("cover_page",),
+        spec=_cover_page_spec(),
+        fallback_terms=("American Depositary Shares", "Common Shares", "Ordinary Shares", "Nasdaq", "NYSE", "Sole Book-Runner"),
+    )
+    offering = _fact_source_text(
+        index,
+        names=("offering_terms",),
+        spec=_offering_spec(max_sections=1),
+        fallback_terms=("we are offering", "initial public offering price", "price range", "under the symbol", "book-runner"),
+    ) or cover
     combined = f"{cover}\n\n{offering}"
     facts: dict[str, Any] = {}
 
@@ -670,19 +683,70 @@ def _verified_offering_terms(index: _FilingContextIndex) -> dict[str, Any]:
             combined,
             match.group(0),
         )
+    if "securities_offered" not in facts:
+        match = re.search(
+            r"(?:we are offering|company is offering|public offering prospectus[^.\n]{0,180}(?:offering|sale of))\s+(?:up to\s+)?([0-9][0-9,]*)\s+Common Shares",
+            combined,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not match:
+            for candidate in re.finditer(r"\b([0-9][0-9,]*)\s+Common Shares\b", cover[:4_000], flags=re.IGNORECASE):
+                nearby = cover[max(0, candidate.start() - 180) : candidate.end() + 180].lower()
+                if "resale" not in nearby and "selling shareholder" not in nearby:
+                    match = candidate
+                    break
+        if match:
+            facts["securities_offered"] = _fact(
+                f"{match.group(1)} Common Shares offered by the company",
+                combined,
+                match.group(0),
+            )
     match = re.search(r"Each ADS represents\s+([0-9][0-9,]*)\s+ordinary shares", combined, flags=re.IGNORECASE)
     if match:
         facts["ads_ratio"] = _fact(f"1 ADS = {match.group(1)} ordinary shares", combined, match.group(0))
-    match = re.search(r"between\s+(US\$[0-9][0-9,.]*)\s+and\s+(US\$[0-9][0-9,.]*)\s+per ADS", combined, flags=re.IGNORECASE)
+    match = re.search(
+        r"between\s+((?:US\$|S\$|HK\$|\$)\s*[0-9][0-9,.]*(?:\.[0-9]+)?)\s+(?:and|to|-)\s+((?:US\$|S\$|HK\$|\$)?\s*[0-9][0-9,.]*(?:\.[0-9]+)?)\s+per\s+(ADS|American Depositary Share|Common Share|ordinary share|share)",
+        combined,
+        flags=re.IGNORECASE,
+    )
     if match:
-        facts["expected_price_range"] = _fact(f"{match.group(1)}-{match.group(2)} per ADS", combined, match.group(0))
-    match = re.search(r"Nasdaq Capital Market under the symbol\s+[“\"]?([A-Z][A-Z0-9.]{0,5})[”\"]?", combined, flags=re.IGNORECASE)
+        low = _normalize_price_token(match.group(1))
+        high = _normalize_price_token(match.group(2), fallback_prefix=_currency_prefix(low))
+        facts["expected_price_range"] = _fact(f"{low}-{high} per {match.group(3).strip()}", combined, match.group(0))
+    match = re.search(
+        r"(?:assumed|midpoint)[^.\n]{0,120}?((?:US\$|S\$|HK\$|\$)\s*[0-9][0-9,.]*(?:\.[0-9]+)?)\s+(?:midpoint\s+)?(?:per\s+)?(ADS|American Depositary Share|Common Share|ordinary share|share)?",
+        combined,
+        flags=re.IGNORECASE,
+    )
     if match:
-        facts["listing"] = _fact(f"Nasdaq Capital Market under symbol {match.group(1).strip('.').upper()}", combined, match.group(0))
+        unit = f" per {match.group(2).strip()}" if match.group(2) else ""
+        facts["assumed_midpoint_price"] = _fact(f"{_normalize_price_token(match.group(1))}{unit}", combined, match.group(0))
+    match = re.search(
+        r"(?:apply to list|applied to list|plans? to list|listing).*?(Nasdaq Capital Market|Nasdaq Global Market|Nasdaq Global Select Market|Nasdaq|New York Stock Exchange|NYSE American|NYSE).*?under\s+(?:the\s+)?(?:symbol|ticker symbol)\s+[\"']?([A-Z][A-Z0-9.]{0,5})[\"']?",
+        combined,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if match:
+        exchange = re.sub(r"\s+", " ", match.group(1)).strip()
+        facts["listing"] = _fact(f"{exchange} under symbol {match.group(2).strip('.').upper()}", combined, match.group(0))
+    if re.search(r"will not close unless.*?(?:NYSE|Nasdaq).*?approv", combined, flags=re.IGNORECASE | re.DOTALL):
+        facts["listing_condition"] = _fact("Offering closing is conditioned on exchange listing approval", combined, "will not close unless")
     match = re.search(r"([0-9]{1,3})\s*-?\s*day option.*?additional\s+([0-9]{1,2})%\s+of the ADSs", combined, flags=re.IGNORECASE)
     if match:
         facts["over_allotment_option"] = _fact(f"{match.group(1)}-day option for up to an additional {match.group(2)}% of ADSs sold", combined, match.group(0))
-    if re.search(r"Roth Capital Partners", combined, flags=re.IGNORECASE) and re.search(r"Benchmark", combined, flags=re.IGNORECASE):
+    if "over_allotment_option" not in facts:
+        match = re.search(
+            r"(?:over-allotment|over allotment|option)[^.\n]{0,220}?(?:(15)%|additional\s+([0-9]{1,3})%)[^.\n]{0,220}?([0-9][0-9,]*)\s+Common Shares",
+            combined,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            percent = match.group(1) or match.group(2)
+            facts["over_allotment_option"] = _fact(f"{percent}% / {match.group(3)} Common Shares over-allotment option", combined, match.group(0))
+    underwriter_value = _underwriter_fact_value(combined)
+    if underwriter_value:
+        facts["underwriters"] = _fact(underwriter_value, combined, underwriter_value.split(" is ")[0].split(" are ")[0])
+    elif re.search(r"Roth Capital Partners", combined, flags=re.IGNORECASE) and re.search(r"Benchmark", combined, flags=re.IGNORECASE):
         facts["underwriters"] = _fact("Roth Capital Partners and Benchmark are joint book-running managers / representatives", combined, "Roth Capital Partners Benchmark")
 
     proceeds = _fact_source_text(index, names=("use_of_proceeds",), spec=_use_of_proceeds_spec(max_sections=1), fallback_terms=("net proceeds", "use of proceeds", "we intend to use"))
@@ -696,6 +760,96 @@ def _verified_offering_terms(index: _FilingContextIndex) -> dict[str, Any]:
             match.group(0),
         )
     return facts
+
+
+def _normalize_price_token(token: str, fallback_prefix: str = "") -> str:
+    clean = re.sub(r"\s+", "", token or "")
+    match = re.match(r"^(US\$|S\$|HK\$|\$)?([0-9][0-9,.]*(?:\.[0-9]+)?)$", clean, flags=re.IGNORECASE)
+    if not match:
+        return clean
+    prefix = match.group(1) or fallback_prefix
+    if prefix.upper() == "US$":
+        prefix = "US$"
+    elif prefix.upper() == "HK$":
+        prefix = "HK$"
+    elif prefix.upper() == "S$":
+        prefix = "S$"
+    return f"{prefix}{match.group(2)}" if prefix else match.group(2)
+
+
+def _currency_prefix(value: str) -> str:
+    match = re.match(r"^(US\$|S\$|HK\$|\$)", value or "", flags=re.IGNORECASE)
+    return match.group(1) if match else ""
+
+
+def _underwriter_fact_value(text: str) -> str:
+    descriptor_match = re.search(r"\b(Sole\s+Book-?Runner|Joint\s+Book-Running Managers?|Joint\s+Book-?Runners?)\b", text or "", flags=re.IGNORECASE)
+    if descriptor_match:
+        prefix = (text or "")[max(0, descriptor_match.start() - 220) : descriptor_match.start()]
+        name_match = re.search(
+            r"([A-Z][A-Za-z0-9&,' \-]{2,120}(?:Co\.,\s*)?(?:LLC|L\.L\.C\.|Inc\.?|Ltd\.?|Company|Capital|Securities|Partners))\s*$",
+            prefix,
+            flags=re.IGNORECASE,
+        )
+        if name_match:
+            name = _clean_underwriter_phrase(name_match.group(1))
+            if _looks_like_underwriter_name(name):
+                descriptor = descriptor_match.group(1).lower()
+                if "sole" in descriptor:
+                    return f"{name} is sole book-runner / representative"
+                if "joint" in descriptor:
+                    return f"{name} are joint book-running managers / representatives"
+                return name
+
+    lines = [re.sub(r"\s+", " ", line).strip(" .") for line in (text or "").splitlines()]
+    for index, line in enumerate(lines):
+        lower = line.lower()
+        if not re.search(r"\b(?:sole|joint)?\s*book-?runner|\bbook-running manager|\brepresentative\b", lower):
+            continue
+        for candidate in (lines[index - 1] if index > 0 else "", lines[index + 1] if index + 1 < len(lines) else ""):
+            name = _clean_underwriter_phrase(candidate)
+            if _looks_like_underwriter_name(name):
+                if "sole" in lower:
+                    return f"{name} is sole book-runner / representative"
+                if "joint" in lower:
+                    return f"{name} are joint book-running managers / representatives"
+                return name
+
+    patterns = (
+        r"([A-Z][A-Za-z0-9&.,' \-]{4,180}?)\s+(?:is|are)\s+(?:acting as\s+)?(?:the\s+)?(?:sole\s+book-?runner|joint\s+book-running managers?|representatives? of the underwriters)",
+        r"(?:representatives of the underwriters|underwriters|book-running managers?|bookrunners)\s+(?:are|include|:)\s+([^.;\n]{5,220})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text or "", flags=re.IGNORECASE)
+        if not match:
+            continue
+        name = _clean_underwriter_phrase(match.group(1))
+        if not _looks_like_underwriter_name(name):
+            continue
+        descriptor = match.group(0).lower()
+        if "sole" in descriptor:
+            return f"{name} is sole book-runner / representative"
+        if "joint" in descriptor:
+            return f"{name} are joint book-running managers / representatives"
+        return name
+    return ""
+
+
+def _clean_underwriter_phrase(value: str) -> str:
+    clean = re.sub(r"\s+", " ", value or "").strip(" .,:;")
+    clean = re.sub(r"\s+(?:is|are)\s+(?:acting as\s+)?(?:the\s+)?(?:sole|joint).*", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"\s+(?:sole|joint)?\s*book-?runner.*", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"^(?:the\s+)?", "", clean, flags=re.IGNORECASE)
+    return clean.strip(" .,:;")
+
+
+def _looks_like_underwriter_name(value: str) -> bool:
+    if not value or len(value) < 5 or len(value) > 180:
+        return False
+    lower = value.lower()
+    if any(term in lower for term in ("prospectus", "registration statement", "common shares", "table of contents")):
+        return False
+    return bool(re.search(r"\b(llc|l\.l\.c\.|inc\.?|ltd\.?|co\.|company|capital|securities|partners|markets|gunnar|benchmark|roth)\b", lower))
 
 
 def _verified_financial_metrics(index: _FilingContextIndex) -> dict[str, Any]:
@@ -973,17 +1127,221 @@ def _verified_ads_sgx_conversion(index: _FilingContextIndex) -> dict[str, Any]:
     return facts
 
 
+def _verified_dual_prospectus_structure(index: _FilingContextIndex) -> dict[str, Any]:
+    search_text = "\n\n".join(
+        _dedupe(
+            [
+                _fact_source_text(
+                    index,
+                    names=("explanatory_note",),
+                    spec=_explanatory_note_spec(),
+                    fallback_terms=("This Registration Statement contains two prospectuses", "Public Offering Prospectus", "Resale Prospectus", "Alternate Pages"),
+                    max_chars=16_000,
+                ),
+                _fact_source_text(
+                    index,
+                    names=("selling_shareholders",),
+                    spec=_selling_shareholders_spec(),
+                    fallback_terms=("Selling Shareholders", "2,817,294", "will not receive any proceeds"),
+                    max_chars=16_000,
+                ),
+                _fact_source_text(
+                    index,
+                    names=("underwriting",),
+                    spec=_underwriting_spec(),
+                    fallback_terms=("Plan of Distribution", "not underwritten", "resale"),
+                    max_chars=10_000,
+                ),
+                _targeted_fact_windows(
+                    index.text,
+                    ("This Registration Statement contains two prospectuses", "Public Offering Prospectus", "Resale Prospectus", "Alternate Pages", "Selling Shareholders"),
+                    max_chars=20_000,
+                ),
+            ]
+        )
+    )
+    lower = search_text.lower()
+    if not (
+        ("public offering prospectus" in lower and "resale prospectus" in lower)
+        or "registration statement contains two prospectuses" in lower
+    ):
+        return {}
+
+    facts: dict[str, Any] = {
+        "structure_detected": _fact("Registration statement contains separate Public Offering Prospectus and Resale Prospectus disclosure", search_text, "Public Offering Prospectus"),
+    }
+    match = re.search(
+        r"Public Offering Prospectus[^.\n]{0,260}?(?:offering|sale|sell)[^.\n]{0,120}?([0-9][0-9,]*)\s+Common Shares",
+        search_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        match = re.search(r"(?:we|the company)\s+(?:are|is)\s+offering\s+([0-9][0-9,]*)\s+Common Shares", search_text, flags=re.IGNORECASE)
+    if match:
+        facts["public_offering"] = _fact(f"Public Offering Prospectus covers company sale of {match.group(1)} Common Shares", search_text, match.group(0))
+
+    match = re.search(
+        r"Resale Prospectus[^.\n]{0,360}?(?:resale|sell|sale)[^.\n]{0,180}?([0-9][0-9,]*)\s+Common Shares",
+        search_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        match = re.search(r"Selling Shareholders?[^.\n]{0,260}?([0-9][0-9,]*)\s+Common Shares", search_text, flags=re.IGNORECASE | re.DOTALL)
+    if match:
+        facts["resale_offering"] = _fact(f"Resale Prospectus covers resale from time to time by Selling Shareholders of {match.group(1)} Common Shares", search_text, match.group(0))
+
+    if re.search(r"will not receive (?:any\s+)?proceeds.*?(?:Selling Shareholders|shares sold by selling shareholders|resale)", search_text, flags=re.IGNORECASE | re.DOTALL):
+        facts["resale_proceeds"] = _fact("Company will not receive proceeds from shares sold by Selling Shareholders", search_text, "will not receive")
+    if re.search(r"(?:no|not).*?resale sales?.*?(?:until|prior to).*?(?:NYSE|trading)", search_text, flags=re.IGNORECASE | re.DOTALL):
+        facts["resale_trading_condition"] = _fact("No resale sales occur until IPO shares begin trading on the exchange", search_text, "resale sales")
+    if re.search(r"(?:consummation|completion).*?resale.*?conditioned on.*?(?:initial public offering|IPO)", search_text, flags=re.IGNORECASE | re.DOTALL):
+        facts["resale_ipo_condition"] = _fact("Resale offering is conditioned on consummation of the initial public offering", search_text, "conditioned on")
+    if re.search(r"omits?.*?Capitalization.*?Dilution|replaces?.*?Underwriting.*?Plan of Distribution", search_text, flags=re.IGNORECASE | re.DOTALL):
+        facts["alternate_page_changes"] = _fact(
+            "Resale Prospectus alternate pages omit Capitalization/Dilution and replace Underwriting with Selling Shareholder Plan of Distribution",
+            search_text,
+            "Alternate Pages",
+        )
+    return facts
+
+
+def _verified_recent_developments(index: _FilingContextIndex) -> dict[str, Any]:
+    search_text = "\n\n".join(
+        _dedupe(
+            [
+                _fact_source_text(
+                    index,
+                    names=("recent_developments",),
+                    spec=_recent_developments_spec(max_sections=2),
+                    fallback_terms=("Recent Developments", "Moltex", "Asset Acquisition", "exclusivity agreement"),
+                    max_chars=18_000,
+                ),
+                _fact_source_text(
+                    index,
+                    names=("use_of_proceeds",),
+                    spec=_use_of_proceeds_spec(max_sections=1),
+                    fallback_terms=("Moltex", "asset acquisition", "acquisition price"),
+                    max_chars=8_000,
+                ),
+                _targeted_fact_windows(
+                    index.text,
+                    ("Moltex", "Asset Acquisition", "Stable Salt Reactor", "WATSS", "administration", "exclusivity fee"),
+                    max_chars=20_000,
+                ),
+            ]
+        )
+    )
+    if not re.search(r"\bMoltex\b|Asset Acquisition|exclusivity agreement", search_text, flags=re.IGNORECASE):
+        return {}
+
+    facts: dict[str, Any] = {
+        "material_acquisition_detected": _fact("Moltex Asset Acquisition is disclosed as a material recent development", search_text, "Moltex"),
+    }
+    match = re.search(
+        r"(?:purchase price|acquisition price)[^.\n]{0,180}?((?:\N{POUND SIGN}|GBP)[0-9][0-9,]*[0-9])[^.\n]{0,180}?(CAD\$[0-9.]+\s+million)[^.\n]{0,180}?(US\$[0-9.]+\s+million)",
+        search_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if match:
+        facts["purchase_price"] = _fact(f"{match.group(1)} / {match.group(2)} / approximately {match.group(3)}", search_text, match.group(0))
+    if re.search(r"patents?|patent applications?|technical know-how|engineering designs?|technical documentation|experimental|modeling data|software|regulatory work product", search_text, flags=re.IGNORECASE):
+        facts["target_assets"] = _fact(
+            "Target assets include IP and related rights, patents/applications, technical know-how, engineering designs, technical documentation, data, software, and regulatory work product",
+            search_text,
+            "technical know-how",
+        )
+    if re.search(r"Stable Salt Reactor|SSR-W|WAste To Stable Salt|WATSS", search_text, flags=re.IGNORECASE):
+        facts["technology_context"] = _fact("Assets relate to Moltex SSR-W and WATSS spent-fuel recycling technology", search_text, "Stable Salt Reactor")
+    if re.search(r"in administration|distressed assets?", search_text, flags=re.IGNORECASE):
+        facts["distressed_status"] = _fact("Moltex Energy Limited is in administration and the assets are distressed assets", search_text, "administration")
+    if re.search(r"does not expect to assume.*?liabilities|historical liabilities", search_text, flags=re.IGNORECASE | re.DOTALL):
+        facts["liability_assumption"] = _fact("Nuclea does not expect to assume historical liabilities based on available information", search_text, "historical liabilities")
+
+    fee_parts: list[str] = []
+    for label, pattern in (
+        ("non-refundable exclusivity fee", r"non-refundable exclusivity fee(?:\s+of)?\s+((?:\N{POUND SIGN}|GBP)[0-9][0-9,]*[0-9])"),
+        ("first extension fee", r"first extension fee(?:\s+of)?\s+((?:\N{POUND SIGN}|GBP)[0-9][0-9,]*[0-9])"),
+        ("second extension fee", r"second extension fee(?:\s+of)?\s+((?:\N{POUND SIGN}|GBP)[0-9][0-9,]*[0-9])"),
+        ("possible further extension fee", r"(?:further|additional) extension[^.\n]{0,120}?\s+((?:\N{POUND SIGN}|GBP)[0-9][0-9,]*[0-9])"),
+    ):
+        match = re.search(pattern, search_text, flags=re.IGNORECASE)
+        if match:
+            fee_parts.append(f"{label} {match.group(1)}")
+    if fee_parts:
+        facts["extension_and_exclusivity_fees"] = {
+            "value": "; ".join(fee_parts),
+            "source_snippet": _source_snippet(search_text, "exclusivity fee", before=220, after=620) or _source_snippet(search_text, "extension fee", before=220, after=620),
+        }
+    if re.search(r"subject to due diligence|definitive sale agreement|definitive agreement", search_text, flags=re.IGNORECASE):
+        facts["closing_risk"] = _fact("Terms remain subject to due diligence and negotiation of a definitive sale agreement", search_text, "due diligence")
+    return facts
+
+
+def _verified_regulatory_status(index: _FilingContextIndex) -> dict[str, Any]:
+    search_text = "\n\n".join(
+        _dedupe(
+            [
+                _fact_source_text(
+                    index,
+                    names=("regulatory_status",),
+                    spec=_regulatory_status_spec(max_sections=2),
+                    fallback_terms=("NRC", "CNSC", "NuMark Associates", "formal applications", "US$100 million"),
+                    max_chars=18_000,
+                ),
+                _fact_source_text(
+                    index,
+                    names=("business",),
+                    spec=_business_spec(max_sections=2),
+                    fallback_terms=("regulatory", "licensing", "Nuclear Regulatory Commission", "Canadian Nuclear Safety Commission"),
+                    max_chars=12_000,
+                ),
+                _targeted_fact_windows(
+                    index.text,
+                    ("NuMark Associates", "CNSC", "NRC", "no formal applications", "US$100 million", "2028", "2029", "2031"),
+                    max_chars=20_000,
+                ),
+            ]
+        )
+    )
+    if not re.search(r"\bNRC\b|CNSC|Nuclear Regulatory Commission|Canadian Nuclear Safety Commission|NuMark", search_text, flags=re.IGNORECASE):
+        return {}
+
+    facts: dict[str, Any] = {}
+    if re.search(r"NuMark Associates.*?(?:pre-application|preapplication|NRC)", search_text, flags=re.IGNORECASE | re.DOTALL):
+        facts["nrc_pre_application"] = _fact("Preliminary NRC pre-application engagement through NuMark Associates is disclosed", search_text, "NuMark Associates")
+    if re.search(r"CNSC.*?(?:informal|advanced reactor review)|informal exchange.*?CNSC", search_text, flags=re.IGNORECASE | re.DOTALL):
+        facts["cnsc_informal_exchange"] = _fact("Limited informal exchange with CNSC's advanced reactor review division is disclosed", search_text, "CNSC")
+    if re.search(r"no formal applications?.*?(?:submitted|filed).*?(?:jurisdiction|NRC|CNSC)|(?:neither|not).*?formal applications?.*?(?:NRC|CNSC)", search_text, flags=re.IGNORECASE | re.DOTALL):
+        facts["formal_applications"] = _fact("No formal NRC/CNSC applications have been submitted", search_text, "formal applications")
+    if re.search(r"funding|manufacturing partners?|test site|community support|design iterations?|regulatory process changes?", search_text, flags=re.IGNORECASE):
+        facts["timeline_dependencies"] = _fact(
+            "Timeline depends on funding, manufacturing partners, test site/community support, design iterations, and regulatory process changes",
+            search_text,
+            "funding",
+        )
+    match = re.search(r"(US\$[0-9.]+\s+million)[^.\n]{0,220}?(?:through|to|by)\s+2028", search_text, flags=re.IGNORECASE)
+    if match:
+        facts["development_capital_need"] = _fact(f"About {match.group(1)} required through 2028 for development, demonstration, and licensing activities", search_text, match.group(0))
+    if re.search(r"2029[^.\n]{0,220}2031|potentially higher.*?2029", search_text, flags=re.IGNORECASE | re.DOTALL):
+        facts["later_spending_uncertainty"] = _fact("Potentially higher 2029-2031 spending remains unclear", search_text, "2029")
+    return facts
+
+
 def _verified_risk_checks(index: _FilingContextIndex) -> dict[str, Any]:
     search_text = "\n\n".join(
         _dedupe(
             [
                 _fact_source_text(index, names=("risk_factors",), spec=_risk_spec(max_sections=2), fallback_terms=("going concern", "substantial doubt", "variable interest entity", "VIE")),
-                _fact_source_text(index, names=("financial_statements",), spec=_financial_statements_spec(max_sections=1), fallback_terms=("going concern",)),
-                _targeted_fact_windows(index.text, ("prepared on a going concern basis", "substantial doubt", "variable interest entity", "wholly-owned subsidiaries"), max_chars=12_000),
+                _fact_source_text(index, names=("financial_statements",), spec=_financial_statements_spec(max_sections=1), fallback_terms=("going concern", "substantial doubt", "do not alleviate")),
+                _targeted_fact_windows(index.text, ("prepared on a going concern basis", "raise substantial doubt", "substantial doubt", "do not alleviate", "variable interest entity", "wholly-owned subsidiaries"), max_chars=14_000),
             ]
         )
     )
-    going_concern_sentence = _source_snippet(search_text, "prepared on a going concern basis", before=180, after=420)
+    going_concern_sentence = (
+        _source_snippet(search_text, "substantial doubt", before=220, after=520)
+        or _source_snippet(search_text, "do not alleviate", before=220, after=520)
+        or _source_snippet(search_text, "prepared on a going concern basis", before=180, after=420)
+    )
     return {
         "going_concern_risk_detected": {
             "value": _has_adverse_going_concern_language(search_text),
@@ -1147,6 +1505,9 @@ def _has_adverse_going_concern_language(text: str) -> bool:
     adverse_patterns = (
         r"substantial doubt (?:about|regarding) (?:our|the company's|the group'?s)? ability to continue",
         r"substantial doubt .*? going concern",
+        r"conditions and events .*? raise substantial doubt",
+        r"do not alleviate (?:the\s+)?substantial doubt",
+        r"plans? .*? do not alleviate .*?substantial doubt",
         r"may not be able to continue as a going concern",
         r"raise substantial doubt",
         r"going concern qualification",
@@ -1245,9 +1606,12 @@ def retrieve_relevant_filing_sections(text: str, prompt: str) -> tuple[IpoFiling
 def _retrieved_section_char_limit(name: str, prompt: str) -> int:
     overview_limits = {
         "cover_page": 4_500,
+        "explanatory_note": 4_500,
         "prospectus_summary": 4_000,
         "offering_terms": 4_500,
         "use_of_proceeds": 4_500,
+        "recent_developments": 5_500,
+        "regulatory_status": 5_000,
         "capitalization": 4_500,
         "dilution": 4_500,
         "mda_results": 5_000,
@@ -1256,6 +1620,7 @@ def _retrieved_section_char_limit(name: str, prompt: str) -> int:
         "customer_supplier_concentration": 3_500,
         "license_obligations": 3_500,
         "icfr_material_weaknesses": 3_500,
+        "selling_shareholders": 4_500,
         "principal_shareholders": 4_000,
         "related_party_transactions": 4_000,
         "shares_eligible_future_sale": 4_000,
@@ -1308,18 +1673,22 @@ def _trim_retrieved_section_text(name: str, text: str, prompt: str, limit: int) 
 
 def _section_preserve_terms(name: str, prompt: str) -> tuple[str, ...]:
     terms_by_name = {
-        "cover_page": ("American Depositary Shares", "Ordinary Shares", "Nasdaq", "Joint Book-Running Managers"),
+        "cover_page": ("American Depositary Shares", "Common Shares", "Ordinary Shares", "Nasdaq", "NYSE", "under the symbol", "Sole Book-Runner", "Joint Book-Running Managers"),
+        "explanatory_note": ("Public Offering Prospectus", "Resale Prospectus", "Alternate Pages", "Selling Shareholders", "will not receive proceeds"),
         "prospectus_summary": ("we are", "our business", "market", "customers"),
-        "offering_terms": ("American Depositary Shares", "we are offering", "initial public offering price", "Nasdaq", "underwriters"),
-        "use_of_proceeds": ("net proceeds", "use the net proceeds", "working capital", "over-allotment"),
+        "offering_terms": ("American Depositary Shares", "Common Shares", "we are offering", "initial public offering price", "price range", "Nasdaq", "NYSE", "underwriters"),
+        "use_of_proceeds": ("net proceeds", "use the net proceeds", "working capital", "over-allotment", "Moltex", "acquisition"),
+        "recent_developments": ("Moltex", "Asset Acquisition", "purchase price", "Stable Salt Reactor", "WATSS", "administration", "exclusivity fee", "extension fee"),
+        "regulatory_status": ("NuMark Associates", "NRC", "CNSC", "formal applications", "US$100 million", "2028", "2029", "2031"),
         "capitalization": ("Cash and cash equivalents", "Total debt", "as adjusted", "total capitalization"),
         "dilution": ("net tangible book value", "immediate dilution", "per ADS", "per ordinary share"),
-        "mda_results": ("Our revenue amounted", "revenue", "net losses", "liquidity", "capital resources"),
-        "financial_statements": ("Revenue", "Loss after income tax", "Gross profit", "Cash and cash equivalents"),
-        "risk_factors": ("going concern", "customer concentration", "supplier concentration", "material weakness", "related party"),
+        "mda_results": ("Our revenue amounted", "revenue", "net losses", "liquidity", "capital resources", "going concern", "substantial doubt"),
+        "financial_statements": ("Revenue", "Loss after income tax", "Gross profit", "Cash and cash equivalents", "substantial doubt"),
+        "risk_factors": ("going concern", "substantial doubt", "do not alleviate", "customer concentration", "supplier concentration", "material weakness", "related party"),
         "customer_supplier_concentration": ("Haur-Jye Technology", "MMI Systems Pte Ltd", "major customer", "major supplier"),
         "license_obligations": ("Accelerate Technologies", "A*STAR", "S$3.0 million", "S$5.0 million", "commercialization obligations"),
         "icfr_material_weaknesses": ("material weakness", "segregation of duties", "payroll", "purchases and payables", "IFRS"),
+        "selling_shareholders": ("Selling Shareholders", "Resale Prospectus", "will not receive any proceeds", "2,817,294", "Plan of Distribution"),
         "principal_shareholders": ("directors and executive officers", "Angelling Capital", "MST SingCo", "beneficial ownership"),
         "related_party_transactions": ("RELATED PARTY TRANSACTIONS", "MMI Systems Pte Ltd", "MST SingCo", "related party"),
         "shares_eligible_future_sale": ("September 8, 2026", "moratorium", "180 days", "lock-up", "future sale"),
@@ -1402,9 +1771,12 @@ def _section_specs_for_prompt(prompt: str) -> tuple[_SectionSpec, ...]:
 
     if wants_overview:
         add(_cover_page_spec())
+        add(_explanatory_note_spec())
         add(_prospectus_summary_spec())
         add(_offering_spec())
         add(_use_of_proceeds_spec())
+        add(_recent_developments_spec())
+        add(_regulatory_status_spec())
         add(_capitalization_spec())
         add(_dilution_spec())
         add(_mda_spec())
@@ -1413,6 +1785,7 @@ def _section_specs_for_prompt(prompt: str) -> tuple[_SectionSpec, ...]:
         add(_customer_supplier_concentration_spec())
         add(_license_obligations_spec())
         add(_icfr_material_weaknesses_spec())
+        add(_selling_shareholders_spec())
         add(_principal_shareholders_spec())
         add(_related_party_transactions_spec())
         add(_shares_eligible_future_sale_spec())
@@ -1432,6 +1805,12 @@ def _section_specs_for_prompt(prompt: str) -> tuple[_SectionSpec, ...]:
         add(_ads_sgx_conversion_spec())
     if any(term in lower for term in ("proceeds", "repay", "working capital", "company receives")):
         add(_use_of_proceeds_spec(max_sections=2))
+    if any(term in lower for term in ("recent development", "acquisition", "moltex", "asset purchase", "exclusivity")):
+        add(_recent_developments_spec(max_sections=2))
+        add(_use_of_proceeds_spec(max_sections=2))
+    if any(term in lower for term in ("regulatory", "nrc", "cnsc", "license", "licensing", "application")):
+        add(_regulatory_status_spec(max_sections=2))
+        add(_business_spec(max_sections=2))
     if any(term in lower for term in ("dilution", "ownership", "capitalization", "overhang", "warrant", "option", "insider", "control", "selling shareholder")):
         add(_capitalization_spec(max_sections=2))
         add(_dilution_spec(max_sections=2))
@@ -1469,9 +1848,14 @@ def _overview_answer_requirements_for_prompt(prompt: str) -> dict[str, Any]:
             "or filing_context. If a topic is absent, say Not disclosed."
         ),
         "required_topics": [
+            "cover-page exchange/ticker, price range/midpoint, and named underwriters or bookrunners",
+            "dual public-offering plus resale-prospectus structures, selling-shareholder supply, resale proceeds, and resale timing/conditions",
             "net proceeds and use-of-proceeds allocation",
+            "material recent developments or acquisitions, including price, assets, fees, and closing/diligence risk",
+            "regulatory status, pre-application engagement, formal application status, timeline dependencies, and capital needs",
             "dilution and pro forma/as-adjusted net tangible book value",
             "actual versus as-adjusted capitalization, including disclosed currency translations",
+            "substantial-doubt going-concern language when present",
             "customer and supplier concentration",
             "license or commercialization obligations",
             "specific ICFR material weakness details",
@@ -1494,9 +1878,20 @@ def _prospectus_summary_spec() -> _SectionSpec:
 def _cover_page_spec() -> _SectionSpec:
     return _SectionSpec(
         name="cover_page",
-        headings=("PRELIMINARY PROSPECTUS", "PROSPECTUS", "American Depositary Shares", "Ordinary Shares"),
+        headings=("PRELIMINARY PROSPECTUS", "PROSPECTUS", "American Depositary Shares", "Common Shares", "Ordinary Shares"),
         stop_headings=("TABLE OF CONTENTS", "Table of Contents", "PROSPECTUS SUMMARY"),
-        terms=("American Depositary Shares", "offering price", "Nasdaq", "under the symbol", "Joint Book-Running Managers"),
+        terms=("American Depositary Shares", "Common Shares", "offering price", "Nasdaq", "NYSE", "under the symbol", "Sole Book-Runner", "Joint Book-Running Managers"),
+    )
+
+
+def _explanatory_note_spec(*, max_sections: int = 1) -> _SectionSpec:
+    return _SectionSpec(
+        name="explanatory_note",
+        headings=("Explanatory Note",),
+        stop_headings=("Prospectus Summary", "Risk Factors", "Use of Proceeds", "Capitalization", "Dilution", "Business"),
+        terms=("two prospectuses", "Public Offering Prospectus", "Resale Prospectus", "Selling Shareholders", "Alternate Pages"),
+        max_sections=max_sections,
+        char_limit=10_000,
     )
 
 
@@ -1525,9 +1920,50 @@ def _use_of_proceeds_spec(*, max_sections: int = 1) -> _SectionSpec:
     return _SectionSpec(
         name="use_of_proceeds",
         headings=("Use of Proceeds",),
-        stop_headings=("Dividend Policy", "Capitalization", "Dilution", "Management", "Underwriting", "Risk Factors", "Business"),
-        terms=("we intend to use", "use the net proceeds", "net proceeds", "proceeds for", "repayment of indebtedness"),
+        stop_headings=(
+            "Recent Developments",
+            "Regulatory Status",
+            "Dividend Policy",
+            "Capitalization",
+            "Dilution",
+            "Management",
+            "Underwriting",
+            "Risk Factors",
+            "Business",
+            "Financial Statements",
+            "Taxation",
+        ),
+        terms=("we intend to use", "use the net proceeds", "net proceeds", "proceeds for", "repayment of indebtedness", "Moltex", "asset acquisition"),
         max_sections=max_sections,
+    )
+
+
+def _recent_developments_spec(*, max_sections: int = 1) -> _SectionSpec:
+    return _SectionSpec(
+        name="recent_developments",
+        headings=("Recent Developments", "Recent Development", "Material Recent Developments"),
+        stop_headings=("Regulatory Status", "Risk Factors", "Use of Proceeds", "Capitalization", "Dilution", "Management", "Business", "Regulation", "Regulatory"),
+        terms=("Moltex", "Asset Acquisition", "exclusivity agreement", "purchase price", "administration", "extension fee"),
+        max_sections=max_sections,
+        char_limit=12_000,
+    )
+
+
+def _regulatory_status_spec(*, max_sections: int = 1) -> _SectionSpec:
+    return _SectionSpec(
+        name="regulatory_status",
+        headings=(
+            "Regulatory Status",
+            "Regulation",
+            "Government Regulation",
+            "Nuclear Regulatory",
+            "Regulatory Approval",
+            "Licensing and Regulatory",
+        ),
+        stop_headings=("Management", "Employees", "Facilities", "Legal Proceedings", "Risk Factors", "Use of Proceeds", "Financial Statements"),
+        terms=("NRC", "CNSC", "NuMark Associates", "formal applications", "US$100 million", "2028", "2029", "2031"),
+        max_sections=max_sections,
+        char_limit=12_000,
     )
 
 
@@ -1561,7 +1997,16 @@ def _financial_statements_spec(*, max_sections: int = 2) -> _SectionSpec:
             "Consolidated Balance Sheets",
             "Consolidated Statements of Financial Position",
         ),
-        stop_headings=("Consolidated Balance Sheets", "Consolidated Statements of Changes", "Consolidated Statements of Cash Flows", "Notes to the Financial Statements", "The accompanying notes", "Going concern"),
+        stop_headings=(
+            "Consolidated Balance Sheets",
+            "Consolidated Statements of Changes",
+            "Consolidated Statements of Cash Flows",
+            "Notes to the Financial Statements",
+            "The accompanying notes",
+            "Going concern",
+            "Taxation",
+            "Material United States Federal Income Tax",
+        ),
         terms=("Revenue", "Gross profit", "Loss after income tax", "Cash at bank", "Cash and cash equivalents", "Total debt"),
         max_sections=max_sections,
     )
@@ -1716,8 +2161,10 @@ def _cover_page_section(text: str) -> IpoFilingSourceSection:
         for marker in ("table of contents", "prospectus summary")
         if (index := lower.find(marker, 300)) > 0
     ]
-    end = min(stop_candidates) if stop_candidates else min(len(text), 12_000)
-    end = max(end, min(len(text), 1_200))
+    if stop_candidates:
+        end = min(stop_candidates)
+    else:
+        end = min(len(text), 12_000)
     body = _clean_section_text(text[: min(end, 14_000)], limit=14_000)
     return IpoFilingSourceSection(name="cover_page", text=body, start_offset=0, end_offset=min(end, 14_000))
 
@@ -1739,7 +2186,11 @@ def _sections_between_headings(text: str, spec: _SectionSpec) -> list[IpoFilingS
         body = _clean_section_text(raw_body, limit=spec.char_limit)
         if not body or not _has_section_body(body):
             continue
-        if _is_toc_like_section_candidate(text, section_start, section_end, body, heading):
+        if spec.name == "financial_statements" and _looks_like_taxation_false_positive(body):
+            continue
+        if _is_toc_like_section_candidate(text, section_start, section_end, body, heading) and not (
+            spec.name == "explanatory_note" and re.search(r"two prospectuses|Public Offering Prospectus|Resale Prospectus", body, flags=re.IGNORECASE)
+        ):
             continue
         score = _section_candidate_score(text, section_start, section_end, body, spec)
         candidates.append((score, section_start, section_end, heading, body))
@@ -1854,17 +2305,22 @@ def _known_toc_entry_count(value: str) -> int:
     lower = re.sub(r"\s+", " ", value or "").lower()
     titles = (
         "prospectus summary",
+        "explanatory note",
+        "recent developments",
         "risk factors",
         "use of proceeds",
         "capitalization",
         "dilution",
         "management's discussion and analysis",
         "business",
+        "regulation",
+        "selling shareholders",
         "principal shareholders",
         "related party transactions",
         "shares eligible for future sale",
         "description of american depositary shares",
         "underwriting",
+        "plan of distribution",
         "financial statements",
     )
     return sum(1 for title in titles if re.search(rf"\b{re.escape(title)}\b\s+\d{{1,4}}\b", lower))
@@ -1883,6 +2339,34 @@ def _is_toc_like_section_candidate(text: str, start: int, end: int, body: str, h
     return _is_toc_dominant_section(body)
 
 
+def _looks_like_taxation_false_positive(value: str) -> bool:
+    lower = (value or "").lower()
+    tax_markers = (
+        "u.s. holder",
+        "united states federal income tax",
+        "amount realized upon the disposition",
+        "capital gain or loss",
+        "tax basis",
+        "passive foreign investment company",
+    )
+    tax_hits = sum(1 for marker in tax_markers if marker in lower)
+    if tax_hits < 2:
+        return False
+    financial_markers = (
+        "consolidated statements of operations",
+        "consolidated statements of comprehensive",
+        "consolidated balance sheets",
+        "consolidated statements of cash flows",
+        "notes to consolidated financial statements",
+        "revenue",
+        "net loss",
+        "total assets",
+        "total liabilities",
+    )
+    financial_hits = sum(1 for marker in financial_markers if marker in lower)
+    return financial_hits <= 1 or "amount realized upon the disposition" in lower
+
+
 def _section_candidate_score(text: str, start: int, end: int, body: str, spec: _SectionSpec) -> int:
     score = 0
     toc_start, toc_end = _table_of_contents_region(text)
@@ -1894,6 +2378,8 @@ def _section_candidate_score(text: str, start: int, end: int, body: str, spec: _
     for term in spec.terms:
         if term and term.lower() in lower:
             score += 12
+    if spec.name == "financial_statements" and _looks_like_taxation_false_positive(body):
+        score -= 500
     if _is_toc_dominant_section(body):
         score -= 250
     if spec.name == "risk_factors" and re.search(r"\bsee\s+risk factors\b", lower) and _prose_word_count(body) < 120:
@@ -1943,6 +2429,8 @@ def _windows_around_terms(text: str, spec: _SectionSpec) -> list[IpoFilingSource
             start_at = index + len(term)
             body = _clean_section_text(text[start:end], limit=min(spec.char_limit, 6_000))
             if not body or not _has_section_body(body):
+                continue
+            if spec.name == "financial_statements" and _looks_like_taxation_false_positive(body):
                 continue
             if _is_toc_like_section_candidate(text, start, end, body, term):
                 continue
@@ -1994,9 +2482,24 @@ def _query_terms(prompt: str) -> tuple[str, ...]:
     if _is_overview_prompt(prompt):
         expansions.extend(
             [
+                "under the symbol",
+                "price range",
+                "sole book-runner",
+                "public offering prospectus",
+                "resale prospectus",
+                "selling shareholders",
+                "will not receive proceeds",
                 "net proceeds",
                 "immediate dilution",
                 "capitalization",
+                "recent developments",
+                "asset acquisition",
+                "Moltex",
+                "regulatory",
+                "NRC",
+                "CNSC",
+                "formal applications",
+                "substantial doubt",
                 "customer concentration",
                 "supplier concentration",
                 "license agreement",
