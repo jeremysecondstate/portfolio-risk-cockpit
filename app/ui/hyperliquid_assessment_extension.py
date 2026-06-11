@@ -99,11 +99,11 @@ def _sync_hyperliquid_account_with_assessment(self: tk.Tk) -> None:
         labeled_portfolios: list[Portfolio] = []
         source_messages: list[str] = []
         reports: list[str] = []
-        primary_open_orders: list[dict[str, object]] = []
+        primary_open_orders: list[dict[str, object]] | None = None
 
         for account in accounts:
             snapshot = client.fetch_snapshot(account.address)
-            if not primary_open_orders:
+            if primary_open_orders is None:
                 primary_open_orders = snapshot.open_orders
 
             raw_portfolio, hyperliquid_source_message = portfolio_from_hyperliquid_snapshot(snapshot)
@@ -122,7 +122,7 @@ def _sync_hyperliquid_account_with_assessment(self: tk.Tk) -> None:
 
                 # Keep order actions pointed at the primary account until signed multi-account
                 # routing is added. Balances/positions below are still synced for every account.
-                _populate_workspace_open_orders_table(orders_table, primary_open_orders)
+                _populate_workspace_open_orders_table(orders_table, primary_open_orders or [])
             except Exception:
                 pass
 
