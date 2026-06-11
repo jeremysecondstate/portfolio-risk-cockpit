@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import re
 import traceback
 
 from datetime import datetime, timedelta, timezone
@@ -31,6 +32,7 @@ from app.ui.trading_workspace_extension import (
 )
 from app.ui import polished_theme
 from app.ui.polished_theme import _make_paned
+from app.ui.symbol_chat_window import open_symbol_chat_window
 from app.ui.venue_mid_extension import _extract_schwab_quote, _first_number, _format_optional_price, _format_price
 
 
@@ -45,6 +47,7 @@ def install_schwab_trading_tab(app_cls: Type[tk.Tk]) -> None:
     app_cls.refresh_schwab_recent_orders_tab = _refresh_schwab_recent_orders_tab  # type: ignore[attr-defined]
     app_cls.open_selected_schwab_order_editor = _open_selected_schwab_order_editor  # type: ignore[attr-defined]
     app_cls.cancel_selected_schwab_open_order = _cancel_selected_schwab_open_order  # type: ignore[attr-defined]
+    app_cls.open_schwab_symbol_chat = _open_schwab_symbol_chat  # type: ignore[attr-defined]
 
 
 def _build_layout_without_account_strip(self: tk.Tk) -> None:
@@ -581,6 +584,7 @@ def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
     def schwab_action(*names: str) -> Callable[[], None]:
         return lambda: _run_schwab_workspace_action(self, *names)
 
+    _add_action_button(actions, row=0, column=0, text="Open Symbol Chat", command=lambda app=self: _open_schwab_symbol_chat(app), style="Accent.TButton")
     _add_action_button(actions, row=0, column=3, text="Tech Analysis", command=schwab_action("show_technical_analysis"))
     _add_action_button(actions, row=1, column=3, text="Preview Schwab", command=schwab_action("run_schwab_preview"))
     _add_action_button(actions, row=0, column=2, text="Recent Orders", command=lambda app=self: _refresh_schwab_recent_orders_tab(app))
@@ -598,6 +602,81 @@ def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
 
     _add_action_button(actions, row=2, column=2, text="Cancel Order", command=schwab_action("cancel_selected_order", "show_cancel_order_placeholder"), style="Danger.TButton")
     _add_action_button(actions, row=2, column=3, text="LIVE Submit", command=lambda app=self: _submit_schwab_live_order(app), style="Danger.TButton")
+
+
+def _open_schwab_symbol_chat(self: tk.Tk) -> None:
+    symbol = _resolve_open_symbol_chat_symbol(self)
+    if not symbol:
+        messagebox.showinfo("Open Symbol Chat", "Select a Schwab position or enter a symbol first.")
+        return
+    try:
+        open_symbol_chat_window(
+            self,
+            symbol,
+            app_context=self,
+            schwab_session=getattr(self, "schwab_session", None),
+        )
+        if hasattr(self, "schwab_status_var"):
+            self.schwab_status_var.set(f"Symbol Chat: opened for {symbol}")
+        _set_schwab_mode_text(
+            self,
+            "AI SYMBOL CHAT\n"
+            "==============\n\n"
+            f"Opened analysis-only Symbol Chat for {symbol}.\n\n"
+            "No order was placed, previewed, modified, or automated.",
+        )
+    except Exception as exc:
+        messagebox.showerror("Open Symbol Chat failed", str(exc))
+
+
+def _resolve_open_symbol_chat_symbol(self: tk.Tk) -> str:
+    for candidate in (
+        _selected_schwab_position_symbol(self),
+        _get_string_var(self, "symbol_var"),
+        _get_string_var(self, "options_symbol_var"),
+        _get_string_var(self, "options_underlying_symbol_var"),
+    ):
+        symbol = _clean_symbol_chat_symbol(candidate)
+        if symbol:
+            return symbol
+    return ""
+
+
+def _selected_schwab_position_symbol(self: tk.Tk) -> str:
+    table = getattr(self, "schwab_workspace_holdings_table", None)
+    if table is None:
+        return ""
+    try:
+        selection = table.selection()
+    except Exception:
+        return ""
+    if not selection:
+        return ""
+    try:
+        raw_values = table.item(selection[0], "values")
+        columns = tuple(table["columns"])
+    except Exception:
+        return ""
+    values = {str(column): str(raw_values[index]) for index, column in enumerate(columns) if index < len(raw_values)}
+    if str(values.get("type", "")).strip().lower() == "cash":
+        return ""
+    return values.get("symbol", "")
+
+
+def _clean_symbol_chat_symbol(value: object) -> str:
+    clean = str(value or "").strip().upper()
+    if not clean:
+        return ""
+    if "(" in clean:
+        clean = clean.split("(", 1)[0].strip()
+    if clean.startswith("HL:"):
+        clean = clean[3:]
+    for suffix in ("-PERP-SHORT", "-PERP", "-SPOT"):
+        if clean.endswith(suffix):
+            clean = clean[: -len(suffix)]
+    clean = re.sub(r"\s+", "", clean)
+    clean = re.sub(r"[^A-Z0-9.\-_/]", "", clean)
+    return clean
 
 
 def _install_schwab_account_tabs(self: tk.Tk, schwab_tab: ttk.Frame) -> None:
