@@ -30,6 +30,7 @@ from app.ui.trading_workspace_extension import install_trading_workspace_extensi
 from app.ui.options_resizable_layout_extension import install_options_resizable_layout_extension
 from app.ui.options_what_if_enhancement_extension import install_options_what_if_enhancement_extension
 from app.ui.polished_theme import install_polished_cockpit_theme
+from app.ui.schwab_exto_time_in_force_extension import install_schwab_exto_time_in_force_extension
 from app.ui.schwab_live_status_extension import install_schwab_live_status_extension
 from app.ui.schwab_mechanical_submit_extension import install_schwab_mechanical_submit_extension
 from app.ui.schwab_oauth_hardening_extension import install_schwab_oauth_hardening_extension
@@ -79,6 +80,7 @@ def install_ui_extensions(app_cls: Type[tk.Tk]) -> None:
     install_venue_mid_extension(app_cls)
     install_options_core_math_extension()
     install_schwab_trading_tab(app_cls)
+    install_schwab_exto_time_in_force_extension(app_cls)
     install_schwab_options_what_if_scenario_extension(app_cls)
     install_options_resizable_layout_extension()
     install_cash_positions_extension(app_cls)
