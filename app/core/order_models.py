@@ -20,12 +20,14 @@ class OrderType(str, Enum):
 
 
 class TimeInForce(str, Enum):
-    DAY = "Day"
+    DAY = "DAY"
     GTC = "GTC"
-    DAY_EXT = "Day (EXT 13h)"
-    GTC_EXT = "GTC (EXT 13h)"
-    DAY_EXT_AM = "Day (EXT AM)"
-    DAY_EXT_PM = "Day (EXT PM)"
+    EXT = "EXT"
+    GTC_EXT = "GTC_EXT"
+    EXTO = "EXTO"
+    GTC_EXTO = "GTC_EXTO"
+    AM = "AM"
+    PM = "PM"
 
 
 SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES = tuple(option.value for option in TimeInForce)
@@ -41,18 +43,31 @@ def normalize_time_in_force(value: str | TimeInForce) -> TimeInForce:
         "gtc": TimeInForce.GTC,
         "good_till_cancel": TimeInForce.GTC,
         "good till cancel": TimeInForce.GTC,
-        "day_ext": TimeInForce.DAY_EXT,
-        "day ext": TimeInForce.DAY_EXT,
-        "day (ext 13h)": TimeInForce.DAY_EXT,
+        "ext": TimeInForce.EXT,
+        "day_ext": TimeInForce.EXT,
+        "day ext": TimeInForce.EXT,
+        "day (ext 13h)": TimeInForce.EXT,
         "gtc_ext": TimeInForce.GTC_EXT,
         "gtc ext": TimeInForce.GTC_EXT,
         "gtc (ext 13h)": TimeInForce.GTC_EXT,
-        "day_ext_am": TimeInForce.DAY_EXT_AM,
-        "day ext am": TimeInForce.DAY_EXT_AM,
-        "day (ext am)": TimeInForce.DAY_EXT_AM,
-        "day_ext_pm": TimeInForce.DAY_EXT_PM,
-        "day ext pm": TimeInForce.DAY_EXT_PM,
-        "day (ext pm)": TimeInForce.DAY_EXT_PM,
+        "exto": TimeInForce.EXTO,
+        "day_exto": TimeInForce.EXTO,
+        "day exto": TimeInForce.EXTO,
+        "day (exto)": TimeInForce.EXTO,
+        "overnight": TimeInForce.EXTO,
+        "24h": TimeInForce.EXTO,
+        "24_5": TimeInForce.EXTO,
+        "gtc_exto": TimeInForce.GTC_EXTO,
+        "gtc exto": TimeInForce.GTC_EXTO,
+        "gtc (exto)": TimeInForce.GTC_EXTO,
+        "day_ext_am": TimeInForce.AM,
+        "day ext am": TimeInForce.AM,
+        "day (ext am)": TimeInForce.AM,
+        "am": TimeInForce.AM,
+        "day_ext_pm": TimeInForce.PM,
+        "day ext pm": TimeInForce.PM,
+        "day (ext pm)": TimeInForce.PM,
+        "pm": TimeInForce.PM,
     }
     normalized = aliases.get(raw.lower())
     if normalized is not None:
@@ -65,10 +80,12 @@ def schwab_equity_session_duration(time_in_force: str | TimeInForce) -> tuple[st
     mapping = {
         TimeInForce.DAY: ("NORMAL", "DAY"),
         TimeInForce.GTC: ("NORMAL", "GOOD_TILL_CANCEL"),
-        TimeInForce.DAY_EXT: ("SEAMLESS", "DAY"),
+        TimeInForce.EXT: ("SEAMLESS", "DAY"),
         TimeInForce.GTC_EXT: ("SEAMLESS", "GOOD_TILL_CANCEL"),
-        TimeInForce.DAY_EXT_AM: ("AM", "DAY"),
-        TimeInForce.DAY_EXT_PM: ("PM", "DAY"),
+        TimeInForce.EXTO: ("EXTO", "DAY"),
+        TimeInForce.GTC_EXTO: ("EXTO", "GOOD_TILL_CANCEL"),
+        TimeInForce.AM: ("AM", "DAY"),
+        TimeInForce.PM: ("PM", "DAY"),
     }
     return mapping[tif]
 
