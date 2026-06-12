@@ -392,21 +392,35 @@ class HyperliquidExecutionAdapter:
     def place_position_tpsl(self, tickets: list[HyperliquidTriggerTicket]) -> Any:
         if not tickets:
             raise ValueError("Enter at least one TP or SL trigger price.")
-        normalized_tickets = [normalize_hyperliquid_trigger_ticket_for_wire(ticket) for ticket in tickets]
-        config = HyperliquidTradingConfig()
+
+        normalized_tickets = [
+            normalize_hyperliquid_trigger_ticket_for_wire(ticket)
+            for ticket in tickets
+        ]
+
+        config = self._config()
         for ticket in normalized_tickets:
             config.validate_trigger_for_live(ticket)
-        return self._local_signed_position_tpsl(normalized_tickets)
+
+        return self._local_signed_position_tpsl(normalized_tickets, config)
 
     def update_leverage(self, coin: str, leverage: int, *, is_cross: bool = True) -> Any:
-        config = HyperliquidTradingConfig()
+        config = self._config()
         config.validate_for_live_action()
+
         normalized_coin = normalize_hyperliquid_coin(coin)
+
         if leverage < 1:
             raise ValueError("Hyperliquid leverage must be at least 1x.")
         if leverage > 100:
             raise ValueError("Hyperliquid leverage must be 100x or lower.")
-        return self._local_signed_update_leverage(normalized_coin, leverage, is_cross=is_cross)
+
+        return self._local_signed_update_leverage(
+            normalized_coin,
+            leverage,
+            config,
+            is_cross=is_cross,
+        )
 
     def _local_signed_submit(self, ticket: HyperliquidOrderTicket, config: HyperliquidTradingConfig) -> Any:
         from eth_account import Account
@@ -503,22 +517,28 @@ class HyperliquidExecutionAdapter:
             reduce_only=normalized_ticket.reduce_only,
         )
 
-    def _local_signed_position_tpsl(self, tickets: list[HyperliquidTriggerTicket]) -> Any:
+    def _local_signed_position_tpsl(
+            self,
+            tickets: list[HyperliquidTriggerTicket],
+            config: HyperliquidTradingConfig,
+    ) -> Any:
         from eth_account import Account
         from hyperliquid.exchange import Exchange
         from hyperliquid.utils import constants
 
-        api_secret = os.getenv("HYPE_API_SECRET", "").strip()
-        wallet_address = os.getenv("HYPE_WALLET_ADDRESS", "").strip()
-
-        api_wallet = Account.from_key(api_secret)
+        api_wallet = Account.from_key(config.api_secret)
 
         exchange = Exchange(
             api_wallet,
             constants.MAINNET_API_URL,
-            account_address=wallet_address,
+            account_address=config.wallet_address,
         )
-        normalized_tickets = [normalize_hyperliquid_trigger_ticket_size_for_exchange(ticket, exchange) for ticket in tickets]
+
+        normalized_tickets = [
+            normalize_hyperliquid_trigger_ticket_size_for_exchange(ticket, exchange)
+            for ticket in tickets
+        ]
+
         order_requests = [
             {
                 "coin": ticket.coin,
@@ -530,22 +550,27 @@ class HyperliquidExecutionAdapter:
             }
             for ticket in normalized_tickets
         ]
+
         return exchange.bulk_orders(order_requests, grouping="positionTpsl")
 
-    def _local_signed_update_leverage(self, coin: str, leverage: int, *, is_cross: bool = True) -> Any:
+    def _local_signed_update_leverage(
+            self,
+            coin: str,
+            leverage: int,
+            config: HyperliquidTradingConfig,
+            *,
+            is_cross: bool = True,
+    ) -> Any:
         from eth_account import Account
         from hyperliquid.exchange import Exchange
         from hyperliquid.utils import constants
 
-        api_secret = os.getenv("HYPE_API_SECRET", "").strip()
-        wallet_address = os.getenv("HYPE_WALLET_ADDRESS", "").strip()
-
-        api_wallet = Account.from_key(api_secret)
+        api_wallet = Account.from_key(config.api_secret)
 
         exchange = Exchange(
             api_wallet,
             constants.MAINNET_API_URL,
-            account_address=wallet_address,
+            account_address=config.wallet_address,
         )
 
         return exchange.update_leverage(int(leverage), coin, is_cross=is_cross)

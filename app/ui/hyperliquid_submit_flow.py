@@ -22,18 +22,21 @@ def install_hyperliquid_submit_flow(app_cls: Type[tk.Tk]) -> None:
     app_cls.show_hyperliquid_perp_live_submit_safety_review = _show_hyperliquid_perp_live_submit_safety_review  # type: ignore[attr-defined]
     app_cls.show_hyperliquid_live_submit_safety_review = _show_hyperliquid_perp_live_submit_safety_review  # type: ignore[attr-defined]
 
+    app_cls.show_hyperliquid_spot_live_submit_for_account = _show_hyperliquid_spot_live_submit_no_autosync  # type: ignore[attr-defined]
+    app_cls.show_hyperliquid_perp_live_submit_for_account = _show_hyperliquid_perp_live_submit_safety_review  # type: ignore[attr-defined]
 
-def _show_hyperliquid_spot_live_submit_no_autosync(self: tk.Tk) -> None:
+
+def _show_hyperliquid_spot_live_submit_no_autosync(self: tk.Tk, account_key: str = "jeremy") -> None:
     try:
         ticket = self.parse_hyperliquid_spot_ticket()
         normalized_ticket = normalize_hyperliquid_ticket_limit_price(ticket)
-        config = HyperliquidTradingConfig()
+        config = HyperliquidTradingConfig(account_key)
         self._set_preview_text(config.live_review_text(normalized_ticket))
-        result = HyperliquidExecutionAdapter().submit(normalized_ticket)
-        self.hyperliquid_status_var.set("Hyperliquid spot: submit attempted")
+        result = HyperliquidExecutionAdapter(account_key).submit(normalized_ticket)
+        self.hyperliquid_status_var.set(f"Hyperliquid spot ({config.account_label}): submit attempted")
         _update_limit_price_if_needed(self, ticket, normalized_ticket)
         self._set_preview_text(
-            "HYPERLIQUID SPOT LIVE SUBMIT RESULT\n"
+            f"HYPERLIQUID SPOT LIVE SUBMIT RESULT ({config.account_label.upper()})\n"
             "===================================\n\n"
             f"{_price_adjustment_lines(ticket, normalized_ticket)}"
             f"{result}\n\n"
@@ -45,17 +48,17 @@ def _show_hyperliquid_spot_live_submit_no_autosync(self: tk.Tk) -> None:
         messagebox.showerror("Hyperliquid spot live submit blocked", str(exc))
 
 
-def _show_hyperliquid_perp_live_submit_safety_review(self: tk.Tk) -> None:
+def _show_hyperliquid_perp_live_submit_safety_review(self: tk.Tk, account_key: str = "jeremy") -> None:
     try:
         _sync_perp_ticket_fields_to_shared(self)
         ticket = self.parse_hyperliquid_ticket()
         normalized_ticket = normalize_hyperliquid_ticket_for_wire(ticket)
-        config = HyperliquidTradingConfig()
+        config = HyperliquidTradingConfig(account_key)
         self._set_preview_text(config.live_review_text(normalized_ticket))
-        adapter = HyperliquidExecutionAdapter()
+        adapter = HyperliquidExecutionAdapter(account_key)
         leverage_result = _apply_ticket_leverage_if_needed(self, adapter, normalized_ticket)
         result = adapter.submit(normalized_ticket)
-        self.hyperliquid_status_var.set("Hyperliquid perp: submit attempted")
+        self.hyperliquid_status_var.set(f"Hyperliquid perp ({config.account_label}): submit attempted")
         _update_ticket_fields_if_needed(self, ticket, normalized_ticket)
         child_tickets = _attached_tpsl_tickets(self, normalized_ticket)
         child_result: object | None = None
