@@ -38,6 +38,7 @@ def _show_hyperliquid_spot_live_submit_no_autosync(self: tk.Tk, account_key: str
         self._set_preview_text(
             f"HYPERLIQUID SPOT LIVE SUBMIT RESULT ({config.account_label.upper()})\n"
             "===================================\n\n"
+            f"Account: {config.account_label}\n\n"
             f"{_price_adjustment_lines(ticket, normalized_ticket)}"
             f"{result}\n\n"
             "No automatic portfolio sync was run.\n"
@@ -73,8 +74,9 @@ def _show_hyperliquid_perp_live_submit_safety_review(self: tk.Tk, account_key: s
             self.hyperliquid_status_var.set("Hyperliquid: parent sent, no TP/SL price entered")
         sync_result = _sync_hyperliquid_account_best_effort(self)
         self._set_preview_text(
-            "HYPERLIQUID PERP LIVE SUBMIT RESULT\n"
+            f"HYPERLIQUID PERP LIVE SUBMIT RESULT ({config.account_label.upper()})\n"
             "===================================\n\n"
+            f"Account: {config.account_label}\n\n"
             "HYPERLIQUID PERP LIVE SUBMIT\n"
             "This was submitted through the PERP order path, not the spot ticket flow.\n\n"
             f"{_perp_ticket_summary_lines(self, normalized_ticket)}"
