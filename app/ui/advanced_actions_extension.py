@@ -49,7 +49,7 @@ def _sync_hyperliquid_combined(self: tk.Tk) -> None:
 
 def _hyperliquid_address_from_env() -> str:
     """Support the friendly HYPE env var plus the original generic name."""
-    for key in "HYPE_WALLET_ADDRESS":
+    for key in "HYPE_WALLET_ADDRESS_JEREMY":
         value = os.getenv(key, "").strip()
         if value:
             return value
@@ -62,7 +62,7 @@ def _sync_hyperliquid_account(self: tk.Tk) -> None:
     address = default_address or simpledialog.askstring(
         "Hyperliquid Sync",
         "Enter your Hyperliquid master/sub-account wallet address.\n\n"
-        "Tip: save HYPE_WALLET_ADDRESS=0x... in .env to skip this prompt.\n\n"
+        "Tip: save HYPE_WALLET_ADDRESS_JEREMY=0x... in .env to skip this prompt.\n\n"
         "Use the account address, not the API/agent wallet address.",
     )
     if not address:

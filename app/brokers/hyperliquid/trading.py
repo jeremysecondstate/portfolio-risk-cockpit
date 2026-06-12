@@ -33,10 +33,10 @@ HYPERLIQUID_LIVE_ACCOUNTS: dict[str, HyperliquidLiveAccountProfile] = {
         label="Jeremy",
         wallet_address_env_keys=(
             "HYPE_WALLET_ADDRESS_JEREMY_SECONDSTATE",
-            "HYPE_WALLET_ADDRESS",
+            "HYPE_WALLET_ADDRESS_JEREMY",
         ),
-        api_address_env_keys=("HYPE_API_ADDRESS",),
-        api_secret_env_keys=("HYPE_API_SECRET",),
+        api_address_env_keys=("HYPE_API_ADDRESS_JEREMY",),
+        api_secret_env_keys=("HYPE_API_SECRET_JEREMY",),
     ),
     "alex": HyperliquidLiveAccountProfile(
         key="alex",
@@ -211,8 +211,8 @@ class HyperliquidTradingConfig:
 
     def validation_lines(self) -> list[str]:
         lines: list[str] = []
-        lines.append(_gate("HYPE_WALLET_ADDRESS", self.wallet_address.startswith("0x") and len(self.wallet_address) == 42))
-        lines.append(_gate("HYPE_API_ADDRESS", self.api_address.startswith("0x") and len(self.api_address) == 42))
+        lines.append(_gate("HYPE_WALLET_ADDRESS_JEREMY", self.wallet_address.startswith("0x") and len(self.wallet_address) == 42))
+        lines.append(_gate("HYPE_API_ADDRESS_JEREMY", self.api_address.startswith("0x") and len(self.api_address) == 42))
         lines.append(_gate("HYPE_API_SECRET present", self.has_signing_secret))
         lines.append(_gate("HYPERLIQUID_ENABLE_LIVE_ORDERS=true", self.live_enabled))
         lines.append(_gate(f"Max notional <= ${self.max_live_notional:,.2f}", True))
@@ -443,8 +443,8 @@ class HyperliquidExecutionAdapter:
         from hyperliquid.exchange import Exchange
         from hyperliquid.utils import constants
 
-        api_secret = os.getenv("HYPE_API_SECRET", "").strip()
-        wallet_address = os.getenv("HYPE_WALLET_ADDRESS", "").strip()
+        api_secret = os.getenv("HYPE_API_SECRET_JEREMY", "").strip()
+        wallet_address = os.getenv("HYPE_WALLET_ADDRESS_JEREMY", "").strip()
 
         api_wallet = Account.from_key(api_secret)
 
@@ -461,8 +461,8 @@ class HyperliquidExecutionAdapter:
         from hyperliquid.exchange import Exchange
         from hyperliquid.utils import constants
 
-        api_secret = os.getenv("HYPE_API_SECRET", "").strip()
-        wallet_address = os.getenv("HYPE_WALLET_ADDRESS", "").strip()
+        api_secret = os.getenv("HYPE_API_SECRET_JEREMY", "").strip()
+        wallet_address = os.getenv("HYPE_WALLET_ADDRESS_JEREMY", "").strip()
 
         api_wallet = Account.from_key(api_secret)
 
@@ -488,8 +488,8 @@ class HyperliquidExecutionAdapter:
         from hyperliquid.exchange import Exchange
         from hyperliquid.utils import constants
 
-        api_secret = os.getenv("HYPE_API_SECRET", "").strip()
-        wallet_address = os.getenv("HYPE_WALLET_ADDRESS", "").strip()
+        api_secret = os.getenv("HYPE_API_SECRET_JEREMY", "").strip()
+        wallet_address = os.getenv("HYPE_WALLET_ADDRESS_JEREMY", "").strip()
 
         api_wallet = Account.from_key(api_secret)
 

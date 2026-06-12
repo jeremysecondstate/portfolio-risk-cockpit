@@ -24,8 +24,8 @@ class HyperliquidAccountTarget(NamedTuple):
 # Jeremy keeps the original single-account env names so existing .env files keep working.
 # Alex can be added with the account-specific address without changing the UI layout.
 HYPERLIQUID_ACCOUNT_ENV_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Jeremy", ("HYPE_WALLET_ADDRESS_JEREMY_SECONDSTATE", "HYPE_WALLET_ADDRESS")),
-    ("Alex", ("HYPE_WALLET_ADDRESS_ALEX_SECONDSTATE", "HYPE_ALEX_WALLET_ADDRESS")),
+    ("Jeremy", ("HYPE_WALLET_ADDRESS_JEREMY_SECONDSTATE", "HYPE_WALLET_ADDRESS_JEREMY")),
+    ("Alex", ("HYPE_WALLET_ADDRESS_ALEX_SECONDSTATE", "HYPE_WALLET_ADDRESS_ALEX")),
 )
 HYPERLIQUID_ADDRESS_ENV_KEYS = tuple(
     key

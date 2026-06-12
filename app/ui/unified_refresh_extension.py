@@ -14,7 +14,7 @@ from app.ui import polished_theme
 from app.ui.schwab_sync_report_extension import _is_temporary_schwab_provider_error
 
 
-HYPERLIQUID_ADDRESS_ENV_KEYS = "HYPE_WALLET_ADDRESS"
+HYPERLIQUID_ADDRESS_ENV_KEYS = "HYPE_WALLET_ADDRESS_JEREMY"
 REFRESH_DUE_AFTER_MS = 5 * 60 * 1000
 AUTO_REFRESH_AFTER_MS = 1 * 60 * 1000
 AUTO_REFRESH_ENV_KEY = "COCKPIT_AUTO_REFRESH_MS"
@@ -329,11 +329,11 @@ def _sync_hyperliquid_account_silent(self: tk.Tk, automated: bool = False) -> tu
         address = simpledialog.askstring(
             "Hyperliquid Sync",
             "Enter your Hyperliquid master/sub-account wallet address.\n\n"
-            "Tip: save HYPE_WALLET_ADDRESS=0x... in .env to skip this prompt.\n\n"
+            "Tip: save HYPE_WALLET_ADDRESS_JEREMY=0x... in .env to skip this prompt.\n\n"
             "Use the account address, not the API/agent wallet address.",
         )
     if not address:
-        raise RuntimeError("Hyperliquid refresh skipped; save HYPE_WALLET_ADDRESS=0x... in .env to enable automatic Hyperliquid sync.")
+        raise RuntimeError("Hyperliquid refresh skipped; save HYPE_WALLET_ADDRESS_JEREMY=0x... in .env to enable automatic Hyperliquid sync.")
 
     client = HyperliquidInfoClient()
     snapshot = client.fetch_snapshot(address)
