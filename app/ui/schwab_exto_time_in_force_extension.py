@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Any, Type
 
+from app.core.order_models import normalize_time_in_force
 from app.ui import schwab_trading_tab
 
 
@@ -17,6 +18,7 @@ def install_schwab_exto_time_in_force_extension(app_cls: Type[tk.Tk]) -> None:
     if getattr(app_cls, "_schwab_exto_time_in_force_extension_installed", False):
         return
 
+    _patch_supported_duration()
     _patch_supported_session()
     _patch_replace_dialog()
 
@@ -29,6 +31,20 @@ def install_schwab_exto_time_in_force_extension(app_cls: Type[tk.Tk]) -> None:
 
     app_cls._build_layout = _build_layout_with_exto_session_choices  # type: ignore[method-assign]
     app_cls._schwab_exto_time_in_force_extension_installed = True  # type: ignore[attr-defined]
+
+
+def _patch_supported_duration() -> None:
+    if getattr(schwab_trading_tab, "_schwab_exto_supported_duration_patched", False):
+        return
+
+    def _supported_duration_with_tos_codes(value: str) -> str:
+        try:
+            return normalize_time_in_force(value).value
+        except ValueError:
+            return "DAY"
+
+    schwab_trading_tab._supported_duration = _supported_duration_with_tos_codes  # type: ignore[attr-defined]
+    schwab_trading_tab._schwab_exto_supported_duration_patched = True  # type: ignore[attr-defined]
 
 
 def _patch_supported_session() -> None:
