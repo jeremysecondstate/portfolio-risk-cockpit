@@ -87,6 +87,7 @@ class RecentEarningsRecord:
     accession_number: str
     source: str = "SEC EDGAR"
     filing_type: str = EARNINGS_DROP_KIND
+    source_excerpt: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -323,6 +324,7 @@ def build_recent_earnings_records(
                 exhibit_url=exhibit_url_by_accession.get(filing.accession_number),
                 accession_number=filing.accession_number,
                 filing_type=filing_type,
+                source_excerpt=_source_excerpt(text_hint_by_accession.get(filing.accession_number, "")),
             )
         )
 
@@ -472,7 +474,9 @@ def filter_recent_earnings_records(
             continue
         if exchange != "All" and (record.exchange or EMPTY_VALUE) != exchange:
             continue
-        if risk_flag != "All" and risk_flag not in record.risk_flags:
+        if risk_flag == "Any risk flag" and not record.risk_flags:
+            continue
+        if risk_flag not in {"All", "Any risk flag"} and risk_flag not in record.risk_flags:
             continue
         if has_exhibit and not record.exhibit_url:
             continue
@@ -823,6 +827,13 @@ def _form_slug(form: str) -> str:
 
 def _collapse_text(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
+
+
+def _source_excerpt(text: str) -> str | None:
+    clean = _collapse_text(text)
+    if not clean:
+        return None
+    return clean[:4000]
 
 
 def _clean_text(value: Any) -> str:

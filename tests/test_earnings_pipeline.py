@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import date
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from app.analytics.earnings_ai import (
+    EARNINGS_AI_SYSTEM_PROMPT,
+    OpenAiEarningsRadarClient,
+    earnings_ai_request_payload,
+)
 from app.analytics.earnings_release import analyze_earnings_sources, format_earnings_release_digest
 from app.analytics.earnings_pipeline import (
     EARNINGS_DROP_KIND,
@@ -23,6 +30,7 @@ from app.analytics.earnings_pipeline import (
 from app.analytics.research_scoring import score_earnings_risk
 from app.data.earnings_calendar import UpcomingEarningsRecord
 from app.data.sec_edgar import SecCompany, SecCurrentFiling, SecEarningsReport, SecFiling, SecFilingDocument
+from app.ui import earnings_radar_extension
 
 
 NVDA_LIKE_10Q_FIXTURE = """
@@ -73,6 +81,7 @@ def _recent_record(
     guidance: bool = True,
     risk_flags: tuple[str, ...] = ("Revenue decline",),
     exhibit_url: str | None = "https://example.test/ex99.htm",
+    source_excerpt: str | None = None,
 ) -> RecentEarningsRecord:
     return RecentEarningsRecord(
         cik="0000000001",
@@ -99,6 +108,7 @@ def _recent_record(
         exhibit_url=exhibit_url,
         accession_number="0000000001-26-000001",
         filing_type=EARNINGS_DROP_KIND,
+        source_excerpt=source_excerpt,
     )
 
 
@@ -138,6 +148,62 @@ class _No8KFakeSecClient:
 
     def get_companyfacts(self, symbol: str) -> tuple[SecCompany, dict]:
         raise RuntimeError("companyfacts offline in deterministic test")
+
+
+class _FakeResponses:
+    def __init__(self, answer: str = "Selected-row earnings analysis only.") -> None:
+        self.answer = answer
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(output_text=self.answer, id=f"earnings_resp_{len(self.calls)}")
+
+
+class _FakeOpenAiClient:
+    def __init__(self, answer: str = "Selected-row earnings analysis only.") -> None:
+        self.responses = _FakeResponses(answer)
+
+
+class _FakeButton:
+    def __init__(self) -> None:
+        self.state = ""
+
+    def configure(self, **kwargs) -> None:
+        if "state" in kwargs:
+            self.state = kwargs["state"]
+
+
+class _FakeText:
+    def __init__(self) -> None:
+        self.value = ""
+        self.state = ""
+
+    def configure(self, **kwargs) -> None:
+        if "state" in kwargs:
+            self.state = kwargs["state"]
+
+    def delete(self, *_args) -> None:
+        self.value = ""
+
+    def insert(self, _index, value: str) -> None:
+        self.value += value
+
+
+class _FakeTree:
+    def __init__(self, selection=("row1",)) -> None:
+        self._selection = selection
+
+    def selection(self):
+        return self._selection
+
+
+class _FakeStatus:
+    def __init__(self) -> None:
+        self.value = ""
+
+    def set(self, value: str) -> None:
+        self.value = value
 
 
 class EarningsPipelineTests(unittest.TestCase):
@@ -253,6 +319,114 @@ class EarningsPipelineTests(unittest.TestCase):
         self.assertEqual(records[0].release_title, "Earnings Release")
         self.assertEqual(records[0].revenue, 10_000_000.0)
         self.assertTrue(records[0].guidance_flag)
+
+    def test_earnings_ai_payload_is_grounded_in_selected_record(self) -> None:
+        record = _recent_record(source_excerpt="Revenue fell because demand softened. API key sk-testsecret123456 should not leak.")
+
+        payload = earnings_ai_request_payload(record, "Summarize this row.", source_snippets=(record.source_excerpt or "",), timeout_seconds=33)
+        selected = payload["selected_earnings_record"]
+
+        self.assertEqual(payload["question"], "Summarize this row.")
+        self.assertEqual(selected["company_name"], "Acme Corp")
+        self.assertEqual(selected["ticker"], "ACME")
+        self.assertEqual(selected["form"], "8-K")
+        self.assertEqual(selected["filing_type"], EARNINGS_DROP_KIND)
+        self.assertEqual(selected["parsed_metrics"]["revenue"], 123_400_000.0)
+        self.assertEqual(selected["guidance"]["mentioned"], True)
+        self.assertEqual(selected["risk_flags"], ["Revenue decline"])
+        self.assertEqual(selected["source_label"], "SEC EDGAR")
+        self.assertEqual(selected["accession_number"], "0000000001-26-000001")
+        self.assertEqual(payload["request_budget"]["openai_timeout_seconds"], 33)
+        self.assertIn("selected Earnings Radar record", " ".join(payload["grounding_rules"]))
+        self.assertIn("sk-[REDACTED]", payload["source_snippets"][0]["text"])
+        self.assertNotIn("sk-testsecret", json.dumps(payload))
+
+    def test_earnings_ai_payload_marks_missing_data_explicitly(self) -> None:
+        record = RecentEarningsRecord(
+            cik="0000000099",
+            company_name="Sparse Corp",
+            ticker=None,
+            form="10-Q",
+            items="Formal report",
+            filed_date="2026-06-01",
+            acceptance_datetime="2026-06-01T18:00:00",
+            report_date=None,
+            fiscal_period=None,
+            sector=None,
+            industry=None,
+            sic=None,
+            exchange=None,
+            release_title=None,
+            revenue=None,
+            revenue_growth=None,
+            eps=None,
+            net_income=None,
+            guidance_flag=False,
+            risk_flags=(),
+            filing_url="https://example.test/sparse-10q.htm",
+            exhibit_url=None,
+            accession_number="0000000099-26-000001",
+            filing_type=FORMAL_REPORT_KIND,
+        )
+
+        payload = earnings_ai_request_payload(record, "What changed?", timeout_seconds=120)
+        selected = payload["selected_earnings_record"]
+
+        self.assertEqual(selected["ticker"]["status"], "Not available in the selected Earnings Radar record.")
+        self.assertEqual(selected["parsed_metrics"]["revenue"]["status"], "Not available in the selected Earnings Radar record.")
+        self.assertEqual(selected["risk_flags"]["reason"], "No risk flags detected in parsed row.")
+        self.assertEqual(payload["source_snippets"]["reason"], "No source text snippet is available in the selected Earnings Radar record.")
+        self.assertIn("ticker", selected["missing_fields"])
+        self.assertIn("source_excerpt", selected["missing_fields"])
+
+    def test_earnings_ai_client_uses_responses_api_store_false_and_timeout(self) -> None:
+        record = _recent_record(source_excerpt="Revenue declined 4%.")
+        fake_openai = _FakeOpenAiClient(answer="Research-only selected-row answer.")
+        client = OpenAiEarningsRadarClient(openai_client=fake_openai, model="gpt-test", timeout_seconds=22)
+
+        response = client.analyze(record, "Guidance and risks?")
+
+        call = fake_openai.responses.calls[0]
+        request_payload = json.loads(call["input"][-1]["content"])
+        self.assertEqual(response.response_id, "earnings_resp_1")
+        self.assertEqual(response.source_mode, "earnings_radar_selected_record")
+        self.assertEqual(call["model"], "gpt-test")
+        self.assertEqual(call["store"], False)
+        self.assertEqual(call["timeout"], 22)
+        self.assertEqual(call["input"][0]["role"], "system")
+        self.assertIn(EARNINGS_AI_SYSTEM_PROMPT, call["input"][0]["content"])
+        self.assertEqual(request_payload["selected_earnings_record"]["ticker"], "ACME")
+        self.assertIn("buy, sell, or hold", " ".join(request_payload["grounding_rules"]))
+
+    def test_earnings_radar_selection_enables_selected_row_ai_actions(self) -> None:
+        record = _recent_record()
+        buttons = [_FakeButton(), _FakeButton(), _FakeButton(), _FakeButton()]
+        detail = _FakeText()
+        app = SimpleNamespace(
+            earnings_recent_table=_FakeTree(),
+            earnings_recent_row_map={"row1": record},
+            earnings_ai_status_var=_FakeStatus(),
+            earnings_recent_detail_text=detail,
+            _earnings_ai_running=False,
+            earnings_ai_analyze_button=buttons[0],
+            earnings_ai_summarize_button=buttons[1],
+            earnings_ai_symbol_chat_button=buttons[2],
+            earnings_ai_quick_buttons=[buttons[3]],
+        )
+
+        earnings_radar_extension._on_recent_selection_changed(app)
+
+        self.assertIs(app.earnings_recent_selected_record, record)
+        self.assertIn("Selected ACME", app.earnings_ai_status_var.value)
+        self.assertIn("Revenue", detail.value)
+        self.assertTrue(all(button.state == "normal" for button in buttons))
+
+        app.earnings_recent_table = _FakeTree(selection=())
+        earnings_radar_extension._on_recent_selection_changed(app)
+
+        self.assertIsNone(app.earnings_recent_selected_record)
+        self.assertIn("Select a recent earnings row", app.earnings_ai_status_var.value)
+        self.assertTrue(all(button.state == "disabled" for button in buttons))
 
     def test_no_8k_uses_10q_fallback_digest_with_metrics(self) -> None:
         report = _sec_10q_report()

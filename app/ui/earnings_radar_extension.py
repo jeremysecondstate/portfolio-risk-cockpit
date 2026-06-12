@@ -3,12 +3,18 @@ from __future__ import annotations
 import math
 import threading
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Iterable, Type
 
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from app.analytics.earnings_ai import (
+    EARNINGS_AI_ANALYZE_PROMPT,
+    EARNINGS_AI_QUICK_PROMPTS,
+    EarningsAiResponse,
+    OpenAiEarningsRadarClient,
+)
 from app.analytics.earnings_pipeline import (
     EARNINGS_FORMS,
     EMPTY_VALUE,
@@ -23,9 +29,11 @@ from app.analytics.earnings_pipeline import (
     filter_recent_earnings_records,
     filter_upcoming_earnings_records,
 )
+from app.analytics.symbol_chat import redact_symbol_chat_secrets
 from app.data.earnings_calendar import ALPHA_VANTAGE_HORIZONS, AlphaVantageEarningsCalendarClient, UpcomingEarningsRecord
 from app.data.sec_edgar import SecEdgarClient
 from app.ui import polished_theme
+from app.ui.symbol_chat_window import open_symbol_chat_window
 
 
 RECENT_COLUMNS = (
@@ -160,6 +168,9 @@ def _ensure_state(self: tk.Tk) -> None:
     self.earnings_recent_page_size_var = tk.StringVar(value="100")
     self.earnings_recent_parse_documents_var = tk.BooleanVar(value=True)
     self.earnings_recent_has_exhibit_var = tk.BooleanVar(value=False)
+    self.earnings_recent_selected_record: RecentEarningsRecord | None = None
+    self.earnings_ai_status_var = tk.StringVar(value="Select a recent earnings row for row-grounded AI.")
+    self._earnings_ai_running = False
 
     self.earnings_upcoming_records: list[UpcomingEarningsRecord] = []
     self.earnings_upcoming_filtered_records: list[UpcomingEarningsRecord] = []
@@ -190,9 +201,11 @@ def _build_recent_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     self.earnings_recent_chart = _chart(parent, row=2)
     self.earnings_recent_table = _table(parent, row=3, title="Recent EDGAR Drops", columns=RECENT_COLUMNS, sort=lambda col: _sort_recent(self, col))
     self.earnings_recent_table.bind("<Double-1>", lambda _event, app=self: _open_recent_filing(app), add="+")
+    self.earnings_recent_table.bind("<<TreeviewSelect>>", lambda _event, app=self: _on_recent_selection_changed(app), add="+")
     self.earnings_recent_table.tag_configure("kind_drop", foreground=polished_theme.ACCENT_SOFT)
     self.earnings_recent_table.tag_configure("kind_formal", foreground=polished_theme.POSITIVE)
-    _footer(self, parent, row=4, page_var_name="earnings_recent_page_var", size_var=self.earnings_recent_page_size_var, prev=lambda: _turn_recent_page(self, -1), next_=lambda: _turn_recent_page(self, 1), apply=lambda: _apply_recent_filters(self))
+    _build_recent_detail_panel(self, parent, row=4)
+    _footer(self, parent, row=5, page_var_name="earnings_recent_page_var", size_var=self.earnings_recent_page_size_var, prev=lambda: _turn_recent_page(self, -1), next_=lambda: _turn_recent_page(self, 1), apply=lambda: _apply_recent_filters(self))
 
 
 def _build_upcoming_tab(self: tk.Tk, parent: ttk.Frame) -> None:
@@ -229,12 +242,66 @@ def _build_recent_filters(self: tk.Tk, parent: ttk.Frame) -> None:
     checks.grid(row=2, column=4, columnspan=4, sticky="ew", pady=(6, 0))
     ttk.Checkbutton(checks, text="Has EX-99 / exhibit", variable=self.earnings_recent_has_exhibit_var, command=lambda: _apply_recent_filters(self)).pack(side=tk.LEFT)
     ttk.Checkbutton(checks, text="Parse optional release text", variable=self.earnings_recent_parse_documents_var).pack(side=tk.LEFT, padx=(12, 0))
+    quick = ttk.Frame(box, style="Panel.TFrame")
+    quick.grid(row=3, column=0, columnspan=8, sticky="ew", pady=(8, 0))
+    ttk.Label(quick, text="Quick", style="Subtle.TLabel").pack(side=tk.LEFT, padx=(0, 6))
+    for label, preset in (
+        ("Last 7D", "last7"),
+        ("8-K 2.02", "item202"),
+        ("Guidance", "guidance"),
+        ("Risk Flags", "risk"),
+        ("Has Exhibit", "exhibit"),
+        ("Formal Reports", "formal"),
+    ):
+        ttk.Button(quick, text=label, command=lambda value=preset, app=self: _apply_recent_quick_preset(app, value)).pack(side=tk.LEFT, padx=(0, 6))
     actions = ttk.Frame(box, style="Panel.TFrame")
-    actions.grid(row=3, column=0, columnspan=8, sticky="ew", pady=(8, 0))
+    actions.grid(row=4, column=0, columnspan=8, sticky="ew", pady=(8, 0))
     ttk.Button(actions, text="Refresh SEC Data", command=lambda: _refresh_recent(self, force_refresh=True), style="Accent.TButton").pack(side=tk.LEFT)
     ttk.Button(actions, text="Open SEC Filing", command=lambda: _open_recent_filing(self)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Open Earnings Exhibit", command=lambda: _open_recent_exhibit(self)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Clear Filters", command=lambda: _clear_recent_filters(self)).pack(side=tk.LEFT, padx=(8, 0))
+
+
+def _build_recent_detail_panel(self: tk.Tk, parent: ttk.Frame, *, row: int) -> None:
+    detail = ttk.LabelFrame(parent, text="Selected Earnings Context + AI", style="Card.TLabelframe")
+    detail.grid(row=row, column=0, sticky="ew", pady=(0, 8))
+    detail.columnconfigure(0, weight=1)
+    detail.columnconfigure(1, weight=0)
+    ttk.Label(detail, textvariable=self.earnings_ai_status_var, style="Chip.TLabel").grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 6))
+
+    self.earnings_recent_detail_text = tk.Text(
+        detail,
+        height=5,
+        wrap=tk.WORD,
+        bg=polished_theme.PANEL,
+        fg=polished_theme.TEXT,
+        insertbackground=polished_theme.TEXT,
+        relief=tk.FLAT,
+        padx=10,
+        pady=8,
+        font=("Segoe UI", 9),
+    )
+    self.earnings_recent_detail_text.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
+    self.earnings_recent_detail_text.configure(state=tk.DISABLED)
+
+    actions = ttk.Frame(detail, style="Panel.TFrame")
+    actions.grid(row=1, column=1, sticky="nsew", padx=(0, 8), pady=(0, 8))
+    self.earnings_ai_analyze_button = ttk.Button(actions, text="Analyze Selected", command=lambda app=self: _run_earnings_ai_prompt(app, "Analyze Selected", EARNINGS_AI_ANALYZE_PROMPT), style="Accent.TButton")
+    self.earnings_ai_analyze_button.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+    self.earnings_ai_summarize_button = ttk.Button(actions, text="Summarize Filing", command=lambda app=self: _run_earnings_ai_prompt(app, "Summarize Filing", EARNINGS_AI_QUICK_PROMPTS["Summarize Drop"]))
+    self.earnings_ai_summarize_button.grid(row=1, column=0, sticky="ew", pady=(0, 4))
+    self.earnings_ai_symbol_chat_button = ttk.Button(actions, text="Open Symbol Chat", command=lambda app=self: _open_recent_symbol_chat(app))
+    self.earnings_ai_symbol_chat_button.grid(row=2, column=0, sticky="ew", pady=(0, 4))
+
+    quick = ttk.Frame(detail, style="Panel.TFrame")
+    quick.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
+    ttk.Label(quick, text="AI", style="Subtle.TLabel").pack(side=tk.LEFT, padx=(0, 6))
+    self.earnings_ai_quick_buttons: list[ttk.Button] = []
+    for label, prompt in EARNINGS_AI_QUICK_PROMPTS.items():
+        button = ttk.Button(quick, text=label, command=lambda prompt_label=label, value=prompt, app=self: _run_earnings_ai_prompt(app, prompt_label, value))
+        button.pack(side=tk.LEFT, padx=(0, 6))
+        self.earnings_ai_quick_buttons.append(button)
+    _set_recent_ai_actions_enabled(self, False)
 
 
 def _build_upcoming_filters(self: tk.Tk, parent: ttk.Frame) -> None:
@@ -326,7 +393,7 @@ def _load_recent_snapshot(self: tk.Tk, snapshot: EarningsRadarSnapshot) -> None:
     _set_combo_values(self.earnings_recent_item_combo, ["All", *sorted({record.items for record in self.earnings_recent_records if record.items})], self.earnings_recent_item_var)
     _set_combo_values(self.earnings_recent_sector_combo, ["All", *sorted({record.sector or EMPTY_VALUE for record in self.earnings_recent_records})], self.earnings_recent_sector_var)
     _set_combo_values(self.earnings_recent_exchange_combo, ["All", *sorted({record.exchange or EMPTY_VALUE for record in self.earnings_recent_records})], self.earnings_recent_exchange_var)
-    _set_combo_values(self.earnings_recent_risk_flag_combo, ["All", *sorted({flag for record in self.earnings_recent_records for flag in record.risk_flags})], self.earnings_recent_risk_flag_var)
+    _set_combo_values(self.earnings_recent_risk_flag_combo, ["All", "Any risk flag", *sorted({flag for record in self.earnings_recent_records for flag in record.risk_flags})], self.earnings_recent_risk_flag_var)
     self.earnings_recent_page = 0
     _apply_recent_filters(self)
 
@@ -380,6 +447,8 @@ def _populate_recent_table(self: tk.Tk) -> None:
         self.earnings_recent_row_map[iid] = record
         tree.insert("", tk.END, iid=iid, values=_recent_values(record), tags=("kind_formal" if record.filing_type == FORMAL_REPORT_KIND else "kind_drop",))
     self.earnings_recent_page_var.set(f"Page {self.earnings_recent_page + 1} / {page_count} - {total} records")
+    if hasattr(self, "earnings_recent_detail_text"):
+        _on_recent_selection_changed(self)
 
 
 def _populate_upcoming_table(self: tk.Tk) -> None:
@@ -494,6 +563,201 @@ def _open_recent_exhibit(self: tk.Tk) -> None:
         _open_url(record.exhibit_url, "Open Earnings Exhibit", "The selected row does not have an earnings exhibit URL.")
 
 
+def _selected_recent_record(self: tk.Tk, *, show_message: bool = False, title: str = "Earnings Radar") -> RecentEarningsRecord | None:
+    table = getattr(self, "earnings_recent_table", None)
+    row_map = getattr(self, "earnings_recent_row_map", {}) or {}
+    if table is None:
+        return None
+    try:
+        selection = table.selection()
+    except Exception:
+        selection = ()
+    if not selection:
+        if show_message:
+            messagebox.showinfo(title, "Select a recent earnings row first.")
+        return None
+    record = row_map.get(selection[0]) if isinstance(row_map, dict) else None
+    if record is None and show_message:
+        messagebox.showinfo(title, "The selected earnings row is no longer available. Refresh or select another row.")
+    return record
+
+
+def _on_recent_selection_changed(self: tk.Tk) -> None:
+    record = _selected_recent_record(self, show_message=False)
+    self.earnings_recent_selected_record = record
+    _update_recent_detail_panel(self, record)
+    _set_recent_ai_actions_enabled(self, record is not None)
+
+
+def _update_recent_detail_panel(self: tk.Tk, record: RecentEarningsRecord | None) -> None:
+    if record is None:
+        self.earnings_ai_status_var.set("Select a recent earnings row for row-grounded AI.")
+        _set_detail_text(self, "No recent earnings row selected.")
+        return
+    symbol = record.ticker or record.cik
+    risk = f"{len(record.risk_flags)} risk flag(s)" if record.risk_flags else "no parsed risk flags"
+    guidance = "guidance mentioned" if record.guidance_flag else "guidance not detected"
+    self.earnings_ai_status_var.set(f"Selected {symbol} - {record.form} {record.items or EMPTY_VALUE}; {guidance}; {risk}.")
+    _set_detail_text(self, _recent_detail_text(record))
+
+
+def _set_detail_text(self: tk.Tk, text: str) -> None:
+    widget = getattr(self, "earnings_recent_detail_text", None)
+    if widget is None:
+        return
+    try:
+        widget.configure(state=tk.NORMAL)
+        widget.delete("1.0", tk.END)
+        widget.insert(tk.END, redact_symbol_chat_secrets(text))
+        widget.configure(state=tk.DISABLED)
+    except tk.TclError:
+        return
+
+
+def _set_recent_ai_actions_enabled(self: tk.Tk, enabled: bool) -> None:
+    running = bool(getattr(self, "_earnings_ai_running", False))
+    state = tk.NORMAL if enabled and not running else tk.DISABLED
+    for name in ("earnings_ai_analyze_button", "earnings_ai_summarize_button", "earnings_ai_symbol_chat_button"):
+        button = getattr(self, name, None)
+        if button is not None:
+            try:
+                button.configure(state=state)
+            except tk.TclError:
+                pass
+    for button in getattr(self, "earnings_ai_quick_buttons", []) or []:
+        try:
+            button.configure(state=state)
+        except tk.TclError:
+            pass
+
+
+def _run_earnings_ai_prompt(self: tk.Tk, label: str, prompt: str) -> None:
+    record = _selected_recent_record(self, show_message=True, title=label)
+    if record is None:
+        return
+    if getattr(self, "_earnings_ai_running", False):
+        self.earnings_ai_status_var.set("Wait for the current Earnings AI response to finish.")
+        return
+    self._earnings_ai_running = True
+    _set_recent_ai_actions_enabled(self, False)
+    symbol = record.ticker or record.cik
+    self.earnings_ai_status_var.set(f"{label}: preparing selected {symbol} context...")
+
+    def progress(message: str) -> None:
+        _post_to_earnings_ui(self, lambda value=message: self.earnings_ai_status_var.set(f"{label}: {value}"))
+
+    def worker() -> None:
+        try:
+            client = _earnings_ai_client(self)
+            response = client.analyze(record, prompt, source_snippets=_source_snippets_for_record(record), progress_callback=progress)
+        except Exception as exc:
+            _post_to_earnings_ui(self, lambda error=exc: _finish_earnings_ai_error(self, label, error))
+            return
+        _post_to_earnings_ui(self, lambda loaded=response: _finish_earnings_ai_success(self, record, label, prompt, loaded))
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _earnings_ai_client(self: tk.Tk) -> OpenAiEarningsRadarClient:
+    factory = getattr(self, "earnings_ai_client_factory", None)
+    if callable(factory):
+        return factory()
+    return OpenAiEarningsRadarClient()
+
+
+def _source_snippets_for_record(record: RecentEarningsRecord) -> tuple[str, ...]:
+    source_excerpt = getattr(record, "source_excerpt", None)
+    return (str(source_excerpt),) if source_excerpt else ()
+
+
+def _post_to_earnings_ui(self: tk.Tk, callback: Callable[[], None]) -> None:
+    try:
+        self.after(0, callback)
+    except tk.TclError:
+        return
+
+
+def _finish_earnings_ai_success(self: tk.Tk, record: RecentEarningsRecord, label: str, prompt: str, response: EarningsAiResponse) -> None:
+    self._earnings_ai_running = False
+    _set_recent_ai_actions_enabled(self, _selected_recent_record(self, show_message=False) is not None)
+    self.earnings_ai_status_var.set(f"{label}: response ready for {record.ticker or record.cik}.")
+    _show_earnings_ai_result(self, record, label, prompt, response)
+
+
+def _finish_earnings_ai_error(self: tk.Tk, label: str, error: Exception) -> None:
+    self._earnings_ai_running = False
+    _set_recent_ai_actions_enabled(self, _selected_recent_record(self, show_message=False) is not None)
+    message = redact_symbol_chat_secrets(str(error))
+    self.earnings_ai_status_var.set(f"{label}: OpenAI request failed.")
+    messagebox.showerror(f"{label} failed", message)
+
+
+def _show_earnings_ai_result(self: tk.Tk, record: RecentEarningsRecord, label: str, prompt: str, response: EarningsAiResponse) -> None:
+    window = getattr(self, "earnings_ai_result_window", None)
+    text_widget = getattr(self, "earnings_ai_result_text", None)
+    if window is None or text_widget is None:
+        window = tk.Toplevel(self)
+        polished_theme.configure_toplevel(window)
+        window.title("Earnings AI - Selected Row")
+        window.geometry("980x720")
+        window.minsize(760, 520)
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(0, weight=1)
+        text_widget = tk.Text(
+            window,
+            wrap=tk.WORD,
+            bg=polished_theme.PANEL,
+            fg=polished_theme.TEXT,
+            insertbackground=polished_theme.TEXT,
+            relief=tk.FLAT,
+            padx=12,
+            pady=12,
+            font=("Segoe UI", 10),
+        )
+        text_widget.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        scroll = ttk.Scrollbar(window, orient=tk.VERTICAL, command=text_widget.yview)
+        scroll.grid(row=0, column=1, sticky="ns", pady=12)
+        text_widget.configure(yscrollcommand=scroll.set)
+
+        def _close() -> None:
+            self.earnings_ai_result_window = None
+            self.earnings_ai_result_text = None
+            window.destroy()
+
+        window.protocol("WM_DELETE_WINDOW", _close)
+        self.earnings_ai_result_window = window
+        self.earnings_ai_result_text = text_widget
+    text_widget.configure(state=tk.NORMAL)
+    text_widget.delete("1.0", tk.END)
+    text_widget.insert(tk.END, _format_earnings_ai_result(record, label, prompt, response))
+    text_widget.configure(state=tk.DISABLED)
+    try:
+        window.deiconify()
+        window.lift()
+    except tk.TclError:
+        pass
+
+
+def _open_recent_symbol_chat(self: tk.Tk) -> None:
+    record = _selected_recent_record(self, show_message=True, title="Open Symbol Chat")
+    if record is None:
+        return
+    symbol = str(record.ticker or "").strip().upper()
+    if not symbol:
+        messagebox.showinfo("Open Symbol Chat", "The selected earnings row does not have a ticker symbol.")
+        return
+    try:
+        open_symbol_chat_window(
+            self,
+            symbol,
+            app_context=self,
+            schwab_session=getattr(self, "schwab_session", None),
+        )
+        self.earnings_ai_status_var.set(f"Opened Symbol Chat for {symbol}.")
+    except Exception as exc:
+        messagebox.showerror("Open Symbol Chat failed", redact_symbol_chat_secrets(str(exc)))
+
+
 def _open_upcoming_source(self: tk.Tk) -> None:
     record = _selected(self.earnings_upcoming_table, self.earnings_upcoming_row_map, "Open Source", "Select an upcoming earnings row first.")
     if record is not None:
@@ -521,6 +785,26 @@ def _clear_recent_filters(self: tk.Tk) -> None:
     _apply_recent_filters(self)
 
 
+def _apply_recent_quick_preset(self: tk.Tk, preset: str) -> None:
+    if preset == "last7":
+        self.earnings_recent_date_from_var.set((datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d"))
+        self.earnings_recent_date_to_var.set("")
+    elif preset == "item202":
+        self.earnings_recent_form_var.set("8-K")
+        self.earnings_recent_item_var.set("2.02")
+    elif preset == "guidance":
+        self.earnings_recent_guidance_var.set("Mentioned")
+    elif preset == "risk":
+        self.earnings_recent_risk_flag_var.set("Any risk flag")
+    elif preset == "exhibit":
+        self.earnings_recent_has_exhibit_var.set(True)
+    elif preset == "formal":
+        self.earnings_recent_form_var.set("All")
+        self.earnings_recent_item_var.set("Formal report")
+    self.earnings_recent_page = 0
+    _apply_recent_filters(self)
+
+
 def _clear_upcoming_filters(self: tk.Tk) -> None:
     for variable in (
         self.earnings_upcoming_search_var,
@@ -532,6 +816,52 @@ def _clear_upcoming_filters(self: tk.Tk) -> None:
     self.earnings_upcoming_has_estimate_var.set(False)
     self.earnings_upcoming_page = 0
     _apply_upcoming_filters(self)
+
+
+def _recent_detail_text(record: RecentEarningsRecord) -> str:
+    lines = [
+        f"{record.company_name} ({display_optional_text(record.ticker)}) | CIK {record.cik}",
+        f"{record.filing_type} | {record.form} | Item: {record.items or EMPTY_VALUE} | Filed: {record.filed_date or EMPTY_VALUE} | Accepted: {record.acceptance_datetime or EMPTY_VALUE}",
+        f"Fiscal period: {display_optional_text(record.fiscal_period)} | Report date: {display_optional_text(record.report_date)}",
+        (
+            "Parsed: "
+            f"Revenue {display_money(record.revenue)} | "
+            f"Growth {display_percent(record.revenue_growth)} | "
+            f"EPS {display_money(record.eps)} | "
+            f"Net income {display_money(record.net_income)}"
+        ),
+        f"Guidance: {'Mentioned' if record.guidance_flag else 'Not detected'} | Risk flags: {', '.join(record.risk_flags) if record.risk_flags else EMPTY_VALUE}",
+        f"Industry: {display_optional_text(record.sector)} / {display_optional_text(record.sic)} | {display_optional_text(record.industry)} | {display_optional_text(record.exchange)}",
+        f"Filing: {record.filing_url}",
+        f"Exhibit: {record.exhibit_url or EMPTY_VALUE}",
+    ]
+    source_excerpt = str(getattr(record, "source_excerpt", "") or "").strip()
+    if source_excerpt:
+        lines.append(f"Source excerpt: {_truncate(source_excerpt, 520)}")
+    return "\n".join(lines)
+
+
+def _format_earnings_ai_result(record: RecentEarningsRecord, label: str, prompt: str, response: EarningsAiResponse) -> str:
+    header = [
+        f"EARNINGS AI - {label}",
+        "=" * (14 + len(label)),
+        "",
+        f"Selected: {record.company_name} ({record.ticker or record.cik})",
+        f"Filing: {record.form} {record.items or EMPTY_VALUE} | {record.filing_type} | filed {record.filed_date or EMPTY_VALUE}",
+        f"Accession: {record.accession_number}",
+        f"Model: {response.model}",
+        f"Source mode: {response.source_mode}",
+        "",
+        "Prompt:",
+        prompt.strip(),
+        "",
+        "Answer:",
+        response.answer.strip(),
+    ]
+    if response.source_debug:
+        header.extend(["", "Source Debug:"])
+        header.extend(f"- {line}" for line in response.source_debug)
+    return redact_symbol_chat_secrets("\n".join(header).strip() + "\n")
 
 
 def _recent_sort_value(record: RecentEarningsRecord, column: str) -> Any:
