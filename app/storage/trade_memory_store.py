@@ -11,11 +11,13 @@ from typing import Any, Iterable, Mapping
 
 from app.analytics.option_contract_inspector import parse_occ_option_symbol
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_DIR = REPO_ROOT / "data" / "trade_memory"
 DEFAULT_SNAPSHOT_PATH = DEFAULT_DATA_DIR / "schwab_trade_snapshots.jsonl"
 DEFAULT_REPORTS_DIR = DEFAULT_DATA_DIR / "reports"
+DEFAULT_REPORTS_DIR_GD = Path("I:/My Drive/PRC/REPORTS/TRADE-MEMORY")
+DEFAULT_SNAPSHOT_PATH_GD = Path("I:/My Drive/PRC/REPORTS/SNAPSHOTS") / "schwab_trade_snapshots.jsonl"
+
 
 _SECRET_KEY_PARTS = (
     "access_token",
@@ -41,9 +43,9 @@ _SECRET_KEY_PARTS = (
 
 class TradeMemoryStore:
     def __init__(
-        self,
-        snapshot_path: Path | str = DEFAULT_SNAPSHOT_PATH,
-        reports_dir: Path | str = DEFAULT_REPORTS_DIR,
+            self,
+            snapshot_path: Path | str = DEFAULT_SNAPSHOT_PATH_GD,
+            reports_dir: Path | str = DEFAULT_REPORTS_DIR_GD,
     ) -> None:
         self.snapshot_path = Path(snapshot_path)
         self.reports_dir = Path(reports_dir)
@@ -94,7 +96,8 @@ class TradeMemoryStore:
                 handle.write(json.dumps(sanitize_for_storage(record), ensure_ascii=True, sort_keys=True) + "\n")
         return updated
 
-    def find_snapshot_for_order(self, order: Mapping[str, Any], *, now: datetime | None = None) -> dict[str, Any] | None:
+    def find_snapshot_for_order(self, order: Mapping[str, Any], *, now: datetime | None = None) -> dict[
+                                                                                                       str, Any] | None:
         return match_snapshot_to_order(order, self.load_snapshots(), now=now)
 
     def find_snapshots_for_symbol(self, symbol: str) -> list[dict[str, Any]]:
@@ -106,7 +109,8 @@ class TradeMemoryStore:
             candidates = {
                 _normalize_symbol(snapshot.get("symbol")),
                 _normalize_symbol(snapshot.get("underlying_symbol")),
-                _normalize_symbol((snapshot.get("option_details") or {}).get("occ_symbol") if isinstance(snapshot.get("option_details"), dict) else ""),
+                _normalize_symbol((snapshot.get("option_details") or {}).get("occ_symbol") if isinstance(
+                    snapshot.get("option_details"), dict) else ""),
             }
             if clean in candidates:
                 matches.append(snapshot)
@@ -159,9 +163,11 @@ def normalize_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     if not thesis_status:
         thesis_status = "saved" if thesis_report else "missing_analysis"
     record["thesis_status"] = thesis_status
-    record["plain_english_summary"] = str(record.get("plain_english_summary") or _summary_from_report(thesis_report) or "No research thesis was available at snapshot time.")
+    record["plain_english_summary"] = str(record.get("plain_english_summary") or _summary_from_report(
+        thesis_report) or "No research thesis was available at snapshot time.")
     record["notes"] = _normalize_notes(record.get("notes"))
-    record["tags"] = [str(tag).strip() for tag in record.get("tags", []) if str(tag).strip()] if isinstance(record.get("tags"), list) else []
+    record["tags"] = [str(tag).strip() for tag in record.get("tags", []) if str(tag).strip()] if isinstance(
+        record.get("tags"), list) else []
     return record
 
 
@@ -184,11 +190,11 @@ def sanitize_for_storage(value: Any) -> Any:
 
 
 def match_snapshot_to_order(
-    order: Mapping[str, Any],
-    snapshots: Iterable[Mapping[str, Any]],
-    *,
-    now: datetime | None = None,
-    max_age_seconds: int = 7 * 24 * 60 * 60,
+        order: Mapping[str, Any],
+        snapshots: Iterable[Mapping[str, Any]],
+        *,
+        now: datetime | None = None,
+        max_age_seconds: int = 7 * 24 * 60 * 60,
 ) -> dict[str, Any] | None:
     identity = order_identity(order)
     if identity["order_id"] or identity["order_location"]:
@@ -233,7 +239,8 @@ def order_identity(order: Mapping[str, Any]) -> dict[str, Any]:
     quantity = _first_number(first_leg.get("quantity"), order.get("quantity"))
     price = _first_number(order.get("price"), order.get("limit_price"), order.get("limitPrice"))
     order_id = str(order.get("orderId") or order.get("order_id") or "").strip()
-    order_location = str(order.get("location") or order.get("orderLocation") or order.get("order_location") or "").strip()
+    order_location = str(
+        order.get("location") or order.get("orderLocation") or order.get("order_location") or "").strip()
     return {
         "order_id": order_id,
         "order_location": order_location,
@@ -253,10 +260,13 @@ def compare_then_now(snapshot: Mapping[str, Any], current: Mapping[str, Any] | N
             "changes": [],
         }
     changes: list[str] = []
-    original_price = _first_number((snapshot.get("market_snapshot") or {}).get("symbol_price") if isinstance(snapshot.get("market_snapshot"), Mapping) else None)
+    original_price = _first_number(
+        (snapshot.get("market_snapshot") or {}).get("symbol_price") if isinstance(snapshot.get("market_snapshot"),
+                                                                                  Mapping) else None)
     current_price = _first_number(current.get("symbol_price"), current.get("last_price"))
     if original_price is not None and current_price is not None:
-        changes.append(f"Symbol price: {_money(original_price)} then vs {_money(current_price)} now ({_signed_percent((current_price - original_price) / max(original_price, 0.01))}).")
+        changes.append(
+            f"Symbol price: {_money(original_price)} then vs {_money(current_price)} now ({_signed_percent((current_price - original_price) / max(original_price, 0.01))}).")
 
     option_details = snapshot.get("option_details") if isinstance(snapshot.get("option_details"), Mapping) else {}
     original_dte = _first_number(option_details.get("dte"), option_details.get("days_to_expiration"))
@@ -286,9 +296,12 @@ def render_trade_thesis_html(snapshot: Mapping[str, Any]) -> str:
         ("Contradictions", _extract_named_lines(record, ("Contradictions", "Biggest risk", "Risk"))),
         ("Risk posture", _extract_named_lines(record, ("Risk", "Risk read", "Position risk"))),
         ("Options/Greeks if applicable", _tab_or_report_lines(record, "Greeks")),
-        ("Macro/event context", _tab_or_report_lines(record, "Macro Context") + _tab_or_report_lines(record, "Earnings / News")),
-        ("What would make this trade dumb?", _extract_named_lines(record, ("What would make this trade dumb", "What can go wrong", "Biggest risk"))),
-        ("What would change my mind?", _extract_named_lines(record, ("What would change my mind", "Changes mind", "Invalidation"))),
+        ("Macro/event context",
+         _tab_or_report_lines(record, "Macro Context") + _tab_or_report_lines(record, "Earnings / News")),
+        ("What would make this trade dumb?",
+         _extract_named_lines(record, ("What would make this trade dumb", "What can go wrong", "Biggest risk"))),
+        ("What would change my mind?",
+         _extract_named_lines(record, ("What would change my mind", "Changes mind", "Invalidation"))),
         ("Raw Schwab preview/order details", _raw_order_lines(record)),
     ]
     body = "\n".join(_html_section(title, lines) for title, lines in sections)
@@ -312,7 +325,7 @@ def render_trade_thesis_html(snapshot: Mapping[str, Any]) -> str:
     )
 
 
-def write_trade_thesis_report(snapshot: Mapping[str, Any], reports_dir: Path | str = DEFAULT_REPORTS_DIR) -> Path:
+def write_trade_thesis_report(snapshot: Mapping[str, Any], reports_dir: Path | str = DEFAULT_REPORTS_DIR_GD) -> Path:
     record = normalize_snapshot(snapshot)
     reports = Path(reports_dir)
     reports.mkdir(parents=True, exist_ok=True)
@@ -410,7 +423,8 @@ def _fallback_identity_matches(identity: Mapping[str, Any], snapshot: Mapping[st
         return False
     if not _close_number(_first_number(ticket.get("quantity")), _first_number(identity.get("quantity"))):
         return False
-    return _close_number(_first_number(ticket.get("limit_price")), _first_number(identity.get("limit_price")), tolerance=0.01)
+    return _close_number(_first_number(ticket.get("limit_price")), _first_number(identity.get("limit_price")),
+                         tolerance=0.01)
 
 
 def normalize_order_side(value: Any) -> str:
