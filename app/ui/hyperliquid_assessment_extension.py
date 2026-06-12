@@ -4,7 +4,7 @@ from dataclasses import replace
 import os
 import tkinter as tk
 from tkinter import messagebox, simpledialog
-from typing import NamedTuple, Type
+from typing import Any, NamedTuple, Type
 
 from app.analytics.hyperliquid_assessment import format_hyperliquid_position_assessment
 from app.brokers.hyperliquid.client import (
@@ -19,6 +19,10 @@ from app.core.portfolio import CashPosition, Portfolio, Position
 class HyperliquidAccountTarget(NamedTuple):
     label: str
     address: str
+
+    @property
+    def key(self) -> str:
+        return _account_metadata_key(self.label)
 
 
 # Jeremy keeps the original single-account env names so existing .env files keep working.
@@ -67,6 +71,32 @@ def _hyperliquid_address_from_env() -> str:
     return accounts[0].address if accounts else ""
 
 
+def _account_metadata_key(label: str) -> str:
+    return "".join(ch for ch in label.lower() if ch.isalnum()) or "account"
+
+
+def _copy_hyperliquid_open_order_for_account(
+    order: dict[str, Any],
+    account: HyperliquidAccountTarget,
+) -> dict[str, Any]:
+    copied_order = dict(order)
+    copied_order["accountLabel"] = account.label
+    copied_order["accountKey"] = account.key
+    copied_order["accountAddress"] = account.address
+    return copied_order
+
+
+def _copy_hyperliquid_open_orders_for_account(
+    open_orders: list[dict[str, Any]],
+    account: HyperliquidAccountTarget,
+) -> list[dict[str, Any]]:
+    return [
+        _copy_hyperliquid_open_order_for_account(order, account)
+        for order in open_orders
+        if isinstance(order, dict)
+    ]
+
+
 def _prompt_for_hyperliquid_account() -> HyperliquidAccountTarget | None:
     address = simpledialog.askstring(
         "Hyperliquid Sync",
@@ -99,12 +129,11 @@ def _sync_hyperliquid_account_with_assessment(self: tk.Tk) -> None:
         labeled_portfolios: list[Portfolio] = []
         source_messages: list[str] = []
         reports: list[str] = []
-        primary_open_orders: list[dict[str, object]] | None = None
+        combined_open_orders: list[dict[str, Any]] = []
 
         for account in accounts:
             snapshot = client.fetch_snapshot(account.address)
-            if primary_open_orders is None:
-                primary_open_orders = snapshot.open_orders
+            combined_open_orders.extend(_copy_hyperliquid_open_orders_for_account(snapshot.open_orders, account))
 
             raw_portfolio, hyperliquid_source_message = portfolio_from_hyperliquid_snapshot(snapshot)
             labeled_portfolio = _account_labeled_portfolio(raw_portfolio, account.label)
@@ -120,9 +149,9 @@ def _sync_hyperliquid_account_with_assessment(self: tk.Tk) -> None:
             try:
                 from app.ui.trading_workspace_extension import _populate_workspace_open_orders_table
 
-                # Keep order actions pointed at the primary account until signed multi-account
-                # routing is added. Balances/positions below are still synced for every account.
-                _populate_workspace_open_orders_table(orders_table, primary_open_orders or [])
+                _populate_workspace_open_orders_table(orders_table, combined_open_orders)
+                self.hyperliquid_open_order_by_oid = getattr(orders_table, "_hyperliquid_open_order_by_oid", {})
+                self.hyperliquid_open_order_coin_by_oid = getattr(orders_table, "_hyperliquid_open_order_coin_by_oid", {})
             except Exception:
                 pass
 

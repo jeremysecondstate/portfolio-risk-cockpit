@@ -324,9 +324,10 @@ def _workspace_holdings_table(parent: ttk.Frame, include_custom_pnl: bool = Fals
 
 
 def _workspace_open_orders_table(parent: ttk.Frame) -> ttk.Treeview:
-    columns = ("time", "type", "coin", "direction", "size", "price", "edit", "ro", "trigger", "tpsl", "oid")
+    columns = ("account", "time", "type", "coin", "direction", "size", "price", "edit", "ro", "trigger", "tpsl", "oid")
     table = ttk.Treeview(parent, columns=columns, show="headings", height=7, selectmode="browse")
     headings = {
+        "account": ("Account", 72, tk.W),
         "time": ("Time", 100, tk.W),
         "type": ("Type", 72, tk.W),
         "coin": ("Coin", 64, tk.W),
@@ -346,6 +347,7 @@ def _workspace_open_orders_table(parent: ttk.Frame) -> ttk.Treeview:
     table.tag_configure("buy", foreground=polished_theme.POSITIVE)
     table.tag_configure("sell", foreground=polished_theme.NEGATIVE)
     table.tag_configure("trigger", foreground="#c084fc")
+    table.tag_configure("readonly", foreground=polished_theme.MUTED)
     return table
 
 
@@ -522,6 +524,9 @@ def _load_workspace_ticket_from_open_order(self: tk.Tk, table: ttk.Treeview, eve
     order_id = values.get("oid", "").strip()
     coin = _workspace_ticket_symbol(values.get("coin", ""))
     direction = values.get("direction", "").strip().lower()
+    lookup_key_by_iid = getattr(table, "_hyperliquid_open_order_key_by_iid", {}) or {}
+    lookup_key = str(lookup_key_by_iid.get(row_id) or order_id)
+    self.hyperliquid_selected_open_order_lookup_key = lookup_key
     order_cache = getattr(table, "_hyperliquid_open_order_by_oid", {}) or {}
     if isinstance(order_cache, dict) and order_cache:
         self.hyperliquid_open_order_by_oid = order_cache
@@ -785,41 +790,67 @@ def _populate_workspace_holdings_table(table: ttk.Treeview, rows: list[dict[str,
 def _populate_workspace_open_orders_table(table: ttk.Treeview, open_orders: list[dict[str, Any]]) -> None:
     from app.ui import hyperliquid_trading_extension as hyperliquid_ui
 
+    order_by_key: dict[str, dict[str, Any]] = {}
+    order_coin_by_key: dict[str, str] = {}
+    order_key_by_iid: dict[str, str] = {}
+    for order in open_orders:
+        if not isinstance(order, dict) or order.get("oid") is None:
+            continue
+        lookup_key = hyperliquid_ui.hyperliquid_open_order_lookup_key(order)
+        order_by_key[lookup_key] = order
+        if order.get("coin"):
+            order_coin_by_key[lookup_key] = str(order.get("coin"))
+
     table._hyperliquid_open_order_by_oid = {  # type: ignore[attr-defined]
-        str(order.get("oid")): order
-        for order in open_orders
-        if isinstance(order, dict) and order.get("oid") is not None
+        key: order
+        for key, order in order_by_key.items()
     }
     table._hyperliquid_open_order_coin_by_oid = {  # type: ignore[attr-defined]
-        str(order.get("oid")): str(order.get("coin"))
-        for order in open_orders
-        if isinstance(order, dict) and order.get("oid") is not None and order.get("coin")
+        key: coin
+        for key, coin in order_coin_by_key.items()
     }
     for row_id in table.get_children():
         table.delete(row_id)
     for index, raw_order in enumerate(open_orders):
         order = hyperliquid_ui.normalize_hyperliquid_open_order(raw_order)
         direction = order.direction or order.side
-        tag = "trigger" if order.is_trigger else "buy" if "buy" in direction.lower() else "sell" if "sell" in direction.lower() or "short" in direction.lower() else ""
+        is_read_only = hyperliquid_ui.hyperliquid_open_order_is_read_only(raw_order)
+        tag = (
+            "readonly"
+            if is_read_only
+            else "trigger"
+            if order.is_trigger
+            else "buy"
+            if "buy" in direction.lower()
+            else "sell"
+            if "sell" in direction.lower() or "short" in direction.lower()
+            else ""
+        )
+        iid = f"open_order_{index}"
+        if isinstance(raw_order, dict) and raw_order.get("oid") is not None:
+            order_key_by_iid[iid] = hyperliquid_ui.hyperliquid_open_order_lookup_key(raw_order)
+        values_by_column = {
+            "account": hyperliquid_ui.hyperliquid_open_order_account_label(raw_order),
+            "time": hyperliquid_ui._order_time_label(order.raw),
+            "type": order.order_kind,
+            "coin": _workspace_ticket_symbol(hyperliquid_ui._display_order_coin(order.coin, "")),
+            "direction": direction,
+            "size": order.size_label,
+            "price": order.price_label,
+            "edit": "Read-only" if is_read_only else "Edit",
+            "ro": "Yes" if order.reduce_only else "--",
+            "trigger": order.trigger_condition or "N/A",
+            "tpsl": order.tpsl_label or "--",
+            "oid": order.oid,
+        }
         table.insert(
             "",
             tk.END,
-            iid=f"open_order_{index}",
-            values=(
-                hyperliquid_ui._order_time_label(order.raw),
-                order.order_kind,
-                _workspace_ticket_symbol(hyperliquid_ui._display_order_coin(order.coin, "")),
-                direction,
-                order.size_label,
-                order.price_label,
-                "Edit",
-                "Yes" if order.reduce_only else "--",
-                order.trigger_condition or "N/A",
-                order.tpsl_label or "--",
-                order.oid,
-            ),
+            iid=iid,
+            values=tuple(values_by_column.get(str(column), "") for column in table["columns"]),
             tags=(tag,) if tag else (),
         )
+    table._hyperliquid_open_order_key_by_iid = order_key_by_iid  # type: ignore[attr-defined]
 
 
 def _workspace_holding_rows(portfolio, venue: str) -> list[dict[str, object]]:

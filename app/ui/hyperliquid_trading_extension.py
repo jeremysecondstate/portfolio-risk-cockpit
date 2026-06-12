@@ -25,7 +25,12 @@ from app.ui.polished_theme import _make_paned
 
 TRADING_VENUES = ["Schwab", "Hyperliquid"]
 HYPERLIQUID_TIFS = ["Alo", "Ioc", "Gtc"]
-HYPERLIQUID_ADDRESS_ENV_KEYS = ("HYPE_WALLET_ADDRESS_JEREMY")
+HYPERLIQUID_ADDRESS_ENV_KEYS = (
+    "HYPE_WALLET_ADDRESS_JEREMY_SECONDSTATE",
+    "HYPE_WALLET_ADDRESS_JEREMY",
+    "HYPE_WALLET_ADDRESS_ALEX_SECONDSTATE",
+    "HYPE_WALLET_ADDRESS_ALEX",
+)
 
 
 @dataclass(frozen=True)
@@ -807,6 +812,35 @@ def _format_hyperliquid_size(value: float) -> str:
     return text or "0"
 
 
+def hyperliquid_open_order_account_key(order: dict[str, Any] | None) -> str:
+    return str((order or {}).get("accountKey") or "").strip().lower()
+
+
+def hyperliquid_open_order_account_label(order: dict[str, Any] | None) -> str:
+    return str((order or {}).get("accountLabel") or "").strip() or "--"
+
+
+def hyperliquid_open_order_account_address(order: dict[str, Any] | None) -> str:
+    return str((order or {}).get("accountAddress") or "").strip()
+
+
+def hyperliquid_open_order_lookup_key(order: dict[str, Any] | None) -> str:
+    raw_order = order or {}
+    oid = str(raw_order.get("oid") or "").strip()
+    account_key = hyperliquid_open_order_account_key(raw_order)
+    if account_key:
+        return f"{account_key}:{oid}"
+    account_address = hyperliquid_open_order_account_address(raw_order).lower()
+    if account_address:
+        return f"{account_address}:{oid}"
+    return oid
+
+
+def hyperliquid_open_order_is_read_only(order: dict[str, Any] | None) -> bool:
+    account_key = hyperliquid_open_order_account_key(order)
+    return bool(account_key and account_key != "jeremy")
+
+
 def _load_selected_recent_orders(self: tk.Tk) -> None:
     if _selected_venue_is_hyperliquid(self):
         self.load_hyperliquid_open_orders(title="HYPERLIQUID ACTIVE ORDERS")
@@ -851,6 +885,8 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
             "Select an open order row first, then click Edit.",
         )
         return
+    if _block_hyperliquid_account_live_action(self, "edit", cached_order):
+        return
 
     normalized_order = normalize_hyperliquid_open_order(cached_order) if cached_order else None
     raw_order_id = self.cancel_order_id_var.get().strip()
@@ -888,8 +924,10 @@ def _show_hyperliquid_order_edit_dialog(self: tk.Tk) -> None:
     context_var = tk.StringVar(value=context)
     mid_status_var = tk.StringVar(value="")
 
+    account_label = hyperliquid_open_order_account_label(cached_order)
+    account_prefix = "" if account_label == "--" else f"{account_label} - "
     selected_text = (
-        f"{context} {normalized_order.direction if normalized_order else side.title()} "
+        f"{account_prefix}{context} {normalized_order.direction if normalized_order else side.title()} "
         f"{normalized_order.size_label if normalized_order else size} {market or '--'}"
     )
     ttk.Label(shell, text=selected_text, style="Mono.TLabel").grid(row=0, column=0, sticky="w")
@@ -1145,23 +1183,46 @@ def _format_optional_trigger_price(value: float | None) -> str:
 
 def _selected_hyperliquid_order(self: tk.Tk) -> dict[str, Any] | None:
     orders = getattr(self, "hyperliquid_open_order_by_oid", {}) or {}
-    selected_order_id = _selected_workspace_hyperliquid_order_id(self)
-    if selected_order_id == "":
+    selected_order_key = _selected_workspace_hyperliquid_order_lookup_key(self)
+    if selected_order_key == "":
         return None
-    raw_order_id = selected_order_id or self.cancel_order_id_var.get().strip()
-    if raw_order_id and raw_order_id in orders:
-        self.cancel_order_id_var.set(raw_order_id)
-        return orders[raw_order_id]
+    if selected_order_key and selected_order_key in orders:
+        selected_order = orders[selected_order_key]
+        self.hyperliquid_selected_open_order_lookup_key = selected_order_key
+        self.cancel_order_id_var.set(str(selected_order.get("oid") or ""))
+        return selected_order
+    raw_order_id = self.cancel_order_id_var.get().strip()
+    if raw_order_id:
+        try:
+            selected_order = _hyperliquid_order_for_live_action(self, raw_order_id)
+        except ValueError:
+            return None
+        if selected_order is not None:
+            self.cancel_order_id_var.set(str(selected_order.get("oid") or raw_order_id))
+            return selected_order
     table_orders = _workspace_hyperliquid_order_cache(self)
-    if raw_order_id and raw_order_id in table_orders:
-        self.cancel_order_id_var.set(raw_order_id)
+    if selected_order_key and selected_order_key in table_orders:
+        selected_order = table_orders[selected_order_key]
+        self.cancel_order_id_var.set(str(selected_order.get("oid") or ""))
         self.hyperliquid_open_order_by_oid = table_orders
         self.hyperliquid_open_order_coin_by_oid = _workspace_hyperliquid_order_coin_cache(self)
-        return table_orders[raw_order_id]
+        self.hyperliquid_selected_open_order_lookup_key = selected_order_key
+        return selected_order
     return None
 
 
 def _selected_workspace_hyperliquid_order_id(self: tk.Tk) -> str | None:
+    selected_key = _selected_workspace_hyperliquid_order_lookup_key(self)
+    if selected_key is None or selected_key == "":
+        return selected_key
+    orders = _workspace_hyperliquid_order_cache(self)
+    selected_order = orders.get(selected_key)
+    if isinstance(selected_order, dict):
+        return str(selected_order.get("oid") or "").strip()
+    return selected_key
+
+
+def _selected_workspace_hyperliquid_order_lookup_key(self: tk.Tk) -> str | None:
     table = getattr(self, "hyperliquid_workspace_open_orders_table", None)
     if table is None:
         return None
@@ -1187,6 +1248,10 @@ def _selected_workspace_hyperliquid_order_id(self: tk.Tk) -> str | None:
         columns = tuple(table["columns"])
     except Exception:
         return ""
+    lookup_key_by_iid = getattr(table, "_hyperliquid_open_order_key_by_iid", {}) or {}
+    lookup_key = lookup_key_by_iid.get(row_id)
+    if lookup_key:
+        return str(lookup_key)
     values = {str(column): str(raw_values[index]) for index, column in enumerate(columns) if index < len(raw_values)}
     return values.get("oid", "").strip()
 
@@ -1205,6 +1270,70 @@ def _workspace_hyperliquid_order_coin_cache(self: tk.Tk) -> dict[str, str]:
         return {}
     cache = getattr(table, "_hyperliquid_open_order_coin_by_oid", {}) or {}
     return cache if isinstance(cache, dict) else {}
+
+
+def _hyperliquid_order_matches_for_raw_oid(self: tk.Tk, raw_order_id: str) -> list[dict[str, Any]]:
+    orders = dict(getattr(self, "hyperliquid_open_order_by_oid", {}) or {})
+    table_orders = _workspace_hyperliquid_order_cache(self)
+    for key, order in table_orders.items():
+        orders.setdefault(str(key), order)
+    return [
+        order
+        for order in orders.values()
+        if isinstance(order, dict) and str(order.get("oid") or "").strip() == raw_order_id
+    ]
+
+
+def _hyperliquid_order_for_live_action(self: tk.Tk, raw_order_id: str) -> dict[str, Any] | None:
+    selected_key = str(getattr(self, "hyperliquid_selected_open_order_lookup_key", "") or "")
+    orders = getattr(self, "hyperliquid_open_order_by_oid", {}) or {}
+    selected_order = orders.get(selected_key) if isinstance(orders, dict) else None
+    if isinstance(selected_order, dict) and str(selected_order.get("oid") or "").strip() == raw_order_id:
+        return selected_order
+
+    table_orders = _workspace_hyperliquid_order_cache(self)
+    selected_order = table_orders.get(selected_key)
+    if isinstance(selected_order, dict) and str(selected_order.get("oid") or "").strip() == raw_order_id:
+        return selected_order
+
+    if isinstance(orders, dict):
+        direct_order = orders.get(raw_order_id)
+        if isinstance(direct_order, dict):
+            return direct_order
+    if raw_order_id in table_orders and isinstance(table_orders[raw_order_id], dict):
+        return table_orders[raw_order_id]
+
+    matches = _hyperliquid_order_matches_for_raw_oid(self, raw_order_id)
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError(
+            "This order ID appears in more than one Hyperliquid account. "
+            "Select the specific Open Orders row before editing or canceling."
+        )
+    return None
+
+
+def _block_hyperliquid_account_live_action(self: tk.Tk, action: str, order: dict[str, Any] | None) -> bool:
+    if not hyperliquid_open_order_is_read_only(order):
+        return False
+
+    account_label = hyperliquid_open_order_account_label(order)
+    message = (
+        f"{account_label} open orders are read-only in this cockpit because signed "
+        "Hyperliquid edit/cancel routing is currently configured for Jeremy credentials only."
+    )
+    if hasattr(self, "hyperliquid_status_var"):
+        self.hyperliquid_status_var.set(f"Hyperliquid: {action} blocked for {account_label}")
+    if hasattr(self, "_set_preview_text"):
+        self._set_preview_text(
+            f"HYPERLIQUID {action.upper()} BLOCKED\n"
+            f"{'=' * (22 + len(action))}\n\n"
+            f"{message}\n\n"
+            "No live request was sent."
+        )
+    messagebox.showinfo(f"Hyperliquid {action} blocked", message)
+    return True
 
 
 def _order_market_for_edit(self: tk.Tk, order: dict[str, Any] | None) -> str:
@@ -1258,6 +1387,14 @@ def _edit_hyperliquid_order(
         order_id = int(raw_order_id.strip())
     except ValueError:
         messagebox.showerror("Hyperliquid edit blocked", "Hyperliquid order ID must be a number.")
+        return
+
+    try:
+        selected_order = _hyperliquid_order_for_live_action(self, str(order_id))
+    except ValueError as exc:
+        messagebox.showerror("Hyperliquid edit blocked", str(exc))
+        return
+    if _block_hyperliquid_account_live_action(self, "edit", selected_order):
         return
 
     try:
@@ -2188,13 +2325,22 @@ def _set_hyperliquid_perp_mid_price(coin: str, target_var: tk.StringVar) -> floa
     return mid
 
 
-def _hyperliquid_cancel_coin_for_order(self: tk.Tk, order_id: str) -> str:
+def _hyperliquid_cancel_coin_for_order(self: tk.Tk, order_id: str, order: dict[str, Any] | None = None) -> str:
+    if isinstance(order, dict) and order.get("coin"):
+        return str(order.get("coin"))
+
     cached_orders = getattr(self, "hyperliquid_open_order_coin_by_oid", {})
-    cached_coin = cached_orders.get(order_id)
+    selected_key = str(getattr(self, "hyperliquid_selected_open_order_lookup_key", "") or "")
+    cached_coin = cached_orders.get(selected_key) if isinstance(cached_orders, dict) else None
     if cached_coin:
         return cached_coin
 
-    coin_source = getattr(self, "hyperliquid_coin_var", tk.StringVar(value="")).get().strip()
+    cached_coin = cached_orders.get(order_id) if isinstance(cached_orders, dict) else None
+    if cached_coin:
+        return cached_coin
+
+    coin_var = getattr(self, "hyperliquid_coin_var", None)
+    coin_source = str(coin_var.get()).strip() if coin_var is not None else ""
     if coin_source:
         return normalize_hyperliquid_coin(coin_source)
 
@@ -2217,7 +2363,15 @@ def _cancel_hyperliquid_order(self: tk.Tk) -> None:
         return
 
     try:
-        coin = _hyperliquid_cancel_coin_for_order(self, raw_order_id)
+        selected_order = _hyperliquid_order_for_live_action(self, raw_order_id)
+    except ValueError as exc:
+        messagebox.showerror("Hyperliquid cancel blocked", str(exc))
+        return
+    if _block_hyperliquid_account_live_action(self, "cancel", selected_order):
+        return
+
+    try:
+        coin = _hyperliquid_cancel_coin_for_order(self, raw_order_id, selected_order)
     except Exception as exc:
         messagebox.showerror("Hyperliquid cancel blocked", str(exc))
         return
@@ -2290,43 +2444,91 @@ def _hyperliquid_user_address(self: tk.Tk) -> str | None:
     return address.strip() or None
 
 
-def _load_hyperliquid_open_orders(self: tk.Tk, title: str = "HYPERLIQUID OPEN ORDERS") -> None:
-    address = _hyperliquid_user_address(self)
+def _hyperliquid_accounts_for_open_orders() -> list[Any] | None:
+    from app.ui.hyperliquid_assessment_extension import (
+        HyperliquidAccountTarget,
+        _hyperliquid_accounts_from_env,
+    )
+
+    accounts = _hyperliquid_accounts_from_env()
+    if accounts:
+        return accounts
+
+    address = simpledialog.askstring(
+        "Hyperliquid Open Orders",
+        "Enter your Hyperliquid master/sub-account wallet address.\n\n"
+        "Tip: save HYPE_WALLET_ADDRESS_JEREMY_SECONDSTATE=0x... and "
+        "HYPE_WALLET_ADDRESS_ALEX_SECONDSTATE=0x... in .env to load both accounts.\n\n"
+        "Use the account address, not the API/agent wallet address.",
+    )
     if not address:
+        return None
+    cleaned_address = address.strip()
+    return [HyperliquidAccountTarget("Manual", cleaned_address)] if cleaned_address else None
+
+
+def _hyperliquid_open_order_cache(open_orders: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        hyperliquid_open_order_lookup_key(order): order
+        for order in open_orders
+        if isinstance(order, dict) and order.get("oid") is not None
+    }
+
+
+def _hyperliquid_open_order_coin_cache(open_orders: list[dict[str, Any]]) -> dict[str, str]:
+    return {
+        hyperliquid_open_order_lookup_key(order): str(order.get("coin"))
+        for order in open_orders
+        if isinstance(order, dict) and order.get("oid") is not None and order.get("coin")
+    }
+
+
+def _load_hyperliquid_open_orders(self: tk.Tk, title: str = "HYPERLIQUID OPEN ORDERS") -> None:
+    accounts = _hyperliquid_accounts_for_open_orders()
+    if not accounts:
         return
 
     try:
+        from app.ui.hyperliquid_assessment_extension import _copy_hyperliquid_open_orders_for_account
+
         client = HyperliquidInfoClient()
-        snapshot = client.fetch_snapshot(address, include_open_orders=True)
-        self.hyperliquid_open_order_coin_by_oid = {
-            str(order.get("oid")): str(order.get("coin"))
-            for order in snapshot.open_orders
-            if order.get("oid") is not None and order.get("coin")
-        }
-        self.hyperliquid_open_order_by_oid = {
-            str(order.get("oid")): order
-            for order in snapshot.open_orders
-            if order.get("oid") is not None
-        }
+        combined_open_orders: list[dict[str, Any]] = []
+        account_summaries: list[str] = []
+        fetched_at: datetime | None = None
+        for account in accounts:
+            snapshot = client.fetch_snapshot(account.address, include_open_orders=True)
+            account_orders = _copy_hyperliquid_open_orders_for_account(snapshot.open_orders, account)
+            combined_open_orders.extend(account_orders)
+            account_summaries.append(
+                f"{account.label}: {_short_address(snapshot.user)} ({len(account_orders)} open orders)"
+            )
+            if fetched_at is None or snapshot.fetched_at > fetched_at:
+                fetched_at = snapshot.fetched_at
+
+        self.hyperliquid_open_order_coin_by_oid = _hyperliquid_open_order_coin_cache(combined_open_orders)
+        self.hyperliquid_open_order_by_oid = _hyperliquid_open_order_cache(combined_open_orders)
         orders_table = getattr(self, "hyperliquid_workspace_open_orders_table", None)
         if orders_table is not None:
             try:
                 from app.ui.trading_workspace_extension import _populate_workspace_open_orders_table
 
-                _populate_workspace_open_orders_table(orders_table, snapshot.open_orders)
+                _populate_workspace_open_orders_table(orders_table, combined_open_orders)
+                self.hyperliquid_open_order_by_oid = getattr(orders_table, "_hyperliquid_open_order_by_oid", {})
+                self.hyperliquid_open_order_coin_by_oid = getattr(orders_table, "_hyperliquid_open_order_coin_by_oid", {})
             except Exception:
                 pass
-        selected_coin = getattr(self, "hyperliquid_coin_var", tk.StringVar(value="")).get().strip()
-        _address, source_key = _hyperliquid_env_address()
-        self.hyperliquid_status_var.set(f"Hyperliquid: {len(snapshot.open_orders)} open orders")
+        selected_coin_var = getattr(self, "hyperliquid_coin_var", None)
+        selected_coin = str(selected_coin_var.get()).strip() if selected_coin_var is not None else ""
+        self.hyperliquid_status_var.set(f"Hyperliquid: {len(combined_open_orders)} open orders")
         self._set_preview_text(
             _format_hyperliquid_open_orders(
                 title,
-                snapshot.user,
-                snapshot.open_orders,
-                snapshot.fetched_at,
+                "Multiple accounts" if len(accounts) > 1 else accounts[0].address,
+                combined_open_orders,
+                fetched_at or datetime.now(),
                 selected_coin=selected_coin,
-                address_source=source_key or "manual entry",
+                address_source="configured Hyperliquid accounts" if len(accounts) > 1 else "configured account",
+                account_summaries=account_summaries,
             )
         )
     except Exception as exc:
@@ -2342,12 +2544,18 @@ def _format_hyperliquid_open_orders(
     *,
     selected_coin: str = "",
     address_source: str = "manual entry",
+    account_summaries: list[str] | None = None,
 ) -> str:
+    account_lines = (
+        ["Accounts:", *(f"- {summary}" for summary in account_summaries), ""]
+        if account_summaries
+        else [f"Wallet: {_short_address(user)}"]
+    )
     lines = [
         title,
         "=" * len(title),
         "",
-        f"Wallet: {_short_address(user)}",
+        *account_lines,
         f"Address source: {address_source}",
         f"Fetched: {fetched_at.strftime('%Y-%m-%d %H:%M:%S')}",
         "",
@@ -2359,15 +2567,19 @@ def _format_hyperliquid_open_orders(
         lines.append("- None")
     else:
         rows = [normalize_hyperliquid_open_order(order) for order in open_orders]
+        include_account = any(hyperliquid_open_order_account_label(order) != "--" for order in open_orders)
+        account_header = f"{'Account':<9} " if include_account else ""
         header = (
-            f"{'Time':<17} {'Type':<13} {'Coin':<10} {'Direction':<13} {'Size':<15} "
+            f"{account_header}{'Time':<17} {'Type':<13} {'Coin':<10} {'Direction':<13} {'Size':<15} "
             f"{'Original':<10} {'Order Value':<15} {'Price':<11} {'RO':<4} {'Trigger Conditions':<22} {'TP/SL':<6} {'OID':<12}"
         )
         lines.append(header)
         lines.append("-" * len(header))
-        for row in rows:
+        for raw_order, row in zip(open_orders, rows):
             coin = _display_order_coin(row.coin or "UNKNOWN", selected_coin)
+            account_prefix = f"{hyperliquid_open_order_account_label(raw_order):<9.9} " if include_account else ""
             lines.append(
+                f"{account_prefix}"
                 f"{_order_time_label(row.raw):<17} "
                 f"{row.order_kind:<13.13} "
                 f"{coin:<10.10} "
