@@ -73,10 +73,20 @@ def _patch_replace_dialog() -> None:
 def _patch_session_comboboxes(root: tk.Misc) -> None:
     for child in root.winfo_children():
         if isinstance(child, ttk.Combobox):
-            try:
-                values = tuple(str(value) for value in child.cget("values"))
-            except tk.TclError:
-                values = ()
+            values = _combobox_values(child)
             if values == _LEGACY_SESSION_CHOICES:
                 child.configure(values=SCHWAB_EQUITY_SESSION_CHOICES)
         _patch_session_comboboxes(child)
+
+
+def _combobox_values(combo: ttk.Combobox) -> tuple[str, ...]:
+    try:
+        raw_values = combo["values"]
+    except tk.TclError:
+        return ()
+    if isinstance(raw_values, str):
+        try:
+            return tuple(str(value) for value in combo.tk.splitlist(raw_values))
+        except tk.TclError:
+            return ()
+    return tuple(str(value) for value in raw_values)
