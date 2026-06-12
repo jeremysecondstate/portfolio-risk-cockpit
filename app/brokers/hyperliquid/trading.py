@@ -19,6 +19,63 @@ HYPERLIQUID_MAX_SIZE_DECIMALS = 8
 
 
 @dataclass(frozen=True)
+class HyperliquidLiveAccountProfile:
+    key: str
+    label: str
+    wallet_address_env_keys: tuple[str, ...]
+    api_address_env_keys: tuple[str, ...]
+    api_secret_env_keys: tuple[str, ...]
+
+
+HYPERLIQUID_LIVE_ACCOUNTS: dict[str, HyperliquidLiveAccountProfile] = {
+    "jeremy": HyperliquidLiveAccountProfile(
+        key="jeremy",
+        label="Jeremy",
+        wallet_address_env_keys=(
+            "HYPE_WALLET_ADDRESS_JEREMY_SECONDSTATE",
+            "HYPE_WALLET_ADDRESS",
+            "HYPERLIQUID_USER_ADDRESS",
+        ),
+        api_address_env_keys=("HYPE_API_ADDRESS",),
+        api_secret_env_keys=("HYPE_API_SECRET",),
+    ),
+    "alex": HyperliquidLiveAccountProfile(
+        key="alex",
+        label="Alex",
+        wallet_address_env_keys=(
+            "HYPE_WALLET_ADDRESS_ALEX_SECONDSTATE",
+            "HYPE_ALEX_WALLET_ADDRESS",
+        ),
+        api_address_env_keys=(
+            "HYPE_ALEX_API_ADDRESS",
+            "HYPE_ALEX_API_KEY",  # fallback for your current env name
+        ),
+        api_secret_env_keys=(
+            "HYPE_ALEX_API_SECRET",
+            "HYPE_ALEX_WALLET_SEED",  # fallback for your current env name
+        ),
+    ),
+}
+
+
+def _first_env_value(keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = os.getenv(key, "").strip().strip("'\"")
+        if value and value.lower() != "key in here":
+            return value
+    return ""
+
+
+def _live_account_profile(account_key: str) -> HyperliquidLiveAccountProfile:
+    normalized = (account_key or "jeremy").strip().lower()
+    try:
+        return HYPERLIQUID_LIVE_ACCOUNTS[normalized]
+    except KeyError as exc:
+        choices = ", ".join(sorted(HYPERLIQUID_LIVE_ACCOUNTS))
+        raise ValueError(f"Unknown Hyperliquid live account '{account_key}'. Choices: {choices}") from exc
+
+
+@dataclass(frozen=True)
 class HyperliquidOrderTicket:
     coin: str
     is_buy: bool
@@ -148,10 +205,14 @@ class HyperliquidSpotMarketLookupError(RuntimeError):
 class HyperliquidTradingConfig:
     """Local environment readiness for Hyperliquid ticket workflow."""
 
-    def __init__(self) -> None:
-        self.wallet_address = os.getenv("HYPE_WALLET_ADDRESS", "").strip()
-        self.api_address = os.getenv("HYPE_API_ADDRESS", "").strip()
-        self.has_signing_secret = bool(os.getenv("HYPE_API_SECRET", "").strip())
+    def __init__(self, account_key: str = "jeremy") -> None:
+        self.account = _live_account_profile(account_key)
+        self.account_key = self.account.key
+        self.account_label = self.account.label
+        self.wallet_address = _first_env_value(self.account.wallet_address_env_keys)
+        self.api_address = _first_env_value(self.account.api_address_env_keys)
+        self.api_secret = _first_env_value(self.account.api_secret_env_keys)
+        self.has_signing_secret = bool(self.api_secret)
         self.live_enabled = os.getenv("HYPERLIQUID_ENABLE_LIVE_ORDERS", "").strip().lower() == "true"
         self.max_live_notional = _float_env("HYPERLIQUID_MAX_LIVE_ORDER_DOLLARS", 500.0)
 
@@ -261,6 +322,7 @@ class HyperliquidTradingConfig:
                 "",
                 status,
                 "",
+                f"Account: {self.account_label}",
                 f"Coin: {ticket.coin}",
                 f"Side: {ticket.side_label}",
                 f"Size: {ticket.size:g}",
@@ -285,13 +347,19 @@ class HyperliquidTradingConfig:
 
 
 class HyperliquidExecutionAdapter:
-    """Fast guarded execution adapter with local SDK hooks."""
+    """Fast execution adapter with local SDK hooks."""
+
+    def __init__(self, account_key: str = "jeremy") -> None:
+        self.account_key = account_key
+
+    def _config(self) -> HyperliquidTradingConfig:
+        return HyperliquidTradingConfig(self.account_key)
 
     def submit(self, ticket: HyperliquidOrderTicket) -> Any:
         normalized_ticket = normalize_hyperliquid_ticket_limit_price(ticket)
-        config = HyperliquidTradingConfig()
+        config = self._config()
         config.validate_for_live(normalized_ticket)
-        return self._local_signed_submit(normalized_ticket)
+        return self._local_signed_submit(normalized_ticket, config)
 
     def cancel(self, coin: str, order_id: int) -> Any:
         config = HyperliquidTradingConfig()
@@ -340,20 +408,17 @@ class HyperliquidExecutionAdapter:
             raise ValueError("Hyperliquid leverage must be 100x or lower.")
         return self._local_signed_update_leverage(normalized_coin, leverage, is_cross=is_cross)
 
-    def _local_signed_submit(self, ticket: HyperliquidOrderTicket) -> Any:
+    def _local_signed_submit(self, ticket: HyperliquidOrderTicket, config: HyperliquidTradingConfig) -> Any:
         from eth_account import Account
         from hyperliquid.exchange import Exchange
         from hyperliquid.utils import constants
 
-        api_secret = os.getenv("HYPE_API_SECRET", "").strip()
-        wallet_address = os.getenv("HYPE_WALLET_ADDRESS", "").strip()
-
-        api_wallet = Account.from_key(api_secret)
+        api_wallet = Account.from_key(config.api_secret)
 
         exchange = Exchange(
             api_wallet,
             constants.MAINNET_API_URL,
-            account_address=wallet_address,
+            account_address=config.wallet_address,
         )
         normalized_ticket = normalize_hyperliquid_ticket_size_for_exchange(ticket, exchange)
 
