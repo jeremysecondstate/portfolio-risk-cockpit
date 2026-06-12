@@ -126,7 +126,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
         ).pack(anchor=tk.W)
 
     def sync_hyperliquid_account(self) -> None:
-        default_address = os.getenv("HYPERLIQUID_USER_ADDRESS", "").strip()
+        default_address = os.getenv("", "").strip()
         address = default_address or simpledialog.askstring(
             "Hyperliquid Sync",
             "Enter your Hyperliquid master/sub-account wallet address.\n\n"

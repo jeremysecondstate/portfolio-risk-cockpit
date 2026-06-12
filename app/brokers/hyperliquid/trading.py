@@ -34,7 +34,6 @@ HYPERLIQUID_LIVE_ACCOUNTS: dict[str, HyperliquidLiveAccountProfile] = {
         wallet_address_env_keys=(
             "HYPE_WALLET_ADDRESS_JEREMY_SECONDSTATE",
             "HYPE_WALLET_ADDRESS",
-            "HYPERLIQUID_USER_ADDRESS",
         ),
         api_address_env_keys=("HYPE_API_ADDRESS",),
         api_secret_env_keys=("HYPE_API_SECRET",),
@@ -44,16 +43,10 @@ HYPERLIQUID_LIVE_ACCOUNTS: dict[str, HyperliquidLiveAccountProfile] = {
         label="Alex",
         wallet_address_env_keys=(
             "HYPE_WALLET_ADDRESS_ALEX_SECONDSTATE",
-            "HYPE_ALEX_WALLET_ADDRESS",
+            "HYPE_WALLET_ADDRESS_ALEX",
         ),
-        api_address_env_keys=(
-            "HYPE_ALEX_API_ADDRESS",
-            "HYPE_ALEX_API_KEY",  # fallback for your current env name
-        ),
-        api_secret_env_keys=(
-            "HYPE_ALEX_API_SECRET",
-            "HYPE_ALEX_WALLET_SEED",  # fallback for your current env name
-        ),
+        api_address_env_keys=("HYPE_API_ADDRESS_ALEX",),
+        api_secret_env_keys=("HYPE_API_SECRET_ALEX",),
     ),
 }
 

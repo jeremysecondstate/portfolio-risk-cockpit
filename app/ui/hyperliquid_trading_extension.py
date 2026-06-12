@@ -25,7 +25,7 @@ from app.ui.polished_theme import _make_paned
 
 TRADING_VENUES = ["Schwab", "Hyperliquid"]
 HYPERLIQUID_TIFS = ["Alo", "Ioc", "Gtc"]
-HYPERLIQUID_ADDRESS_ENV_KEYS = ("HYPE_WALLET_ADDRESS", "HYPERLIQUID_USER_ADDRESS")
+HYPERLIQUID_ADDRESS_ENV_KEYS = ("HYPE_WALLET_ADDRESS")
 
 
 @dataclass(frozen=True)

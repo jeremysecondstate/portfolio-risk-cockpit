@@ -14,7 +14,7 @@ from app.ui import polished_theme
 from app.ui.schwab_sync_report_extension import _is_temporary_schwab_provider_error
 
 
-HYPERLIQUID_ADDRESS_ENV_KEYS = ("HYPE_WALLET_ADDRESS", "HYPERLIQUID_USER_ADDRESS")
+HYPERLIQUID_ADDRESS_ENV_KEYS = "HYPE_WALLET_ADDRESS"
 REFRESH_DUE_AFTER_MS = 5 * 60 * 1000
 AUTO_REFRESH_AFTER_MS = 1 * 60 * 1000
 AUTO_REFRESH_ENV_KEY = "COCKPIT_AUTO_REFRESH_MS"

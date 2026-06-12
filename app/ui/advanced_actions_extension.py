@@ -49,7 +49,7 @@ def _sync_hyperliquid_combined(self: tk.Tk) -> None:
 
 def _hyperliquid_address_from_env() -> str:
     """Support the friendly HYPE env var plus the original generic name."""
-    for key in ("HYPE_WALLET_ADDRESS", "HYPERLIQUID_USER_ADDRESS"):
+    for key in "HYPE_WALLET_ADDRESS":
         value = os.getenv(key, "").strip()
         if value:
             return value
