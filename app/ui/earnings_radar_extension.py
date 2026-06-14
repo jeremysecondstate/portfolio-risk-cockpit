@@ -29,6 +29,20 @@ from app.analytics.earnings_pipeline import (
     filter_recent_earnings_records,
     filter_upcoming_earnings_records,
 )
+from app.analytics.market_screener import (
+    EARNINGS_WINDOW_OPTIONS,
+    EVENT_TYPE_OPTIONS,
+    MARKET_SCREENER_AI_ANALYZE_PROMPT,
+    MARKET_SCREENER_AI_QUICK_PROMPTS,
+    MarketScreenerAiResponse,
+    MarketScreenerRecord,
+    MarketScreenerSnapshot,
+    OpenAiMarketScreenerClient,
+    fetch_market_screener_snapshot,
+    filter_market_screener_records,
+    market_screener_has_ai_signal,
+    sort_market_screener_records,
+)
 from app.analytics.symbol_chat import redact_symbol_chat_secrets
 from app.data.earnings_calendar import ALPHA_VANTAGE_HORIZONS, AlphaVantageEarningsCalendarClient, UpcomingEarningsRecord
 from app.data.sec_edgar import SecEdgarClient
@@ -68,8 +82,30 @@ UPCOMING_COLUMNS = (
     ("source", "Source", 130, tk.W),
     ("source_link", "Source link", 420, tk.W),
 )
+SCREENER_COLUMNS = (
+    ("symbol", "Symbol", 86, tk.W),
+    ("company", "Company", 230, tk.W),
+    ("exchange", "Exchange", 110, tk.W),
+    ("sector", "Sector", 150, tk.W),
+    ("industry", "Industry", 190, tk.W),
+    ("price", "Price", 92, tk.E),
+    ("change_percent", "Change %", 96, tk.E),
+    ("volume", "Volume", 110, tk.E),
+    ("avg_volume", "Avg vol", 110, tk.E),
+    ("market_cap", "Market cap", 120, tk.E),
+    ("pe_ratio", "P/E", 82, tk.E),
+    ("eps", "EPS", 82, tk.E),
+    ("revenue_growth", "Rev growth", 104, tk.E),
+    ("next_earnings", "Next earnings", 112, tk.W),
+    ("recent_filing", "Recent filing", 112, tk.W),
+    ("recent_type", "Recent type", 160, tk.W),
+    ("signals", "Signals", 260, tk.W),
+    ("risk_flags", "Risk flags", 220, tk.W),
+    ("sources", "Sources", 190, tk.W),
+)
 RECENT_NUMERIC_COLUMNS = {"revenue", "revenue_growth", "eps", "net_income"}
 UPCOMING_NUMERIC_COLUMNS = {"estimate"}
+SCREENER_NUMERIC_COLUMNS = {"price", "change_percent", "volume", "avg_volume", "market_cap", "pe_ratio", "eps", "revenue_growth", "signals", "risk_flags", "sources"}
 
 
 def install_earnings_radar_extension(app_cls: Type[tk.Tk]) -> None:
@@ -90,7 +126,7 @@ def _inject_earnings_button(self: tk.Tk) -> None:
         return
     for column in range(3):
         actions.columnconfigure(column, weight=1, uniform="schwab_actions")
-    ttk.Button(actions, text="Earnings Radar", command=self.show_earnings_radar, style="Accent.TButton").grid(
+    ttk.Button(actions, text="Market Screener", command=self.show_earnings_radar, style="Accent.TButton").grid(
         row=3,
         column=2,
         sticky="ew",
@@ -114,8 +150,8 @@ def _open_earnings_radar_dashboard(self: tk.Tk) -> None:
 
     _ensure_state(self)
     window = tk.Toplevel(self)
-    window.title("Earnings Radar / SEC + Calendar")
-    window.geometry("1360x860")
+    window.title("Market Intelligence Screener")
+    window.geometry("1420x900")
     window.minsize(1120, 700)
     window.columnconfigure(0, weight=1)
     window.rowconfigure(0, weight=1)
@@ -123,10 +159,13 @@ def _open_earnings_radar_dashboard(self: tk.Tk) -> None:
 
     notebook = ttk.Notebook(window)
     notebook.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+    screener_tab = ttk.Frame(notebook, style="Panel.TFrame")
     recent_tab = ttk.Frame(notebook, style="Panel.TFrame")
     upcoming_tab = ttk.Frame(notebook, style="Panel.TFrame")
+    notebook.add(screener_tab, text="All Stocks / Screener")
     notebook.add(recent_tab, text="Recent EDGAR Drops")
     notebook.add(upcoming_tab, text="Upcoming Earnings")
+    _build_screener_tab(self, screener_tab)
     _build_recent_tab(self, recent_tab)
     _build_upcoming_tab(self, upcoming_tab)
 
@@ -137,8 +176,9 @@ def _open_earnings_radar_dashboard(self: tk.Tk) -> None:
     else:
         self.earnings_recent_status_var.set("Ready. Refresh SEC data to load recent earnings drops.")
 
-    window.after(250, lambda app=self: _refresh_recent(app, force_refresh=False))
-    window.after(500, lambda app=self: _refresh_upcoming(app, force_refresh=False))
+    window.after(150, lambda app=self: _refresh_screener(app, force_refresh=False))
+    window.after(300, lambda app=self: _refresh_recent(app, force_refresh=False))
+    window.after(600, lambda app=self: _refresh_upcoming(app, force_refresh=False))
 
     def _close() -> None:
         self.earnings_radar_window = None
@@ -148,6 +188,28 @@ def _open_earnings_radar_dashboard(self: tk.Tk) -> None:
 
 
 def _ensure_state(self: tk.Tk) -> None:
+    self.market_screener_records: list[MarketScreenerRecord] = []
+    self.market_screener_filtered_records: list[MarketScreenerRecord] = []
+    self.market_screener_row_map: dict[str, MarketScreenerRecord] = {}
+    self.market_screener_sort_column = "symbol"
+    self.market_screener_sort_desc = False
+    self.market_screener_page = 0
+    self.market_screener_status_var = tk.StringVar(value="Ready.")
+    self.market_screener_search_var = tk.StringVar(value="")
+    self.market_screener_sector_var = tk.StringVar(value="All")
+    self.market_screener_exchange_var = tk.StringVar(value="All")
+    self.market_screener_event_type_var = tk.StringVar(value="All")
+    self.market_screener_risk_flag_var = tk.StringVar(value="All")
+    self.market_screener_earnings_window_var = tk.StringVar(value="All")
+    self.market_screener_has_ai_signal_var = tk.BooleanVar(value=False)
+    self.market_screener_page_size_var = tk.StringVar(value="100")
+    self.market_screener_selected_record: MarketScreenerRecord | None = None
+    self.market_screener_ai_status_var = tk.StringVar(value="Select a screener row for row-grounded AI.")
+    self._market_screener_ai_running = False
+    self._market_screener_refreshing = False
+    self._market_screener_refresh_pending = False
+    self._market_screener_refresh_pending_force = False
+
     self.earnings_recent_records: list[RecentEarningsRecord] = []
     self.earnings_recent_filtered_records: list[RecentEarningsRecord] = []
     self.earnings_recent_row_map: dict[str, RecentEarningsRecord] = {}
@@ -186,6 +248,133 @@ def _ensure_state(self: tk.Tk) -> None:
     self.earnings_upcoming_date_to_var = tk.StringVar(value="")
     self.earnings_upcoming_has_estimate_var = tk.BooleanVar(value=False)
     self.earnings_upcoming_page_size_var = tk.StringVar(value="100")
+
+
+def _build_screener_tab(self: tk.Tk, parent: ttk.Frame) -> None:
+    parent.columnconfigure(0, weight=1)
+    parent.rowconfigure(3, weight=1)
+    _header(
+        parent,
+        "Market Intelligence Screener",
+        "Public-company universe, earnings events, SEC filing signals, local holdings, and optional provider-backed market fields are merged into one row-grounded research surface. Missing provider fields remain blank instead of inferred.",
+        self.market_screener_status_var,
+    ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    _build_screener_filters(self, parent)
+    self.market_screener_chart = _chart(parent, row=2)
+    self.market_screener_table = _table(parent, row=3, title="All Stocks / Screener", columns=SCREENER_COLUMNS, sort=lambda col: _sort_screener(self, col))
+    self.market_screener_table.bind("<Double-1>", lambda _event, app=self: _open_screener_source(app), add="+")
+    self.market_screener_table.bind("<<TreeviewSelect>>", lambda _event, app=self: _on_screener_selection_changed(app), add="+")
+    self.market_screener_table.tag_configure("signal", foreground=polished_theme.ACCENT_SOFT)
+    self.market_screener_table.tag_configure("risk", foreground=polished_theme.NEGATIVE)
+    _build_screener_detail_panel(self, parent, row=4)
+    _footer(
+        self,
+        parent,
+        row=5,
+        page_var_name="market_screener_page_var",
+        size_var=self.market_screener_page_size_var,
+        prev=lambda: _turn_screener_page(self, -1),
+        next_=lambda: _turn_screener_page(self, 1),
+        apply=lambda: _apply_screener_filters(self),
+    )
+
+
+def _build_screener_filters(self: tk.Tk, parent: ttk.Frame) -> None:
+    box = ttk.LabelFrame(parent, text="Filters", style="Card.TLabelframe")
+    box.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+    for column in range(8):
+        box.columnconfigure(column, weight=1 if column in {1, 3, 5, 7} else 0)
+    _entry_filter(box, "Search", self.market_screener_search_var, row=0, column=0, command=lambda: _apply_screener_filters(self))
+    self.market_screener_sector_combo = _combo_filter(box, "Sector", self.market_screener_sector_var, ["All"], row=0, column=2, command=lambda: _apply_screener_filters(self))
+    self.market_screener_exchange_combo = _combo_filter(box, "Exchange", self.market_screener_exchange_var, ["All"], row=0, column=4, command=lambda: _apply_screener_filters(self))
+    _combo_filter(box, "Event", self.market_screener_event_type_var, list(EVENT_TYPE_OPTIONS), row=0, column=6, command=lambda: _apply_screener_filters(self))
+    self.market_screener_risk_flag_combo = _combo_filter(box, "Risk flag", self.market_screener_risk_flag_var, ["All"], row=1, column=0, command=lambda: _apply_screener_filters(self))
+    _combo_filter(box, "Earnings", self.market_screener_earnings_window_var, list(EARNINGS_WINDOW_OPTIONS), row=1, column=2, command=lambda: _apply_screener_filters(self))
+    checks = ttk.Frame(box, style="Panel.TFrame")
+    checks.grid(row=1, column=4, columnspan=4, sticky="ew", pady=4)
+    ttk.Checkbutton(checks, text="Has AI-worthy signal", variable=self.market_screener_has_ai_signal_var, command=lambda: _apply_screener_filters(self)).pack(side=tk.LEFT)
+
+    quick = ttk.Frame(box, style="Panel.TFrame")
+    quick.grid(row=2, column=0, columnspan=8, sticky="ew", pady=(8, 0))
+    ttk.Label(quick, text="Quick", style="Subtle.TLabel").pack(side=tk.LEFT, padx=(0, 6))
+    for label, preset in (
+        ("Earnings Soon", "earnings_soon"),
+        ("Recent SEC Filing", "recent_filing"),
+        ("Guidance", "guidance"),
+        ("Risk Flags", "risk"),
+        ("High Volume / Mover", "mover"),
+        ("My Holdings", "holdings"),
+    ):
+        ttk.Button(quick, text=label, command=lambda value=preset, app=self: _apply_screener_quick_preset(app, value)).pack(side=tk.LEFT, padx=(0, 6))
+
+    actions = ttk.Frame(box, style="Panel.TFrame")
+    actions.grid(row=3, column=0, columnspan=8, sticky="ew", pady=(8, 0))
+    ttk.Button(actions, text="Refresh Screener", command=lambda: _refresh_screener(self, force_refresh=True), style="Accent.TButton").pack(side=tk.LEFT)
+    ttk.Button(actions, text="Open Source", command=lambda: _open_screener_source(self)).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(actions, text="Open Symbol Chat", command=lambda: _open_screener_symbol_chat(self)).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(actions, text="Clear Filters", command=lambda: _clear_screener_filters(self)).pack(side=tk.LEFT, padx=(8, 0))
+
+
+def _build_screener_detail_panel(self: tk.Tk, parent: ttk.Frame, *, row: int) -> None:
+    detail = ttk.LabelFrame(parent, text="Selected Screener Context + AI", style="Card.TLabelframe")
+    detail.grid(row=row, column=0, sticky="ew", pady=(0, 8))
+    detail.columnconfigure(0, weight=1)
+    detail.columnconfigure(1, weight=0)
+    ttk.Label(detail, textvariable=self.market_screener_ai_status_var, style="Chip.TLabel").grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 6))
+
+    text_frame = ttk.Frame(detail, style="Panel.TFrame")
+    text_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
+    text_frame.columnconfigure(0, weight=1)
+    self.market_screener_detail_text = tk.Text(
+        text_frame,
+        height=5,
+        wrap=tk.WORD,
+        bg=polished_theme.PANEL,
+        fg=polished_theme.TEXT,
+        insertbackground=polished_theme.TEXT,
+        relief=tk.FLAT,
+        padx=10,
+        pady=8,
+        font=("Segoe UI", 9),
+    )
+    self.market_screener_detail_text.grid(row=0, column=0, sticky="ew")
+    self.market_screener_detail_text.configure(state=tk.DISABLED)
+
+    self.market_screener_source_text = tk.Text(
+        text_frame,
+        height=3,
+        wrap=tk.WORD,
+        bg=polished_theme.INPUT,
+        fg=polished_theme.MUTED,
+        insertbackground=polished_theme.TEXT,
+        relief=tk.FLAT,
+        padx=10,
+        pady=6,
+        font=("Segoe UI", 8),
+    )
+    self.market_screener_source_text.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+    self.market_screener_source_text.configure(state=tk.DISABLED)
+
+    actions = ttk.Frame(detail, style="Panel.TFrame")
+    actions.grid(row=1, column=1, sticky="nsew", padx=(0, 8), pady=(0, 8))
+    self.market_screener_ai_analyze_button = ttk.Button(actions, text="Analyze Selected", command=lambda app=self: _run_screener_ai_prompt(app, "Analyze Selected", MARKET_SCREENER_AI_ANALYZE_PROMPT), style="Accent.TButton")
+    self.market_screener_ai_analyze_button.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+    self.market_screener_ai_why_button = ttk.Button(actions, text="Why Interesting?", command=lambda app=self: _run_screener_ai_prompt(app, "Why Interesting?", MARKET_SCREENER_AI_QUICK_PROMPTS["Why Interesting?"]))
+    self.market_screener_ai_why_button.grid(row=1, column=0, sticky="ew", pady=(0, 4))
+    self.market_screener_ai_risks_button = ttk.Button(actions, text="Risks + Diligence", command=lambda app=self: _run_screener_ai_prompt(app, "Risks + Diligence", MARKET_SCREENER_AI_QUICK_PROMPTS["Risks + Diligence"]))
+    self.market_screener_ai_risks_button.grid(row=2, column=0, sticky="ew", pady=(0, 4))
+    self.market_screener_ai_symbol_chat_button = ttk.Button(actions, text="Open Symbol Chat", command=lambda app=self: _open_screener_symbol_chat(app))
+    self.market_screener_ai_symbol_chat_button.grid(row=3, column=0, sticky="ew", pady=(0, 4))
+
+    quick = ttk.Frame(detail, style="Panel.TFrame")
+    quick.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
+    ttk.Label(quick, text="AI", style="Subtle.TLabel").pack(side=tk.LEFT, padx=(0, 6))
+    self.market_screener_ai_quick_buttons: list[ttk.Button] = []
+    for label, prompt in MARKET_SCREENER_AI_QUICK_PROMPTS.items():
+        button = ttk.Button(quick, text=label, command=lambda prompt_label=label, value=prompt, app=self: _run_screener_ai_prompt(app, prompt_label, value))
+        button.pack(side=tk.LEFT, padx=(0, 6))
+        self.market_screener_ai_quick_buttons.append(button)
+    _set_screener_ai_actions_enabled(self, False)
 
 
 def _build_recent_tab(self: tk.Tk, parent: ttk.Frame) -> None:
@@ -323,6 +512,199 @@ def _build_upcoming_filters(self: tk.Tk, parent: ttk.Frame) -> None:
     ttk.Button(actions, text="Clear Filters", command=lambda: _clear_upcoming_filters(self)).pack(side=tk.LEFT, padx=(8, 0))
 
 
+def _market_screener_holdings_records(self: tk.Tk) -> list[MarketScreenerRecord]:
+    broker = getattr(self, "broker", None)
+    getter = getattr(broker, "get_portfolio", None)
+    if not callable(getter):
+        return []
+    try:
+        portfolio = getter()
+    except Exception:
+        return []
+    positions = getattr(portfolio, "positions", None)
+    if not isinstance(positions, dict):
+        return []
+    fetched_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    records: list[MarketScreenerRecord] = []
+    for symbol, position in sorted(positions.items()):
+        clean_symbol = str(getattr(position, "symbol", symbol) or symbol).strip().upper()
+        if not clean_symbol or clean_symbol.startswith("HL:") or clean_symbol == "USD":
+            continue
+        records.append(
+            MarketScreenerRecord(
+                symbol=clean_symbol,
+                company_name=None,
+                price=_safe_float(getattr(position, "last_price", None)),
+                signals=("Schwab holding",),
+                sources=("Local app holdings",),
+                fetched_at=fetched_at,
+                source_excerpt=(
+                    f"Local holdings context: quantity={_safe_float(getattr(position, 'quantity', None))}; "
+                    f"average_cost={_safe_float(getattr(position, 'average_cost', None))}; "
+                    f"market_value={_safe_float(getattr(position, 'market_value', None))}; "
+                    f"unrealized_pnl={_safe_float(getattr(position, 'unrealized_profit_loss', None))}."
+                ),
+            )
+        )
+    return records
+
+
+def _refresh_screener(self: tk.Tk, *, force_refresh: bool) -> None:
+    if getattr(self, "_market_screener_refreshing", False):
+        self._market_screener_refresh_pending = True
+        self._market_screener_refresh_pending_force = bool(getattr(self, "_market_screener_refresh_pending_force", False) or force_refresh)
+        return
+    self._market_screener_refreshing = True
+    self._market_screener_refresh_pending = False
+    self._market_screener_refresh_pending_force = False
+    self.market_screener_status_var.set("Loading market intelligence screener...")
+    recent_records = list(getattr(self, "earnings_recent_records", []) or [])
+    upcoming_records = list(getattr(self, "earnings_upcoming_records", []) or [])
+    supplemental_records = _market_screener_holdings_records(self)
+
+    def worker() -> None:
+        try:
+            snapshot = fetch_market_screener_snapshot(
+                recent_records=recent_records,
+                upcoming_records=upcoming_records,
+                supplemental_records=supplemental_records,
+                force_refresh=force_refresh,
+            )
+        except Exception as exc:
+            self.after(0, lambda error=exc: _finish_screener_error(self, error))
+            return
+        self.after(0, lambda loaded=snapshot: _finish_screener_success(self, loaded))
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _finish_screener_success(self: tk.Tk, snapshot: MarketScreenerSnapshot) -> None:
+    self._market_screener_refreshing = False
+    _load_screener_snapshot(self, snapshot)
+    signals = sum(1 for record in snapshot.records if market_screener_has_ai_signal(record))
+    warnings = f" ({len(snapshot.errors)} nonblocking warning(s))" if snapshot.errors else ""
+    self.market_screener_status_var.set(f"Loaded {len(snapshot.records)} screener rows; {signals} with AI-worthy signals. Fetched {snapshot.fetched_at}.{warnings}")
+    _run_pending_screener_refresh(self)
+
+
+def _finish_screener_error(self: tk.Tk, error: Exception) -> None:
+    self._market_screener_refreshing = False
+    self.market_screener_status_var.set(f"Screener refresh failed: {error}")
+    _run_pending_screener_refresh(self)
+
+
+def _run_pending_screener_refresh(self: tk.Tk) -> None:
+    if not getattr(self, "_market_screener_refresh_pending", False):
+        return
+    force_refresh = bool(getattr(self, "_market_screener_refresh_pending_force", False))
+    self._market_screener_refresh_pending = False
+    self._market_screener_refresh_pending_force = False
+    try:
+        self.after(50, lambda app=self, force=force_refresh: _refresh_screener(app, force_refresh=force))
+    except tk.TclError:
+        return
+
+
+def _load_screener_snapshot(self: tk.Tk, snapshot: MarketScreenerSnapshot) -> None:
+    self.market_screener_records = list(snapshot.records)
+    _set_combo_values(self.market_screener_sector_combo, ["All", *sorted({record.sector or EMPTY_VALUE for record in self.market_screener_records})], self.market_screener_sector_var)
+    _set_combo_values(self.market_screener_exchange_combo, ["All", *sorted({record.exchange or EMPTY_VALUE for record in self.market_screener_records})], self.market_screener_exchange_var)
+    _set_combo_values(self.market_screener_risk_flag_combo, ["All", "Any risk flag", *sorted({flag for record in self.market_screener_records for flag in record.risk_flags})], self.market_screener_risk_flag_var)
+    _set_screener_source_text(self, _screener_source_status_text(snapshot))
+    self.market_screener_page = 0
+    _apply_screener_filters(self)
+
+
+def _apply_screener_filters(self: tk.Tk) -> None:
+    filtered = filter_market_screener_records(
+        self.market_screener_records,
+        search=self.market_screener_search_var.get(),
+        sector=self.market_screener_sector_var.get(),
+        exchange=self.market_screener_exchange_var.get(),
+        event_type=self.market_screener_event_type_var.get(),
+        risk_flag=self.market_screener_risk_flag_var.get(),
+        earnings_date_window=self.market_screener_earnings_window_var.get(),
+        has_ai_signal=self.market_screener_has_ai_signal_var.get(),
+    )
+    self.market_screener_filtered_records = sort_market_screener_records(filtered, self.market_screener_sort_column, descending=self.market_screener_sort_desc)
+    self.market_screener_page = min(self.market_screener_page, _max_page(self.market_screener_filtered_records, _screener_page_size(self)))
+    _populate_screener_table(self)
+    _draw_screener_chart(self)
+
+
+def _populate_screener_table(self: tk.Tk) -> None:
+    tree = self.market_screener_table
+    tree.delete(*tree.get_children())
+    self.market_screener_row_map = {}
+    page_size = _screener_page_size(self)
+    total, page_count, start = _page_window(self.market_screener_filtered_records, page_size, self.market_screener_page)
+    self.market_screener_page = min(self.market_screener_page, page_count - 1)
+    for index, record in enumerate(self.market_screener_filtered_records[start : start + page_size]):
+        iid = f"market_screener_{start + index}"
+        self.market_screener_row_map[iid] = record
+        tag = "risk" if record.risk_flags else "signal" if market_screener_has_ai_signal(record) else ""
+        tags = (tag,) if tag else ()
+        tree.insert("", tk.END, iid=iid, values=_screener_values(record), tags=tags)
+    self.market_screener_page_var.set(f"Page {self.market_screener_page + 1} / {page_count} - {total} records")
+    if hasattr(self, "market_screener_detail_text"):
+        _on_screener_selection_changed(self)
+
+
+def _screener_values(record: MarketScreenerRecord) -> tuple[str, ...]:
+    return (
+        record.symbol or EMPTY_VALUE,
+        display_optional_text(record.company_name),
+        display_optional_text(record.exchange),
+        display_optional_text(record.sector),
+        display_optional_text(record.industry),
+        display_money(record.price),
+        display_percent(record.change_percent),
+        _display_large_number(record.volume),
+        _display_large_number(record.avg_volume),
+        display_money(record.market_cap),
+        _display_decimal(record.pe_ratio),
+        display_money(record.eps),
+        display_percent(record.revenue_growth),
+        display_optional_text(record.next_earnings_date),
+        display_optional_text(record.recent_filing_date),
+        display_optional_text(record.recent_filing_type),
+        ", ".join(record.signals) if record.signals else EMPTY_VALUE,
+        ", ".join(record.risk_flags) if record.risk_flags else EMPTY_VALUE,
+        ", ".join(record.sources) if record.sources else EMPTY_VALUE,
+    )
+
+
+def _draw_screener_chart(self: tk.Tk) -> None:
+    records = self.market_screener_filtered_records
+    _draw_grouped_chart(
+        self.market_screener_chart,
+        (
+            ("Signals", _counts(records, _primary_screener_signal)),
+            ("Sector", _counts(records, lambda record: record.sector or "Unknown")),
+            ("Sources", _counts(records, lambda record: (record.sources[0] if record.sources else "Unknown"))),
+        ),
+    )
+
+
+def _sort_screener(self: tk.Tk, column: str) -> None:
+    self.market_screener_sort_desc = not self.market_screener_sort_desc if self.market_screener_sort_column == column else column in SCREENER_NUMERIC_COLUMNS | {"next_earnings", "recent_filing"}
+    self.market_screener_sort_column = column
+    self.market_screener_page = 0
+    _apply_screener_filters(self)
+
+
+def _turn_screener_page(self: tk.Tk, delta: int) -> None:
+    self.market_screener_page = min(max(self.market_screener_page + delta, 0), _max_page(self.market_screener_filtered_records, _screener_page_size(self)))
+    _populate_screener_table(self)
+
+
+def _open_screener_source(self: tk.Tk) -> None:
+    record = _selected_screener_record(self, show_message=True, title="Open Source")
+    if record is None:
+        return
+    _open_url(record.source_links[0] if record.source_links else None, "Open Source", "The selected screener row does not have a source URL.")
+
+
 def _refresh_recent(self: tk.Tk, *, force_refresh: bool) -> None:
     if getattr(self, "_earnings_recent_refreshing", False):
         return
@@ -348,6 +730,8 @@ def _finish_recent_success(self: tk.Tk, snapshot: EarningsRadarSnapshot) -> None
     source = "cache" if snapshot.used_cache else "SEC"
     warnings = f" ({len(snapshot.errors)} nonblocking warnings)" if snapshot.errors else ""
     self.earnings_recent_status_var.set(f"Loaded {len(snapshot.recent)} earnings filings from {source}. Fetched {snapshot.fetched_at}.{warnings}")
+    if hasattr(self, "market_screener_table"):
+        _refresh_screener(self, force_refresh=False)
 
 
 def _finish_recent_error(self: tk.Tk, error: Exception) -> None:
@@ -381,6 +765,8 @@ def _finish_upcoming_success(self: tk.Tk, records: list[UpcomingEarningsRecord],
     self.earnings_upcoming_status_var.set(status)
     self.earnings_upcoming_page = 0
     _apply_upcoming_filters(self)
+    if hasattr(self, "market_screener_table"):
+        _refresh_screener(self, force_refresh=False)
 
 
 def _finish_upcoming_error(self: tk.Tk, error: Exception) -> None:
@@ -561,6 +947,212 @@ def _open_recent_exhibit(self: tk.Tk) -> None:
     record = _selected(self.earnings_recent_table, self.earnings_recent_row_map, "Open Earnings Exhibit", "Select an earnings row first.")
     if record is not None:
         _open_url(record.exhibit_url, "Open Earnings Exhibit", "The selected row does not have an earnings exhibit URL.")
+
+
+def _selected_screener_record(self: tk.Tk, *, show_message: bool = False, title: str = "Market Screener") -> MarketScreenerRecord | None:
+    table = getattr(self, "market_screener_table", None)
+    row_map = getattr(self, "market_screener_row_map", {}) or {}
+    if table is None:
+        return None
+    try:
+        selection = table.selection()
+    except Exception:
+        selection = ()
+    if not selection:
+        if show_message:
+            messagebox.showinfo(title, "Select a screener row first.")
+        return None
+    record = row_map.get(selection[0]) if isinstance(row_map, dict) else None
+    if record is None and show_message:
+        messagebox.showinfo(title, "The selected screener row is no longer available. Refresh or select another row.")
+    return record
+
+
+def _on_screener_selection_changed(self: tk.Tk) -> None:
+    record = _selected_screener_record(self, show_message=False)
+    self.market_screener_selected_record = record
+    _update_screener_detail_panel(self, record)
+    _set_screener_ai_actions_enabled(self, record is not None)
+
+
+def _update_screener_detail_panel(self: tk.Tk, record: MarketScreenerRecord | None) -> None:
+    if record is None:
+        self.market_screener_ai_status_var.set("Select a screener row for row-grounded AI.")
+        _set_screener_detail_text(self, "No screener row selected.")
+        return
+    symbol = record.symbol or record.cik or "selected row"
+    signal = ", ".join(record.signals[:3]) if record.signals else "no screener signals"
+    risk = f"{len(record.risk_flags)} risk flag(s)" if record.risk_flags else "no risk flags"
+    self.market_screener_ai_status_var.set(f"Selected {symbol} - {signal}; {risk}.")
+    _set_screener_detail_text(self, _screener_detail_text(record))
+
+
+def _set_screener_detail_text(self: tk.Tk, text: str) -> None:
+    widget = getattr(self, "market_screener_detail_text", None)
+    if widget is None:
+        return
+    try:
+        widget.configure(state=tk.NORMAL)
+        widget.delete("1.0", tk.END)
+        widget.insert(tk.END, redact_symbol_chat_secrets(text))
+        widget.configure(state=tk.DISABLED)
+    except tk.TclError:
+        return
+
+
+def _set_screener_source_text(self: tk.Tk, text: str) -> None:
+    widget = getattr(self, "market_screener_source_text", None)
+    if widget is None:
+        return
+    try:
+        widget.configure(state=tk.NORMAL)
+        widget.delete("1.0", tk.END)
+        widget.insert(tk.END, redact_symbol_chat_secrets(text))
+        widget.configure(state=tk.DISABLED)
+    except tk.TclError:
+        return
+
+
+def _set_screener_ai_actions_enabled(self: tk.Tk, enabled: bool) -> None:
+    running = bool(getattr(self, "_market_screener_ai_running", False))
+    state = tk.NORMAL if enabled and not running else tk.DISABLED
+    for name in (
+        "market_screener_ai_analyze_button",
+        "market_screener_ai_why_button",
+        "market_screener_ai_risks_button",
+        "market_screener_ai_symbol_chat_button",
+    ):
+        button = getattr(self, name, None)
+        if button is not None:
+            try:
+                button.configure(state=state)
+            except tk.TclError:
+                pass
+    for button in getattr(self, "market_screener_ai_quick_buttons", []) or []:
+        try:
+            button.configure(state=state)
+        except tk.TclError:
+            pass
+
+
+def _run_screener_ai_prompt(self: tk.Tk, label: str, prompt: str) -> None:
+    record = _selected_screener_record(self, show_message=True, title=label)
+    if record is None:
+        return
+    if getattr(self, "_market_screener_ai_running", False):
+        self.market_screener_ai_status_var.set("Wait for the current screener AI response to finish.")
+        return
+    self._market_screener_ai_running = True
+    _set_screener_ai_actions_enabled(self, False)
+    symbol = record.symbol or record.cik or "selected row"
+    self.market_screener_ai_status_var.set(f"{label}: preparing selected {symbol} context...")
+
+    def progress(message: str) -> None:
+        _post_to_earnings_ui(self, lambda value=message: self.market_screener_ai_status_var.set(f"{label}: {value}"))
+
+    def worker() -> None:
+        try:
+            client = _market_screener_ai_client(self)
+            response = client.analyze(record, prompt, source_snippets=_source_snippets_for_screener_record(record), progress_callback=progress)
+        except Exception as exc:
+            _post_to_earnings_ui(self, lambda error=exc: _finish_screener_ai_error(self, label, error))
+            return
+        _post_to_earnings_ui(self, lambda loaded=response: _finish_screener_ai_success(self, record, label, prompt, loaded))
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _market_screener_ai_client(self: tk.Tk) -> OpenAiMarketScreenerClient:
+    factory = getattr(self, "market_screener_ai_client_factory", None)
+    if callable(factory):
+        return factory()
+    return OpenAiMarketScreenerClient()
+
+
+def _source_snippets_for_screener_record(record: MarketScreenerRecord) -> tuple[str, ...]:
+    source_excerpt = getattr(record, "source_excerpt", None)
+    return (str(source_excerpt),) if source_excerpt else ()
+
+
+def _finish_screener_ai_success(self: tk.Tk, record: MarketScreenerRecord, label: str, prompt: str, response: MarketScreenerAiResponse) -> None:
+    self._market_screener_ai_running = False
+    _set_screener_ai_actions_enabled(self, _selected_screener_record(self, show_message=False) is not None)
+    self.market_screener_ai_status_var.set(f"{label}: response ready for {record.symbol or record.cik or 'selected row'}.")
+    _show_screener_ai_result(self, record, label, prompt, response)
+
+
+def _finish_screener_ai_error(self: tk.Tk, label: str, error: Exception) -> None:
+    self._market_screener_ai_running = False
+    _set_screener_ai_actions_enabled(self, _selected_screener_record(self, show_message=False) is not None)
+    message = redact_symbol_chat_secrets(str(error))
+    self.market_screener_ai_status_var.set(f"{label}: OpenAI request failed.")
+    messagebox.showerror(f"{label} failed", message)
+
+
+def _show_screener_ai_result(self: tk.Tk, record: MarketScreenerRecord, label: str, prompt: str, response: MarketScreenerAiResponse) -> None:
+    window = getattr(self, "market_screener_ai_result_window", None)
+    text_widget = getattr(self, "market_screener_ai_result_text", None)
+    if window is None or text_widget is None:
+        window = tk.Toplevel(self)
+        polished_theme.configure_toplevel(window)
+        window.title("Market Screener AI - Selected Row")
+        window.geometry("980x720")
+        window.minsize(760, 520)
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(0, weight=1)
+        text_widget = tk.Text(
+            window,
+            wrap=tk.WORD,
+            bg=polished_theme.PANEL,
+            fg=polished_theme.TEXT,
+            insertbackground=polished_theme.TEXT,
+            relief=tk.FLAT,
+            padx=12,
+            pady=12,
+            font=("Segoe UI", 10),
+        )
+        text_widget.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        scroll = ttk.Scrollbar(window, orient=tk.VERTICAL, command=text_widget.yview)
+        scroll.grid(row=0, column=1, sticky="ns", pady=12)
+        text_widget.configure(yscrollcommand=scroll.set)
+
+        def _close() -> None:
+            self.market_screener_ai_result_window = None
+            self.market_screener_ai_result_text = None
+            window.destroy()
+
+        window.protocol("WM_DELETE_WINDOW", _close)
+        self.market_screener_ai_result_window = window
+        self.market_screener_ai_result_text = text_widget
+    text_widget.configure(state=tk.NORMAL)
+    text_widget.delete("1.0", tk.END)
+    text_widget.insert(tk.END, _format_screener_ai_result(record, label, prompt, response))
+    text_widget.configure(state=tk.DISABLED)
+    try:
+        window.deiconify()
+        window.lift()
+    except tk.TclError:
+        pass
+
+
+def _open_screener_symbol_chat(self: tk.Tk) -> None:
+    record = _selected_screener_record(self, show_message=True, title="Open Symbol Chat")
+    if record is None:
+        return
+    symbol = str(record.symbol or "").strip().upper()
+    if not symbol or symbol.startswith("CIK:"):
+        messagebox.showinfo("Open Symbol Chat", "The selected screener row does not have a stock ticker symbol.")
+        return
+    try:
+        open_symbol_chat_window(
+            self,
+            symbol,
+            app_context=self,
+            schwab_session=getattr(self, "schwab_session", None),
+        )
+        self.market_screener_ai_status_var.set(f"Opened Symbol Chat for {symbol}.")
+    except Exception as exc:
+        messagebox.showerror("Open Symbol Chat failed", redact_symbol_chat_secrets(str(exc)))
 
 
 def _selected_recent_record(self: tk.Tk, *, show_message: bool = False, title: str = "Earnings Radar") -> RecentEarningsRecord | None:
@@ -764,6 +1356,41 @@ def _open_upcoming_source(self: tk.Tk) -> None:
         _open_url(record.source_url, "Open Source", "The selected row does not have a source URL.")
 
 
+def _clear_screener_filters(self: tk.Tk) -> None:
+    self.market_screener_search_var.set("")
+    for variable in (
+        self.market_screener_sector_var,
+        self.market_screener_exchange_var,
+        self.market_screener_event_type_var,
+        self.market_screener_risk_flag_var,
+        self.market_screener_earnings_window_var,
+    ):
+        variable.set("All")
+    self.market_screener_has_ai_signal_var.set(False)
+    self.market_screener_page = 0
+    _apply_screener_filters(self)
+
+
+def _apply_screener_quick_preset(self: tk.Tk, preset: str) -> None:
+    if preset == "earnings_soon":
+        self.market_screener_event_type_var.set("Upcoming earnings")
+        self.market_screener_earnings_window_var.set("Next 30 days")
+    elif preset == "recent_filing":
+        self.market_screener_event_type_var.set("Recent SEC filing")
+        self.market_screener_earnings_window_var.set("All")
+    elif preset == "guidance":
+        self.market_screener_event_type_var.set("Guidance mentioned")
+    elif preset == "risk":
+        self.market_screener_event_type_var.set("Risk flags")
+        self.market_screener_risk_flag_var.set("Any risk flag")
+    elif preset == "mover":
+        self.market_screener_event_type_var.set("High volume / mover")
+    elif preset == "holdings":
+        self.market_screener_event_type_var.set("Schwab holding/watchlist")
+    self.market_screener_page = 0
+    _apply_screener_filters(self)
+
+
 def _clear_recent_filters(self: tk.Tk) -> None:
     for variable in (
         self.earnings_recent_search_var,
@@ -816,6 +1443,69 @@ def _clear_upcoming_filters(self: tk.Tk) -> None:
     self.earnings_upcoming_has_estimate_var.set(False)
     self.earnings_upcoming_page = 0
     _apply_upcoming_filters(self)
+
+
+def _screener_detail_text(record: MarketScreenerRecord) -> str:
+    lines = [
+        f"{record.symbol or EMPTY_VALUE} | {display_optional_text(record.company_name)} | CIK {display_optional_text(record.cik)}",
+        f"Exchange: {display_optional_text(record.exchange)} | Sector: {display_optional_text(record.sector)} | Industry: {display_optional_text(record.industry)}",
+        (
+            "Market fields: "
+            f"Price {display_money(record.price)} | "
+            f"Change {display_percent(record.change_percent)} | "
+            f"Volume {_display_large_number(record.volume)} / Avg {_display_large_number(record.avg_volume)} | "
+            f"Market cap {display_money(record.market_cap)} | P/E {_display_decimal(record.pe_ratio)}"
+        ),
+        (
+            "Fundamentals/events: "
+            f"EPS {display_money(record.eps)} | "
+            f"Revenue growth {display_percent(record.revenue_growth)} | "
+            f"Next earnings {display_optional_text(record.next_earnings_date)} | "
+            f"Recent filing {display_optional_text(record.recent_filing_date)} {display_optional_text(record.recent_filing_type)}"
+        ),
+        f"Signals: {', '.join(record.signals) if record.signals else EMPTY_VALUE}",
+        f"Risk flags: {', '.join(record.risk_flags) if record.risk_flags else EMPTY_VALUE}",
+        f"Sources: {', '.join(record.sources) if record.sources else EMPTY_VALUE}",
+    ]
+    if record.source_links:
+        lines.append("Source links: " + " | ".join(record.source_links[:4]))
+    source_excerpt = str(getattr(record, "source_excerpt", "") or "").strip()
+    if source_excerpt:
+        lines.append(f"Source excerpt: {_truncate(source_excerpt, 520)}")
+    return "\n".join(lines)
+
+
+def _format_screener_ai_result(record: MarketScreenerRecord, label: str, prompt: str, response: MarketScreenerAiResponse) -> str:
+    header = [
+        f"MARKET SCREENER AI - {label}",
+        "=" * (21 + len(label)),
+        "",
+        f"Selected: {record.symbol or record.cik or EMPTY_VALUE} - {record.company_name or EMPTY_VALUE}",
+        f"Signals: {', '.join(record.signals) if record.signals else EMPTY_VALUE}",
+        f"Risk flags: {', '.join(record.risk_flags) if record.risk_flags else EMPTY_VALUE}",
+        f"Model: {response.model}",
+        f"Source mode: {response.source_mode}",
+        "",
+        "Prompt:",
+        prompt.strip(),
+        "",
+        "Answer:",
+        response.answer.strip(),
+    ]
+    if response.source_debug:
+        header.extend(["", "Source Debug:"])
+        header.extend(f"- {line}" for line in response.source_debug)
+    return redact_symbol_chat_secrets("\n".join(header).strip() + "\n")
+
+
+def _screener_source_status_text(snapshot: MarketScreenerSnapshot) -> str:
+    lines = ["Source/status:"]
+    for status in snapshot.statuses:
+        lines.append(f"- {status.source}: {status.status} - {status.message}")
+    if snapshot.errors:
+        lines.append("Warnings:")
+        lines.extend(f"- {error}" for error in snapshot.errors[:6])
+    return "\n".join(lines)
 
 
 def _recent_detail_text(record: RecentEarningsRecord) -> str:
@@ -924,7 +1614,7 @@ def _table(parent: ttk.Frame, *, row: int, title: str, columns: tuple[tuple[str,
     tree = ttk.Treeview(frame, columns=tuple(column_id for column_id, _label, _width, _anchor in columns), show="headings", height=14, selectmode="browse")
     for column_id, label, width, anchor in columns:
         tree.heading(column_id, text=label, command=lambda col=column_id: sort(col))
-        tree.column(column_id, width=width, minwidth=min(width, 90), anchor=anchor, stretch=column_id in {"company", "industry", "risk_flags", "filing_link", "exhibit_link", "source_link"})
+        tree.column(column_id, width=width, minwidth=min(width, 90), anchor=anchor, stretch=column_id in {"company", "industry", "signals", "risk_flags", "sources", "filing_link", "exhibit_link", "source_link"})
     tree.grid(row=0, column=0, sticky="nsew")
     y_scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
     y_scroll.grid(row=0, column=1, sticky="ns")
@@ -1014,6 +1704,18 @@ def _counts(records: Iterable[Any], selector: Callable[[Any], str]) -> dict[str,
     return counts
 
 
+def _primary_screener_signal(record: MarketScreenerRecord) -> str:
+    if record.risk_flags:
+        return "Risk flags"
+    if record.signals:
+        return record.signals[0]
+    if record.next_earnings_date:
+        return "Upcoming earnings"
+    if record.recent_filing_date:
+        return "Recent SEC filing"
+    return "Universe only"
+
+
 def _page_window(records: list[Any], page_size: int, page: int) -> tuple[int, int, int]:
     total = len(records)
     page_count = max(1, math.ceil(total / page_size))
@@ -1031,6 +1733,10 @@ def _recent_page_size(self: tk.Tk) -> int:
 
 def _upcoming_page_size(self: tk.Tk) -> int:
     return _safe_int(self.earnings_upcoming_page_size_var.get(), default=100, minimum=25, maximum=500)
+
+
+def _screener_page_size(self: tk.Tk) -> int:
+    return _safe_int(self.market_screener_page_size_var.get(), default=100, minimum=25, maximum=500)
 
 
 def _selected(tree: ttk.Treeview, row_map: dict[str, Any], title: str, missing_selection: str) -> Any | None:
@@ -1067,6 +1773,32 @@ def _safe_int(value: str, *, default: int, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(minimum, min(maximum, parsed))
+
+
+def _safe_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(str(value).replace("$", "").replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _display_large_number(value: float | None) -> str:
+    if value is None:
+        return NOT_EXTRACTED
+    abs_value = abs(value)
+    if abs_value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.2f}B"
+    if abs_value >= 1_000_000:
+        return f"{value / 1_000_000:.2f}M"
+    if abs_value >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    return f"{value:,.0f}"
+
+
+def _display_decimal(value: float | None) -> str:
+    return NOT_EXTRACTED if value is None else f"{value:.2f}"
 
 
 def _truncate(value: str, limit: int) -> str:
