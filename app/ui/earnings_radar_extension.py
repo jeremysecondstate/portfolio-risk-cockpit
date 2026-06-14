@@ -18,6 +18,7 @@ from app.analytics.earnings_ai import (
 from app.analytics.earnings_pipeline import (
     EARNINGS_FORMS,
     EMPTY_VALUE,
+    NOT_EXTRACTED,
     EarningsRadarSnapshot,
     EarningsRadarStore,
     FORMAL_REPORT_KIND,

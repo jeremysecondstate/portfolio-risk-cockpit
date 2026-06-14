@@ -18,6 +18,7 @@ from app.analytics.market_screener import (
 )
 from app.data.earnings_calendar import MISSING_API_KEY_MESSAGE, UpcomingEarningsRecord
 from app.data.market_universe import MarketUniverseEntry
+from app.ui import earnings_radar_extension
 
 
 def _recent_record() -> RecentEarningsRecord:
@@ -133,6 +134,14 @@ def test_market_screener_filters_and_sorting_cover_events_risks_windows_and_move
     assert filter_market_screener_records([acme, beta], earnings_date_window="Next 7 days", today=date(2026, 6, 13)) == [acme]
     assert filter_market_screener_records([acme, beta], has_ai_signal=True) == [acme]
     assert sort_market_screener_records([beta, acme], "change_percent", descending=True) == [acme, beta]
+
+
+def test_market_screener_ui_values_handle_missing_numeric_fields() -> None:
+    values = earnings_radar_extension._screener_values(MarketScreenerRecord("ACME", "Acme Corp"))
+
+    assert values[0] == "ACME"
+    assert values[1] == "Acme Corp"
+    assert "Not extracted" in values
 
 
 def test_market_screener_missing_providers_degrade_to_fallback_and_status_messages() -> None:
