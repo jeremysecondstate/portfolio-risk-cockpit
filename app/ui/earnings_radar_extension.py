@@ -40,12 +40,14 @@ from app.analytics.market_screener import (
     OpenAiMarketScreenerClient,
     fetch_market_screener_snapshot,
     filter_market_screener_records,
+    market_screener_record_has_quote_fields,
     market_screener_has_ai_signal,
+    merge_market_data_records_into_screener_records,
     sort_market_screener_records,
 )
 from app.analytics.symbol_chat import redact_symbol_chat_secrets
 from app.data.earnings_calendar import ALPHA_VANTAGE_HORIZONS, AlphaVantageEarningsCalendarClient, UpcomingEarningsRecord
-from app.data.market_data_provider import configured_market_data_provider, configured_market_data_symbol_limit
+from app.data.market_data_provider import MarketQuoteFundamentalsSnapshot, configured_market_data_provider, configured_market_data_symbol_limit
 from app.data.sec_edgar import SecEdgarClient
 from app.ui import polished_theme
 from app.ui.symbol_chat_window import open_symbol_chat_window
@@ -107,6 +109,7 @@ SCREENER_COLUMNS = (
 RECENT_NUMERIC_COLUMNS = {"revenue", "revenue_growth", "eps", "net_income"}
 UPCOMING_NUMERIC_COLUMNS = {"estimate"}
 SCREENER_NUMERIC_COLUMNS = {"price", "change_percent", "volume", "avg_volume", "market_cap", "pe_ratio", "eps", "revenue_growth", "signals", "risk_flags", "sources"}
+MARKET_DATA_PAGE_ENRICHMENT_CAP = 100
 
 
 def install_earnings_radar_extension(app_cls: Type[tk.Tk]) -> None:
@@ -210,6 +213,10 @@ def _ensure_state(self: tk.Tk) -> None:
     self._market_screener_refreshing = False
     self._market_screener_refresh_pending = False
     self._market_screener_refresh_pending_force = False
+    self.market_screener_source_status_base_text = "Source/status: Market Intelligence Screener has not loaded yet."
+    self.market_screener_market_data_status_lines: list[str] = []
+    self.market_screener_market_data_attempted_symbols: set[str] = set()
+    self.market_screener_market_data_running_symbols: set[str] = set()
 
     self.earnings_recent_records: list[RecentEarningsRecord] = []
     self.earnings_recent_filtered_records: list[RecentEarningsRecord] = []
@@ -311,6 +318,7 @@ def _build_screener_filters(self: tk.Tk, parent: ttk.Frame) -> None:
     actions = ttk.Frame(box, style="Panel.TFrame")
     actions.grid(row=3, column=0, columnspan=8, sticky="ew", pady=(8, 0))
     ttk.Button(actions, text="Refresh Screener", command=lambda: _refresh_screener(self, force_refresh=True), style="Accent.TButton").pack(side=tk.LEFT)
+    ttk.Button(actions, text="Enrich Visible Page", command=lambda: _request_visible_page_market_data_enrichment(self, force_refresh=False)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Open Source", command=lambda: _open_screener_source(self)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Open Symbol Chat", command=lambda: _open_screener_symbol_chat(self)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Clear Filters", command=lambda: _clear_screener_filters(self)).pack(side=tk.LEFT, padx=(8, 0))
@@ -555,6 +563,8 @@ def _refresh_screener(self: tk.Tk, *, force_refresh: bool) -> None:
         self._market_screener_refresh_pending = True
         self._market_screener_refresh_pending_force = bool(getattr(self, "_market_screener_refresh_pending_force", False) or force_refresh)
         return
+    if force_refresh:
+        _reset_screener_market_data_enrichment_state(self)
     self._market_screener_refreshing = True
     self._market_screener_refresh_pending = False
     self._market_screener_refresh_pending_force = False
@@ -612,10 +622,14 @@ def _run_pending_screener_refresh(self: tk.Tk) -> None:
 
 def _load_screener_snapshot(self: tk.Tk, snapshot: MarketScreenerSnapshot) -> None:
     self.market_screener_records = list(snapshot.records)
+    attempted_symbols = getattr(self, "market_screener_market_data_attempted_symbols", set())
+    if isinstance(attempted_symbols, set):
+        attempted_symbols.update(_market_data_symbols_from_records(self.market_screener_records))
     _set_combo_values(self.market_screener_sector_combo, ["All", *sorted({record.sector or EMPTY_VALUE for record in self.market_screener_records})], self.market_screener_sector_var)
     _set_combo_values(self.market_screener_exchange_combo, ["All", *sorted({record.exchange or EMPTY_VALUE for record in self.market_screener_records})], self.market_screener_exchange_var)
     _set_combo_values(self.market_screener_risk_flag_combo, ["All", "Any risk flag", *sorted({flag for record in self.market_screener_records for flag in record.risk_flags})], self.market_screener_risk_flag_var)
-    _set_screener_source_text(self, _screener_source_status_text(snapshot))
+    self.market_screener_source_status_base_text = _screener_source_status_text(snapshot)
+    _refresh_screener_source_text(self)
     self.market_screener_page = 0
     _apply_screener_filters(self)
 
@@ -653,6 +667,7 @@ def _populate_screener_table(self: tk.Tk) -> None:
     self.market_screener_page_var.set(f"Page {self.market_screener_page + 1} / {page_count} - {total} records")
     if hasattr(self, "market_screener_detail_text"):
         _on_screener_selection_changed(self)
+    _request_visible_page_market_data_enrichment(self, force_refresh=False)
 
 
 def _screener_values(record: MarketScreenerRecord) -> tuple[str, ...]:
@@ -708,6 +723,206 @@ def _open_screener_source(self: tk.Tk) -> None:
     if record is None:
         return
     _open_url(record.source_links[0] if record.source_links else None, "Open Source", "The selected screener row does not have a source URL.")
+
+
+def _request_visible_page_market_data_enrichment(self: tk.Tk, *, force_refresh: bool = False) -> None:
+    rows = list(getattr(self, "market_screener_row_map", {}).values())
+    symbols = _symbols_needing_market_data_enrichment(self, rows, require_price_or_volume=False)
+    if not symbols:
+        return
+    _request_market_data_enrichment(
+        self,
+        symbols[:MARKET_DATA_PAGE_ENRICHMENT_CAP],
+        reason="visible page",
+        force_refresh=force_refresh,
+        max_symbols=MARKET_DATA_PAGE_ENRICHMENT_CAP,
+    )
+
+
+def _request_selected_row_market_data_enrichment(self: tk.Tk, record: MarketScreenerRecord) -> None:
+    if record.price is not None and record.volume is not None:
+        return
+    symbols = _symbols_needing_market_data_enrichment(self, [record], require_price_or_volume=True)
+    if not symbols:
+        return
+    _request_market_data_enrichment(
+        self,
+        symbols[:1],
+        reason="selected row",
+        force_refresh=False,
+        max_symbols=1,
+    )
+
+
+def _request_market_data_enrichment(
+    self: tk.Tk,
+    symbols: Iterable[str],
+    *,
+    reason: str,
+    force_refresh: bool,
+    max_symbols: int,
+) -> None:
+    requested = _dedupe_market_data_symbols(symbols)[:max_symbols]
+    if not requested:
+        return
+    running_symbols = getattr(self, "market_screener_market_data_running_symbols", set())
+    attempted_symbols = getattr(self, "market_screener_market_data_attempted_symbols", set())
+    if not isinstance(running_symbols, set) or not isinstance(attempted_symbols, set):
+        return
+    running_symbols.update(requested)
+    provider = configured_market_data_provider(schwab_session=getattr(self, "schwab_session", None))
+    self.market_screener_status_var.set(f"Enriching {reason} market data for {len(requested)} symbol(s)...")
+
+    def worker() -> None:
+        try:
+            snapshot = provider.quote_fundamentals(requested, force_refresh=force_refresh, max_symbols=max_symbols)
+        except Exception as exc:
+            self.after(0, lambda error=exc, symbols=requested, why=reason: _finish_screener_market_data_enrichment_error(self, symbols, why, error))
+            return
+        self.after(0, lambda loaded=snapshot, symbols=requested, why=reason: _finish_screener_market_data_enrichment(self, symbols, why, loaded))
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _finish_screener_market_data_enrichment(
+    self: tk.Tk,
+    requested_symbols: tuple[str, ...],
+    reason: str,
+    snapshot: MarketQuoteFundamentalsSnapshot,
+) -> None:
+    _mark_market_data_enrichment_finished(self, requested_symbols)
+    selected_symbol = _selected_screener_symbol(self)
+    if snapshot.records:
+        self.market_screener_records = merge_market_data_records_into_screener_records(
+            self.market_screener_records,
+            snapshot.records,
+            fetched_at=snapshot.fetched_at,
+        )
+        attempted_symbols = getattr(self, "market_screener_market_data_attempted_symbols", set())
+        if isinstance(attempted_symbols, set):
+            attempted_symbols.update(_dedupe_market_data_symbols(record.symbol for record in snapshot.records))
+        _apply_screener_filters(self)
+        if selected_symbol:
+            _select_screener_symbol(self, selected_symbol)
+            _update_screener_detail_panel(self, _record_by_symbol(self.market_screener_records, selected_symbol))
+    _append_screener_market_data_status(
+        self,
+        (
+            f"Market data {reason}: enriched {len(snapshot.records)} of {len(requested_symbols)} requested symbol(s). "
+            f"{_market_data_provider_status_summary(snapshot)} Missing fields are not inferred."
+        ),
+    )
+    signals = sum(1 for record in self.market_screener_records if market_screener_has_ai_signal(record))
+    self.market_screener_status_var.set(f"Loaded {len(self.market_screener_records)} screener rows; {signals} with AI-worthy signals. Market data {reason} updated.")
+
+
+def _finish_screener_market_data_enrichment_error(self: tk.Tk, requested_symbols: tuple[str, ...], reason: str, error: Exception) -> None:
+    _mark_market_data_enrichment_finished(self, requested_symbols)
+    _append_screener_market_data_status(self, f"Market data {reason}: provider error for {len(requested_symbols)} symbol(s): {error}")
+    self.market_screener_status_var.set(f"Market data {reason} enrichment failed: {error}")
+
+
+def _mark_market_data_enrichment_finished(self: tk.Tk, requested_symbols: Iterable[str]) -> None:
+    requested = _dedupe_market_data_symbols(requested_symbols)
+    running_symbols = getattr(self, "market_screener_market_data_running_symbols", set())
+    attempted_symbols = getattr(self, "market_screener_market_data_attempted_symbols", set())
+    if isinstance(running_symbols, set):
+        running_symbols.difference_update(requested)
+    if isinstance(attempted_symbols, set):
+        attempted_symbols.update(requested)
+
+
+def _symbols_needing_market_data_enrichment(
+    self: tk.Tk,
+    records: Iterable[MarketScreenerRecord],
+    *,
+    require_price_or_volume: bool,
+) -> tuple[str, ...]:
+    attempted_symbols = getattr(self, "market_screener_market_data_attempted_symbols", set())
+    running_symbols = getattr(self, "market_screener_market_data_running_symbols", set())
+    attempted = attempted_symbols if isinstance(attempted_symbols, set) else set()
+    running = running_symbols if isinstance(running_symbols, set) else set()
+    symbols: list[str] = []
+    for record in records:
+        symbol = _normalize_screener_symbol(record.symbol)
+        if not symbol or symbol in attempted or symbol in running:
+            continue
+        if require_price_or_volume:
+            needs_data = record.price is None or record.volume is None
+        else:
+            needs_data = not market_screener_record_has_quote_fields(record)
+        if needs_data:
+            symbols.append(symbol)
+    return _dedupe_market_data_symbols(symbols)
+
+
+def _reset_screener_market_data_enrichment_state(self: tk.Tk) -> None:
+    self.market_screener_market_data_status_lines = []
+    self.market_screener_market_data_attempted_symbols = set()
+    self.market_screener_market_data_running_symbols = set()
+
+
+def _market_data_symbols_from_records(records: Iterable[MarketScreenerRecord]) -> tuple[str, ...]:
+    return _dedupe_market_data_symbols(record.symbol for record in records if market_screener_record_has_quote_fields(record))
+
+
+def _dedupe_market_data_symbols(symbols: Iterable[str]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for symbol in symbols:
+        clean = _normalize_screener_symbol(symbol)
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        result.append(clean)
+    return tuple(result)
+
+
+def _normalize_screener_symbol(value: Any) -> str:
+    symbol = str(value or "").strip().upper().replace("/", ".")
+    return symbol if symbol and len(symbol) <= 16 else ""
+
+
+def _selected_screener_symbol(self: tk.Tk) -> str:
+    record = _selected_screener_record(self, show_message=False)
+    return _normalize_screener_symbol(record.symbol if record is not None else "")
+
+
+def _record_by_symbol(records: Iterable[MarketScreenerRecord], symbol: str) -> MarketScreenerRecord | None:
+    clean = _normalize_screener_symbol(symbol)
+    for record in records:
+        if _normalize_screener_symbol(record.symbol) == clean:
+            return record
+    return None
+
+
+def _select_screener_symbol(self: tk.Tk, symbol: str) -> None:
+    clean = _normalize_screener_symbol(symbol)
+    tree = getattr(self, "market_screener_table", None)
+    if tree is None or not clean:
+        return
+    for iid, record in getattr(self, "market_screener_row_map", {}).items():
+        if _normalize_screener_symbol(record.symbol) != clean:
+            continue
+        try:
+            tree.selection_set(iid)
+            tree.focus(iid)
+            tree.see(iid)
+        except tk.TclError:
+            pass
+        return
+
+
+def _market_data_provider_status_summary(snapshot: MarketQuoteFundamentalsSnapshot) -> str:
+    if not snapshot.statuses:
+        return ""
+    sources = ", ".join(dict.fromkeys(status.source for status in snapshot.statuses if status.source))
+    statuses = ", ".join(dict.fromkeys(status.status for status in snapshot.statuses if status.status))
+    if sources and statuses:
+        return f"Provider status: {sources} ({statuses})."
+    if sources:
+        return f"Provider status: {sources}."
+    return ""
 
 
 def _refresh_recent(self: tk.Tk, *, force_refresh: bool) -> None:
@@ -978,6 +1193,8 @@ def _on_screener_selection_changed(self: tk.Tk) -> None:
     self.market_screener_selected_record = record
     _update_screener_detail_panel(self, record)
     _set_screener_ai_actions_enabled(self, record is not None)
+    if record is not None:
+        _request_selected_row_market_data_enrichment(self, record)
 
 
 def _update_screener_detail_panel(self: tk.Tk, record: MarketScreenerRecord | None) -> None:
@@ -1016,6 +1233,26 @@ def _set_screener_source_text(self: tk.Tk, text: str) -> None:
         widget.configure(state=tk.DISABLED)
     except tk.TclError:
         return
+
+
+def _append_screener_market_data_status(self: tk.Tk, line: str) -> None:
+    lines = list(getattr(self, "market_screener_market_data_status_lines", []) or [])
+    clean = str(line or "").strip()
+    if clean:
+        lines.append(clean)
+    self.market_screener_market_data_status_lines = lines[-6:]
+    _refresh_screener_source_text(self)
+
+
+def _refresh_screener_source_text(self: tk.Tk) -> None:
+    base = str(getattr(self, "market_screener_source_status_base_text", "") or "").strip()
+    lines = list(getattr(self, "market_screener_market_data_status_lines", []) or [])
+    if lines:
+        session_text = "\n".join(f"- {line}" for line in lines)
+        text = f"{base}\nSession enrichment:\n{session_text}" if base else f"Session enrichment:\n{session_text}"
+    else:
+        text = base
+    _set_screener_source_text(self, text or "Source/status: Market Intelligence Screener has not loaded yet.")
 
 
 def _set_screener_ai_actions_enabled(self: tk.Tk, enabled: bool) -> None:
@@ -1505,7 +1742,9 @@ def _format_screener_ai_result(record: MarketScreenerRecord, label: str, prompt:
 
 def _screener_source_status_text(snapshot: MarketScreenerSnapshot) -> str:
     lines = ["Source/status:"]
-    for status in snapshot.statuses:
+    market_data_statuses = [status for status in snapshot.statuses if status.source == "Market data enrichment"]
+    other_statuses = [status for status in snapshot.statuses if status.source != "Market data enrichment"]
+    for status in [*market_data_statuses, *other_statuses]:
         lines.append(f"- {status.source}: {status.status} - {status.message}")
     if snapshot.errors:
         lines.append("Warnings:")

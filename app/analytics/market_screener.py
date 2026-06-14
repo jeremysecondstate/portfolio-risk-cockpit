@@ -294,13 +294,14 @@ def fetch_market_screener_snapshot(
         supplemental_records=supplemental_records or (),
         fetched_at=fetched_at,
     )
+    market_data_symbols = _market_data_candidate_symbols(base_records, market_data_symbol_limit)
     market_data = _load_market_data_records(
         market_data_provider,
         market_data_records,
         statuses,
         errors,
         fetched_at,
-        _market_data_candidate_symbols(base_records, market_data_symbol_limit),
+        market_data_symbols,
         force_refresh,
         market_data_symbol_limit,
     )
@@ -312,7 +313,7 @@ def fetch_market_screener_snapshot(
         market_data_records=market_data,
         fetched_at=fetched_at,
     )
-    statuses.append(_market_data_coverage_status(records, fetched_at))
+    statuses.append(_market_data_coverage_status(records, market_data, market_data_symbol_limit, fetched_at))
     sources = tuple(sorted({source for record in records for source in record.sources if source}))
     return MarketScreenerSnapshot(
         records=tuple(records),
@@ -352,6 +353,55 @@ def build_market_screener_records(
         _merge_into(merged, _record_from_market_data(record, fetched_at=fetched_at))
 
     return sorted(merged.values(), key=lambda row: ((row.symbol or "ZZZZ").upper(), (row.company_name or "").lower()))
+
+
+def merge_market_data_records_into_screener_records(
+    records: Iterable[MarketScreenerRecord],
+    market_data_records: Iterable[MarketQuoteFundamentalsRecord],
+    *,
+    fetched_at: str | None = None,
+) -> list[MarketScreenerRecord]:
+    fetched_at = fetched_at or _now()
+    rows = [_normalize_record(record, fetched_at=fetched_at) for record in records]
+    indexes_by_key = {_record_key(record): index for index, record in enumerate(rows) if _record_key(record)}
+    for market_data_record in market_data_records:
+        incoming = _record_from_market_data(market_data_record, fetched_at=fetched_at)
+        key = _record_key(incoming)
+        if not key or key not in indexes_by_key:
+            continue
+        index = indexes_by_key[key]
+        rows[index] = merge_market_screener_record(rows[index], incoming)
+    return rows
+
+
+def market_screener_record_has_market_data(record: MarketScreenerRecord) -> bool:
+    return any(
+        value is not None
+        for value in (
+            record.price,
+            record.market_cap,
+            record.volume,
+            record.avg_volume,
+            record.change_percent,
+            record.pe_ratio,
+            record.eps,
+            record.revenue_growth,
+        )
+    )
+
+
+def market_screener_record_has_quote_fields(record: MarketScreenerRecord) -> bool:
+    return any(
+        value is not None
+        for value in (
+            record.price,
+            record.market_cap,
+            record.volume,
+            record.avg_volume,
+            record.change_percent,
+            record.pe_ratio,
+        )
+    )
 
 
 def filter_market_screener_records(
@@ -633,28 +683,53 @@ def _load_market_data_records(
     return tuple(snapshot.records)
 
 
-def _market_data_coverage_status(records: Iterable[MarketScreenerRecord], fetched_at: str) -> MarketScreenerSourceStatus:
+def _market_data_coverage_status(
+    records: Iterable[MarketScreenerRecord],
+    market_data_records: Iterable[MarketQuoteFundamentalsRecord],
+    max_symbols: int,
+    fetched_at: str,
+) -> MarketScreenerSourceStatus:
     rows = list(records)
-    has_market_data = any(
-        record.price is not None
-        or record.volume is not None
-        or record.market_cap is not None
-        or record.pe_ratio is not None
-        or record.change_percent is not None
-        for record in rows
-    )
-    if has_market_data:
+    provider_rows = [record for record in market_data_records if _quote_record_has_any_value(record)]
+    provider_symbols = {_normalize_symbol(record.symbol) for record in provider_rows if _normalize_symbol(record.symbol)}
+    sources = tuple(sorted({record.source for record in provider_rows if record.source}))
+    source_text = ", ".join(sources) if sources else "configured market-data providers"
+    limit_text = max(0, min(100, max_symbols))
+    if provider_symbols:
         return MarketScreenerSourceStatus(
-            "Market quote/fundamental metrics",
+            "Market data enrichment",
             "partial",
             fetched_at,
-            "Some rows include local/provider quote or valuation fields; missing fields remain blank and are not inferred.",
+            (
+                f"Market data: enriched {len(provider_symbols)} of {len(rows)} rows via {source_text}. "
+                f"Initial refresh requested up to {limit_text} symbol(s). Increase MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT up to 100, "
+                "or use page/selected-row enrichment. Missing market cap, P/E, EPS, revenue growth, avg volume, and change % stay blank unless a provider/local file supplies them."
+            ),
         )
     return MarketScreenerSourceStatus(
-        "Market quote/fundamental metrics",
-        "unavailable",
+        "Market data enrichment",
+        "disabled" if max_symbols <= 0 else "unavailable",
         fetched_at,
-        "No quote/fundamental fields were supplied by the configured capped market-data providers. Price, volume, market cap, P/E, EPS, and change fields remain blank.",
+        (
+            f"Market data: enriched 0 of {len(rows)} rows via {source_text}. "
+            "No quote/fundamental fields were supplied by the configured capped providers; missing fields stay blank and are not inferred."
+        ),
+    )
+
+
+def _quote_record_has_any_value(record: MarketQuoteFundamentalsRecord) -> bool:
+    return any(
+        value is not None
+        for value in (
+            record.price,
+            record.market_cap,
+            record.volume,
+            record.avg_volume,
+            record.change_percent,
+            record.pe_ratio,
+            record.eps,
+            record.revenue_growth,
+        )
     )
 
 

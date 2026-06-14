@@ -14,11 +14,13 @@ from app.analytics.market_screener import (
     fetch_market_screener_snapshot,
     filter_market_screener_records,
     market_screener_ai_request_payload,
+    market_screener_record_has_quote_fields,
+    merge_market_data_records_into_screener_records,
     sort_market_screener_records,
 )
 from app.data.earnings_calendar import MISSING_API_KEY_MESSAGE, UpcomingEarningsRecord
-from app.data.market_data_provider import LocalMarketDataFileProvider, MarketQuoteFundamentalsRecord
-from app.data.market_universe import MarketUniverseEntry
+from app.data.market_data_provider import LocalMarketDataFileProvider, MarketDataProviderStatus, MarketQuoteFundamentalsRecord, MarketQuoteFundamentalsSnapshot
+from app.data.market_universe import MarketUniverseEntry, MarketUniverseSnapshot
 from app.ui import earnings_radar_extension
 
 
@@ -77,6 +79,31 @@ class _FakeResponses:
 class _FakeOpenAiClient:
     def __init__(self, answer: str = "Selected screener row analysis only.") -> None:
         self.responses = _FakeResponses(answer)
+
+
+class _FakeMarketDataProvider:
+    provider_name = "fake_market_data"
+
+    def __init__(self, records_by_symbol: dict[str, MarketQuoteFundamentalsRecord]) -> None:
+        self.records_by_symbol = records_by_symbol
+        self.calls: list[tuple[tuple[str, ...], int, bool]] = []
+
+    def quote_fundamentals(self, symbols, *, force_refresh: bool = False, max_symbols: int = 50):
+        requested = tuple(symbols)[:max_symbols]
+        self.calls.append((requested, max_symbols, force_refresh))
+        records = tuple(self.records_by_symbol[symbol] for symbol in requested if symbol in self.records_by_symbol)
+        return MarketQuoteFundamentalsSnapshot(
+            records=records,
+            fetched_at="2026-06-14T10:00:00+00:00",
+            statuses=(
+                MarketDataProviderStatus(
+                    "Fake quote",
+                    "available" if records else "empty",
+                    "2026-06-14T10:00:00+00:00",
+                    f"Loaded {len(records)} fake quote row(s).",
+                ),
+            ),
+        )
 
 
 def test_market_screener_merge_combines_universe_recent_and_upcoming_rows() -> None:
@@ -146,6 +173,81 @@ def test_market_screener_quote_fundamental_records_merge_correctly() -> None:
     assert "https://example.test/acme" in acme.source_links
 
 
+def test_market_screener_initial_market_data_enrichment_respects_cap_and_reports_scope() -> None:
+    universe = MarketUniverseSnapshot(
+        records=tuple(MarketUniverseEntry(symbol, f"{symbol} Corp") for symbol in ("ACME", "BETA", "GAMMA", "DELTA")),
+        fetched_at="2026-06-14T10:00:00+00:00",
+        sources=("Fixture",),
+        statuses=(),
+    )
+    provider = _FakeMarketDataProvider(
+        {
+            "ACME": MarketQuoteFundamentalsRecord("ACME", price=10.0, volume=1000, source="Fake quote"),
+            "BETA": MarketQuoteFundamentalsRecord("BETA", price=20.0, volume=2000, source="Fake quote"),
+            "GAMMA": MarketQuoteFundamentalsRecord("GAMMA", price=30.0, volume=3000, source="Fake quote"),
+        }
+    )
+
+    snapshot = fetch_market_screener_snapshot(
+        universe_snapshot=universe,
+        recent_records=(),
+        upcoming_records=(),
+        market_data_provider=provider,
+        market_data_symbol_limit=2,
+    )
+
+    assert provider.calls == [(("ACME", "BETA"), 2, False)]
+    assert {record.symbol for record in snapshot.records if record.price is not None} == {"ACME", "BETA"}
+    status = next(status for status in snapshot.statuses if status.source == "Market data enrichment")
+    assert status.status == "partial"
+    assert "Market data: enriched 2 of 4 rows via Fake quote" in status.message
+    assert "MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT up to 100" in status.message
+
+
+def test_market_screener_page_enrichment_merge_updates_existing_rows_without_duplicates() -> None:
+    records = [
+        MarketScreenerRecord("ACME", "Acme Corp"),
+        MarketScreenerRecord("BETA", "Beta Inc"),
+    ]
+
+    merged = merge_market_data_records_into_screener_records(
+        records,
+        [
+            MarketQuoteFundamentalsRecord("ACME", price=11.5, volume=1200, source="Fake quote"),
+            MarketQuoteFundamentalsRecord("GAMMA", price=99.0, volume=9900, source="Fake quote"),
+        ],
+        fetched_at="2026-06-14T10:00:00+00:00",
+    )
+
+    assert len(merged) == 2
+    assert [record.symbol for record in merged] == ["ACME", "BETA"]
+    acme = next(record for record in merged if record.symbol == "ACME")
+    beta = next(record for record in merged if record.symbol == "BETA")
+    assert acme.price == 11.5
+    assert acme.volume == 1200
+    assert "Fake quote" in acme.sources
+    assert beta.price is None
+
+
+def test_market_screener_selected_row_enrichment_updates_one_symbol() -> None:
+    records = [
+        MarketScreenerRecord("ACME", "Acme Corp"),
+        MarketScreenerRecord("BETA", "Beta Inc"),
+    ]
+
+    merged = merge_market_data_records_into_screener_records(
+        records,
+        [MarketQuoteFundamentalsRecord("BETA", price=22.25, volume=2200, source="Fake quote")],
+        fetched_at="2026-06-14T10:00:00+00:00",
+    )
+
+    assert next(record for record in merged if record.symbol == "ACME").price is None
+    beta = next(record for record in merged if record.symbol == "BETA")
+    assert beta.price == 22.25
+    assert beta.volume == 2200
+    assert market_screener_record_has_quote_fields(beta) is True
+
+
 def test_local_market_data_file_provider_loads_capped_requested_symbols(tmp_path) -> None:
     path = tmp_path / "market-data.csv"
     path.write_text(
@@ -207,11 +309,22 @@ def test_high_volume_mover_filter_requires_actual_market_data() -> None:
     changed_without_volume = MarketScreenerRecord("BETA", "Beta Inc", change_percent=None, volume=None, avg_volume=None)
     mover = MarketScreenerRecord("GAMMA", "Gamma Inc", change_percent=-5.1)
     high_volume = MarketScreenerRecord("DELTA", "Delta Inc", volume=2_000_000, avg_volume=1_000_000)
+    schwab_quote_only = build_market_screener_records(
+        [MarketUniverseEntry("EPSI", "Epsilon Inc")],
+        market_data_records=[MarketQuoteFundamentalsRecord("EPSI", price=12.5, volume=100_000, source="Schwab quote")],
+        fetched_at="2026-06-14T10:00:00+00:00",
+    )[0]
 
     assert filter_market_screener_records(
-        [no_market_data, changed_without_volume, mover, high_volume],
+        [no_market_data, changed_without_volume, mover, high_volume, schwab_quote_only],
         event_type="High volume / mover",
     ) == [mover, high_volume]
+    values = earnings_radar_extension._screener_values(schwab_quote_only)
+    assert values[5] == "$12.50"
+    assert values[6] == "--"
+    assert values[8] == "--"
+    assert "High volume" not in schwab_quote_only.signals
+    assert "Mover" not in schwab_quote_only.signals
 
 
 def test_market_screener_missing_providers_degrade_to_fallback_and_status_messages() -> None:
@@ -227,7 +340,7 @@ def test_market_screener_missing_providers_degrade_to_fallback_and_status_messag
     assert any(status.source == "SEC company_tickers.json" and status.status == "unavailable" for status in snapshot.statuses)
     assert any(status.source == "Built-in fallback universe" and status.status == "fallback" for status in snapshot.statuses)
     assert any(status.source == "Upcoming earnings calendar" and status.status == "unavailable" for status in snapshot.statuses)
-    assert any(status.source == "Market quote/fundamental metrics" and status.status == "unavailable" for status in snapshot.statuses)
+    assert any(status.source == "Market data enrichment" and status.status == "unavailable" for status in snapshot.statuses)
 
 
 def test_market_screener_ai_payload_is_grounded_in_selected_row_and_marks_missing_metrics() -> None:
