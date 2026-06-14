@@ -18,7 +18,6 @@ from app.analytics.earnings_ai import (
 from app.analytics.earnings_pipeline import (
     EARNINGS_FORMS,
     EMPTY_VALUE,
-    NOT_EXTRACTED,
     EarningsRadarSnapshot,
     EarningsRadarStore,
     FORMAL_REPORT_KIND,
@@ -46,6 +45,7 @@ from app.analytics.market_screener import (
 )
 from app.analytics.symbol_chat import redact_symbol_chat_secrets
 from app.data.earnings_calendar import ALPHA_VANTAGE_HORIZONS, AlphaVantageEarningsCalendarClient, UpcomingEarningsRecord
+from app.data.market_data_provider import configured_market_data_provider, configured_market_data_symbol_limit
 from app.data.sec_edgar import SecEdgarClient
 from app.ui import polished_theme
 from app.ui.symbol_chat_window import open_symbol_chat_window
@@ -562,6 +562,8 @@ def _refresh_screener(self: tk.Tk, *, force_refresh: bool) -> None:
     recent_records = list(getattr(self, "earnings_recent_records", []) or [])
     upcoming_records = list(getattr(self, "earnings_upcoming_records", []) or [])
     supplemental_records = _market_screener_holdings_records(self)
+    market_data_provider = configured_market_data_provider(schwab_session=getattr(self, "schwab_session", None))
+    market_data_symbol_limit = configured_market_data_symbol_limit()
 
     def worker() -> None:
         try:
@@ -569,6 +571,8 @@ def _refresh_screener(self: tk.Tk, *, force_refresh: bool) -> None:
                 recent_records=recent_records,
                 upcoming_records=upcoming_records,
                 supplemental_records=supplemental_records,
+                market_data_provider=market_data_provider,
+                market_data_symbol_limit=market_data_symbol_limit,
                 force_refresh=force_refresh,
             )
         except Exception as exc:
@@ -658,14 +662,14 @@ def _screener_values(record: MarketScreenerRecord) -> tuple[str, ...]:
         display_optional_text(record.exchange),
         display_optional_text(record.sector),
         display_optional_text(record.industry),
-        display_money(record.price),
-        display_percent(record.change_percent),
-        _display_large_number(record.volume),
-        _display_large_number(record.avg_volume),
-        display_money(record.market_cap),
-        _display_decimal(record.pe_ratio),
-        display_money(record.eps),
-        display_percent(record.revenue_growth),
+        _display_market_money(record.price),
+        _display_market_percent(record.change_percent),
+        _display_market_large_number(record.volume),
+        _display_market_large_number(record.avg_volume),
+        _display_market_money(record.market_cap),
+        _display_market_decimal(record.pe_ratio),
+        _display_market_money(record.eps),
+        _display_market_percent(record.revenue_growth),
         display_optional_text(record.next_earnings_date),
         display_optional_text(record.recent_filing_date),
         display_optional_text(record.recent_filing_type),
@@ -1452,15 +1456,15 @@ def _screener_detail_text(record: MarketScreenerRecord) -> str:
         f"Exchange: {display_optional_text(record.exchange)} | Sector: {display_optional_text(record.sector)} | Industry: {display_optional_text(record.industry)}",
         (
             "Market fields: "
-            f"Price {display_money(record.price)} | "
-            f"Change {display_percent(record.change_percent)} | "
-            f"Volume {_display_large_number(record.volume)} / Avg {_display_large_number(record.avg_volume)} | "
-            f"Market cap {display_money(record.market_cap)} | P/E {_display_decimal(record.pe_ratio)}"
+            f"Price {_display_market_money(record.price)} | "
+            f"Change {_display_market_percent(record.change_percent)} | "
+            f"Volume {_display_market_large_number(record.volume)} / Avg {_display_market_large_number(record.avg_volume)} | "
+            f"Market cap {_display_market_money(record.market_cap)} | P/E {_display_market_decimal(record.pe_ratio)}"
         ),
         (
             "Fundamentals/events: "
-            f"EPS {display_money(record.eps)} | "
-            f"Revenue growth {display_percent(record.revenue_growth)} | "
+            f"EPS {_display_market_money(record.eps)} | "
+            f"Revenue growth {_display_market_percent(record.revenue_growth)} | "
             f"Next earnings {display_optional_text(record.next_earnings_date)} | "
             f"Recent filing {display_optional_text(record.recent_filing_date)} {display_optional_text(record.recent_filing_type)}"
         ),
@@ -1785,9 +1789,19 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
-def _display_large_number(value: float | None) -> str:
+def _display_market_money(value: float | None) -> str:
     if value is None:
-        return NOT_EXTRACTED
+        return EMPTY_VALUE
+    return f"${value:,.0f}" if abs(value) >= 100 else f"${value:,.2f}"
+
+
+def _display_market_percent(value: float | None) -> str:
+    return EMPTY_VALUE if value is None else f"{value:.1f}%"
+
+
+def _display_market_large_number(value: float | None) -> str:
+    if value is None:
+        return EMPTY_VALUE
     abs_value = abs(value)
     if abs_value >= 1_000_000_000:
         return f"{value / 1_000_000_000:.2f}B"
@@ -1798,8 +1812,8 @@ def _display_large_number(value: float | None) -> str:
     return f"{value:,.0f}"
 
 
-def _display_decimal(value: float | None) -> str:
-    return NOT_EXTRACTED if value is None else f"{value:.2f}"
+def _display_market_decimal(value: float | None) -> str:
+    return EMPTY_VALUE if value is None else f"{value:.2f}"
 
 
 def _truncate(value: str, limit: int) -> str:

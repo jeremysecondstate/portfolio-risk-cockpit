@@ -16,6 +16,11 @@ from app.analytics.symbol_chat import (
     redact_symbol_chat_secrets,
 )
 from app.data.earnings_calendar import AlphaVantageEarningsCalendarClient, UpcomingEarningsRecord
+from app.data.market_data_provider import (
+    DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
+    MarketQuoteFundamentalsRecord,
+    configured_market_data_provider,
+)
 from app.data.market_universe import MarketUniverseEntry, MarketUniverseSnapshot, fetch_market_universe_snapshot
 from app.data.sec_edgar import SecEdgarClient
 
@@ -256,8 +261,11 @@ def fetch_market_screener_snapshot(
     recent_records: Iterable[RecentEarningsRecord] | None = None,
     upcoming_records: Iterable[UpcomingEarningsRecord] | None = None,
     supplemental_records: Iterable[MarketScreenerRecord] | None = None,
+    market_data_records: Iterable[MarketQuoteFundamentalsRecord] | None = None,
     upcoming_provider: Any | None = None,
+    market_data_provider: Any | None = None,
     universe_limit: int = 750,
+    market_data_symbol_limit: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
     horizon: str = "3month",
     upcoming_symbols: Iterable[str] | None = None,
     force_refresh: bool = False,
@@ -279,11 +287,29 @@ def fetch_market_screener_snapshot(
     recent = _load_recent_records(client, recent_records, statuses, errors, fetched_at)
     upcoming = _load_upcoming_records(upcoming_provider, upcoming_records, statuses, errors, fetched_at, horizon, upcoming_symbols, force_refresh)
 
+    base_records = build_market_screener_records(
+        universe_snapshot.records,
+        recent,
+        upcoming,
+        supplemental_records=supplemental_records or (),
+        fetched_at=fetched_at,
+    )
+    market_data = _load_market_data_records(
+        market_data_provider,
+        market_data_records,
+        statuses,
+        errors,
+        fetched_at,
+        _market_data_candidate_symbols(base_records, market_data_symbol_limit),
+        force_refresh,
+        market_data_symbol_limit,
+    )
     records = build_market_screener_records(
         universe_snapshot.records,
         recent,
         upcoming,
         supplemental_records=supplemental_records or (),
+        market_data_records=market_data,
         fetched_at=fetched_at,
     )
     statuses.append(_market_data_coverage_status(records, fetched_at))
@@ -303,6 +329,7 @@ def build_market_screener_records(
     upcoming_records: Iterable[UpcomingEarningsRecord] = (),
     *,
     supplemental_records: Iterable[MarketScreenerRecord] = (),
+    market_data_records: Iterable[MarketQuoteFundamentalsRecord] = (),
     fetched_at: str | None = None,
 ) -> list[MarketScreenerRecord]:
     fetched_at = fetched_at or _now()
@@ -320,6 +347,9 @@ def build_market_screener_records(
 
     for record in supplemental_records:
         _merge_into(merged, _normalize_record(record, fetched_at=fetched_at))
+
+    for record in market_data_records:
+        _merge_into(merged, _record_from_market_data(record, fetched_at=fetched_at))
 
     return sorted(merged.values(), key=lambda row: ((row.symbol or "ZZZZ").upper(), (row.company_name or "").lower()))
 
@@ -544,7 +574,63 @@ def _load_upcoming_records(
                 f"Upcoming earnings provider failed: {exc}",
             )
         )
+    return ()
+
+
+def _load_market_data_records(
+    provider: Any | None,
+    provided: Iterable[MarketQuoteFundamentalsRecord] | None,
+    statuses: list[MarketScreenerSourceStatus],
+    errors: list[str],
+    fetched_at: str,
+    symbols: Iterable[str],
+    force_refresh: bool,
+    max_symbols: int,
+) -> tuple[MarketQuoteFundamentalsRecord, ...]:
+    if max_symbols <= 0:
+        statuses.append(
+            MarketScreenerSourceStatus(
+                "Market quote/fundamental provider",
+                "disabled",
+                fetched_at,
+                "Market quote/fundamental enrichment is disabled because the symbol cap is 0.",
+            )
+        )
         return ()
+    requested = tuple(symbols)
+    if provided is not None:
+        rows = tuple(provided)
+        statuses.append(
+            MarketScreenerSourceStatus(
+                "Market quote/fundamental records",
+                "available" if rows else "empty",
+                fetched_at,
+                f"Merged {len(rows)} supplied quote/fundamental row(s).",
+            )
+        )
+        return rows
+    active_provider = provider or configured_market_data_provider()
+    try:
+        snapshot = active_provider.quote_fundamentals(
+            requested,
+            force_refresh=force_refresh,
+            max_symbols=max_symbols,
+        )
+    except Exception as exc:
+        errors.append(f"Market quote/fundamental provider: {exc}")
+        statuses.append(
+            MarketScreenerSourceStatus(
+                "Market quote/fundamental provider",
+                "error",
+                fetched_at,
+                f"Market quote/fundamental provider failed: {exc}",
+            )
+        )
+        return ()
+
+    statuses.extend(MarketScreenerSourceStatus(status.source, status.status, status.fetched_at, status.message) for status in snapshot.statuses)
+    errors.extend(snapshot.errors)
+    return tuple(snapshot.records)
 
 
 def _market_data_coverage_status(records: Iterable[MarketScreenerRecord], fetched_at: str) -> MarketScreenerSourceStatus:
@@ -568,8 +654,36 @@ def _market_data_coverage_status(records: Iterable[MarketScreenerRecord], fetche
         "Market quote/fundamental metrics",
         "unavailable",
         fetched_at,
-        "No broad quote/fundamental provider is configured for this MVP. Price, volume, market cap, P/E, and change fields remain unavailable unless local rows supply them.",
+        "No quote/fundamental fields were supplied by the configured capped market-data providers. Price, volume, market cap, P/E, EPS, and change fields remain blank.",
     )
+
+
+def _market_data_candidate_symbols(records: Iterable[MarketScreenerRecord], limit: int) -> tuple[str, ...]:
+    if limit <= 0:
+        return ()
+    rows = [record for record in records if _normalize_symbol(record.symbol)]
+
+    def priority(record: MarketScreenerRecord) -> tuple[int, str]:
+        signals = set(record.signals)
+        if "Schwab holding" in signals or "Watchlist" in signals:
+            rank = 0
+        elif record.next_earnings_date or record.recent_filing_date or record.risk_flags:
+            rank = 1
+        else:
+            rank = 2
+        return rank, record.symbol
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for record in sorted(rows, key=priority):
+        symbol = _normalize_symbol(record.symbol)
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        result.append(symbol)
+        if len(result) >= limit:
+            break
+    return tuple(result)
 
 
 def _record_from_universe(entry: MarketUniverseEntry, *, fetched_at: str) -> MarketScreenerRecord:
@@ -629,6 +743,32 @@ def _record_from_upcoming_earnings(record: UpcomingEarningsRecord, *, fetched_at
         sources=(record.source or "Upcoming earnings calendar",),
         source_links=source_links,
         fetched_at=fetched_at,
+    )
+
+
+def _record_from_market_data(record: MarketQuoteFundamentalsRecord, *, fetched_at: str) -> MarketScreenerRecord:
+    source_links = (record.source_url,) if record.source_url else ()
+    signals: list[str] = []
+    high_volume = record.volume is not None and record.avg_volume not in (None, 0) and record.volume >= record.avg_volume * 1.5
+    mover = record.change_percent is not None and abs(record.change_percent) >= 5.0
+    if high_volume:
+        signals.append("High volume")
+    if mover:
+        signals.append("Mover")
+    return MarketScreenerRecord(
+        symbol=_normalize_symbol(record.symbol),
+        price=record.price,
+        market_cap=record.market_cap,
+        volume=record.volume,
+        avg_volume=record.avg_volume,
+        change_percent=record.change_percent,
+        pe_ratio=record.pe_ratio,
+        eps=record.eps,
+        revenue_growth=record.revenue_growth,
+        signals=tuple(signals),
+        sources=(record.source or "Market quote/fundamental provider",),
+        source_links=source_links,
+        fetched_at=record.fetched_at or fetched_at,
     )
 
 

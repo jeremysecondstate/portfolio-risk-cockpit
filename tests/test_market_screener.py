@@ -17,6 +17,7 @@ from app.analytics.market_screener import (
     sort_market_screener_records,
 )
 from app.data.earnings_calendar import MISSING_API_KEY_MESSAGE, UpcomingEarningsRecord
+from app.data.market_data_provider import LocalMarketDataFileProvider, MarketQuoteFundamentalsRecord
 from app.data.market_universe import MarketUniverseEntry
 from app.ui import earnings_radar_extension
 
@@ -108,6 +109,62 @@ def test_market_screener_merge_combines_universe_recent_and_upcoming_rows() -> N
     assert beta.next_earnings_date is None
 
 
+def test_market_screener_quote_fundamental_records_merge_correctly() -> None:
+    records = build_market_screener_records(
+        [MarketUniverseEntry("ACME", "Acme Corp", exchange="Nasdaq")],
+        market_data_records=[
+            MarketQuoteFundamentalsRecord(
+                "ACME",
+                price=121.25,
+                change_percent=5.6,
+                volume=2_500_000,
+                avg_volume=1_000_000,
+                market_cap=12_000_000_000,
+                pe_ratio=31.5,
+                eps=1.22,
+                revenue_growth=14.4,
+                source="Local market data file",
+                source_url="https://example.test/acme",
+                fetched_at="2026-06-14T10:00:00+00:00",
+            )
+        ],
+        fetched_at="2026-06-14T10:00:00+00:00",
+    )
+
+    acme = records[0]
+    assert acme.price == 121.25
+    assert acme.change_percent == 5.6
+    assert acme.volume == 2_500_000
+    assert acme.avg_volume == 1_000_000
+    assert acme.market_cap == 12_000_000_000
+    assert acme.pe_ratio == 31.5
+    assert acme.eps == 1.22
+    assert acme.revenue_growth == 14.4
+    assert "High volume" in acme.signals
+    assert "Mover" in acme.signals
+    assert "Local market data file" in acme.sources
+    assert "https://example.test/acme" in acme.source_links
+
+
+def test_local_market_data_file_provider_loads_capped_requested_symbols(tmp_path) -> None:
+    path = tmp_path / "market-data.csv"
+    path.write_text(
+        "symbol,price,change_percent,volume,avg_volume,market_cap,pe_ratio,eps,revenue_growth,source,source_url\n"
+        "ACME,121.25,5.6,2500000,1000000,12000000000,31.5,1.22,14.4,Fixture,https://example.test/acme\n"
+        "BETA,8.5,0.4,1000,2000,,,,,Fixture,https://example.test/beta\n",
+        encoding="utf-8",
+    )
+    provider = LocalMarketDataFileProvider(path)
+
+    snapshot = provider.quote_fundamentals(["ACME"], max_symbols=1)
+
+    assert len(snapshot.records) == 1
+    assert snapshot.records[0].symbol == "ACME"
+    assert snapshot.records[0].price == 121.25
+    assert snapshot.records[0].market_cap == 12_000_000_000
+    assert snapshot.statuses[0].status == "available"
+
+
 def test_market_screener_filters_and_sorting_cover_events_risks_windows_and_movers() -> None:
     acme = MarketScreenerRecord(
         "ACME",
@@ -141,7 +198,20 @@ def test_market_screener_ui_values_handle_missing_numeric_fields() -> None:
 
     assert values[0] == "ACME"
     assert values[1] == "Acme Corp"
-    assert "Not extracted" in values
+    assert "--" in values
+    assert "Not extracted" not in values
+
+
+def test_high_volume_mover_filter_requires_actual_market_data() -> None:
+    no_market_data = MarketScreenerRecord("ACME", "Acme Corp")
+    changed_without_volume = MarketScreenerRecord("BETA", "Beta Inc", change_percent=None, volume=None, avg_volume=None)
+    mover = MarketScreenerRecord("GAMMA", "Gamma Inc", change_percent=-5.1)
+    high_volume = MarketScreenerRecord("DELTA", "Delta Inc", volume=2_000_000, avg_volume=1_000_000)
+
+    assert filter_market_screener_records(
+        [no_market_data, changed_without_volume, mover, high_volume],
+        event_type="High volume / mover",
+    ) == [mover, high_volume]
 
 
 def test_market_screener_missing_providers_degrade_to_fallback_and_status_messages() -> None:
