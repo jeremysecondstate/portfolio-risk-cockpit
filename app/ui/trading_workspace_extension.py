@@ -14,6 +14,7 @@ from app.analytics.trade_setup import calculate_support_resistance
 from app.brokers.hyperliquid.client import HyperliquidInfoClient
 from app.brokers.hyperliquid.trading import normalize_hyperliquid_coin
 from app.core.order_models import SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, OrderSide, OrderType, TimeInForce
+from app.ui.hyperliquid_perp_chat_window import open_hyperliquid_perp_chat_window
 from app.ui.trading_workspace import build_trading_workspace_tab, run_options_what_if
 from app.ui import polished_theme
 from app.ui.polished_theme import _make_paned
@@ -32,6 +33,7 @@ def install_trading_workspace_extension(app_cls: Type[tk.Tk]) -> None:
     app_cls.use_current_cockpit_source_portfolio = _use_current_cockpit_source_portfolio  # type: ignore[attr-defined]
     app_cls.use_hyperliquid_mid_market = _use_hyperliquid_mid_market  # type: ignore[attr-defined]
     app_cls.run_hyperliquid_perp_what_if = _run_hyperliquid_perp_what_if  # type: ignore[attr-defined]
+    app_cls.open_hyperliquid_perp_strategy_chat = _open_hyperliquid_perp_strategy_chat  # type: ignore[attr-defined]
     app_cls.open_hyperliquid_output_popout = _open_hyperliquid_output_popout  # type: ignore[attr-defined]
     app_cls.refresh_hyperliquid_output_popout = _refresh_hyperliquid_output_popout  # type: ignore[attr-defined]
     app_cls.update_workspace_holdings_tables = _update_workspace_holdings_tables  # type: ignore[attr-defined]
@@ -1774,6 +1776,7 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
 
     _add_workspace_button(actions, row=0, column=0, text="Technical Analysis", command=hyperliquid_research_action("perp", "hyperliquid_crypto_technicals_frame"), style="Accent.TButton")
     _add_workspace_button(actions, row=0, column=1, text="Perp What-If", command=hyperliquid_popout_action("perp", "run_hyperliquid_perp_what_if"), style="Accent.TButton")
+    _add_workspace_button(actions, row=0, column=2, text="Perp Strategy Chat", command=hyperliquid_action("perp", "open_hyperliquid_perp_strategy_chat"), style="Accent.TButton")
     _add_workspace_button(actions, row=1, column=0, text="TP/SL", command=hyperliquid_action("perp", "show_hyperliquid_position_tpsl_dialog"))
     _add_workspace_button(actions, row=1, column=1, text="Edit Position", command=hyperliquid_action("perp", "show_hyperliquid_perp_position_editor"))
     _add_workspace_button(actions, row=1, column=2, text="Position Size", command=hyperliquid_action("perp", "show_hyperliquid_perp_position_size", "show_position_size"))
@@ -1838,6 +1841,34 @@ def _use_hyperliquid_mid_market(self: tk.Tk) -> None:
     except Exception as exc:
         self.hyperliquid_status_var.set("Hyperliquid: mid failed")
         messagebox.showerror("Hyperliquid mid-market lookup failed", str(exc))
+
+
+def _open_hyperliquid_perp_strategy_chat(self: tk.Tk) -> None:
+    try:
+        _sync_hyperliquid_ticket_to_shared(self, "perp")
+        coin = normalize_hyperliquid_coin(self.hyperliquid_coin_var.get().strip() or self.symbol_var.get().strip() or "HYPE")
+        open_hyperliquid_perp_chat_window(
+            self,
+            coin,
+            app_context=self,
+        )
+        self.hyperliquid_status_var.set(f"Hyperliquid: Perp Strategy Chat opened for {coin}")
+        _set_workspace_text(
+            self.hyperliquid_trading_preview_text,
+            "HYPERLIQUID PERP STRATEGY CHAT\n"
+            "==============================\n\n"
+            f"Opened read-only strategy chat for {coin}-PERP.\n\n"
+            "The chat uses deterministic cockpit context, ticket fields, synced Jeremy/Alex exposure, open orders, and calculator output.\n"
+            "Orders must be submitted manually through the existing LIVE Submit Jeremy / LIVE Submit Alex buttons.",
+        )
+    except Exception as exc:
+        self.hyperliquid_status_var.set("Hyperliquid: strategy chat failed")
+        messagebox.showerror("Open Hyperliquid Perp Strategy Chat failed", str(exc))
+    finally:
+        try:
+            _sync_hyperliquid_ticket_from_shared(self, "perp")
+        except Exception:
+            pass
 
 
 def _run_hyperliquid_perp_what_if(self: tk.Tk) -> None:
