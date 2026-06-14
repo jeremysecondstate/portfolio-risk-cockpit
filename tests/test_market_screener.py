@@ -14,6 +14,7 @@ from app.analytics.market_screener import (
     fetch_market_screener_snapshot,
     filter_market_screener_records,
     market_screener_ai_request_payload,
+    market_screener_data_label,
     market_screener_record_has_quote_fields,
     merge_market_data_records_into_screener_records,
     sort_market_screener_records,
@@ -79,6 +80,14 @@ class _FakeResponses:
 class _FakeOpenAiClient:
     def __init__(self, answer: str = "Selected screener row analysis only.") -> None:
         self.responses = _FakeResponses(answer)
+
+
+class _FakeTkVar:
+    def __init__(self, value: str = "") -> None:
+        self.value = value
+
+    def set(self, value: str) -> None:
+        self.value = value
 
 
 class _FakeMarketDataProvider:
@@ -248,6 +257,55 @@ def test_market_screener_selected_row_enrichment_updates_one_symbol() -> None:
     assert market_screener_record_has_quote_fields(beta) is True
 
 
+def test_market_screener_selected_row_enrichment_finish_updates_snapshot_and_detail(monkeypatch) -> None:
+    app = SimpleNamespace(
+        market_screener_records=[MarketScreenerRecord("ACME", "Acme Corp"), MarketScreenerRecord("BETA", "Beta Inc")],
+        market_screener_market_data_running_symbols={"BETA"},
+        market_screener_market_data_attempted_symbols=set(),
+        market_screener_status_var=_FakeTkVar(),
+    )
+    detail_updates: list[MarketScreenerRecord | None] = []
+    monkeypatch.setattr(earnings_radar_extension, "_selected_screener_symbol", lambda _app: "BETA")
+    monkeypatch.setattr(earnings_radar_extension, "_apply_screener_filters", lambda _app: None)
+    monkeypatch.setattr(earnings_radar_extension, "_select_screener_symbol", lambda _app, _symbol: None)
+    monkeypatch.setattr(earnings_radar_extension, "_append_screener_market_data_status", lambda _app, _line: None)
+    monkeypatch.setattr(earnings_radar_extension, "_update_screener_detail_panel", lambda _app, record: detail_updates.append(record))
+    snapshot = MarketQuoteFundamentalsSnapshot(
+        records=(MarketQuoteFundamentalsRecord("BETA", price=22.25, volume=2200, source="Fake quote"),),
+        fetched_at="2026-06-14T10:00:00+00:00",
+        statuses=(MarketDataProviderStatus("Fake quote", "available", "2026-06-14T10:00:00+00:00", "Loaded 1 fake quote row."),),
+    )
+
+    earnings_radar_extension._finish_screener_market_data_enrichment(app, ("BETA",), "selected row", snapshot)
+
+    acme = next(record for record in app.market_screener_records if record.symbol == "ACME")
+    beta = next(record for record in app.market_screener_records if record.symbol == "BETA")
+    assert acme.price is None
+    assert beta.price == 22.25
+    assert beta.volume == 2200
+    assert app.market_screener_market_data_running_symbols == set()
+    assert app.market_screener_market_data_attempted_symbols == {"BETA"}
+    assert detail_updates[-1] == beta
+    assert "selected row updated" in app.market_screener_status_var.value
+
+
+def test_market_screener_selected_row_enrichment_requests_only_selected_symbol(monkeypatch) -> None:
+    app = SimpleNamespace(
+        market_screener_market_data_running_symbols=set(),
+        market_screener_market_data_attempted_symbols=set(),
+    )
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def fake_request(_app, symbols, **kwargs) -> None:
+        calls.append((tuple(symbols), kwargs))
+
+    monkeypatch.setattr(earnings_radar_extension, "_request_market_data_enrichment", fake_request)
+
+    earnings_radar_extension._request_selected_row_market_data_enrichment(app, MarketScreenerRecord("BETA", "Beta Inc"))
+
+    assert calls == [(("BETA",), {"reason": "selected row", "force_refresh": False, "max_symbols": 1})]
+
+
 def test_local_market_data_file_provider_loads_capped_requested_symbols(tmp_path) -> None:
     path = tmp_path / "market-data.csv"
     path.write_text(
@@ -283,23 +341,44 @@ def test_market_screener_filters_and_sorting_cover_events_risks_windows_and_move
         sources=("SEC EDGAR",),
     )
     beta = MarketScreenerRecord("BETA", "Beta Inc", exchange="NYSE", sector="Industrials", sources=("SEC company_tickers.json",))
+    filing_only = MarketScreenerRecord("FILI", "Filing Inc", recent_filing_date="2026-06-07", sources=("SEC EDGAR",))
+    earnings_only = MarketScreenerRecord("EARN", "Earnings Inc", next_earnings_date="2026-06-21", sources=("Alpha Vantage",))
+    holding_only = MarketScreenerRecord("HOLD", "Holding Inc", signals=("Schwab holding",), sources=("Local app holdings",))
 
     assert filter_market_screener_records([acme, beta], search="acme") == [acme]
     assert filter_market_screener_records([acme, beta], sector="Technology") == [acme]
     assert filter_market_screener_records([acme, beta], event_type="Upcoming earnings") == [acme]
+    assert filter_market_screener_records([acme, beta], event_type="Quote-enriched") == [acme]
     assert filter_market_screener_records([acme, beta], event_type="Guidance mentioned") == [acme]
     assert filter_market_screener_records([acme, beta], event_type="High volume / mover") == [acme]
     assert filter_market_screener_records([acme, beta], risk_flag="Any risk flag") == [acme]
     assert filter_market_screener_records([acme, beta], earnings_date_window="Next 7 days", today=date(2026, 6, 13)) == [acme]
     assert filter_market_screener_records([acme, beta], has_ai_signal=True) == [acme]
+    assert filter_market_screener_records([acme, beta], has_price_volume_data=True) == [acme]
     assert sort_market_screener_records([beta, acme], "change_percent", descending=True) == [acme, beta]
+    assert sort_market_screener_records(
+        [beta, MarketScreenerRecord("LOW", price=8.0), MarketScreenerRecord("HIGH", price=30.0)],
+        "price",
+        descending=False,
+    ) == [MarketScreenerRecord("LOW", price=8.0), MarketScreenerRecord("HIGH", price=30.0), beta]
+    assert sort_market_screener_records(
+        [beta, MarketScreenerRecord("LOW", price=8.0), MarketScreenerRecord("HIGH", price=30.0)],
+        "price",
+        descending=True,
+    ) == [MarketScreenerRecord("HIGH", price=30.0), MarketScreenerRecord("LOW", price=8.0), beta]
+    assert market_screener_data_label(acme) == "Quote"
+    assert market_screener_data_label(holding_only) == "Holding"
+    assert market_screener_data_label(filing_only) == "Filing"
+    assert market_screener_data_label(earnings_only) == "Earnings"
+    assert market_screener_data_label(beta) == "Universe only"
 
 
 def test_market_screener_ui_values_handle_missing_numeric_fields() -> None:
     values = earnings_radar_extension._screener_values(MarketScreenerRecord("ACME", "Acme Corp"))
 
     assert values[0] == "ACME"
-    assert values[1] == "Acme Corp"
+    assert values[1] == "Universe only"
+    assert values[2] == "Acme Corp"
     assert "--" in values
     assert "Not extracted" not in values
 
@@ -320,9 +399,10 @@ def test_high_volume_mover_filter_requires_actual_market_data() -> None:
         event_type="High volume / mover",
     ) == [mover, high_volume]
     values = earnings_radar_extension._screener_values(schwab_quote_only)
-    assert values[5] == "$12.50"
-    assert values[6] == "--"
-    assert values[8] == "--"
+    assert values[1] == "Quote"
+    assert values[6] == "$12.50"
+    assert values[7] == "--"
+    assert values[9] == "--"
     assert "High volume" not in schwab_quote_only.signals
     assert "Mover" not in schwab_quote_only.signals
 

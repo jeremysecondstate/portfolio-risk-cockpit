@@ -40,6 +40,7 @@ from app.analytics.market_screener import (
     OpenAiMarketScreenerClient,
     fetch_market_screener_snapshot,
     filter_market_screener_records,
+    market_screener_data_label,
     market_screener_record_has_quote_fields,
     market_screener_has_ai_signal,
     merge_market_data_records_into_screener_records,
@@ -87,6 +88,7 @@ UPCOMING_COLUMNS = (
 )
 SCREENER_COLUMNS = (
     ("symbol", "Symbol", 86, tk.W),
+    ("data_status", "Data", 92, tk.W),
     ("company", "Company", 230, tk.W),
     ("exchange", "Exchange", 110, tk.W),
     ("sector", "Sector", 150, tk.W),
@@ -206,9 +208,11 @@ def _ensure_state(self: tk.Tk) -> None:
     self.market_screener_risk_flag_var = tk.StringVar(value="All")
     self.market_screener_earnings_window_var = tk.StringVar(value="All")
     self.market_screener_has_ai_signal_var = tk.BooleanVar(value=False)
+    self.market_screener_has_price_volume_data_var = tk.BooleanVar(value=False)
     self.market_screener_page_size_var = tk.StringVar(value="100")
     self.market_screener_selected_record: MarketScreenerRecord | None = None
     self.market_screener_ai_status_var = tk.StringVar(value="Select a screener row for row-grounded AI.")
+    self.market_screener_source_summary_var = tk.StringVar(value="Market data/source status will appear here after load.")
     self._market_screener_ai_running = False
     self._market_screener_refreshing = False
     self._market_screener_refresh_pending = False
@@ -301,6 +305,7 @@ def _build_screener_filters(self: tk.Tk, parent: ttk.Frame) -> None:
     checks = ttk.Frame(box, style="Panel.TFrame")
     checks.grid(row=1, column=4, columnspan=4, sticky="ew", pady=4)
     ttk.Checkbutton(checks, text="Has AI-worthy signal", variable=self.market_screener_has_ai_signal_var, command=lambda: _apply_screener_filters(self)).pack(side=tk.LEFT)
+    ttk.Checkbutton(checks, text="Has price/volume data", variable=self.market_screener_has_price_volume_data_var, command=lambda: _apply_screener_filters(self)).pack(side=tk.LEFT, padx=(12, 0))
 
     quick = ttk.Frame(box, style="Panel.TFrame")
     quick.grid(row=2, column=0, columnspan=8, sticky="ew", pady=(8, 0))
@@ -311,6 +316,7 @@ def _build_screener_filters(self: tk.Tk, parent: ttk.Frame) -> None:
         ("Guidance", "guidance"),
         ("Risk Flags", "risk"),
         ("High Volume / Mover", "mover"),
+        ("Quote-enriched", "quote_enriched"),
         ("My Holdings", "holdings"),
     ):
         ttk.Button(quick, text=label, command=lambda value=preset, app=self: _apply_screener_quick_preset(app, value)).pack(side=tk.LEFT, padx=(0, 6))
@@ -349,9 +355,10 @@ def _build_screener_detail_panel(self: tk.Tk, parent: ttk.Frame, *, row: int) ->
     self.market_screener_detail_text.grid(row=0, column=0, sticky="ew")
     self.market_screener_detail_text.configure(state=tk.DISABLED)
 
+    ttk.Label(text_frame, textvariable=self.market_screener_source_summary_var, style="Chip.TLabel", wraplength=1100).grid(row=1, column=0, sticky="ew", pady=(6, 0))
     self.market_screener_source_text = tk.Text(
         text_frame,
-        height=3,
+        height=5,
         wrap=tk.WORD,
         bg=polished_theme.INPUT,
         fg=polished_theme.MUTED,
@@ -359,9 +366,9 @@ def _build_screener_detail_panel(self: tk.Tk, parent: ttk.Frame, *, row: int) ->
         relief=tk.FLAT,
         padx=10,
         pady=6,
-        font=("Segoe UI", 8),
+        font=("Segoe UI", 9),
     )
-    self.market_screener_source_text.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+    self.market_screener_source_text.grid(row=2, column=0, sticky="ew", pady=(6, 0))
     self.market_screener_source_text.configure(state=tk.DISABLED)
 
     actions = ttk.Frame(detail, style="Panel.TFrame")
@@ -629,6 +636,7 @@ def _load_screener_snapshot(self: tk.Tk, snapshot: MarketScreenerSnapshot) -> No
     _set_combo_values(self.market_screener_exchange_combo, ["All", *sorted({record.exchange or EMPTY_VALUE for record in self.market_screener_records})], self.market_screener_exchange_var)
     _set_combo_values(self.market_screener_risk_flag_combo, ["All", "Any risk flag", *sorted({flag for record in self.market_screener_records for flag in record.risk_flags})], self.market_screener_risk_flag_var)
     self.market_screener_source_status_base_text = _screener_source_status_text(snapshot)
+    self.market_screener_source_summary_var.set(_screener_source_summary_text(snapshot))
     _refresh_screener_source_text(self)
     self.market_screener_page = 0
     _apply_screener_filters(self)
@@ -644,6 +652,7 @@ def _apply_screener_filters(self: tk.Tk) -> None:
         risk_flag=self.market_screener_risk_flag_var.get(),
         earnings_date_window=self.market_screener_earnings_window_var.get(),
         has_ai_signal=self.market_screener_has_ai_signal_var.get(),
+        has_price_volume_data=self.market_screener_has_price_volume_data_var.get(),
     )
     self.market_screener_filtered_records = sort_market_screener_records(filtered, self.market_screener_sort_column, descending=self.market_screener_sort_desc)
     self.market_screener_page = min(self.market_screener_page, _max_page(self.market_screener_filtered_records, _screener_page_size(self)))
@@ -673,6 +682,7 @@ def _populate_screener_table(self: tk.Tk) -> None:
 def _screener_values(record: MarketScreenerRecord) -> tuple[str, ...]:
     return (
         record.symbol or EMPTY_VALUE,
+        market_screener_data_label(record),
         display_optional_text(record.company_name),
         display_optional_text(record.exchange),
         display_optional_text(record.sector),
@@ -1240,6 +1250,12 @@ def _append_screener_market_data_status(self: tk.Tk, line: str) -> None:
     clean = str(line or "").strip()
     if clean:
         lines.append(clean)
+        summary_var = getattr(self, "market_screener_source_summary_var", None)
+        if summary_var is not None:
+            try:
+                summary_var.set(_truncate(clean, 240))
+            except tk.TclError:
+                pass
     self.market_screener_market_data_status_lines = lines[-6:]
     _refresh_screener_source_text(self)
 
@@ -1609,6 +1625,7 @@ def _clear_screener_filters(self: tk.Tk) -> None:
     ):
         variable.set("All")
     self.market_screener_has_ai_signal_var.set(False)
+    self.market_screener_has_price_volume_data_var.set(False)
     self.market_screener_page = 0
     _apply_screener_filters(self)
 
@@ -1627,6 +1644,10 @@ def _apply_screener_quick_preset(self: tk.Tk, preset: str) -> None:
         self.market_screener_risk_flag_var.set("Any risk flag")
     elif preset == "mover":
         self.market_screener_event_type_var.set("High volume / mover")
+    elif preset == "quote_enriched":
+        self.market_screener_event_type_var.set("Quote-enriched")
+        self.market_screener_earnings_window_var.set("All")
+        self.market_screener_has_price_volume_data_var.set(False)
     elif preset == "holdings":
         self.market_screener_event_type_var.set("Schwab holding/watchlist")
     self.market_screener_page = 0
@@ -1741,15 +1762,33 @@ def _format_screener_ai_result(record: MarketScreenerRecord, label: str, prompt:
 
 
 def _screener_source_status_text(snapshot: MarketScreenerSnapshot) -> str:
-    lines = ["Source/status:"]
     market_data_statuses = [status for status in snapshot.statuses if status.source == "Market data enrichment"]
     other_statuses = [status for status in snapshot.statuses if status.source != "Market data enrichment"]
-    for status in [*market_data_statuses, *other_statuses]:
-        lines.append(f"- {status.source}: {status.status} - {status.message}")
+    lines: list[str] = []
+    if market_data_statuses:
+        lines.append("Market data")
+        lines.extend(f"- {status.status}: {status.message}" for status in market_data_statuses)
+    if other_statuses:
+        if lines:
+            lines.append("")
+        lines.append("Source coverage")
+        lines.extend(f"- {status.source}: {status.status} - {status.message}" for status in other_statuses)
     if snapshot.errors:
+        if lines:
+            lines.append("")
         lines.append("Warnings:")
         lines.extend(f"- {error}" for error in snapshot.errors[:6])
-    return "\n".join(lines)
+    return "\n".join(lines or ["Source/status: Market Intelligence Screener has not loaded provider status yet."])
+
+
+def _screener_source_summary_text(snapshot: MarketScreenerSnapshot) -> str:
+    market_data_status = next((status for status in snapshot.statuses if status.source == "Market data enrichment"), None)
+    if market_data_status is not None:
+        return _truncate(market_data_status.message, 240)
+    if snapshot.statuses:
+        status = snapshot.statuses[0]
+        return _truncate(f"{status.source}: {status.status} - {status.message}", 240)
+    return "Market data/source status loaded."
 
 
 def _recent_detail_text(record: RecentEarningsRecord) -> str:
@@ -1858,7 +1897,7 @@ def _table(parent: ttk.Frame, *, row: int, title: str, columns: tuple[tuple[str,
     tree = ttk.Treeview(frame, columns=tuple(column_id for column_id, _label, _width, _anchor in columns), show="headings", height=14, selectmode="browse")
     for column_id, label, width, anchor in columns:
         tree.heading(column_id, text=label, command=lambda col=column_id: sort(col))
-        tree.column(column_id, width=width, minwidth=min(width, 90), anchor=anchor, stretch=column_id in {"company", "industry", "signals", "risk_flags", "sources", "filing_link", "exhibit_link", "source_link"})
+        tree.column(column_id, width=width, minwidth=min(width, 90), anchor=anchor, stretch=column_id in {"company", "industry", "data_status", "signals", "risk_flags", "sources", "filing_link", "exhibit_link", "source_link"})
     tree.grid(row=0, column=0, sticky="nsew")
     y_scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
     y_scroll.grid(row=0, column=1, sticky="ns")

@@ -68,6 +68,7 @@ MARKET_SCREENER_AI_QUICK_PROMPTS: dict[str, str] = {
 
 EVENT_TYPE_OPTIONS = (
     "All",
+    "Quote-enriched",
     "Upcoming earnings",
     "Recent SEC filing",
     "Guidance mentioned",
@@ -390,6 +391,10 @@ def market_screener_record_has_market_data(record: MarketScreenerRecord) -> bool
     )
 
 
+def market_screener_record_has_price_volume_data(record: MarketScreenerRecord) -> bool:
+    return record.price is not None or record.volume is not None
+
+
 def market_screener_record_has_quote_fields(record: MarketScreenerRecord) -> bool:
     return any(
         value is not None
@@ -404,6 +409,18 @@ def market_screener_record_has_quote_fields(record: MarketScreenerRecord) -> boo
     )
 
 
+def market_screener_data_label(record: MarketScreenerRecord) -> str:
+    if any(signal in {"Schwab holding", "Watchlist"} for signal in record.signals):
+        return "Holding"
+    if market_screener_record_has_quote_fields(record):
+        return "Quote"
+    if record.recent_filing_date:
+        return "Filing"
+    if record.next_earnings_date:
+        return "Earnings"
+    return "Universe only"
+
+
 def filter_market_screener_records(
     records: Iterable[MarketScreenerRecord],
     *,
@@ -414,6 +431,7 @@ def filter_market_screener_records(
     risk_flag: str = "All",
     earnings_date_window: str = "All",
     has_ai_signal: bool = False,
+    has_price_volume_data: bool = False,
     today: date | None = None,
 ) -> list[MarketScreenerRecord]:
     search_text = search.strip().lower()
@@ -435,6 +453,8 @@ def filter_market_screener_records(
         if not _earnings_window_matches(record, earnings_date_window, today):
             continue
         if has_ai_signal and not market_screener_has_ai_signal(record):
+            continue
+        if has_price_volume_data and not market_screener_record_has_price_volume_data(record):
             continue
         filtered.append(record)
     return filtered
@@ -922,6 +942,8 @@ def _record_key(record: MarketScreenerRecord) -> str:
 def _event_type_matches(record: MarketScreenerRecord, event_type: str) -> bool:
     if event_type == "All":
         return True
+    if event_type == "Quote-enriched":
+        return market_screener_record_has_market_data(record)
     if event_type == "Upcoming earnings":
         return bool(record.next_earnings_date)
     if event_type == "Recent SEC filing":
@@ -967,6 +989,7 @@ def _sort_value(record: MarketScreenerRecord, column: str) -> Any:
         "pe_ratio": record.pe_ratio,
         "eps": record.eps,
         "revenue_growth": record.revenue_growth,
+        "data_status": market_screener_data_label(record),
         "next_earnings": record.next_earnings_date,
         "recent_filing": record.recent_filing_date,
         "recent_type": record.recent_filing_type,
