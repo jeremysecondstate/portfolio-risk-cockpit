@@ -101,6 +101,7 @@ SCREENER_COLUMNS = (
     ("pe_ratio", "P/E", 82, tk.E),
     ("eps", "EPS", 82, tk.E),
     ("revenue_growth", "Rev growth", 104, tk.E),
+    ("float_shares", "Float/Shares", 124, tk.E),
     ("next_earnings", "Next earnings", 112, tk.W),
     ("recent_filing", "Recent filing", 112, tk.W),
     ("recent_type", "Recent type", 160, tk.W),
@@ -110,7 +111,7 @@ SCREENER_COLUMNS = (
 )
 RECENT_NUMERIC_COLUMNS = {"revenue", "revenue_growth", "eps", "net_income"}
 UPCOMING_NUMERIC_COLUMNS = {"estimate"}
-SCREENER_NUMERIC_COLUMNS = {"price", "change_percent", "volume", "avg_volume", "market_cap", "pe_ratio", "eps", "revenue_growth", "signals", "risk_flags", "sources"}
+SCREENER_NUMERIC_COLUMNS = {"price", "change_percent", "volume", "avg_volume", "market_cap", "pe_ratio", "eps", "revenue_growth", "float_shares", "signals", "risk_flags", "sources"}
 MARKET_DATA_PAGE_ENRICHMENT_CAP = 100
 
 
@@ -317,6 +318,7 @@ def _build_screener_filters(self: tk.Tk, parent: ttk.Frame) -> None:
         ("Risk Flags", "risk"),
         ("High Volume / Mover", "mover"),
         ("Quote-enriched", "quote_enriched"),
+        ("Fundamentals", "fundamentals"),
         ("My Holdings", "holdings"),
     ):
         ttk.Button(quick, text=label, command=lambda value=preset, app=self: _apply_screener_quick_preset(app, value)).pack(side=tk.LEFT, padx=(0, 6))
@@ -695,6 +697,7 @@ def _screener_values(record: MarketScreenerRecord) -> tuple[str, ...]:
         _display_market_decimal(record.pe_ratio),
         _display_market_money(record.eps),
         _display_market_percent(record.revenue_growth),
+        _display_float_or_shares(record),
         display_optional_text(record.next_earnings_date),
         display_optional_text(record.recent_filing_date),
         display_optional_text(record.recent_filing_type),
@@ -928,10 +931,12 @@ def _market_data_provider_status_summary(snapshot: MarketQuoteFundamentalsSnapsh
         return ""
     sources = ", ".join(dict.fromkeys(status.source for status in snapshot.statuses if status.source))
     statuses = ", ".join(dict.fromkeys(status.status for status in snapshot.statuses if status.status))
+    fmp_message = next((status.message for status in snapshot.statuses if status.source == "FMP quote/fundamentals" and status.message), "")
+    note = f" {_truncate(fmp_message, 240)}" if fmp_message else ""
     if sources and statuses:
-        return f"Provider status: {sources} ({statuses})."
+        return f"Provider status: {sources} ({statuses}).{note}"
     if sources:
-        return f"Provider status: {sources}."
+        return f"Provider status: {sources}.{note}"
     return ""
 
 
@@ -1648,6 +1653,10 @@ def _apply_screener_quick_preset(self: tk.Tk, preset: str) -> None:
         self.market_screener_event_type_var.set("Quote-enriched")
         self.market_screener_earnings_window_var.set("All")
         self.market_screener_has_price_volume_data_var.set(False)
+    elif preset == "fundamentals":
+        self.market_screener_event_type_var.set("Fundamentals available")
+        self.market_screener_earnings_window_var.set("All")
+        self.market_screener_has_price_volume_data_var.set(False)
     elif preset == "holdings":
         self.market_screener_event_type_var.set("Schwab holding/watchlist")
     self.market_screener_page = 0
@@ -1723,6 +1732,7 @@ def _screener_detail_text(record: MarketScreenerRecord) -> str:
             "Fundamentals/events: "
             f"EPS {_display_market_money(record.eps)} | "
             f"Revenue growth {_display_market_percent(record.revenue_growth)} | "
+            f"Float/Shares {_display_float_or_shares(record)} | "
             f"Next earnings {display_optional_text(record.next_earnings_date)} | "
             f"Recent filing {display_optional_text(record.recent_filing_date)} {display_optional_text(record.recent_filing_type)}"
         ),
@@ -2088,6 +2098,18 @@ def _display_market_large_number(value: float | None) -> str:
     if abs_value >= 1_000:
         return f"{value / 1_000:.1f}K"
     return f"{value:,.0f}"
+
+
+def _display_float_or_shares(record: MarketScreenerRecord) -> str:
+    shares_float = _display_market_large_number(record.shares_float)
+    shares_outstanding = _display_market_large_number(record.shares_outstanding)
+    if record.shares_float is not None and record.shares_outstanding is not None:
+        return f"{shares_float} / {shares_outstanding}"
+    if record.shares_float is not None:
+        return shares_float
+    if record.shares_outstanding is not None:
+        return shares_outstanding
+    return EMPTY_VALUE
 
 
 def _display_market_decimal(value: float | None) -> str:

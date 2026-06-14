@@ -69,6 +69,7 @@ MARKET_SCREENER_AI_QUICK_PROMPTS: dict[str, str] = {
 EVENT_TYPE_OPTIONS = (
     "All",
     "Quote-enriched",
+    "Fundamentals available",
     "Upcoming earnings",
     "Recent SEC filing",
     "Guidance mentioned",
@@ -104,6 +105,8 @@ class MarketScreenerRecord:
     pe_ratio: float | None = None
     eps: float | None = None
     revenue_growth: float | None = None
+    shares_float: float | None = None
+    shares_outstanding: float | None = None
     next_earnings_date: str | None = None
     recent_filing_date: str | None = None
     recent_filing_type: str | None = None
@@ -387,6 +390,8 @@ def market_screener_record_has_market_data(record: MarketScreenerRecord) -> bool
             record.pe_ratio,
             record.eps,
             record.revenue_growth,
+            record.shares_float,
+            record.shares_outstanding,
         )
     )
 
@@ -405,8 +410,13 @@ def market_screener_record_has_quote_fields(record: MarketScreenerRecord) -> boo
             record.avg_volume,
             record.change_percent,
             record.pe_ratio,
+            record.eps,
         )
     )
+
+
+def market_screener_record_has_fundamentals(record: MarketScreenerRecord) -> bool:
+    return any(value is not None for value in (record.market_cap, record.pe_ratio, record.eps, record.revenue_growth))
 
 
 def market_screener_data_label(record: MarketScreenerRecord) -> str:
@@ -526,6 +536,8 @@ def market_screener_record_context(record: MarketScreenerRecord) -> dict[str, An
         "fundamental_fields": {
             "eps": _number_or_missing(record.eps, "eps"),
             "revenue_growth_percent": _number_or_missing(record.revenue_growth, "revenue_growth"),
+            "shares_float": _number_or_missing(record.shares_float, "shares_float"),
+            "shares_outstanding": _number_or_missing(record.shares_outstanding, "shares_outstanding"),
         },
         "event_fields": {
             "next_earnings_date": _text_or_missing(record.next_earnings_date, "next_earnings_date"),
@@ -741,6 +753,9 @@ def _quote_record_has_any_value(record: MarketQuoteFundamentalsRecord) -> bool:
     return any(
         value is not None
         for value in (
+            record.exchange,
+            record.sector,
+            record.industry,
             record.price,
             record.market_cap,
             record.volume,
@@ -749,6 +764,8 @@ def _quote_record_has_any_value(record: MarketQuoteFundamentalsRecord) -> bool:
             record.pe_ratio,
             record.eps,
             record.revenue_growth,
+            record.shares_float,
+            record.shares_outstanding,
         )
     )
 
@@ -852,6 +869,9 @@ def _record_from_market_data(record: MarketQuoteFundamentalsRecord, *, fetched_a
         signals.append("Mover")
     return MarketScreenerRecord(
         symbol=_normalize_symbol(record.symbol),
+        exchange=record.exchange,
+        sector=record.sector,
+        industry=record.industry,
         price=record.price,
         market_cap=record.market_cap,
         volume=record.volume,
@@ -860,6 +880,8 @@ def _record_from_market_data(record: MarketQuoteFundamentalsRecord, *, fetched_a
         pe_ratio=record.pe_ratio,
         eps=record.eps,
         revenue_growth=record.revenue_growth,
+        shares_float=record.shares_float,
+        shares_outstanding=record.shares_outstanding,
         signals=tuple(signals),
         sources=(record.source or "Market quote/fundamental provider",),
         source_links=source_links,
@@ -882,6 +904,8 @@ def _normalize_record(record: MarketScreenerRecord, *, fetched_at: str) -> Marke
         pe_ratio=record.pe_ratio,
         eps=record.eps,
         revenue_growth=record.revenue_growth,
+        shares_float=record.shares_float,
+        shares_outstanding=record.shares_outstanding,
         next_earnings_date=record.next_earnings_date,
         recent_filing_date=record.recent_filing_date,
         recent_filing_type=record.recent_filing_type,
@@ -918,6 +942,8 @@ def merge_market_screener_record(existing: MarketScreenerRecord, incoming: Marke
         pe_ratio=_prefer_number(incoming.pe_ratio, existing.pe_ratio),
         eps=_prefer_number(incoming.eps, existing.eps),
         revenue_growth=_prefer_number(incoming.revenue_growth, existing.revenue_growth),
+        shares_float=_prefer_number(incoming.shares_float, existing.shares_float),
+        shares_outstanding=_prefer_number(incoming.shares_outstanding, existing.shares_outstanding),
         next_earnings_date=_earlier_date(existing.next_earnings_date, incoming.next_earnings_date),
         recent_filing_date=_later_date(existing.recent_filing_date, incoming.recent_filing_date),
         recent_filing_type=incoming.recent_filing_type or existing.recent_filing_type,
@@ -944,6 +970,8 @@ def _event_type_matches(record: MarketScreenerRecord, event_type: str) -> bool:
         return True
     if event_type == "Quote-enriched":
         return market_screener_record_has_market_data(record)
+    if event_type == "Fundamentals available":
+        return market_screener_record_has_fundamentals(record)
     if event_type == "Upcoming earnings":
         return bool(record.next_earnings_date)
     if event_type == "Recent SEC filing":
@@ -989,6 +1017,9 @@ def _sort_value(record: MarketScreenerRecord, column: str) -> Any:
         "pe_ratio": record.pe_ratio,
         "eps": record.eps,
         "revenue_growth": record.revenue_growth,
+        "float_shares": record.shares_float if record.shares_float is not None else record.shares_outstanding,
+        "shares_float": record.shares_float,
+        "shares_outstanding": record.shares_outstanding,
         "data_status": market_screener_data_label(record),
         "next_earnings": record.next_earnings_date,
         "recent_filing": record.recent_filing_date,
@@ -1030,6 +1061,8 @@ def _missing_fields(record: MarketScreenerRecord) -> list[str]:
         "pe_ratio": record.pe_ratio,
         "eps": record.eps,
         "revenue_growth": record.revenue_growth,
+        "shares_float": record.shares_float,
+        "shares_outstanding": record.shares_outstanding,
         "next_earnings_date": record.next_earnings_date,
         "recent_filing_date": record.recent_filing_date,
         "recent_filing_type": record.recent_filing_type,

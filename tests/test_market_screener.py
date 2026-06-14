@@ -20,7 +20,7 @@ from app.analytics.market_screener import (
     sort_market_screener_records,
 )
 from app.data.earnings_calendar import MISSING_API_KEY_MESSAGE, UpcomingEarningsRecord
-from app.data.market_data_provider import LocalMarketDataFileProvider, MarketDataProviderStatus, MarketQuoteFundamentalsRecord, MarketQuoteFundamentalsSnapshot
+from app.data.market_data_provider import CompositeMarketDataProvider, FmpQuoteFundamentalsProvider, LocalMarketDataFileProvider, MarketDataProviderStatus, MarketQuoteFundamentalsRecord, MarketQuoteFundamentalsSnapshot
 from app.data.market_universe import MarketUniverseEntry, MarketUniverseSnapshot
 from app.ui import earnings_radar_extension
 
@@ -113,6 +113,26 @@ class _FakeMarketDataProvider:
                 ),
             ),
         )
+
+
+class _FakeFmpResponse:
+    def __init__(self, status_code: int, payload) -> None:
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class _FakeFmpSession:
+    def __init__(self, handler) -> None:
+        self.handler = handler
+        self.calls: list[dict[str, object]] = []
+
+    def get(self, url, *, params=None, headers=None, timeout=None):
+        call = {"url": url, "params": dict(params or {}), "headers": dict(headers or {}), "timeout": timeout}
+        self.calls.append(call)
+        return self.handler(url, call["params"])
 
 
 def test_market_screener_merge_combines_universe_recent_and_upcoming_rows() -> None:
@@ -325,6 +345,171 @@ def test_local_market_data_file_provider_loads_capped_requested_symbols(tmp_path
     assert snapshot.statuses[0].status == "available"
 
 
+def test_fmp_provider_maps_quote_and_profile_fields_without_key_in_status() -> None:
+    api_key = "fmp-secret-key-123"
+
+    def handler(url: str, params: dict[str, object]) -> _FakeFmpResponse:
+        if url.endswith("/batch-quote"):
+            assert "apikey" not in params
+            return _FakeFmpResponse(
+                200,
+                [
+                    {
+                        "symbol": "ACME",
+                        "price": 12.34,
+                        "changesPercentage": 3.21,
+                        "volume": 1_250_000,
+                        "avgVolume": 1_000_000,
+                        "marketCap": 2_500_000_000,
+                        "pe": 18.5,
+                        "EPS": 0.67,
+                    }
+                ],
+            )
+        if url.endswith("/profile"):
+            return _FakeFmpResponse(
+                200,
+                [
+                    {
+                        "symbol": "ACME",
+                        "sector": "Technology",
+                        "industry": "Software",
+                        "exchangeShortName": "NASDAQ",
+                        "sharesFloat": 120_000_000,
+                        "sharesOutstanding": 150_000_000,
+                    }
+                ],
+            )
+        raise AssertionError(url)
+
+    session = _FakeFmpSession(handler)
+    provider = FmpQuoteFundamentalsProvider(api_key=api_key, session=session, symbol_limit=5)
+
+    snapshot = provider.quote_fundamentals(["ACME"], max_symbols=5)
+
+    assert len(snapshot.records) == 1
+    record = snapshot.records[0]
+    assert record.symbol == "ACME"
+    assert record.price == 12.34
+    assert record.change_percent == 3.21
+    assert record.volume == 1_250_000
+    assert record.avg_volume == 1_000_000
+    assert record.market_cap == 2_500_000_000
+    assert record.pe_ratio == 18.5
+    assert record.eps == 0.67
+    assert record.sector == "Technology"
+    assert record.industry == "Software"
+    assert record.exchange == "NASDAQ"
+    assert record.shares_float == 120_000_000
+    assert record.shares_outstanding == 150_000_000
+    assert record.source == "FMP quote, FMP profile"
+    status_text = " ".join(status.message for status in snapshot.statuses) + " " + " ".join(snapshot.errors)
+    assert api_key not in status_text
+    assert all(api_key not in str(call["url"]) for call in session.calls)
+    assert all("apikey" not in call["params"] for call in session.calls)
+
+
+def test_fmp_missing_key_is_optional_and_does_not_call_network() -> None:
+    session = _FakeFmpSession(lambda _url, _params: _FakeFmpResponse(200, []))
+    provider = FmpQuoteFundamentalsProvider(api_key="", session=session)
+
+    snapshot = provider.quote_fundamentals(["ACME"], max_symbols=5)
+
+    assert snapshot.records == ()
+    assert session.calls == []
+    assert snapshot.statuses[0].source == "FMP quote/fundamentals"
+    assert snapshot.statuses[0].status == "unavailable"
+    assert "No FMP_API_KEY is configured" in snapshot.statuses[0].message
+
+
+def test_fmp_missing_fields_remain_none_and_screener_renders_dashes() -> None:
+    record = MarketQuoteFundamentalsRecord.from_dict({"symbol": "MISS", "price": "", "volume": None, "marketCap": "", "source": "FMP quote"})
+    rows = build_market_screener_records(
+        [MarketUniverseEntry("MISS", "Missing Fields Inc")],
+        market_data_records=[record],
+        fetched_at="2026-06-14T10:00:00+00:00",
+    )
+
+    row = rows[0]
+    assert row.price is None
+    assert row.volume is None
+    assert row.market_cap is None
+    values = earnings_radar_extension._screener_values(row)
+    assert values[6] == "--"
+    assert values[8] == "--"
+    assert values[10] == "--"
+    assert values[14] == "--"
+
+
+def test_fmp_cap_and_cache_prevent_full_universe_calls() -> None:
+    def handler(url: str, params: dict[str, object]) -> _FakeFmpResponse:
+        if url.endswith("/batch-quote"):
+            symbols = str(params["symbols"]).split(",")
+            assert symbols == ["SYM000", "SYM001"]
+            return _FakeFmpResponse(200, [{"symbol": symbol, "price": index + 1.0} for index, symbol in enumerate(symbols)])
+        if url.endswith("/profile"):
+            return _FakeFmpResponse(200, [{"symbol": params["symbol"], "sector": "Technology"}])
+        raise AssertionError(url)
+
+    session = _FakeFmpSession(handler)
+    provider = FmpQuoteFundamentalsProvider(api_key="secret", session=session, symbol_limit=2, cache_ttl_seconds=600)
+    symbols = [f"SYM{index:03d}" for index in range(819)]
+
+    first = provider.quote_fundamentals(symbols, max_symbols=819)
+    first_call_count = len(session.calls)
+    second = provider.quote_fundamentals(symbols, max_symbols=819)
+
+    assert first_call_count == 3
+    assert len(session.calls) == first_call_count
+    assert len(first.records) == 2
+    assert len(second.records) == 2
+    assert "817 skipped/limited" in first.statuses[0].message
+    assert "cache used for 4" in second.statuses[0].message
+
+
+def test_fmp_plan_limit_warning_redacts_api_key() -> None:
+    api_key = "fmp-redact-me"
+
+    def handler(_url: str, _params: dict[str, object]) -> _FakeFmpResponse:
+        return _FakeFmpResponse(200, {"Error Message": f"Daily plan limit reached for {api_key}. Please upgrade."})
+
+    provider = FmpQuoteFundamentalsProvider(api_key=api_key, session=_FakeFmpSession(handler), symbol_limit=2)
+
+    snapshot = provider.quote_fundamentals(["ACME"], max_symbols=2)
+
+    combined = " ".join(status.message for status in snapshot.statuses) + " " + " ".join(snapshot.errors)
+    assert snapshot.records == ()
+    assert snapshot.statuses[0].status == "warning"
+    assert api_key not in combined
+    assert "[REDACTED]" in combined
+
+
+def test_composite_market_data_provider_merges_local_schwab_and_fmp_without_duplicate_symbols() -> None:
+    local_provider = _FakeMarketDataProvider({"ACME": MarketQuoteFundamentalsRecord("ACME", price=10.0, volume=1000, source="Schwab quote")})
+
+    def handler(url: str, params: dict[str, object]) -> _FakeFmpResponse:
+        if url.endswith("/batch-quote"):
+            return _FakeFmpResponse(200, [{"symbol": "ACME", "marketCap": 5_000_000_000, "peRatio": 20.0}])
+        if url.endswith("/profile"):
+            return _FakeFmpResponse(200, [{"symbol": params["symbol"], "sector": "Technology", "industry": "Software"}])
+        raise AssertionError(url)
+
+    fmp_provider = FmpQuoteFundamentalsProvider(api_key="secret", session=_FakeFmpSession(handler), symbol_limit=5)
+    composite = CompositeMarketDataProvider([local_provider, fmp_provider])
+
+    snapshot = composite.quote_fundamentals(["ACME"], max_symbols=5)
+
+    assert len(snapshot.records) == 1
+    record = snapshot.records[0]
+    assert record.symbol == "ACME"
+    assert record.price == 10.0
+    assert record.volume == 1000
+    assert record.market_cap == 5_000_000_000
+    assert record.pe_ratio == 20.0
+    assert record.sector == "Technology"
+    assert record.source == "Schwab quote, FMP quote, FMP profile"
+
+
 def test_market_screener_filters_and_sorting_cover_events_risks_windows_and_movers() -> None:
     acme = MarketScreenerRecord(
         "ACME",
@@ -349,6 +534,7 @@ def test_market_screener_filters_and_sorting_cover_events_risks_windows_and_move
     assert filter_market_screener_records([acme, beta], sector="Technology") == [acme]
     assert filter_market_screener_records([acme, beta], event_type="Upcoming earnings") == [acme]
     assert filter_market_screener_records([acme, beta], event_type="Quote-enriched") == [acme]
+    assert filter_market_screener_records([acme, beta], event_type="Fundamentals available") == []
     assert filter_market_screener_records([acme, beta], event_type="Guidance mentioned") == [acme]
     assert filter_market_screener_records([acme, beta], event_type="High volume / mover") == [acme]
     assert filter_market_screener_records([acme, beta], risk_flag="Any risk flag") == [acme]
@@ -407,7 +593,8 @@ def test_high_volume_mover_filter_requires_actual_market_data() -> None:
     assert "Mover" not in schwab_quote_only.signals
 
 
-def test_market_screener_missing_providers_degrade_to_fallback_and_status_messages() -> None:
+def test_market_screener_missing_providers_degrade_to_fallback_and_status_messages(monkeypatch) -> None:
+    monkeypatch.delenv("FMP_API_KEY", raising=False)
     snapshot = fetch_market_screener_snapshot(
         sec_client=_FailingSecClient(),
         recent_records=(),
