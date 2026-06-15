@@ -49,7 +49,7 @@ HYPERLIQUID_LIVE_ACCOUNTS: dict[str, HyperliquidLiveAccountProfile] = {
         ),
         api_address_env_keys=("HYPE_API_ADDRESS_ALEX",),
         api_secret_env_keys=("HYPE_API_SECRET_ALEX",),
-        transfer_secret_env_keys=("HYPE_API_SECRET_ALEX",),
+        transfer_secret_env_keys=("HYPE_WALLET_SECRET_ALEX",),
     ),
 }
 
