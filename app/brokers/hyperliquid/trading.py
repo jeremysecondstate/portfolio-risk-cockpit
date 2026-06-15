@@ -355,7 +355,7 @@ class HyperliquidExecutionAdapter:
         return self._local_signed_submit(normalized_ticket, config)
 
     def cancel(self, coin: str, order_id: int) -> Any:
-        config = HyperliquidTradingConfig()
+        config = self._config()
         config.validate_for_live_action()
 
         normalized_coin = coin.strip()
@@ -364,23 +364,23 @@ class HyperliquidExecutionAdapter:
         if order_id <= 0:
             raise ValueError("Hyperliquid cancel requires a positive order ID.")
 
-        return self._local_signed_cancel(normalized_coin, order_id)
+        return self._local_signed_cancel(normalized_coin, order_id, config)
 
     def modify_order(self, order_id: int, ticket: HyperliquidOrderTicket) -> Any:
         normalized_ticket = normalize_hyperliquid_ticket_limit_price(ticket)
-        config = HyperliquidTradingConfig()
+        config = self._config()
         config.validate_for_live(normalized_ticket)
         if order_id <= 0:
             raise ValueError("Hyperliquid edit requires a positive order ID.")
-        return self._local_signed_modify(order_id, normalized_ticket)
+        return self._local_signed_modify(order_id, normalized_ticket, config)
 
     def modify_order_edit(self, order_id: int, ticket: HyperliquidOrderEditTicket) -> Any:
         normalized_ticket = normalize_hyperliquid_order_edit_ticket_for_wire(ticket)
-        config = HyperliquidTradingConfig()
+        config = self._config()
         config.validate_edit_for_live(normalized_ticket)
         if order_id <= 0:
             raise ValueError("Hyperliquid edit requires a positive order ID.")
-        return self._local_signed_modify_edit(order_id, normalized_ticket)
+        return self._local_signed_modify_edit(order_id, normalized_ticket, config)
 
     def place_position_tpsl(self, tickets: list[HyperliquidTriggerTicket]) -> Any:
         if not tickets:
@@ -438,38 +438,41 @@ class HyperliquidExecutionAdapter:
             reduce_only=normalized_ticket.reduce_only,
         )
 
-    def _local_signed_cancel(self, coin: str, order_id: int) -> Any:
+    def _local_signed_cancel(
+            self,
+            coin: str,
+            order_id: int,
+            config: HyperliquidTradingConfig,
+    ) -> Any:
         from eth_account import Account
         from hyperliquid.exchange import Exchange
         from hyperliquid.utils import constants
 
-        api_secret = os.getenv("HYPE_API_SECRET_JEREMY", "").strip()
-        wallet_address = os.getenv("HYPE_WALLET_ADDRESS_JEREMY", "").strip()
-
-        api_wallet = Account.from_key(api_secret)
+        api_wallet = Account.from_key(config.api_secret)
 
         exchange = Exchange(
             api_wallet,
             constants.MAINNET_API_URL,
-            account_address=wallet_address,
+            account_address=config.wallet_address,
         )
 
         return exchange.cancel(coin, order_id)
 
-    def _local_signed_modify(self, order_id: int, ticket: HyperliquidOrderTicket) -> Any:
+    def _local_signed_modify(
+            self,
+            order_id: int,
+            ticket: HyperliquidOrderTicket,
+            config: HyperliquidTradingConfig) -> Any:
         from eth_account import Account
         from hyperliquid.exchange import Exchange
         from hyperliquid.utils import constants
 
-        api_secret = os.getenv("HYPE_API_SECRET_JEREMY", "").strip()
-        wallet_address = os.getenv("HYPE_WALLET_ADDRESS_JEREMY", "").strip()
-
-        api_wallet = Account.from_key(api_secret)
+        api_wallet = Account.from_key(config.api_secret)
 
         exchange = Exchange(
             api_wallet,
             constants.MAINNET_API_URL,
-            account_address=wallet_address,
+            account_address=config.wallet_address,
         )
         normalized_ticket = normalize_hyperliquid_ticket_size_for_exchange(ticket, exchange)
 
@@ -483,20 +486,21 @@ class HyperliquidExecutionAdapter:
             reduce_only=normalized_ticket.reduce_only,
         )
 
-    def _local_signed_modify_edit(self, order_id: int, ticket: HyperliquidOrderEditTicket) -> Any:
+    def _local_signed_modify_edit(
+            self,
+            order_id: int,
+            ticket: HyperliquidOrderEditTicket,
+            config: HyperliquidTradingConfig) -> Any:
         from eth_account import Account
         from hyperliquid.exchange import Exchange
         from hyperliquid.utils import constants
 
-        api_secret = os.getenv("HYPE_API_SECRET_JEREMY", "").strip()
-        wallet_address = os.getenv("HYPE_WALLET_ADDRESS_JEREMY", "").strip()
-
-        api_wallet = Account.from_key(api_secret)
+        api_wallet = Account.from_key(config.api_secret)
 
         exchange = Exchange(
             api_wallet,
             constants.MAINNET_API_URL,
-            account_address=wallet_address,
+            account_address=config.wallet_address,
         )
         normalized_ticket = normalize_hyperliquid_order_edit_ticket_size_for_exchange(ticket, exchange)
 
