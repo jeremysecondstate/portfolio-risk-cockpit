@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from typing import Any, Callable, Iterable, Mapping
 
 from app.analytics.earnings_pipeline import EarningsRadarStore, RecentEarningsRecord
+from app.analytics.ipo_pipeline import sector_for_sic
 from app.analytics.openai_ipo_report import _redact_api_key, _response_output_text
 from app.analytics.symbol_chat import (
     OpenAiSymbolChatClient,
@@ -22,7 +23,7 @@ from app.data.market_data_provider import (
     configured_market_data_provider,
 )
 from app.data.market_universe import MarketUniverseEntry, MarketUniverseSnapshot, fetch_market_universe_snapshot
-from app.data.sec_edgar import SecEdgarClient
+from app.data.sec_edgar import SEC_SUBMISSIONS_URL, SEC_TICKER_URL, TICKER_CACHE_TTL, SecEdgarClient
 
 
 LOGGER = logging.getLogger(__name__)
@@ -96,6 +97,34 @@ class MarketScreenerSourceStatus:
     status: str
     fetched_at: str
     message: str
+
+
+@dataclass(frozen=True)
+class MarketScreenerCoverageDiagnostics:
+    total_rows: int = 0
+    rows_with_cik: int = 0
+    rows_missing_cik: int = 0
+    rows_with_symbol: int = 0
+    rows_missing_symbol: int = 0
+    rows_resolved_by_sec_cik_mapping: int = 0
+    rows_resolved_by_sec_submissions_metadata: int = 0
+    rows_enriched_by_local_file: int = 0
+    rows_enriched_by_schwab_quote: int = 0
+    rows_enriched_by_fmp_quote: int = 0
+    rows_enriched_by_fmp_profile: int = 0
+    rows_enriched_by_fmp_profile_by_cik: int = 0
+    rows_enriched_by_fallback_provider: int = 0
+    rows_blocked_by_provider_plan_rate_auth_limit: int = 0
+    rows_skipped_by_configured_symbol_cap: int = 0
+    rows_provider_returned_no_usable_data: int = 0
+    provider_unavailable: int = 0
+    unresolved_rows: int = 0
+    rows_still_missing_exchange_sector_industry: int = 0
+    rows_still_missing_price_volume: int = 0
+    rows_still_missing_fundamentals: int = 0
+
+    def to_dict(self) -> dict[str, int]:
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -173,6 +202,7 @@ class MarketScreenerSnapshot:
     sources: tuple[str, ...]
     statuses: tuple[MarketScreenerSourceStatus, ...]
     errors: tuple[str, ...] = ()
+    diagnostics: MarketScreenerCoverageDiagnostics = field(default_factory=MarketScreenerCoverageDiagnostics)
 
 
 @dataclass(frozen=True)
@@ -324,17 +354,39 @@ def fetch_market_screener_snapshot(
 
     recent = _load_recent_records(client, recent_records, statuses, errors, fetched_at)
     upcoming = _load_upcoming_records(upcoming_provider, upcoming_records, statuses, errors, fetched_at, horizon, upcoming_symbols, force_refresh)
+    supplemental = tuple(supplemental_records or ())
+    identity_records = _load_sec_cik_identity_records(client, universe_snapshot.records, recent, supplemental, statuses, errors, fetched_at)
+    universe_records = (*universe_snapshot.records, *identity_records)
 
     base_records = build_market_screener_records(
-        universe_snapshot.records,
+        universe_records,
         recent,
         upcoming,
-        supplemental_records=supplemental_records or (),
+        supplemental_records=supplemental,
         fetched_at=fetched_at,
     )
-    market_data_symbols = _market_data_candidate_symbols(base_records, market_data_symbol_limit)
+    sec_submission_records = _load_sec_submission_metadata_records(
+        client,
+        base_records,
+        statuses,
+        errors,
+        fetched_at,
+        max_ciks=market_data_symbol_limit,
+    )
+    supplemental_with_sec_metadata = (*supplemental, *sec_submission_records)
+    base_records = build_market_screener_records(
+        universe_records,
+        recent,
+        upcoming,
+        supplemental_records=supplemental_with_sec_metadata,
+        fetched_at=fetched_at,
+    )
+    all_market_data_symbols = _market_data_candidate_symbols(base_records, max(10_000, market_data_symbol_limit))
+    market_data_symbols = all_market_data_symbols[: max(0, market_data_symbol_limit)]
+    provider_diagnostics: dict[str, int] = {}
+    active_market_data_provider = None if market_data_records is not None else (market_data_provider or configured_market_data_provider())
     market_data = _load_market_data_records(
-        market_data_provider,
+        active_market_data_provider,
         market_data_records,
         statuses,
         errors,
@@ -342,16 +394,36 @@ def fetch_market_screener_snapshot(
         market_data_symbols,
         force_refresh,
         market_data_symbol_limit,
+        provider_diagnostics,
     )
+    cik_market_data = _load_market_data_records_by_cik(
+        active_market_data_provider,
+        statuses,
+        errors,
+        fetched_at,
+        _market_data_candidate_ciks(base_records, market_data_symbol_limit),
+        force_refresh,
+        market_data_symbol_limit,
+        provider_diagnostics,
+    )
+    all_market_data = (*market_data, *cik_market_data)
+    provider_diagnostics["rows_skipped_by_configured_symbol_cap"] = provider_diagnostics.get("rows_skipped_by_configured_symbol_cap", 0) + max(
+        0,
+        len(all_market_data_symbols) - max(0, market_data_symbol_limit),
+    )
+    provider_diagnostics["rows_resolved_by_sec_cik_mapping"] = provider_diagnostics.get("rows_resolved_by_sec_cik_mapping", 0) + len(identity_records)
+    provider_diagnostics["rows_resolved_by_sec_submissions_metadata"] = provider_diagnostics.get("rows_resolved_by_sec_submissions_metadata", 0) + len(sec_submission_records)
     records = build_market_screener_records(
-        universe_snapshot.records,
+        universe_records,
         recent,
         upcoming,
-        supplemental_records=supplemental_records or (),
-        market_data_records=market_data,
+        supplemental_records=supplemental_with_sec_metadata,
+        market_data_records=all_market_data,
         fetched_at=fetched_at,
     )
-    statuses.append(_market_data_coverage_status(records, market_data, market_data_symbol_limit, fetched_at))
+    diagnostics = _build_market_screener_diagnostics(records, statuses, provider_diagnostics)
+    statuses.append(_market_data_coverage_status(records, all_market_data, market_data_symbol_limit, fetched_at, diagnostics))
+    statuses.append(_source_ladder_diagnostics_status(diagnostics, fetched_at))
     sources = tuple(sorted({source for record in records for source in record.sources if source}))
     return MarketScreenerSnapshot(
         records=tuple(records),
@@ -359,6 +431,7 @@ def fetch_market_screener_snapshot(
         sources=sources,
         statuses=tuple(statuses),
         errors=tuple(errors),
+        diagnostics=diagnostics,
     )
 
 
@@ -401,14 +474,19 @@ def merge_market_data_records_into_screener_records(
 ) -> list[MarketScreenerRecord]:
     fetched_at = fetched_at or _now()
     rows = [_normalize_record(record, fetched_at=fetched_at) for record in records]
-    indexes_by_key = {_record_key(record): index for index, record in enumerate(rows) if _record_key(record)}
+    indexes_by_key: dict[str, int] = {}
+    for index, record in enumerate(rows):
+        for key in _record_keys(record):
+            indexes_by_key.setdefault(key, index)
     for market_data_record in market_data_records:
         incoming = _record_from_market_data(market_data_record, fetched_at=fetched_at)
-        key = _record_key(incoming)
-        if not key or key not in indexes_by_key:
+        key = next((candidate for candidate in _record_keys(incoming) if candidate in indexes_by_key), "")
+        if not key:
             continue
         index = indexes_by_key[key]
         rows[index] = merge_market_screener_record(rows[index], incoming)
+        for updated_key in _record_keys(rows[index]):
+            indexes_by_key[updated_key] = index
     return rows
 
 
@@ -665,6 +743,7 @@ def market_screener_record_context(record: MarketScreenerRecord) -> dict[str, An
         "field_provenance": _field_provenance_payload(record),
         "fetched_at": _text_or_missing(record.fetched_at, "fetched_at"),
         "missing_fields": _missing_fields(record),
+        "missing_field_reasons": market_screener_record_missing_reason_lines(record),
         "analysis_policy": {
             "scope": "selected Market Intelligence Screener row only",
             "research_only": True,
@@ -672,6 +751,23 @@ def market_screener_record_context(record: MarketScreenerRecord) -> dict[str, An
         },
     }
     return _json_safe(fields)
+
+
+def market_screener_record_missing_reason_lines(record: MarketScreenerRecord) -> list[str]:
+    reasons: list[str] = []
+    if not _normalize_cik(record.cik):
+        reasons.append("missing CIK: SEC CIK/ticker and submissions metadata cannot resolve this row without a trusted CIK.")
+    if not _normalize_symbol(record.symbol):
+        reasons.append("missing ticker: no trusted SEC/provider symbol is present; symbol was not guessed from company name.")
+    if not (record.exchange and record.sector and record.industry):
+        missing = ", ".join(field for field, value in (("exchange", record.exchange), ("sector", record.sector), ("industry", record.industry)) if not value)
+        reasons.append(f"missing identity/profile fields: {missing}; requires SEC submissions, local file, FMP profile/profile-by-CIK, or configured fallback data.")
+    if record.price is None or record.volume is None:
+        missing = ", ".join(field for field, value in (("price", record.price), ("volume", record.volume)) if value is None)
+        reasons.append(f"missing price/volume fields: {missing}; requires Schwab quote, local file, FMP quote, or configured fallback quote data.")
+    if not market_screener_record_has_fundamentals(record):
+        reasons.append("missing fundamentals: market cap, P/E, EPS, and revenue growth are absent unless a local file, FMP profile/quote, SEC filing parse, or configured fallback supplies them.")
+    return reasons
 
 
 def _load_recent_records(
@@ -774,6 +870,151 @@ def _load_upcoming_records(
     return ()
 
 
+def _load_sec_cik_identity_records(
+    client: SecEdgarClient,
+    universe: Iterable[MarketUniverseEntry],
+    recent: Iterable[RecentEarningsRecord],
+    supplemental: Iterable[MarketScreenerRecord],
+    statuses: list[MarketScreenerSourceStatus],
+    errors: list[str],
+    fetched_at: str,
+) -> tuple[MarketUniverseEntry, ...]:
+    existing_by_cik: dict[str, list[str]] = {}
+    for entry in universe:
+        cik = _normalize_cik(entry.cik)
+        symbol = _normalize_symbol(entry.symbol)
+        if cik and symbol:
+            existing_by_cik.setdefault(cik, []).append(symbol)
+
+    requested_ciks = _ciks_needing_identity(recent, supplemental)
+    unresolved_ciks = tuple(cik for cik in requested_ciks if cik not in existing_by_cik)
+    if not unresolved_ciks:
+        statuses.append(
+            MarketScreenerSourceStatus(
+                "SEC CIK/ticker identity",
+                "available" if requested_ciks else "empty",
+                fetched_at,
+                f"Resolved 0 additional symbol(s); {len(requested_ciks)} CIK row(s) were already covered by loaded universe rows.",
+            )
+        )
+        return ()
+
+    try:
+        payload = client._fetch_json(SEC_TICKER_URL, cache_name="company_tickers.json", ttl=TICKER_CACHE_TTL)
+    except Exception as exc:
+        errors.append(f"SEC CIK/ticker identity: {exc}")
+        statuses.append(
+            MarketScreenerSourceStatus(
+                "SEC CIK/ticker identity",
+                "unavailable",
+                fetched_at,
+                f"SEC CIK/ticker identity map unavailable: {exc}",
+            )
+        )
+        return ()
+    if not isinstance(payload, dict):
+        statuses.append(
+            MarketScreenerSourceStatus(
+                "SEC CIK/ticker identity",
+                "unavailable",
+                fetched_at,
+                "SEC CIK/ticker identity map returned an unexpected response shape.",
+            )
+        )
+        return ()
+
+    by_cik: dict[str, list[MarketUniverseEntry]] = {}
+    for item in payload.values():
+        if not isinstance(item, Mapping):
+            continue
+        cik = _normalize_cik(item.get("cik_str"))
+        symbol = _normalize_symbol(item.get("ticker"))
+        if not cik or not symbol or cik not in unresolved_ciks:
+            continue
+        by_cik.setdefault(cik, []).append(
+            MarketUniverseEntry(
+                symbol=symbol,
+                company_name=_optional_text(item.get("title")),
+                cik=cik,
+                source="SEC CIK/ticker identity",
+                source_url=SEC_TICKER_URL,
+            )
+        )
+
+    resolved: list[MarketUniverseEntry] = []
+    ambiguous = 0
+    for cik in unresolved_ciks:
+        candidates = by_cik.get(cik, [])
+        symbols = sorted({_normalize_symbol(entry.symbol) for entry in candidates if _normalize_symbol(entry.symbol)})
+        if len(symbols) != 1:
+            if len(symbols) > 1:
+                ambiguous += 1
+            continue
+        selected = next(entry for entry in candidates if _normalize_symbol(entry.symbol) == symbols[0])
+        resolved.append(selected)
+    status = "available" if resolved else "empty"
+    statuses.append(
+        MarketScreenerSourceStatus(
+            "SEC CIK/ticker identity",
+            status,
+            fetched_at,
+            (
+                f"Resolved {len(resolved)} symbol(s) by exact SEC CIK match; "
+                f"{len(unresolved_ciks) - len(resolved)} CIK row(s) remain unresolved"
+                + (f"; {ambiguous} ambiguous multi-ticker CIK row(s) were not guessed." if ambiguous else ".")
+            ),
+        )
+    )
+    return tuple(resolved)
+
+
+def _load_sec_submission_metadata_records(
+    client: SecEdgarClient,
+    records: Iterable[MarketScreenerRecord],
+    statuses: list[MarketScreenerSourceStatus],
+    errors: list[str],
+    fetched_at: str,
+    *,
+    max_ciks: int,
+) -> tuple[MarketScreenerRecord, ...]:
+    candidate_ciks = _sec_submission_candidate_ciks(records, max_ciks)
+    if not candidate_ciks:
+        statuses.append(
+            MarketScreenerSourceStatus(
+                "SEC submissions metadata",
+                "empty",
+                fetched_at,
+                "No capped filing CIK rows needed SEC submissions metadata enrichment.",
+            )
+        )
+        return ()
+
+    enriched: list[MarketScreenerRecord] = []
+    metadata_errors = 0
+    for cik in candidate_ciks:
+        try:
+            payload = client.get_submissions_by_cik(cik)
+        except Exception as exc:
+            errors.append(f"{cik} SEC submissions metadata: {exc}")
+            metadata_errors += 1
+            continue
+        record = _record_from_sec_submission_metadata(cik, payload, fetched_at=fetched_at)
+        if record is not None:
+            enriched.append(record)
+    status = "available" if enriched else "empty"
+    if not enriched and metadata_errors:
+        status = "unavailable"
+    statuses.append(
+        MarketScreenerSourceStatus(
+            "SEC submissions metadata",
+            status,
+            fetched_at,
+            f"Loaded SEC submissions metadata for {len(enriched)} of {len(candidate_ciks)} capped CIK row(s).",
+        )
+    )
+    return tuple(enriched)
+
+
 def _load_market_data_records(
     provider: Any | None,
     provided: Iterable[MarketQuoteFundamentalsRecord] | None,
@@ -783,6 +1024,7 @@ def _load_market_data_records(
     symbols: Iterable[str],
     force_refresh: bool,
     max_symbols: int,
+    provider_diagnostics: dict[str, int],
 ) -> tuple[MarketQuoteFundamentalsRecord, ...]:
     if max_symbols <= 0:
         statuses.append(
@@ -793,6 +1035,7 @@ def _load_market_data_records(
                 "Market quote/fundamental enrichment is disabled because the symbol cap is 0.",
             )
         )
+        provider_diagnostics["rows_skipped_by_configured_symbol_cap"] = provider_diagnostics.get("rows_skipped_by_configured_symbol_cap", 0) + len(tuple(symbols))
         return ()
     requested = tuple(symbols)
     if provided is not None:
@@ -827,6 +1070,42 @@ def _load_market_data_records(
 
     statuses.extend(MarketScreenerSourceStatus(status.source, status.status, status.fetched_at, status.message) for status in snapshot.statuses)
     errors.extend(snapshot.errors)
+    _merge_counter_mapping(provider_diagnostics, snapshot.diagnostics)
+    return tuple(snapshot.records)
+
+
+def _load_market_data_records_by_cik(
+    provider: Any | None,
+    statuses: list[MarketScreenerSourceStatus],
+    errors: list[str],
+    fetched_at: str,
+    ciks: Iterable[str],
+    force_refresh: bool,
+    max_symbols: int,
+    provider_diagnostics: dict[str, int],
+) -> tuple[MarketQuoteFundamentalsRecord, ...]:
+    requested = tuple(ciks)
+    if not requested or max_symbols <= 0 or provider is None:
+        return ()
+    by_cik = getattr(provider, "quote_fundamentals_by_cik", None)
+    if not callable(by_cik):
+        return ()
+    try:
+        snapshot = by_cik(requested, force_refresh=force_refresh, max_symbols=max_symbols)
+    except Exception as exc:
+        errors.append(f"Market quote/fundamental provider CIK lookup: {exc}")
+        statuses.append(
+            MarketScreenerSourceStatus(
+                "FMP profile-by-CIK",
+                "error",
+                fetched_at,
+                f"CIK-based market-data lookup failed: {exc}",
+            )
+        )
+        return ()
+    statuses.extend(MarketScreenerSourceStatus(status.source, status.status, status.fetched_at, status.message) for status in snapshot.statuses)
+    errors.extend(snapshot.errors)
+    _merge_counter_mapping(provider_diagnostics, snapshot.diagnostics)
     return tuple(snapshot.records)
 
 
@@ -835,6 +1114,7 @@ def _market_data_coverage_status(
     market_data_records: Iterable[MarketQuoteFundamentalsRecord],
     max_symbols: int,
     fetched_at: str,
+    diagnostics: MarketScreenerCoverageDiagnostics,
 ) -> MarketScreenerSourceStatus:
     rows = list(records)
     provider_rows = [record for record in market_data_records if _quote_record_has_any_value(record)]
@@ -842,13 +1122,14 @@ def _market_data_coverage_status(
     sources = tuple(sorted({record.source for record in provider_rows if record.source}))
     source_text = ", ".join(sources) if sources else "configured market-data providers"
     limit_text = max(0, min(100, max_symbols))
+    summary = market_screener_diagnostics_summary(diagnostics)
     if provider_symbols:
         return MarketScreenerSourceStatus(
             "Market data enrichment",
             "partial",
             fetched_at,
             (
-                f"Market data: enriched {len(provider_symbols)} of {len(rows)} rows via {source_text}. "
+                f"{summary} Market data: enriched {len(provider_symbols)} of {len(rows)} rows via {source_text}. "
                 f"Initial refresh requested up to {limit_text} symbol(s). Increase MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT up to 100, "
                 "or use page/selected-row enrichment. Missing market cap, P/E, EPS, revenue growth, avg volume, and change % stay blank unless a provider/local file supplies them."
             ),
@@ -858,10 +1139,173 @@ def _market_data_coverage_status(
         "disabled" if max_symbols <= 0 else "unavailable",
         fetched_at,
         (
-            f"Market data: enriched 0 of {len(rows)} rows via {source_text}. "
+            f"{summary} Market data: enriched 0 of {len(rows)} rows via {source_text}. "
             "No quote/fundamental fields were supplied by the configured capped providers; missing fields stay blank and are not inferred."
         ),
     )
+
+
+def _source_ladder_diagnostics_status(
+    diagnostics: MarketScreenerCoverageDiagnostics,
+    fetched_at: str,
+) -> MarketScreenerSourceStatus:
+    detail = "; ".join(market_screener_diagnostics_detail_lines(diagnostics))
+    return MarketScreenerSourceStatus(
+        "Source ladder diagnostics",
+        "available",
+        fetched_at,
+        detail,
+    )
+
+
+def market_screener_diagnostics_summary(diagnostics: MarketScreenerCoverageDiagnostics) -> str:
+    parts = [
+        f"Resolved {diagnostics.rows_resolved_by_sec_cik_mapping} symbols via SEC CIK",
+        f"SEC submissions {diagnostics.rows_resolved_by_sec_submissions_metadata}",
+        f"Schwab quotes {diagnostics.rows_enriched_by_schwab_quote}",
+        f"FMP profiles {diagnostics.rows_enriched_by_fmp_profile + diagnostics.rows_enriched_by_fmp_profile_by_cik}",
+        f"{diagnostics.rows_skipped_by_configured_symbol_cap} skipped by cap",
+        f"{diagnostics.unresolved_rows} unresolved",
+    ]
+    if diagnostics.rows_enriched_by_local_file:
+        parts.insert(2, f"local {diagnostics.rows_enriched_by_local_file}")
+    if diagnostics.rows_enriched_by_fmp_quote:
+        parts.insert(-2, f"FMP quotes {diagnostics.rows_enriched_by_fmp_quote}")
+    if diagnostics.rows_enriched_by_fallback_provider:
+        parts.insert(-2, f"fallback {diagnostics.rows_enriched_by_fallback_provider}")
+    if diagnostics.rows_blocked_by_provider_plan_rate_auth_limit:
+        parts.insert(-2, f"{diagnostics.rows_blocked_by_provider_plan_rate_auth_limit} blocked by provider auth/plan/rate")
+    return "; ".join(parts) + "."
+
+
+def market_screener_diagnostics_detail_lines(diagnostics: MarketScreenerCoverageDiagnostics) -> list[str]:
+    labels = (
+        ("Total screener rows", diagnostics.total_rows),
+        ("Rows with CIK", diagnostics.rows_with_cik),
+        ("Rows missing CIK", diagnostics.rows_missing_cik),
+        ("Rows with ticker/symbol", diagnostics.rows_with_symbol),
+        ("Rows missing symbol", diagnostics.rows_missing_symbol),
+        ("Rows resolved by SEC CIK mapping", diagnostics.rows_resolved_by_sec_cik_mapping),
+        ("Rows resolved by SEC submissions metadata", diagnostics.rows_resolved_by_sec_submissions_metadata),
+        ("Rows enriched by local file", diagnostics.rows_enriched_by_local_file),
+        ("Rows enriched by Schwab quote", diagnostics.rows_enriched_by_schwab_quote),
+        ("Rows enriched by FMP quote", diagnostics.rows_enriched_by_fmp_quote),
+        ("Rows enriched by FMP profile", diagnostics.rows_enriched_by_fmp_profile),
+        ("Rows enriched by FMP profile-by-CIK", diagnostics.rows_enriched_by_fmp_profile_by_cik),
+        ("Rows enriched by fallback provider", diagnostics.rows_enriched_by_fallback_provider),
+        ("Rows blocked by provider plan/rate/auth limit", diagnostics.rows_blocked_by_provider_plan_rate_auth_limit),
+        ("Provider unavailable count", diagnostics.provider_unavailable),
+        ("Rows skipped by configured symbol cap", diagnostics.rows_skipped_by_configured_symbol_cap),
+        ("Rows provider returned with no usable data", diagnostics.rows_provider_returned_no_usable_data),
+        ("Unresolved rows", diagnostics.unresolved_rows),
+        ("Rows still missing exchange/sector/industry", diagnostics.rows_still_missing_exchange_sector_industry),
+        ("Rows still missing price/volume", diagnostics.rows_still_missing_price_volume),
+        ("Rows still missing fundamentals", diagnostics.rows_still_missing_fundamentals),
+    )
+    return [f"{label}: {value}" for label, value in labels]
+
+
+def _build_market_screener_diagnostics(
+    records: Iterable[MarketScreenerRecord],
+    statuses: Iterable[MarketScreenerSourceStatus],
+    provider_diagnostics: Mapping[str, int],
+) -> MarketScreenerCoverageDiagnostics:
+    rows = list(records)
+    status_rows = list(statuses)
+    provider_unavailable = _counter(provider_diagnostics, "provider_unavailable")
+    provider_unavailable = max(
+        provider_unavailable,
+        sum(1 for status in status_rows if status.status in {"unavailable", "error"} and _status_is_provider_related(status)),
+    )
+    blocked = max(
+        _counter(provider_diagnostics, "rows_blocked_by_provider_plan_rate_auth_limit"),
+        sum(1 for status in status_rows if _status_message_mentions_provider_limit(status)),
+    )
+    return MarketScreenerCoverageDiagnostics(
+        total_rows=len(rows),
+        rows_with_cik=sum(1 for record in rows if _normalize_cik(record.cik)),
+        rows_missing_cik=sum(1 for record in rows if not _normalize_cik(record.cik)),
+        rows_with_symbol=sum(1 for record in rows if _normalize_symbol(record.symbol)),
+        rows_missing_symbol=sum(1 for record in rows if not _normalize_symbol(record.symbol)),
+        rows_resolved_by_sec_cik_mapping=max(
+            _counter(provider_diagnostics, "rows_resolved_by_sec_cik_mapping"),
+            _count_rows_with_source(rows, "SEC CIK/ticker identity") + _count_rows_with_source(rows, "SEC company_tickers.json"),
+        ),
+        rows_resolved_by_sec_submissions_metadata=max(
+            _counter(provider_diagnostics, "rows_resolved_by_sec_submissions_metadata"),
+            _count_rows_with_source(rows, "SEC submissions metadata"),
+        ),
+        rows_enriched_by_local_file=max(
+            _counter(provider_diagnostics, "rows_enriched_by_local_file"),
+            _count_rows_with_source(rows, "Local market data file"),
+        ),
+        rows_enriched_by_schwab_quote=max(
+            _counter(provider_diagnostics, "rows_enriched_by_schwab_quote"),
+            _count_rows_with_source(rows, "Schwab quote"),
+        ),
+        rows_enriched_by_fmp_quote=max(
+            _counter(provider_diagnostics, "rows_enriched_by_fmp_quote"),
+            _count_rows_with_source(rows, "FMP quote"),
+        ),
+        rows_enriched_by_fmp_profile=max(
+            _counter(provider_diagnostics, "rows_enriched_by_fmp_profile"),
+            _count_rows_with_source(rows, "FMP profile"),
+        ),
+        rows_enriched_by_fmp_profile_by_cik=max(
+            _counter(provider_diagnostics, "rows_enriched_by_fmp_profile_by_cik"),
+            _count_rows_with_source(rows, "FMP profile-by-CIK"),
+        ),
+        rows_enriched_by_fallback_provider=max(
+            _counter(provider_diagnostics, "rows_enriched_by_fallback_provider"),
+            _count_rows_with_source(rows, "Fallback Alpha Vantage"),
+        ),
+        rows_blocked_by_provider_plan_rate_auth_limit=blocked,
+        rows_skipped_by_configured_symbol_cap=_counter(provider_diagnostics, "rows_skipped_by_configured_symbol_cap"),
+        rows_provider_returned_no_usable_data=_counter(provider_diagnostics, "rows_provider_returned_no_usable_data"),
+        provider_unavailable=provider_unavailable,
+        unresolved_rows=sum(1 for record in rows if not _normalize_symbol(record.symbol)),
+        rows_still_missing_exchange_sector_industry=sum(1 for record in rows if not (record.exchange and record.sector and record.industry)),
+        rows_still_missing_price_volume=sum(1 for record in rows if record.price is None or record.volume is None),
+        rows_still_missing_fundamentals=sum(1 for record in rows if not market_screener_record_has_fundamentals(record)),
+    )
+
+
+def _count_rows_with_source(records: Iterable[MarketScreenerRecord], needle: str) -> int:
+    lower = needle.lower()
+    count = 0
+    for record in records:
+        source_text = " ".join(record.sources).lower()
+        provenance_text = " ".join(row.source for row in record.field_provenance).lower()
+        if lower in source_text or lower in provenance_text:
+            count += 1
+    return count
+
+
+def _status_is_provider_related(status: MarketScreenerSourceStatus) -> bool:
+    source = status.source.lower()
+    return any(term in source for term in ("market", "quote", "fmp", "schwab", "fallback", "alpha vantage", "local"))
+
+
+def _status_message_mentions_provider_limit(status: MarketScreenerSourceStatus) -> bool:
+    text = f"{status.status} {status.message}".lower()
+    return any(term in text for term in ("auth", "plan", "rate", "quota", "401", "403", "429", "unauthorized", "forbidden"))
+
+
+def _counter(counters: Mapping[str, int], key: str) -> int:
+    try:
+        return max(0, int(counters.get(key, 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _merge_counter_mapping(target: dict[str, int], source: Mapping[str, int] | None) -> None:
+    for key, value in (source or {}).items():
+        try:
+            amount = int(value)
+        except (TypeError, ValueError):
+            continue
+        if amount:
+            target[str(key)] = target.get(str(key), 0) + amount
 
 
 def _quote_record_has_any_value(record: MarketQuoteFundamentalsRecord) -> bool:
@@ -911,6 +1355,140 @@ def _market_data_candidate_symbols(records: Iterable[MarketScreenerRecord], limi
         if len(result) >= limit:
             break
     return tuple(result)
+
+
+def _market_data_candidate_ciks(records: Iterable[MarketScreenerRecord], limit: int) -> tuple[str, ...]:
+    if limit <= 0:
+        return ()
+    seen: set[str] = set()
+    result: list[str] = []
+    for record in records:
+        cik = _normalize_cik(record.cik)
+        if not cik or cik in seen:
+            continue
+        source_text = " ".join(record.sources).lower()
+        filing_like = bool(record.recent_filing_date or "sec edgar" in source_text or "recent edgar" in source_text)
+        needs_identity_or_profile = (
+            not _normalize_symbol(record.symbol)
+            or not record.exchange
+            or not record.sector
+            or not record.industry
+            or not market_screener_record_has_fundamentals(record)
+        )
+        if filing_like and needs_identity_or_profile:
+            seen.add(cik)
+            result.append(cik)
+        if len(result) >= limit:
+            break
+    return tuple(result)
+
+
+def _ciks_needing_identity(
+    recent: Iterable[RecentEarningsRecord],
+    supplemental: Iterable[MarketScreenerRecord],
+) -> tuple[str, ...]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for record in recent:
+        cik = _normalize_cik(record.cik)
+        if cik and not _normalize_symbol(record.ticker) and cik not in seen:
+            seen.add(cik)
+            result.append(cik)
+    for record in supplemental:
+        cik = _normalize_cik(record.cik)
+        if cik and not _normalize_symbol(record.symbol) and cik not in seen:
+            seen.add(cik)
+            result.append(cik)
+    return tuple(result)
+
+
+def _sec_submission_candidate_ciks(records: Iterable[MarketScreenerRecord], max_ciks: int) -> tuple[str, ...]:
+    if max_ciks <= 0:
+        return ()
+    seen: set[str] = set()
+    result: list[str] = []
+    for record in records:
+        cik = _normalize_cik(record.cik)
+        if not cik or cik in seen:
+            continue
+        source_text = " ".join(record.sources).lower()
+        filing_like = bool(record.recent_filing_date or "sec edgar" in source_text or "recent edgar" in source_text)
+        needs_metadata = not record.symbol or not record.exchange or not record.sector or not record.industry
+        if filing_like and needs_metadata:
+            seen.add(cik)
+            result.append(cik)
+        if len(result) >= max_ciks:
+            break
+    return tuple(result)
+
+
+def _record_from_sec_submission_metadata(cik: str, payload: Mapping[str, Any], *, fetched_at: str) -> MarketScreenerRecord | None:
+    normalized_cik = _normalize_cik(cik)
+    tickers = _clean_text_sequence(payload.get("tickers"))
+    exchanges = _clean_text_sequence(payload.get("exchanges"))
+    symbol = _normalize_symbol(tickers[0]) if len(tickers) == 1 else ""
+    exchange = exchanges[0] if len(exchanges) == 1 else None
+    sic = _optional_text(payload.get("sic"))
+    industry = _optional_text(payload.get("sicDescription"))
+    sector = sector_for_sic(sic, industry) if (sic or industry) else None
+    company_name = _optional_text(payload.get("name") or payload.get("entityName"))
+    source_url = SEC_SUBMISSIONS_URL.format(cik=normalized_cik)
+    values = {
+        "symbol": symbol,
+        "company_name": company_name,
+        "cik": normalized_cik,
+        "exchange": exchange,
+        "sector": sector,
+        "industry": industry,
+    }
+    if not any(_has_value(value) for key, value in values.items() if key != "cik"):
+        return None
+    return MarketScreenerRecord(
+        symbol=symbol,
+        company_name=company_name,
+        cik=normalized_cik,
+        exchange=exchange,
+        sector=sector,
+        industry=industry,
+        sources=("SEC submissions metadata",),
+        source_links=(source_url,),
+        fetched_at=fetched_at,
+        source_excerpt=_sec_submission_metadata_excerpt(sic, industry, tickers, exchanges),
+        field_provenance=_provenance_for_values(
+            values,
+            source="SEC submissions metadata",
+            source_link=source_url,
+            fetched_at=fetched_at,
+            source_detail="CIK submissions metadata",
+        ),
+    )
+
+
+def _clean_text_sequence(value: Any) -> tuple[str, ...]:
+    if isinstance(value, (list, tuple)):
+        return tuple(_dedupe_texts(item for item in value if _optional_text(item)))
+    clean = _optional_text(value)
+    return (clean,) if clean else ()
+
+
+def _sec_submission_metadata_excerpt(
+    sic: str | None,
+    industry: str | None,
+    tickers: Iterable[str],
+    exchanges: Iterable[str],
+) -> str | None:
+    parts = []
+    if sic:
+        parts.append(f"SEC SIC {sic}")
+    if industry:
+        parts.append(industry)
+    ticker_text = ", ".join(tickers)
+    exchange_text = ", ".join(exchanges)
+    if ticker_text:
+        parts.append(f"tickers: {ticker_text}")
+    if exchange_text:
+        parts.append(f"exchanges: {exchange_text}")
+    return "; ".join(parts) or None
 
 
 def _record_from_universe(entry: MarketUniverseEntry, *, fetched_at: str) -> MarketScreenerRecord:
@@ -1019,6 +1597,7 @@ def _record_from_market_data(record: MarketQuoteFundamentalsRecord, *, fetched_a
         signals.append("Mover")
     values = {
         "symbol": _normalize_symbol(record.symbol),
+        "cik": _normalize_cik(getattr(record, "cik", None)) or None,
         "exchange": record.exchange,
         "sector": record.sector,
         "industry": record.industry,
@@ -1055,6 +1634,7 @@ def _record_from_market_data(record: MarketQuoteFundamentalsRecord, *, fetched_a
         sources=(source,),
         source_links=source_links,
         fetched_at=record_fetched_at,
+        cik=values["cik"],
         field_provenance=_market_data_provenance(record, values, source=source, source_link=record.source_url, fetched_at=record_fetched_at),
     )
 
@@ -1096,11 +1676,21 @@ def _normalize_record(record: MarketScreenerRecord, *, fetched_at: str) -> Marke
 
 
 def _merge_into(records: dict[str, MarketScreenerRecord], incoming: MarketScreenerRecord) -> None:
-    key = _record_key(incoming)
-    if not key:
+    keys = _record_keys(incoming)
+    if not keys:
         return
-    existing = records.get(key)
-    records[key] = incoming if existing is None else merge_market_screener_record(existing, incoming)
+    existing_key = next((key for key in keys if key in records), "")
+    existing = records.get(existing_key) if existing_key else None
+    merged = incoming if existing is None else merge_market_screener_record(existing, incoming)
+    canonical_key = _record_key(merged)
+    if not canonical_key:
+        return
+    if existing_key and existing_key != canonical_key:
+        records.pop(existing_key, None)
+    for alias in _record_keys(merged):
+        if alias != canonical_key and alias in records:
+            merged = merge_market_screener_record(records.pop(alias), merged)
+    records[canonical_key] = merged
 
 
 def merge_market_screener_record(existing: MarketScreenerRecord, incoming: MarketScreenerRecord) -> MarketScreenerRecord:
@@ -1135,7 +1725,7 @@ def merge_market_screener_record(existing: MarketScreenerRecord, incoming: Marke
         portfolio_market_value=_prefer_number(incoming.portfolio_market_value, existing.portfolio_market_value),
         portfolio_unrealized_pnl=_prefer_number(incoming.portfolio_unrealized_pnl, existing.portfolio_unrealized_pnl),
         portfolio_weight=_prefer_number(incoming.portfolio_weight, existing.portfolio_weight),
-        field_provenance=_dedupe_field_provenance((*existing.field_provenance, *incoming.field_provenance)),
+        field_provenance=_merge_screener_field_provenance(existing, incoming),
     )
 
 
@@ -1143,8 +1733,19 @@ def _record_key(record: MarketScreenerRecord) -> str:
     symbol = _normalize_symbol(record.symbol)
     if symbol:
         return f"SYMBOL:{symbol}"
-    cik = str(record.cik or "").strip()
+    cik = _normalize_cik(record.cik)
     return f"CIK:{cik}" if cik else ""
+
+
+def _record_keys(record: MarketScreenerRecord) -> tuple[str, ...]:
+    keys: list[str] = []
+    symbol = _normalize_symbol(record.symbol)
+    cik = _normalize_cik(record.cik)
+    if symbol:
+        keys.append(f"SYMBOL:{symbol}")
+    if cik:
+        keys.append(f"CIK:{cik}")
+    return tuple(dict.fromkeys(keys))
 
 
 def _event_type_matches(record: MarketScreenerRecord, event_type: str) -> bool:
@@ -1315,6 +1916,93 @@ def _field_provenance_from_payload(payload: Any) -> tuple[MarketScreenerFieldPro
         if row.field and row.source:
             rows.append(row)
     return _dedupe_field_provenance(rows)
+
+
+_SCREENER_SINGLE_VALUE_FIELDS = (
+    "symbol",
+    "company_name",
+    "cik",
+    "exchange",
+    "sector",
+    "industry",
+    "price",
+    "market_cap",
+    "volume",
+    "avg_volume",
+    "change_percent",
+    "pe_ratio",
+    "eps",
+    "revenue_growth",
+    "shares_float",
+    "shares_outstanding",
+    "next_earnings_date",
+    "recent_filing_date",
+    "recent_filing_type",
+    "source_excerpt",
+    "portfolio_quantity",
+    "portfolio_average_cost",
+    "portfolio_market_value",
+    "portfolio_unrealized_pnl",
+    "portfolio_weight",
+)
+_INCOMING_NUMERIC_FIELDS = {
+    "price",
+    "market_cap",
+    "volume",
+    "avg_volume",
+    "change_percent",
+    "pe_ratio",
+    "eps",
+    "revenue_growth",
+    "shares_float",
+    "shares_outstanding",
+    "portfolio_quantity",
+    "portfolio_average_cost",
+    "portfolio_market_value",
+    "portfolio_unrealized_pnl",
+    "portfolio_weight",
+}
+
+
+def _merge_screener_field_provenance(
+    existing: MarketScreenerRecord,
+    incoming: MarketScreenerRecord,
+) -> tuple[MarketScreenerFieldProvenance, ...]:
+    existing_by_field = _provenance_by_field(existing.field_provenance)
+    incoming_by_field = _provenance_by_field(incoming.field_provenance)
+    selected: list[MarketScreenerFieldProvenance] = []
+    for field in _SCREENER_SINGLE_VALUE_FIELDS:
+        row = incoming_by_field.get(field) if _screener_field_selected_from_incoming(existing, incoming, field) else existing_by_field.get(field)
+        if row is None:
+            row = existing_by_field.get(field) or incoming_by_field.get(field)
+        if row is not None:
+            selected.append(row)
+    selected.extend(row for row in existing.field_provenance if row.field not in _SCREENER_SINGLE_VALUE_FIELDS)
+    selected.extend(row for row in incoming.field_provenance if row.field not in _SCREENER_SINGLE_VALUE_FIELDS)
+    return _dedupe_field_provenance(selected)
+
+
+def _screener_field_selected_from_incoming(existing: MarketScreenerRecord, incoming: MarketScreenerRecord, field: str) -> bool:
+    incoming_value = getattr(incoming, field)
+    existing_value = getattr(existing, field)
+    if field in _INCOMING_NUMERIC_FIELDS:
+        return incoming_value is not None
+    if field == "next_earnings_date":
+        selected = _earlier_date(existing.next_earnings_date, incoming.next_earnings_date)
+        return _has_value(incoming.next_earnings_date) and selected == incoming.next_earnings_date and selected != existing.next_earnings_date
+    if field == "recent_filing_date":
+        selected = _later_date(existing.recent_filing_date, incoming.recent_filing_date)
+        return _has_value(incoming.recent_filing_date) and selected == incoming.recent_filing_date and selected != existing.recent_filing_date
+    if field == "recent_filing_type":
+        return _has_value(incoming.recent_filing_type)
+    return not _has_value(existing_value) and _has_value(incoming_value)
+
+
+def _provenance_by_field(rows: Iterable[MarketScreenerFieldProvenance]) -> dict[str, MarketScreenerFieldProvenance]:
+    result: dict[str, MarketScreenerFieldProvenance] = {}
+    for row in _field_provenance_from_payload(tuple(rows)):
+        result.setdefault(row.field, row)
+    return result
 
 
 def _market_data_provenance(
@@ -1638,6 +2326,11 @@ def _dedupe_texts(values: Iterable[Any]) -> list[str]:
 
 def _normalize_symbol(value: Any) -> str:
     return str(value or "").strip().upper().replace("/", ".")
+
+
+def _normalize_cik(value: Any) -> str:
+    digits = "".join(char for char in str(value or "") if char.isdigit())
+    return digits.zfill(10) if digits else ""
 
 
 def _now() -> str:

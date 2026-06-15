@@ -44,7 +44,10 @@ from app.analytics.market_screener import (
     market_screener_data_completeness,
     market_screener_data_completeness_label,
     market_screener_data_label,
+    market_screener_diagnostics_detail_lines,
+    market_screener_diagnostics_summary,
     market_screener_is_my_holding,
+    market_screener_record_missing_reason_lines,
     market_screener_record_has_quote_fields,
     market_screener_has_ai_signal,
     merge_market_data_records_into_screener_records,
@@ -740,7 +743,8 @@ def _finish_screener_success(self: tk.Tk, snapshot: MarketScreenerSnapshot) -> N
     signals = sum(1 for record in snapshot.records if market_screener_has_ai_signal(record))
     holdings = sum(1 for record in snapshot.records if market_screener_is_my_holding(record))
     warnings = f" ({len(snapshot.errors)} nonblocking warning(s))" if snapshot.errors else ""
-    self.market_screener_status_var.set(f"Loaded {len(snapshot.records)} screener rows; {holdings} My Holdings; {signals} with AI-worthy signals. Fetched {snapshot.fetched_at}.{warnings}")
+    source_status = market_screener_diagnostics_summary(snapshot.diagnostics)
+    self.market_screener_status_var.set(f"Loaded {len(snapshot.records)} screener rows; {holdings} My Holdings; {signals} with AI-worthy signals. {source_status} Fetched {snapshot.fetched_at}.{warnings}")
     _run_pending_screener_refresh(self)
 
 
@@ -917,7 +921,7 @@ def _request_market_data_enrichment(
     if not isinstance(running_symbols, set) or not isinstance(attempted_symbols, set):
         return
     running_symbols.update(requested)
-    provider = configured_market_data_provider(schwab_session=getattr(self, "schwab_session", None))
+    provider = configured_market_data_provider(schwab_session=getattr(self, "schwab_session", None), include_fallback_provider=True)
     self.market_screener_status_var.set(f"Enriching {reason} market data for {len(requested)} symbol(s)...")
 
     def worker() -> None:
@@ -1905,6 +1909,10 @@ def _screener_detail_text(record: MarketScreenerRecord) -> str:
         )
     if record.source_links:
         lines.append("Source links: " + " | ".join(record.source_links[:4]))
+    missing_reasons = market_screener_record_missing_reason_lines(record)
+    if missing_reasons:
+        lines.append("Source-aware missing reasons:")
+        lines.extend(f"- {reason}" for reason in missing_reasons[:6])
     if record.field_provenance:
         lines.append("Field provenance:")
         ordered_provenance = _ordered_screener_field_provenance(record)
@@ -1977,11 +1985,17 @@ def _format_screener_ai_result(record: MarketScreenerRecord, label: str, prompt:
 
 def _screener_source_status_text(snapshot: MarketScreenerSnapshot) -> str:
     market_data_statuses = [status for status in snapshot.statuses if status.source == "Market data enrichment"]
-    other_statuses = [status for status in snapshot.statuses if status.source != "Market data enrichment"]
+    diagnostics_statuses = [status for status in snapshot.statuses if status.source == "Source ladder diagnostics"]
+    other_statuses = [status for status in snapshot.statuses if status.source not in {"Market data enrichment", "Source ladder diagnostics"}]
     lines: list[str] = []
     if market_data_statuses:
         lines.append("Market data")
         lines.extend(f"- {status.status}: {status.message}" for status in market_data_statuses)
+    if diagnostics_statuses or snapshot.diagnostics.total_rows:
+        if lines:
+            lines.append("")
+        lines.append("Source ladder diagnostics")
+        lines.extend(f"- {line}" for line in market_screener_diagnostics_detail_lines(snapshot.diagnostics))
     if other_statuses:
         if lines:
             lines.append("")
@@ -1996,6 +2010,8 @@ def _screener_source_status_text(snapshot: MarketScreenerSnapshot) -> str:
 
 
 def _screener_source_summary_text(snapshot: MarketScreenerSnapshot) -> str:
+    if snapshot.diagnostics.total_rows:
+        return _truncate(market_screener_diagnostics_summary(snapshot.diagnostics), 240)
     market_data_status = next((status for status in snapshot.statuses if status.source == "Market data enrichment"), None)
     if market_data_status is not None:
         return _truncate(market_data_status.message, 240)

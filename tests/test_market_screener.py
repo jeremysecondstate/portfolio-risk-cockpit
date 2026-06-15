@@ -16,6 +16,7 @@ from app.analytics.market_screener import (
     market_screener_ai_request_payload,
     market_screener_data_completeness_score,
     market_screener_data_label,
+    market_screener_diagnostics_summary,
     market_screener_is_my_holding,
     market_screener_record_has_quote_fields,
     merge_market_data_records_into_screener_records,
@@ -67,6 +68,41 @@ class _FakeMissingUpcomingProvider:
 class _FailingSecClient:
     def _fetch_json(self, *_args, **_kwargs):
         raise RuntimeError("SEC offline")
+
+
+class _FakeSecIdentityClient:
+    cache_dir = "unused"
+
+    def __init__(self, *, ticker_payload=None, submissions_by_cik=None) -> None:
+        self.ticker_payload = ticker_payload if ticker_payload is not None else {}
+        self.submissions_by_cik = submissions_by_cik or {}
+
+    def _fetch_json(self, url, **_kwargs):
+        if "company_tickers" in str(url):
+            return self.ticker_payload
+        return {}
+
+    def get_submissions_by_cik(self, cik):
+        return self.submissions_by_cik.get(str(cik).zfill(10), {})
+
+
+class _DiagnosticMarketDataProvider:
+    provider_name = "diagnostic_market_data"
+
+    def __init__(self, snapshot: MarketQuoteFundamentalsSnapshot) -> None:
+        self.snapshot = snapshot
+        self.calls: list[tuple[tuple[str, ...], int, bool]] = []
+
+    def quote_fundamentals(self, symbols, *, force_refresh: bool = False, max_symbols: int = 50):
+        self.calls.append((tuple(symbols), max_symbols, force_refresh))
+        return self.snapshot
+
+    def quote_fundamentals_by_cik(self, ciks, *, force_refresh: bool = False, max_symbols: int = 50):
+        return MarketQuoteFundamentalsSnapshot(
+            records=(),
+            fetched_at=self.snapshot.fetched_at,
+            statuses=(),
+        )
 
 
 class _FakeResponses:
@@ -259,6 +295,152 @@ def test_market_screener_initial_market_data_enrichment_respects_cap_and_reports
     assert status.status == "partial"
     assert "Market data: enriched 2 of 4 rows via Fake quote" in status.message
     assert "MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT up to 100" in status.message
+
+
+def test_market_screener_resolves_cik_only_filing_row_through_sec_mapping() -> None:
+    recent = _recent_record()
+    recent = RecentEarningsRecord(**{**recent.to_dict(), "ticker": None, "sector": None, "industry": None, "exchange": None})
+    sec_client = _FakeSecIdentityClient(
+        ticker_payload={"0": {"cik_str": 1, "ticker": "ACME", "title": "Acme Corp"}},
+        submissions_by_cik={
+            "0000000001": {
+                "name": "Acme Corp",
+                "tickers": ["ACME"],
+                "exchanges": ["Nasdaq"],
+                "sic": "7372",
+                "sicDescription": "Services-Prepackaged Software",
+            }
+        },
+    )
+
+    snapshot = fetch_market_screener_snapshot(
+        sec_client=sec_client,
+        universe_snapshot=MarketUniverseSnapshot(records=(), fetched_at="2026-06-14T10:00:00+00:00", sources=(), statuses=()),
+        recent_records=[recent],
+        upcoming_records=(),
+        market_data_records=(),
+    )
+
+    assert len(snapshot.records) == 1
+    record = snapshot.records[0]
+    assert record.symbol == "ACME"
+    assert record.cik == "0000000001"
+    assert record.exchange == "Nasdaq"
+    provenance = {(row.field, row.source) for row in record.field_provenance}
+    assert ("symbol", "SEC CIK/ticker identity") in provenance
+    assert ("sector", "SEC submissions metadata") in provenance
+    assert snapshot.diagnostics.rows_resolved_by_sec_cik_mapping == 1
+    assert snapshot.diagnostics.rows_resolved_by_sec_submissions_metadata == 1
+
+
+def test_market_screener_cik_only_row_can_use_fmp_profile_by_cik_without_symbol_guessing() -> None:
+    recent = _recent_record()
+    recent = RecentEarningsRecord(**{**recent.to_dict(), "ticker": None, "sector": None, "industry": None, "exchange": None})
+    sec_client = _FakeSecIdentityClient(ticker_payload={}, submissions_by_cik={"0000000001": {}})
+
+    class _FmpByCikOnlyProvider:
+        provider_name = "fmp_by_cik_only"
+
+        def quote_fundamentals(self, symbols, *, force_refresh: bool = False, max_symbols: int = 50):
+            assert tuple(symbols) == ()
+            return MarketQuoteFundamentalsSnapshot(records=(), fetched_at="2026-06-14T10:00:00+00:00", statuses=())
+
+        def quote_fundamentals_by_cik(self, ciks, *, force_refresh: bool = False, max_symbols: int = 50):
+            assert tuple(ciks) == ("0000000001",)
+            return MarketQuoteFundamentalsSnapshot(
+                records=(
+                    MarketQuoteFundamentalsRecord(
+                        "ACME",
+                        price=25.0,
+                        market_cap=2_000_000_000,
+                        sector="Technology",
+                        industry="Software",
+                        source="FMP profile-by-CIK",
+                        cik="0000000001",
+                    ),
+                ),
+                fetched_at="2026-06-14T10:00:00+00:00",
+                statuses=(MarketDataProviderStatus("FMP profile-by-CIK", "available", "2026-06-14T10:00:00+00:00", "Loaded 1."),),
+                diagnostics={"rows_enriched_by_fmp_profile_by_cik": 1},
+            )
+
+    snapshot = fetch_market_screener_snapshot(
+        sec_client=sec_client,
+        universe_snapshot=MarketUniverseSnapshot(records=(), fetched_at="2026-06-14T10:00:00+00:00", sources=(), statuses=()),
+        recent_records=[recent],
+        upcoming_records=(),
+        market_data_provider=_FmpByCikOnlyProvider(),
+        market_data_symbol_limit=5,
+    )
+
+    record = snapshot.records[0]
+    assert record.symbol == "ACME"
+    assert record.price == 25.0
+    assert record.market_cap == 2_000_000_000
+    assert snapshot.diagnostics.rows_enriched_by_fmp_profile_by_cik == 1
+    assert snapshot.diagnostics.unresolved_rows == 0
+
+
+def test_market_screener_diagnostics_count_limits_empty_provider_and_unresolved_rows() -> None:
+    provider = _DiagnosticMarketDataProvider(
+        MarketQuoteFundamentalsSnapshot(
+            records=(MarketQuoteFundamentalsRecord("ACME", price=10.0, source="Schwab quote"),),
+            fetched_at="2026-06-14T10:00:00+00:00",
+            statuses=(MarketDataProviderStatus("Diagnostic provider", "partial", "2026-06-14T10:00:00+00:00", "One empty and one auth-limited row."),),
+            diagnostics={
+                "rows_enriched_by_schwab_quote": 1,
+                "rows_provider_returned_no_usable_data": 1,
+                "rows_blocked_by_provider_plan_rate_auth_limit": 1,
+                "rows_skipped_by_configured_symbol_cap": 2,
+            },
+        )
+    )
+    snapshot = fetch_market_screener_snapshot(
+        sec_client=_FakeSecIdentityClient(ticker_payload={}),
+        universe_snapshot=MarketUniverseSnapshot(
+            records=tuple(MarketUniverseEntry(symbol, f"{symbol} Corp") for symbol in ("ACME", "BETA", "GAMMA")),
+            fetched_at="2026-06-14T10:00:00+00:00",
+            sources=("Fixture",),
+            statuses=(),
+        ),
+        recent_records=(),
+        upcoming_records=(),
+        supplemental_records=[MarketScreenerRecord("", "Mystery Filing", cik="0000009999", sources=("Manual filing",))],
+        market_data_provider=provider,
+        market_data_symbol_limit=1,
+    )
+
+    diagnostics = snapshot.diagnostics
+    assert diagnostics.rows_enriched_by_schwab_quote == 1
+    assert diagnostics.rows_provider_returned_no_usable_data == 1
+    assert diagnostics.rows_blocked_by_provider_plan_rate_auth_limit == 1
+    assert diagnostics.rows_skipped_by_configured_symbol_cap >= 2
+    assert diagnostics.unresolved_rows == 1
+    assert "unresolved" in market_screener_diagnostics_summary(diagnostics)
+
+
+def test_market_screener_does_not_guess_symbol_from_company_name_when_identity_untrusted() -> None:
+    recent = _recent_record()
+    recent = RecentEarningsRecord(**{**recent.to_dict(), "ticker": None, "cik": "0000009999"})
+    sec_client = _FakeSecIdentityClient(
+        ticker_payload={"0": {"cik_str": 1, "ticker": "ACME", "title": "Acme Corp"}},
+        submissions_by_cik={"0000009999": {"name": "Acme Corp", "tickers": ["ACME", "ACMEB"]}},
+    )
+
+    snapshot = fetch_market_screener_snapshot(
+        sec_client=sec_client,
+        universe_snapshot=MarketUniverseSnapshot(records=(), fetched_at="2026-06-14T10:00:00+00:00", sources=(), statuses=()),
+        recent_records=[recent],
+        upcoming_records=(),
+        market_data_records=(),
+    )
+
+    assert len(snapshot.records) == 1
+    record = snapshot.records[0]
+    assert record.company_name == "Acme Corp"
+    assert record.symbol == ""
+    assert snapshot.diagnostics.rows_missing_symbol == 1
+    assert snapshot.diagnostics.unresolved_rows == 1
 
 
 def test_market_screener_page_enrichment_merge_updates_existing_rows_without_duplicates() -> None:
@@ -567,6 +749,72 @@ def test_composite_market_data_provider_merges_local_schwab_and_fmp_without_dupl
     assert record.pe_ratio == 20.0
     assert record.sector == "Technology"
     assert record.source == "Schwab quote, FMP quote, FMP profile"
+
+
+def test_market_data_source_ladder_preserves_precedence_and_field_provenance() -> None:
+    local_provider = _FakeMarketDataProvider(
+        {"ACME": MarketQuoteFundamentalsRecord("ACME", price=10.0, source="Local market data file")}
+    )
+    schwab_provider = _FakeMarketDataProvider(
+        {"ACME": MarketQuoteFundamentalsRecord("ACME", price=11.0, volume=1_000, source="Schwab quote")}
+    )
+    fmp_provider = _FakeMarketDataProvider(
+        {
+            "ACME": MarketQuoteFundamentalsRecord(
+                "ACME",
+                price=12.0,
+                market_cap=5_000_000_000,
+                sector="Technology",
+                source="FMP quote, FMP profile",
+            )
+        }
+    )
+    composite = CompositeMarketDataProvider([local_provider, schwab_provider, fmp_provider])
+
+    snapshot = composite.quote_fundamentals(["ACME"], max_symbols=5)
+
+    record = snapshot.records[0]
+    assert record.price == 10.0
+    assert record.volume == 1_000
+    assert record.market_cap == 5_000_000_000
+    provenance = {row.field: row.source for row in record.field_provenance}
+    assert provenance["price"] == "Local market data file"
+    assert provenance["volume"] == "Schwab quote"
+    assert provenance["market_cap"] == "FMP quote, FMP profile"
+
+
+def test_fmp_provider_profile_by_cik_maps_profile_fields_and_cik() -> None:
+    def handler(url: str, params: dict[str, object]) -> _FakeFmpResponse:
+        if url.endswith("/profile-cik"):
+            assert params["cik"] == "320193"
+            return _FakeFmpResponse(
+                200,
+                [
+                    {
+                        "symbol": "AAPL",
+                        "cik": "0000320193",
+                        "price": 195.0,
+                        "marketCap": 3_000_000_000_000,
+                        "sector": "Technology",
+                        "industry": "Consumer Electronics",
+                        "exchangeShortName": "NASDAQ",
+                    }
+                ],
+            )
+        raise AssertionError(url)
+
+    provider = FmpQuoteFundamentalsProvider(api_key="secret", session=_FakeFmpSession(handler), symbol_limit=5)
+
+    snapshot = provider.quote_fundamentals_by_cik(["0000320193"], max_symbols=5)
+
+    assert len(snapshot.records) == 1
+    record = snapshot.records[0]
+    assert record.symbol == "AAPL"
+    assert record.cik == "0000320193"
+    assert record.price == 195.0
+    assert record.market_cap == 3_000_000_000_000
+    assert record.source == "FMP profile-by-CIK"
+    assert snapshot.diagnostics["rows_enriched_by_fmp_profile_by_cik"] == 1
 
 
 def test_market_screener_holding_quote_fmp_row_has_label_completeness_and_provenance() -> None:

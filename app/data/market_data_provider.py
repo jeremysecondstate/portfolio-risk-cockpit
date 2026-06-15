@@ -5,7 +5,7 @@ import json
 import os
 import re
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol
@@ -21,12 +21,23 @@ FMP_API_KEY_ENV = "FMP_API_KEY"
 FMP_BASE_URL_ENV = "FMP_BASE_URL"
 FMP_MARKET_DATA_SYMBOL_LIMIT_ENV = "FMP_MARKET_DATA_SYMBOL_LIMIT"
 FMP_CACHE_TTL_SECONDS_ENV = "FMP_CACHE_TTL_SECONDS"
+MARKET_DATA_FALLBACK_PROVIDER_ENV = "MARKET_SCREENER_FALLBACK_PROVIDER"
+MARKET_DATA_FALLBACK_SYMBOL_LIMIT_ENV = "MARKET_SCREENER_FALLBACK_SYMBOL_LIMIT"
+ALPHA_VANTAGE_API_KEY_ENV = "ALPHA_VANTAGE_API_KEY"
+ALPHA_VANTAGE_BASE_URL_ENV = "ALPHA_VANTAGE_BASE_URL"
+ALPHA_VANTAGE_CACHE_TTL_SECONDS_ENV = "ALPHA_VANTAGE_CACHE_TTL_SECONDS"
 DEFAULT_FMP_BASE_URL = "https://financialmodelingprep.com/stable"
 DEFAULT_FMP_MARKET_DATA_SYMBOL_LIMIT = 100
 DEFAULT_FMP_CACHE_TTL_SECONDS = 900
+DEFAULT_ALPHA_VANTAGE_BASE_URL = "https://www.alphavantage.co/query"
+DEFAULT_ALPHA_VANTAGE_FALLBACK_SYMBOL_LIMIT = 25
+DEFAULT_ALPHA_VANTAGE_CACHE_TTL_SECONDS = 900
 FMP_QUOTE_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/quote"
 FMP_PROFILE_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/profile-symbol"
+FMP_PROFILE_BY_CIK_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/profile-cik"
+ALPHA_VANTAGE_DOC_URL = "https://www.alphavantage.co/documentation/"
 _SHARED_FMP_CACHE: dict[tuple[str, str, str], tuple[float, Mapping[str, Any]]] = {}
+_SHARED_ALPHA_VANTAGE_CACHE: dict[tuple[str, str, str], tuple[float, Mapping[str, Any]]] = {}
 
 
 @dataclass(frozen=True)
@@ -66,6 +77,7 @@ class MarketQuoteFundamentalsRecord:
     shares_float: float | None = None
     shares_outstanding: float | None = None
     field_provenance: tuple[MarketDataFieldProvenance, ...] = ()
+    cik: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -90,6 +102,7 @@ class MarketQuoteFundamentalsRecord:
             "revenue_growth": _optional_float(_first_present(payload, "revenue_growth", "revenueGrowth", "revenueGrowthTTM", "QuarterlyRevenueGrowthYOY")),
             "shares_float": _optional_float(_first_present(payload, "shares_float", "float", "sharesFloat", "floatShares")),
             "shares_outstanding": _optional_float(_first_present(payload, "shares_outstanding", "sharesOutstanding", "shares_outstanding")),
+            "cik": _normalize_cik(_first_present(payload, "cik", "cik_str", "CIK")) or None,
         }
         provenance_payload = payload.get("field_provenance")
         field_provenance = _field_provenance_from_payload(provenance_payload)
@@ -118,6 +131,7 @@ class MarketQuoteFundamentalsSnapshot:
     fetched_at: str
     statuses: tuple[MarketDataProviderStatus, ...]
     errors: tuple[str, ...] = ()
+    diagnostics: Mapping[str, int] = field(default_factory=dict)
 
 
 class MarketQuoteFundamentalsProvider(Protocol):
@@ -126,6 +140,15 @@ class MarketQuoteFundamentalsProvider(Protocol):
     def quote_fundamentals(
         self,
         symbols: Iterable[str],
+        *,
+        force_refresh: bool = False,
+        max_symbols: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
+    ) -> MarketQuoteFundamentalsSnapshot:
+        ...
+
+    def quote_fundamentals_by_cik(
+        self,
+        ciks: Iterable[str],
         *,
         force_refresh: bool = False,
         max_symbols: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
@@ -161,12 +184,14 @@ class LocalMarketDataFileProvider:
                 records=(),
                 fetched_at=fetched_at,
                 statuses=(MarketDataProviderStatus("Local market data file", "unavailable", fetched_at, f"No {MARKET_DATA_FILE_PATH_ENV} file is configured."),),
+                diagnostics={"provider_unavailable": 1},
             )
         if not self.path.exists():
             return MarketQuoteFundamentalsSnapshot(
                 records=(),
                 fetched_at=fetched_at,
                 statuses=(MarketDataProviderStatus("Local market data file", "unavailable", fetched_at, f"Configured market data file does not exist: {self.path}"),),
+                diagnostics={"provider_unavailable": 1},
             )
 
         try:
@@ -177,8 +202,10 @@ class LocalMarketDataFileProvider:
                 fetched_at=fetched_at,
                 statuses=(MarketDataProviderStatus("Local market data file", "error", fetched_at, f"Could not read local market data file: {exc}"),),
                 errors=(str(exc),),
+                diagnostics={"provider_unavailable": 1},
             )
         filtered = tuple(record for record in rows if not wanted or record.symbol in wanted)
+        enriched = sum(1 for record in filtered if _quote_record_has_any_value(record))
         return MarketQuoteFundamentalsSnapshot(
             records=filtered,
             fetched_at=fetched_at,
@@ -190,6 +217,10 @@ class LocalMarketDataFileProvider:
                     f"Loaded {len(filtered)} quote/fundamental row(s) from {self.path}.",
                 ),
             ),
+            diagnostics={
+                "rows_enriched_by_local_file": enriched,
+                "rows_provider_returned_no_usable_data": max(0, len(wanted) - enriched) if wanted else 0,
+            },
         )
 
     def _read_rows(self, *, force_refresh: bool) -> tuple[MarketQuoteFundamentalsRecord, ...]:
@@ -234,20 +265,26 @@ class SchwabQuoteFundamentalsProvider:
                 records=(),
                 fetched_at=fetched_at,
                 statuses=(MarketDataProviderStatus("Schwab quote", "unavailable", fetched_at, "No authenticated Schwab market-data session is available."),),
+                diagnostics={"provider_unavailable": 1},
             )
         records: list[MarketQuoteFundamentalsRecord] = []
         errors: list[str] = []
+        blocked = 0
+        no_usable = 0
         requested = _limited_symbols(symbols, max_symbols)
         for symbol in requested:
             try:
                 status_code, payload = get_quote(symbol)
                 if int(status_code) != 200:
                     errors.append(f"{symbol}: Schwab quote returned HTTP {status_code}")
+                    if int(status_code) in {401, 403, 429}:
+                        blocked += 1
                     continue
                 snapshot = parse_quote_snapshot(symbol, payload)
                 price = snapshot.last or snapshot.mark
                 if price is None and snapshot.total_volume is None:
                     errors.append(f"{symbol}: Schwab quote payload had no usable price or volume fields")
+                    no_usable += 1
                     continue
                 records.append(
                     MarketQuoteFundamentalsRecord(
@@ -270,6 +307,11 @@ class SchwabQuoteFundamentalsProvider:
             fetched_at=fetched_at,
             statuses=(MarketDataProviderStatus("Schwab quote", status, fetched_at, message),),
             errors=tuple(errors),
+            diagnostics={
+                "rows_enriched_by_schwab_quote": len(records),
+                "rows_blocked_by_provider_plan_rate_auth_limit": blocked,
+                "rows_provider_returned_no_usable_data": no_usable,
+            },
         )
 
 
@@ -330,6 +372,10 @@ class FmpQuoteFundamentalsProvider:
                         f"FMP enrichment: 0 rows updated; {skipped_limited} skipped/limited; cache used for 0. No {FMP_API_KEY_ENV} is configured; Schwab/local providers remain available.",
                     ),
                 ),
+                diagnostics={
+                    "provider_unavailable": 1,
+                    "rows_skipped_by_configured_symbol_cap": skipped_limited,
+                },
             )
 
         if max_symbols <= 0 or self.symbol_limit <= 0:
@@ -344,11 +390,14 @@ class FmpQuoteFundamentalsProvider:
                         f"FMP enrichment: 0 rows updated; {len(capped_input)} skipped/limited; cache used for 0. FMP enrichment is disabled because the symbol cap is 0.",
                     ),
                 ),
+                diagnostics={"rows_skipped_by_configured_symbol_cap": len(capped_input)},
             )
 
         records_by_symbol: dict[str, MarketQuoteFundamentalsRecord] = {}
         warnings: list[str] = []
         cache_hits = 0
+        quote_rows = 0
+        profile_rows = 0
 
         quote_payloads: dict[str, Mapping[str, Any]] = {}
         quote_blocked = False
@@ -363,6 +412,7 @@ class FmpQuoteFundamentalsProvider:
             record = self._record_from_payload(symbol, payload, source="FMP quote", source_url=FMP_QUOTE_DOC_URL, fetched_at=fetched_at)
             if _quote_record_has_any_value(record):
                 records_by_symbol[symbol] = record
+                quote_rows += 1
 
         profile_symbols = () if quote_blocked else requested
         for symbol in profile_symbols:
@@ -379,6 +429,7 @@ class FmpQuoteFundamentalsProvider:
             profile_record = self._record_from_payload(symbol, profile_payload, source="FMP profile", source_url=FMP_PROFILE_DOC_URL, fetched_at=fetched_at)
             if not _quote_record_has_any_value(profile_record):
                 continue
+            profile_rows += 1
             existing = records_by_symbol.get(symbol)
             records_by_symbol[symbol] = profile_record if existing is None else _merge_quote_records(existing, profile_record)
 
@@ -398,6 +449,107 @@ class FmpQuoteFundamentalsProvider:
             fetched_at=fetched_at,
             statuses=(MarketDataProviderStatus("FMP quote/fundamentals", status, fetched_at, _redact_fmp_secret(message, self.api_key)),),
             errors=tuple(_redact_fmp_secret(warning, self.api_key) for warning in warnings[:4]),
+            diagnostics={
+                "rows_enriched_by_fmp_quote": quote_rows,
+                "rows_enriched_by_fmp_profile": profile_rows,
+                "rows_blocked_by_provider_plan_rate_auth_limit": 1 if any(_is_fmp_limit_warning(warning) for warning in warnings) else 0,
+                "rows_skipped_by_configured_symbol_cap": skipped_limited,
+                "rows_provider_returned_no_usable_data": max(0, len(requested) - len(records)),
+            },
+        )
+
+    def quote_fundamentals_by_cik(
+        self,
+        ciks: Iterable[str],
+        *,
+        force_refresh: bool = False,
+        max_symbols: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
+    ) -> MarketQuoteFundamentalsSnapshot:
+        fetched_at = _now()
+        capped_input = _limited_ciks(ciks, max_symbols)
+        requested = capped_input[: self.symbol_limit]
+        skipped_limited = max(0, len(capped_input) - len(requested))
+
+        if not _optional_string(self.api_key):
+            return MarketQuoteFundamentalsSnapshot(
+                records=(),
+                fetched_at=fetched_at,
+                statuses=(
+                    MarketDataProviderStatus(
+                        "FMP profile-by-CIK",
+                        "unavailable",
+                        fetched_at,
+                        f"FMP profile-by-CIK: 0 rows updated; {skipped_limited} skipped/limited. No {FMP_API_KEY_ENV} is configured.",
+                    ),
+                ),
+                diagnostics={
+                    "provider_unavailable": 1,
+                    "rows_skipped_by_configured_symbol_cap": skipped_limited,
+                },
+            )
+
+        if max_symbols <= 0 or self.symbol_limit <= 0:
+            return MarketQuoteFundamentalsSnapshot(
+                records=(),
+                fetched_at=fetched_at,
+                statuses=(
+                    MarketDataProviderStatus(
+                        "FMP profile-by-CIK",
+                        "disabled",
+                        fetched_at,
+                        f"FMP profile-by-CIK: 0 rows updated; {len(capped_input)} skipped/limited because the symbol cap is 0.",
+                    ),
+                ),
+                diagnostics={"rows_skipped_by_configured_symbol_cap": len(capped_input)},
+            )
+
+        records: list[MarketQuoteFundamentalsRecord] = []
+        warnings: list[str] = []
+        cache_hits = 0
+        for cik in requested:
+            try:
+                payload, cache_hit = self._profile_by_cik_payload(cik, force_refresh=force_refresh)
+                cache_hits += int(cache_hit)
+            except FmpProviderWarning as exc:
+                warnings.append(str(exc))
+                if _is_fmp_limit_warning(str(exc)):
+                    break
+                continue
+            if not payload:
+                continue
+            symbol = _normalize_symbol(_first_present(payload, "symbol", "ticker"))
+            record = self._record_from_payload(
+                symbol,
+                payload,
+                source="FMP profile-by-CIK",
+                source_url=FMP_PROFILE_BY_CIK_DOC_URL,
+                fetched_at=fetched_at,
+                cik=cik,
+            )
+            if _quote_record_has_any_value(record) or record.symbol:
+                records.append(record)
+
+        status = "available" if records else "empty"
+        if warnings:
+            status = "partial" if records else "warning"
+        message = (
+            f"FMP profile-by-CIK: {len(records)} rows updated; {skipped_limited} skipped/limited; cache used for {cache_hits}. "
+            "CIK lookups are only requested for capped filing rows that still need trusted identity/profile data."
+        )
+        if warnings:
+            message += f" Provider warning: {_short_warning(warnings[0], self.api_key)}"
+
+        return MarketQuoteFundamentalsSnapshot(
+            records=tuple(records),
+            fetched_at=fetched_at,
+            statuses=(MarketDataProviderStatus("FMP profile-by-CIK", status, fetched_at, _redact_fmp_secret(message, self.api_key)),),
+            errors=tuple(_redact_fmp_secret(warning, self.api_key) for warning in warnings[:4]),
+            diagnostics={
+                "rows_enriched_by_fmp_profile_by_cik": len(records),
+                "rows_blocked_by_provider_plan_rate_auth_limit": 1 if any(_is_fmp_limit_warning(warning) for warning in warnings) else 0,
+                "rows_skipped_by_configured_symbol_cap": skipped_limited,
+                "rows_provider_returned_no_usable_data": max(0, len(requested) - len(records)),
+            },
         )
 
     def _quote_payloads(self, symbols: tuple[str, ...], *, force_refresh: bool) -> tuple[dict[str, Mapping[str, Any]], int]:
@@ -437,6 +589,20 @@ class FmpQuoteFundamentalsProvider:
             self._cache_set("profile", symbol, selected)
         return selected, False
 
+    def _profile_by_cik_payload(self, cik: str, *, force_refresh: bool) -> tuple[Mapping[str, Any] | None, bool]:
+        normalized_cik = _normalize_cik(cik)
+        if not normalized_cik:
+            return None, False
+        cached = self._cache_get("profile-cik", normalized_cik, force_refresh=force_refresh)
+        if cached is not None:
+            return cached, True
+        payload = self._get_json("profile-cik", {"cik": _fmp_cik_param(normalized_cik)})
+        rows = _coerce_fmp_rows(payload)
+        selected = rows[0] if rows else None
+        if selected is not None:
+            self._cache_set("profile-cik", normalized_cik, selected)
+        return selected, False
+
     def _record_from_payload(
         self,
         symbol: str,
@@ -445,9 +611,12 @@ class FmpQuoteFundamentalsProvider:
         source: str,
         source_url: str,
         fetched_at: str,
+        cik: str | None = None,
     ) -> MarketQuoteFundamentalsRecord:
         values = dict(payload)
         values.setdefault("symbol", symbol)
+        if cik:
+            values.setdefault("cik", cik)
         values["source"] = source
         values["source_url"] = source_url
         values["fetched_at"] = fetched_at
@@ -500,6 +669,214 @@ class FmpQuoteFundamentalsProvider:
         self._cache[(self.base_url, endpoint, symbol)] = (time.time(), dict(payload))
 
 
+class AlphaVantageFallbackProvider:
+    provider_name = "alpha_vantage_fallback"
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        session: requests.Session | Any | None = None,
+        timeout_seconds: float = 8.0,
+        symbol_limit: int | None = None,
+        cache_ttl_seconds: int | None = None,
+    ) -> None:
+        self.api_key = api_key if api_key is not None else os.getenv(ALPHA_VANTAGE_API_KEY_ENV, "")
+        self.base_url = (base_url or os.getenv(ALPHA_VANTAGE_BASE_URL_ENV, DEFAULT_ALPHA_VANTAGE_BASE_URL) or DEFAULT_ALPHA_VANTAGE_BASE_URL).rstrip("/")
+        self.session = session or requests.Session()
+        self.timeout_seconds = timeout_seconds
+        self.symbol_limit = (
+            max(0, min(100, int(symbol_limit)))
+            if symbol_limit is not None
+            else _configured_int(MARKET_DATA_FALLBACK_SYMBOL_LIMIT_ENV, DEFAULT_ALPHA_VANTAGE_FALLBACK_SYMBOL_LIMIT, minimum=0, maximum=100)
+        )
+        self.cache_ttl_seconds = (
+            max(0, int(cache_ttl_seconds))
+            if cache_ttl_seconds is not None
+            else _configured_int(ALPHA_VANTAGE_CACHE_TTL_SECONDS_ENV, DEFAULT_ALPHA_VANTAGE_CACHE_TTL_SECONDS, minimum=0, maximum=86_400)
+        )
+        self._cache: dict[tuple[str, str, str], tuple[float, Mapping[str, Any]]] = {} if session is not None else _SHARED_ALPHA_VANTAGE_CACHE
+
+    def quote_fundamentals(
+        self,
+        symbols: Iterable[str],
+        *,
+        force_refresh: bool = False,
+        max_symbols: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
+    ) -> MarketQuoteFundamentalsSnapshot:
+        fetched_at = _now()
+        capped_input = _limited_symbols(symbols, max_symbols)
+        requested = capped_input[: self.symbol_limit]
+        skipped_limited = max(0, len(capped_input) - len(requested))
+
+        if not _optional_string(self.api_key):
+            return MarketQuoteFundamentalsSnapshot(
+                records=(),
+                fetched_at=fetched_at,
+                statuses=(
+                    MarketDataProviderStatus(
+                        "Fallback Alpha Vantage",
+                        "unavailable",
+                        fetched_at,
+                        f"Fallback provider requested but no {ALPHA_VANTAGE_API_KEY_ENV} is configured.",
+                    ),
+                ),
+                diagnostics={
+                    "provider_unavailable": 1,
+                    "rows_skipped_by_configured_symbol_cap": skipped_limited,
+                },
+            )
+
+        if max_symbols <= 0 or self.symbol_limit <= 0:
+            return MarketQuoteFundamentalsSnapshot(
+                records=(),
+                fetched_at=fetched_at,
+                statuses=(
+                    MarketDataProviderStatus(
+                        "Fallback Alpha Vantage",
+                        "disabled",
+                        fetched_at,
+                        f"Fallback Alpha Vantage: 0 rows updated; {len(capped_input)} skipped/limited because the fallback symbol cap is 0.",
+                    ),
+                ),
+                diagnostics={"rows_skipped_by_configured_symbol_cap": len(capped_input)},
+            )
+
+        records_by_symbol: dict[str, MarketQuoteFundamentalsRecord] = {}
+        warnings: list[str] = []
+        cache_hits = 0
+        quote_rows = 0
+        overview_rows = 0
+        for symbol in requested:
+            try:
+                quote_payload, quote_cache_hit = self._payload("GLOBAL_QUOTE", symbol, force_refresh=force_refresh)
+                cache_hits += int(quote_cache_hit)
+                quote_record = self._quote_record(symbol, quote_payload, fetched_at=fetched_at)
+                if _quote_record_has_any_value(quote_record):
+                    records_by_symbol[symbol] = quote_record
+                    quote_rows += 1
+            except RuntimeError as exc:
+                warnings.append(str(exc))
+                if _is_alpha_vantage_limit_warning(str(exc)):
+                    break
+            try:
+                overview_payload, overview_cache_hit = self._payload("OVERVIEW", symbol, force_refresh=force_refresh)
+                cache_hits += int(overview_cache_hit)
+                overview_record = self._overview_record(symbol, overview_payload, fetched_at=fetched_at)
+                if _quote_record_has_any_value(overview_record):
+                    existing = records_by_symbol.get(symbol)
+                    records_by_symbol[symbol] = overview_record if existing is None else _merge_quote_records(existing, overview_record)
+                    overview_rows += 1
+            except RuntimeError as exc:
+                warnings.append(str(exc))
+                if _is_alpha_vantage_limit_warning(str(exc)):
+                    break
+
+        records = tuple(records_by_symbol.values())
+        status = "available" if records else "empty"
+        if warnings:
+            status = "partial" if records else "warning"
+        message = (
+            f"Fallback Alpha Vantage: {len(records)} rows updated; {skipped_limited} skipped/limited; cache used for {cache_hits}. "
+            "Fallback is only attached to visible-page or selected-row enrichment when explicitly configured."
+        )
+        if warnings:
+            message += f" Provider warning: {_short_warning(warnings[0], self.api_key)}"
+        return MarketQuoteFundamentalsSnapshot(
+            records=records,
+            fetched_at=fetched_at,
+            statuses=(MarketDataProviderStatus("Fallback Alpha Vantage", status, fetched_at, _redact_fmp_secret(message, self.api_key)),),
+            errors=tuple(_redact_fmp_secret(warning, self.api_key) for warning in warnings[:4]),
+            diagnostics={
+                "rows_enriched_by_fallback_provider": len(records),
+                "rows_enriched_by_fallback_quote": quote_rows,
+                "rows_enriched_by_fallback_profile": overview_rows,
+                "rows_blocked_by_provider_plan_rate_auth_limit": 1 if any(_is_alpha_vantage_limit_warning(warning) for warning in warnings) else 0,
+                "rows_skipped_by_configured_symbol_cap": skipped_limited,
+                "rows_provider_returned_no_usable_data": max(0, len(requested) - len(records)),
+            },
+        )
+
+    def _payload(self, function: str, symbol: str, *, force_refresh: bool) -> tuple[Mapping[str, Any], bool]:
+        cached = self._cache_get(function, symbol, force_refresh=force_refresh)
+        if cached is not None:
+            return cached, True
+        try:
+            response = self.session.get(
+                self.base_url,
+                params={"function": function, "symbol": symbol, "apikey": self.api_key},
+                headers={"User-Agent": "portfolio-risk-cockpit/1.0"},
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(_redact_fmp_secret(f"Alpha Vantage {function} request failed: {exc}", self.api_key)) from None
+        status_code = int(getattr(response, "status_code", 0) or 0)
+        if status_code in {401, 403, 429}:
+            raise RuntimeError(f"Alpha Vantage {function} authentication/rate limit returned HTTP {status_code}.")
+        if status_code < 200 or status_code >= 300:
+            raise RuntimeError(f"Alpha Vantage {function} returned HTTP {status_code}.")
+        try:
+            payload = response.json()
+        except ValueError:
+            raise RuntimeError(f"Alpha Vantage {function} returned a non-JSON response.") from None
+        warning = _detect_alpha_vantage_warning(payload)
+        if warning:
+            raise RuntimeError(warning)
+        if not isinstance(payload, Mapping):
+            return {}, False
+        self._cache_set(function, symbol, payload)
+        return payload, False
+
+    def _quote_record(self, symbol: str, payload: Mapping[str, Any], *, fetched_at: str) -> MarketQuoteFundamentalsRecord:
+        quote = payload.get("Global Quote") if isinstance(payload.get("Global Quote"), Mapping) else payload
+        values = {
+            "symbol": symbol,
+            "price": _first_present(quote, "05. price", "price"),
+            "volume": _first_present(quote, "06. volume", "volume"),
+            "change_percent": _first_present(quote, "10. change percent", "change_percent"),
+            "source": "Fallback Alpha Vantage quote",
+            "source_url": ALPHA_VANTAGE_DOC_URL,
+            "fetched_at": fetched_at,
+        }
+        return MarketQuoteFundamentalsRecord.from_dict(values)
+
+    def _overview_record(self, symbol: str, payload: Mapping[str, Any], *, fetched_at: str) -> MarketQuoteFundamentalsRecord:
+        values = {
+            "symbol": symbol,
+            "exchange": _first_present(payload, "Exchange", "exchange"),
+            "sector": _first_present(payload, "Sector", "sector"),
+            "industry": _first_present(payload, "Industry", "industry"),
+            "market_cap": _first_present(payload, "MarketCapitalization", "marketCap"),
+            "pe_ratio": _first_present(payload, "PERatio", "peRatio"),
+            "eps": _first_present(payload, "EPS", "eps"),
+            "revenue_growth": _first_present(payload, "QuarterlyRevenueGrowthYOY", "revenueGrowth"),
+            "shares_outstanding": _first_present(payload, "SharesOutstanding", "sharesOutstanding"),
+            "source": "Fallback Alpha Vantage profile",
+            "source_url": ALPHA_VANTAGE_DOC_URL,
+            "fetched_at": fetched_at,
+        }
+        return MarketQuoteFundamentalsRecord.from_dict(values)
+
+    def _cache_get(self, endpoint: str, symbol: str, *, force_refresh: bool) -> Mapping[str, Any] | None:
+        if force_refresh or self.cache_ttl_seconds <= 0:
+            return None
+        key = (self.base_url, endpoint, symbol)
+        cached = self._cache.get(key)
+        if cached is None:
+            return None
+        cached_at, payload = cached
+        if time.time() - cached_at > self.cache_ttl_seconds:
+            self._cache.pop(key, None)
+            return None
+        return payload
+
+    def _cache_set(self, endpoint: str, symbol: str, payload: Mapping[str, Any]) -> None:
+        if self.cache_ttl_seconds <= 0:
+            return
+        self._cache[(self.base_url, endpoint, symbol)] = (time.time(), dict(payload))
+
+
 class CompositeMarketDataProvider:
     provider_name = "composite_market_data"
 
@@ -525,10 +902,12 @@ class CompositeMarketDataProvider:
         merged: dict[str, MarketQuoteFundamentalsRecord] = {}
         statuses: list[MarketDataProviderStatus] = []
         errors: list[str] = []
+        diagnostics: dict[str, int] = {}
         for provider in self.providers:
             snapshot = provider.quote_fundamentals(requested, force_refresh=force_refresh, max_symbols=max_symbols)
             statuses.extend(snapshot.statuses)
             errors.extend(snapshot.errors)
+            _merge_diagnostics(diagnostics, snapshot.diagnostics)
             for record in snapshot.records:
                 existing = merged.get(record.symbol)
                 merged[record.symbol] = record if existing is None else _merge_quote_records(existing, record)
@@ -537,15 +916,85 @@ class CompositeMarketDataProvider:
             fetched_at=fetched_at,
             statuses=tuple(statuses),
             errors=tuple(errors),
+            diagnostics=diagnostics,
+        )
+
+    def quote_fundamentals_by_cik(
+        self,
+        ciks: Iterable[str],
+        *,
+        force_refresh: bool = False,
+        max_symbols: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
+    ) -> MarketQuoteFundamentalsSnapshot:
+        fetched_at = _now()
+        requested = _limited_ciks(ciks, max_symbols)
+        if not self.providers:
+            return MarketQuoteFundamentalsSnapshot(
+                records=(),
+                fetched_at=fetched_at,
+                statuses=(MarketDataProviderStatus("Market quote/fundamental provider", "unavailable", fetched_at, "No market quote/fundamental provider is configured."),),
+                diagnostics={"provider_unavailable": 1},
+            )
+
+        merged: dict[str, MarketQuoteFundamentalsRecord] = {}
+        statuses: list[MarketDataProviderStatus] = []
+        errors: list[str] = []
+        diagnostics: dict[str, int] = {}
+        for provider in self.providers:
+            by_cik = getattr(provider, "quote_fundamentals_by_cik", None)
+            if not callable(by_cik) or provider is self:
+                continue
+            snapshot = by_cik(requested, force_refresh=force_refresh, max_symbols=max_symbols)
+            statuses.extend(snapshot.statuses)
+            errors.extend(snapshot.errors)
+            _merge_diagnostics(diagnostics, snapshot.diagnostics)
+            for record in snapshot.records:
+                key = _normalize_symbol(record.symbol) or _normalize_cik(record.cik)
+                if not key:
+                    continue
+                existing = merged.get(key)
+                merged[key] = record if existing is None else _merge_quote_records(existing, record)
+        if not statuses:
+            statuses.append(
+                MarketDataProviderStatus(
+                    "FMP profile-by-CIK",
+                    "unavailable",
+                    fetched_at,
+                    "No configured market-data provider supports CIK-based quote/profile lookup.",
+                )
+            )
+            diagnostics["provider_unavailable"] = diagnostics.get("provider_unavailable", 0) + 1
+        return MarketQuoteFundamentalsSnapshot(
+            records=tuple(merged.values()),
+            fetched_at=fetched_at,
+            statuses=tuple(statuses),
+            errors=tuple(errors),
+            diagnostics=diagnostics,
         )
 
 
-def configured_market_data_provider(*, schwab_session: Any | None = None, local_path: str | Path | None = None) -> CompositeMarketDataProvider:
+def configured_market_data_provider(
+    *,
+    schwab_session: Any | None = None,
+    local_path: str | Path | None = None,
+    include_fallback_provider: bool = False,
+) -> CompositeMarketDataProvider:
     providers: list[MarketQuoteFundamentalsProvider] = [LocalMarketDataFileProvider(local_path)]
     if schwab_session is not None:
         providers.append(SchwabQuoteFundamentalsProvider(schwab_session))
     providers.append(FmpQuoteFundamentalsProvider())
+    if include_fallback_provider:
+        fallback_provider = configured_fallback_market_data_provider()
+        if fallback_provider is not None:
+            providers.append(fallback_provider)
     return CompositeMarketDataProvider(providers)
+
+
+def configured_fallback_market_data_provider() -> MarketQuoteFundamentalsProvider | None:
+    provider_name = str(os.getenv(MARKET_DATA_FALLBACK_PROVIDER_ENV, "") or "").strip().lower().replace("-", "_")
+    if provider_name not in {"alpha_vantage", "alphavantage"}:
+        return None
+    return AlphaVantageFallbackProvider()
 
 
 def configured_market_data_symbol_limit(default: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT) -> int:
@@ -553,40 +1002,39 @@ def configured_market_data_symbol_limit(default: int = DEFAULT_MARKET_DATA_SYMBO
 
 
 def _merge_quote_records(left: MarketQuoteFundamentalsRecord, right: MarketQuoteFundamentalsRecord) -> MarketQuoteFundamentalsRecord:
-    right_is_newer = _record_is_newer(right, left)
-    field_provenance = _merge_quote_field_provenance(left, right, right_is_newer)
+    field_provenance = _merge_quote_field_provenance(left, right)
     return MarketQuoteFundamentalsRecord(
         symbol=left.symbol or right.symbol,
-        exchange=_prefer_field(left.exchange, right.exchange, right_is_newer),
-        sector=_prefer_field(left.sector, right.sector, right_is_newer),
-        industry=_prefer_field(left.industry, right.industry, right_is_newer),
-        price=_prefer_field(left.price, right.price, right_is_newer),
-        change_percent=_prefer_field(left.change_percent, right.change_percent, right_is_newer),
-        volume=_prefer_field(left.volume, right.volume, right_is_newer),
-        avg_volume=_prefer_field(left.avg_volume, right.avg_volume, right_is_newer),
-        market_cap=_prefer_field(left.market_cap, right.market_cap, right_is_newer),
-        pe_ratio=_prefer_field(left.pe_ratio, right.pe_ratio, right_is_newer),
-        eps=_prefer_field(left.eps, right.eps, right_is_newer),
-        revenue_growth=_prefer_field(left.revenue_growth, right.revenue_growth, right_is_newer),
-        shares_float=_prefer_field(left.shares_float, right.shares_float, right_is_newer),
-        shares_outstanding=_prefer_field(left.shares_outstanding, right.shares_outstanding, right_is_newer),
+        exchange=_prefer_ladder_field(left.exchange, right.exchange),
+        sector=_prefer_ladder_field(left.sector, right.sector),
+        industry=_prefer_ladder_field(left.industry, right.industry),
+        price=_prefer_ladder_field(left.price, right.price),
+        change_percent=_prefer_ladder_field(left.change_percent, right.change_percent),
+        volume=_prefer_ladder_field(left.volume, right.volume),
+        avg_volume=_prefer_ladder_field(left.avg_volume, right.avg_volume),
+        market_cap=_prefer_ladder_field(left.market_cap, right.market_cap),
+        pe_ratio=_prefer_ladder_field(left.pe_ratio, right.pe_ratio),
+        eps=_prefer_ladder_field(left.eps, right.eps),
+        revenue_growth=_prefer_ladder_field(left.revenue_growth, right.revenue_growth),
+        shares_float=_prefer_ladder_field(left.shares_float, right.shares_float),
+        shares_outstanding=_prefer_ladder_field(left.shares_outstanding, right.shares_outstanding),
         source=", ".join(dict.fromkeys([source for source in (left.source, right.source) if source])),
-        source_url=right.source_url if right_is_newer and right.source_url else left.source_url or right.source_url,
-        fetched_at=right.fetched_at if right_is_newer else left.fetched_at or right.fetched_at,
+        source_url=left.source_url or right.source_url,
+        fetched_at=left.fetched_at or right.fetched_at,
         field_provenance=field_provenance,
+        cik=left.cik or right.cik,
     )
 
 
 def _merge_quote_field_provenance(
     left: MarketQuoteFundamentalsRecord,
     right: MarketQuoteFundamentalsRecord,
-    right_is_newer: bool,
 ) -> tuple[MarketDataFieldProvenance, ...]:
     left_by_field = _quote_provenance_by_field(left)
     right_by_field = _quote_provenance_by_field(right)
     merged: list[MarketDataFieldProvenance] = []
     for field in _QUOTE_VALUE_FIELDS:
-        selected = right_by_field.get(field) if _field_was_selected_from_right(left, right, field, right_is_newer) else left_by_field.get(field)
+        selected = right_by_field.get(field) if _field_was_selected_from_right(left, right, field) else left_by_field.get(field)
         if selected is None:
             selected = left_by_field.get(field) or right_by_field.get(field)
         if selected is not None:
@@ -636,11 +1084,10 @@ def _field_was_selected_from_right(
     left: MarketQuoteFundamentalsRecord,
     right: MarketQuoteFundamentalsRecord,
     field: str,
-    right_is_newer: bool,
 ) -> bool:
     right_value = getattr(right, field)
     left_value = getattr(left, field)
-    return right_value is not None and (left_value is None or right_is_newer)
+    return right_value is not None and left_value is None
 
 
 def _quote_provenance_by_field(record: MarketQuoteFundamentalsRecord) -> dict[str, MarketDataFieldProvenance]:
@@ -698,12 +1145,8 @@ def _dedupe_field_provenance(rows: Iterable[MarketDataFieldProvenance]) -> tuple
     return tuple(result)
 
 
-def _prefer_field(left: Any, right: Any, right_is_newer: bool) -> Any:
-    if right is None:
-        return left
-    if left is None or right_is_newer:
-        return right
-    return left
+def _prefer_ladder_field(left: Any, right: Any) -> Any:
+    return left if left is not None else right
 
 
 def _record_is_newer(incoming: MarketQuoteFundamentalsRecord, existing: MarketQuoteFundamentalsRecord) -> bool:
@@ -747,9 +1190,35 @@ def _limited_symbols(symbols: Iterable[str], max_symbols: int) -> tuple[str, ...
     return tuple(result)
 
 
+def _limited_ciks(ciks: Iterable[str], max_symbols: int) -> tuple[str, ...]:
+    if max_symbols <= 0:
+        return ()
+    seen: set[str] = set()
+    result: list[str] = []
+    for cik in ciks:
+        clean = _normalize_cik(cik)
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        result.append(clean)
+        if len(result) >= max_symbols:
+            break
+    return tuple(result)
+
+
 def _normalize_symbol(value: Any) -> str:
     symbol = str(value or "").strip().upper().replace("/", ".")
     return symbol if symbol and len(symbol) <= 16 else ""
+
+
+def _normalize_cik(value: Any) -> str:
+    digits = re.sub(r"\D", "", str(value or ""))
+    return digits.zfill(10) if digits else ""
+
+
+def _fmp_cik_param(value: Any) -> str:
+    normalized = _normalize_cik(value)
+    return normalized.lstrip("0") or normalized
 
 
 def _optional_string(value: Any) -> str | None:
@@ -818,9 +1287,37 @@ def _detect_fmp_plan_limit(payload: Any) -> str | None:
     return None
 
 
+def _detect_alpha_vantage_warning(payload: Any) -> str | None:
+    if not isinstance(payload, Mapping):
+        return None
+    for key in ("Error Message", "Note", "Information"):
+        value = payload.get(key)
+        if value:
+            return f"Alpha Vantage provider warning: {value}"
+    compact = " ".join(str(value) for value in payload.values() if isinstance(value, (str, int, float))).lower()
+    if compact and any(term in compact for term in ("limit", "premium", "rate", "apikey", "invalid api")):
+        return f"Alpha Vantage provider warning: {_short_warning(compact, None)}"
+    return None
+
+
 def _is_fmp_limit_warning(message: str) -> bool:
     compact = str(message or "").lower()
     return any(term in compact for term in ("limit", "quota", "rate", "plan", "429", "403", "401"))
+
+
+def _is_alpha_vantage_limit_warning(message: str) -> bool:
+    compact = str(message or "").lower()
+    return any(term in compact for term in ("limit", "premium", "rate", "apikey", "invalid api", "429", "403", "401"))
+
+
+def _merge_diagnostics(target: dict[str, int], source: Mapping[str, int] | None) -> None:
+    for key, value in (source or {}).items():
+        try:
+            amount = int(value)
+        except (TypeError, ValueError):
+            continue
+        if amount:
+            target[str(key)] = target.get(str(key), 0) + amount
 
 
 def _short_warning(message: str, api_key: str | None) -> str:
