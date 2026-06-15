@@ -125,9 +125,7 @@ def _show_hyperliquid_usdc_transfer(
             return
 
         expected = (
-            f"TRANSFER {amount:g} USDC FROM "
-            f"{source_config.account_label.upper()} TO "
-            f"{destination_config.account_label.upper()}"
+            f"TRANSFER {amount:g}"
         )
 
         confirmation = simpledialog.askstring(
