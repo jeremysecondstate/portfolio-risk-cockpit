@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import date
 from types import SimpleNamespace
 
@@ -85,11 +86,14 @@ class _FakeOpenAiClient:
 
 
 class _FakeTkVar:
-    def __init__(self, value: str = "") -> None:
+    def __init__(self, value: object = "") -> None:
         self.value = value
 
-    def set(self, value: str) -> None:
+    def set(self, value: object) -> None:
         self.value = value
+
+    def get(self):
+        return self.value
 
 
 class _FakeTextWidget:
@@ -116,6 +120,36 @@ class _FakeTree:
 
     def select(self, *iids: str) -> None:
         self._selection = tuple(iids)
+
+
+class _FakeCanvas:
+    def __init__(self, width: int = 900) -> None:
+        self.width = width
+        self.calls: list[tuple[str, tuple, dict]] = []
+        self.visible = True
+        self.grid_calls: list[tuple[str, tuple, dict]] = []
+
+    def delete(self, *args) -> None:
+        self.calls.append(("delete", args, {}))
+
+    def winfo_width(self) -> int:
+        return self.width
+
+    def grid(self, *args, **kwargs) -> None:
+        self.visible = True
+        self.grid_calls.append(("grid", args, kwargs))
+
+    def grid_remove(self) -> None:
+        self.visible = False
+        self.grid_calls.append(("grid_remove", (), {}))
+
+    def create_text(self, *args, **kwargs) -> int:
+        self.calls.append(("text", args, kwargs))
+        return len(self.calls)
+
+    def create_rectangle(self, *args, **kwargs) -> int:
+        self.calls.append(("rectangle", args, kwargs))
+        return len(self.calls)
 
 
 class _FakeMarketDataProvider:
@@ -193,6 +227,80 @@ def test_market_screener_merge_combines_universe_recent_and_upcoming_rows() -> N
     assert beta.next_earnings_date is None
 
 
+def test_market_screener_cik_merge_resolves_blank_ticker_filing_from_universe() -> None:
+    filing = replace(
+        _recent_record(),
+        ticker=None,
+        cik="42",
+        company_name="Matched Filing Name Inc.",
+        exchange=None,
+        sector=None,
+        industry=None,
+        guidance_flag=True,
+        risk_flags=("Customer concentration",),
+        filing_url="https://example.test/matched-8k.htm",
+        exhibit_url="https://example.test/matched-ex99.htm",
+    )
+
+    records = build_market_screener_records(
+        [
+            MarketUniverseEntry(
+                "MTCH",
+                "Matched Universe Corp.",
+                cik="0000000042",
+                exchange="NYSE",
+                sector="Technology",
+                industry="Software",
+                source="SEC company_tickers.json",
+            )
+        ],
+        [filing],
+        fetched_at="2026-06-14T10:00:00+00:00",
+    )
+
+    assert len(records) == 1
+    row = records[0]
+    assert row.symbol == "MTCH"
+    assert row.company_name == "Matched Universe Corp."
+    assert row.exchange == "NYSE"
+    assert row.sector == "Technology"
+    assert row.industry == "Software"
+    assert row.recent_filing_date == "2026-06-05"
+    assert "Guidance mentioned" in row.signals
+    assert "Customer concentration" in row.risk_flags
+    assert "SEC EDGAR" in row.sources
+    assert "SEC company_tickers.json" in row.sources
+    assert "https://example.test/matched-8k.htm" in row.source_links
+    assert "https://example.test/matched-ex99.htm" in row.source_links
+
+
+def test_market_screener_blank_ticker_filing_without_cik_match_stays_unresolved() -> None:
+    filing = replace(
+        _recent_record(),
+        ticker=None,
+        cik="0000000099",
+        company_name="Unmatched Filing Corp.",
+        exchange=None,
+        sector=None,
+        industry=None,
+        risk_flags=("Revenue decline",),
+    )
+
+    records = build_market_screener_records(
+        [MarketUniverseEntry("BETA", "Beta Inc", cik="0000000002", exchange="Nasdaq", sector="Technology")],
+        [filing],
+        fetched_at="2026-06-14T10:00:00+00:00",
+    )
+
+    filing_row = next(record for record in records if record.cik == "0000000099")
+    assert filing_row.symbol == ""
+    assert filing_row.company_name == "Unmatched Filing Corp."
+    assert filing_row.exchange is None
+    assert filing_row.sector is None
+    assert filing_row.industry is None
+    assert "Revenue decline" in filing_row.risk_flags
+
+
 def test_market_screener_quote_fundamental_records_merge_correctly() -> None:
     records = build_market_screener_records(
         [MarketUniverseEntry("ACME", "Acme Corp", exchange="Nasdaq")],
@@ -228,6 +336,44 @@ def test_market_screener_quote_fundamental_records_merge_correctly() -> None:
     assert "Mover" in acme.signals
     assert "Local market data file" in acme.sources
     assert "https://example.test/acme" in acme.source_links
+
+
+def test_market_screener_market_data_candidates_include_cik_resolved_filing_symbol() -> None:
+    universe = MarketUniverseSnapshot(
+        records=(
+            MarketUniverseEntry("ZZZZ", "Quiet Corp", cik="0000000007"),
+            MarketUniverseEntry("MTCH", "Matched Universe Corp.", cik="0000000042", exchange="NYSE", sector="Technology", industry="Software"),
+        ),
+        fetched_at="2026-06-14T10:00:00+00:00",
+        sources=("Fixture",),
+        statuses=(),
+    )
+    filing = replace(
+        _recent_record(),
+        ticker=None,
+        cik="0000000042",
+        company_name="Matched Filing Name Inc.",
+        exchange=None,
+        sector=None,
+        industry=None,
+        guidance_flag=True,
+    )
+    provider = _FakeMarketDataProvider({"MTCH": MarketQuoteFundamentalsRecord("MTCH", price=42.0, volume=4200, source="Fake quote")})
+
+    snapshot = fetch_market_screener_snapshot(
+        universe_snapshot=universe,
+        recent_records=(filing,),
+        upcoming_records=(),
+        market_data_provider=provider,
+        market_data_symbol_limit=1,
+    )
+
+    assert provider.calls == [(("MTCH",), 1, False)]
+    row = next(record for record in snapshot.records if record.symbol == "MTCH")
+    assert row.price == 42.0
+    assert row.volume == 4200
+    assert row.recent_filing_date == "2026-06-05"
+    assert "Guidance mentioned" in row.signals
 
 
 def test_market_screener_initial_market_data_enrichment_respects_cap_and_reports_scope() -> None:
@@ -688,6 +834,82 @@ def test_market_screener_ui_values_handle_missing_numeric_fields() -> None:
     assert values[3] == "Acme Corp"
     assert "--" in values
     assert "Not extracted" not in values
+
+
+def test_market_screener_summary_strip_is_compact_and_keeps_counts_visible() -> None:
+    records = [
+        MarketScreenerRecord(
+            "HOLD",
+            "Held Corp",
+            exchange="Nasdaq",
+            sector="Technology",
+            industry="Software",
+            price=120.0,
+            market_cap=1_000_000_000,
+            volume=2_000_000,
+            avg_volume=1_500_000,
+            change_percent=3.2,
+            pe_ratio=22.0,
+            eps=1.25,
+            revenue_growth=12.0,
+            shares_float=50_000_000,
+            next_earnings_date="2026-07-21",
+            signals=("Schwab holding",),
+            sources=("Local app holdings", "FMP quote"),
+            source_links=("https://example.test/hold",),
+            portfolio_quantity=10,
+        ),
+        MarketScreenerRecord("QUOT", "Quote Corp", price=14.0, volume=100_000, sources=("Schwab quote",)),
+        MarketScreenerRecord("FILI", "Filing Corp", recent_filing_date="2026-06-12", sources=("SEC EDGAR",)),
+        MarketScreenerRecord("BASE", "Base Corp"),
+    ]
+
+    groups = earnings_radar_extension._screener_summary_groups(records)
+    canvas = _FakeCanvas()
+    earnings_radar_extension._draw_screener_summary_strip(canvas, groups)
+    text_values = [kwargs["text"] for call, _args, kwargs in canvas.calls if call == "text"]
+
+    assert earnings_radar_extension.MARKET_SCREENER_SUMMARY_STRIP_HEIGHT < earnings_radar_extension.EARNINGS_RADAR_CHART_HEIGHT
+    assert earnings_radar_extension.MARKET_SCREENER_TABLE_ROWHEIGHT == 38
+    assert groups[0][1] == {"My Holdings": 1, "Not held": 3}
+    assert "Portfolio" in text_values
+    assert "Data" in text_values
+    assert "Completeness" in text_values
+    assert "My Holdings" in text_values
+    assert "Not held" in text_values
+    assert "Universe only" in text_values
+    assert "1" in text_values
+    assert "3" in text_values
+    assert any(call == "rectangle" for call, _args, _kwargs in canvas.calls)
+
+
+def test_market_screener_summary_toggle_collapses_canvas_and_restores_redraw(monkeypatch) -> None:
+    canvas = _FakeCanvas()
+    app = SimpleNamespace(
+        market_screener_summary_visible_var=_FakeTkVar(True),
+        market_screener_summary_toggle_var=_FakeTkVar("Hide Summary"),
+        market_screener_chart=canvas,
+        market_screener_filtered_records=[MarketScreenerRecord("ACME", "Acme Corp")],
+    )
+    redraws: list[list[MarketScreenerRecord]] = []
+    monkeypatch.setattr(earnings_radar_extension, "_draw_screener_chart", lambda target: redraws.append(list(target.market_screener_filtered_records)))
+
+    earnings_radar_extension._toggle_screener_summary(app)
+
+    assert app.market_screener_summary_visible_var.get() is False
+    assert app.market_screener_summary_toggle_var.get() == "Show Summary"
+    assert canvas.visible is False
+    assert canvas.grid_calls[-1][0] == "grid_remove"
+    assert redraws == []
+
+    app.market_screener_filtered_records = [MarketScreenerRecord("BETA", "Beta Inc")]
+    earnings_radar_extension._toggle_screener_summary(app)
+
+    assert app.market_screener_summary_visible_var.get() is True
+    assert app.market_screener_summary_toggle_var.get() == "Hide Summary"
+    assert canvas.visible is True
+    assert canvas.grid_calls[-1][0] == "grid"
+    assert [[record.symbol for record in rows] for rows in redraws] == [["BETA"]]
 
 
 def test_high_volume_mover_filter_requires_actual_market_data() -> None:

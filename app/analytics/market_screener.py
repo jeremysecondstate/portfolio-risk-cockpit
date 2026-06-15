@@ -22,7 +22,7 @@ from app.data.market_data_provider import (
     configured_market_data_provider,
 )
 from app.data.market_universe import MarketUniverseEntry, MarketUniverseSnapshot, fetch_market_universe_snapshot
-from app.data.sec_edgar import SecEdgarClient
+from app.data.sec_edgar import SecEdgarClient, normalize_cik
 
 
 LOGGER = logging.getLogger(__name__)
@@ -373,19 +373,22 @@ def build_market_screener_records(
 ) -> list[MarketScreenerRecord]:
     fetched_at = fetched_at or _now()
     merged: dict[str, MarketScreenerRecord] = {}
+    universe_records = [_record_from_universe(entry, fetched_at=fetched_at) for entry in universe]
+    universe_metadata_by_cik = _unambiguous_cik_metadata(universe_records)
 
-    for entry in universe:
-        record = _record_from_universe(entry, fetched_at=fetched_at)
+    for record in universe_records:
         _merge_into(merged, record)
 
     for record in recent_records:
-        _merge_into(merged, _record_from_recent_earnings(record, fetched_at=fetched_at))
+        filing_record = _record_from_recent_earnings(record, fetched_at=fetched_at)
+        _merge_into(merged, _resolve_record_metadata_by_cik(filing_record, universe_metadata_by_cik))
 
     for record in upcoming_records:
         _merge_into(merged, _record_from_upcoming_earnings(record, fetched_at=fetched_at))
 
     for record in supplemental_records:
-        _merge_into(merged, _normalize_record(record, fetched_at=fetched_at))
+        supplemental_record = _normalize_record(record, fetched_at=fetched_at)
+        _merge_into(merged, _resolve_record_metadata_by_cik(supplemental_record, universe_metadata_by_cik))
 
     for record in market_data_records:
         _merge_into(merged, _record_from_market_data(record, fetched_at=fetched_at))
@@ -1143,8 +1146,42 @@ def _record_key(record: MarketScreenerRecord) -> str:
     symbol = _normalize_symbol(record.symbol)
     if symbol:
         return f"SYMBOL:{symbol}"
-    cik = str(record.cik or "").strip()
+    cik = _normalize_cik_for_match(record.cik)
     return f"CIK:{cik}" if cik else ""
+
+
+def _unambiguous_cik_metadata(records: Iterable[MarketScreenerRecord]) -> dict[str, MarketScreenerRecord]:
+    grouped: dict[str, list[MarketScreenerRecord]] = {}
+    for record in records:
+        cik = _normalize_cik_for_match(record.cik)
+        symbol = _normalize_symbol(record.symbol)
+        if cik and symbol:
+            grouped.setdefault(cik, []).append(record)
+
+    metadata: dict[str, MarketScreenerRecord] = {}
+    for cik, rows in grouped.items():
+        if len({_normalize_symbol(row.symbol) for row in rows if _normalize_symbol(row.symbol)}) != 1:
+            continue
+        merged = rows[0]
+        for row in rows[1:]:
+            merged = merge_market_screener_record(merged, row)
+        metadata[cik] = merged
+    return metadata
+
+
+def _resolve_record_metadata_by_cik(
+    record: MarketScreenerRecord,
+    metadata_by_cik: Mapping[str, MarketScreenerRecord],
+) -> MarketScreenerRecord:
+    if _normalize_symbol(record.symbol):
+        return record
+    cik = _normalize_cik_for_match(record.cik)
+    if not cik:
+        return record
+    metadata = metadata_by_cik.get(cik)
+    if metadata is None:
+        return record
+    return merge_market_screener_record(metadata, record)
 
 
 def _event_type_matches(record: MarketScreenerRecord, event_type: str) -> bool:
@@ -1638,6 +1675,13 @@ def _dedupe_texts(values: Iterable[Any]) -> list[str]:
 
 def _normalize_symbol(value: Any) -> str:
     return str(value or "").strip().upper().replace("/", ".")
+
+
+def _normalize_cik_for_match(value: Any) -> str:
+    try:
+        return normalize_cik(value)
+    except (TypeError, ValueError):
+        return ""
 
 
 def _now() -> str:
