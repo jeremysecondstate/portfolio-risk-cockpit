@@ -114,7 +114,7 @@ class EarningsRadarSnapshot:
 class EarningsRadarStore:
     def __init__(self, cache_dir: str | Path | None = None) -> None:
         self.cache_dir = Path(cache_dir or DEFAULT_CACHE_DIR)
-        self.path = self.cache_dir / "earnings_radar_records.json"
+        self.path = self.cache_dir / f"earnings_radar_records_{datetime.now(timezone.utc).timestamp()}.json"
 
     def load(self, *, max_age: timedelta | None = None) -> EarningsRadarSnapshot | None:
         if not self.path.exists():
