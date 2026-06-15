@@ -41,13 +41,11 @@ def install_trading_workspace_extension(app_cls: Type[tk.Tk]) -> None:
 
 
 def _build_layout_with_trading_workspace(self: tk.Tk) -> None:
-    root = ttk.Frame(self, style="Canvas.TFrame", padding=18)
+    root = ttk.Frame(self, style="Canvas.TFrame", padding=(18, 8, 18, 18))
     root.pack(fill=tk.BOTH, expand=True)
 
-    self._build_header(root)
-
     tabs = ttk.Notebook(root)
-    tabs.pack(fill=tk.BOTH, expand=True, pady=(16, 0))
+    tabs.pack(fill=tk.BOTH, expand=True, pady=(0, 0))
 
     cockpit_tab = ttk.Frame(tabs, style="Canvas.TFrame", padding=0)
     schwab_tab = ttk.Frame(tabs, style="Canvas.TFrame", padding=14)
