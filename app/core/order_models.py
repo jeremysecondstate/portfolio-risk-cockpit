@@ -31,6 +31,58 @@ class TimeInForce(str, Enum):
 
 
 SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES = tuple(option.value for option in TimeInForce)
+SCHWAB_EQUITY_API_SESSION_CHOICES = ("NORMAL", "AM", "PM", "SEAMLESS")
+SCHWAB_EQUITY_API_DURATION_CHOICES = ("DAY", "GOOD_TILL_CANCEL")
+SCHWAB_EQUITY_API_UNSUPPORTED_TIFS = frozenset({TimeInForce.EXTO, TimeInForce.GTC_EXTO})
+SCHWAB_EQUITY_EXTENDED_HOURS_TIFS = frozenset(
+    {
+        TimeInForce.EXT,
+        TimeInForce.GTC_EXT,
+        TimeInForce.EXTO,
+        TimeInForce.GTC_EXTO,
+        TimeInForce.AM,
+        TimeInForce.PM,
+    }
+)
+SCHWAB_EQUITY_TIF_API_MAP = {
+    TimeInForce.DAY: ("NORMAL", "DAY"),
+    TimeInForce.GTC: ("NORMAL", "GOOD_TILL_CANCEL"),
+    TimeInForce.EXT: ("SEAMLESS", "DAY"),
+    TimeInForce.GTC_EXT: ("SEAMLESS", "GOOD_TILL_CANCEL"),
+    TimeInForce.AM: ("AM", "DAY"),
+    TimeInForce.PM: ("PM", "DAY"),
+}
+SCHWAB_EQUITY_TIME_IN_FORCE_ALIASES = {
+    "day": TimeInForce.DAY,
+    "gtc": TimeInForce.GTC,
+    "good_till_cancel": TimeInForce.GTC,
+    "good till cancel": TimeInForce.GTC,
+    "ext": TimeInForce.EXT,
+    "day_ext": TimeInForce.EXT,
+    "day ext": TimeInForce.EXT,
+    "day (ext 13h)": TimeInForce.EXT,
+    "gtc_ext": TimeInForce.GTC_EXT,
+    "gtc ext": TimeInForce.GTC_EXT,
+    "gtc (ext 13h)": TimeInForce.GTC_EXT,
+    "exto": TimeInForce.EXTO,
+    "day_exto": TimeInForce.EXTO,
+    "day exto": TimeInForce.EXTO,
+    "day (exto)": TimeInForce.EXTO,
+    "overnight": TimeInForce.EXTO,
+    "24h": TimeInForce.EXTO,
+    "24_5": TimeInForce.EXTO,
+    "gtc_exto": TimeInForce.GTC_EXTO,
+    "gtc exto": TimeInForce.GTC_EXTO,
+    "gtc (exto)": TimeInForce.GTC_EXTO,
+    "day_ext_am": TimeInForce.AM,
+    "day ext am": TimeInForce.AM,
+    "day (ext am)": TimeInForce.AM,
+    "am": TimeInForce.AM,
+    "day_ext_pm": TimeInForce.PM,
+    "day ext pm": TimeInForce.PM,
+    "day (ext pm)": TimeInForce.PM,
+    "pm": TimeInForce.PM,
+}
 
 
 def normalize_time_in_force(value: str | TimeInForce) -> TimeInForce:
@@ -38,38 +90,7 @@ def normalize_time_in_force(value: str | TimeInForce) -> TimeInForce:
         return value
 
     raw = str(value or "").strip()
-    aliases = {
-        "day": TimeInForce.DAY,
-        "gtc": TimeInForce.GTC,
-        "good_till_cancel": TimeInForce.GTC,
-        "good till cancel": TimeInForce.GTC,
-        "ext": TimeInForce.EXT,
-        "day_ext": TimeInForce.EXT,
-        "day ext": TimeInForce.EXT,
-        "day (ext 13h)": TimeInForce.EXT,
-        "gtc_ext": TimeInForce.GTC_EXT,
-        "gtc ext": TimeInForce.GTC_EXT,
-        "gtc (ext 13h)": TimeInForce.GTC_EXT,
-        "exto": TimeInForce.EXTO,
-        "day_exto": TimeInForce.EXTO,
-        "day exto": TimeInForce.EXTO,
-        "day (exto)": TimeInForce.EXTO,
-        "overnight": TimeInForce.EXTO,
-        "24h": TimeInForce.EXTO,
-        "24_5": TimeInForce.EXTO,
-        "gtc_exto": TimeInForce.GTC_EXTO,
-        "gtc exto": TimeInForce.GTC_EXTO,
-        "gtc (exto)": TimeInForce.GTC_EXTO,
-        "day_ext_am": TimeInForce.AM,
-        "day ext am": TimeInForce.AM,
-        "day (ext am)": TimeInForce.AM,
-        "am": TimeInForce.AM,
-        "day_ext_pm": TimeInForce.PM,
-        "day ext pm": TimeInForce.PM,
-        "day (ext pm)": TimeInForce.PM,
-        "pm": TimeInForce.PM,
-    }
-    normalized = aliases.get(raw.lower())
+    normalized = SCHWAB_EQUITY_TIME_IN_FORCE_ALIASES.get(raw.lower())
     if normalized is not None:
         return normalized
     return TimeInForce(raw)
@@ -77,17 +98,33 @@ def normalize_time_in_force(value: str | TimeInForce) -> TimeInForce:
 
 def schwab_equity_session_duration(time_in_force: str | TimeInForce) -> tuple[str, str]:
     tif = normalize_time_in_force(time_in_force)
+    if tif in SCHWAB_EQUITY_API_UNSUPPORTED_TIFS:
+        raise ValueError(
+            f"TIF {tif.value} is visible in thinkorswim, but the checked-in Schwab Trader API "
+            "schema does not list EXTO as a valid order session. Schwab preview/live submit is "
+            "blocked instead of sending an invalid payload."
+        )
+    return SCHWAB_EQUITY_TIF_API_MAP[tif]
+
+
+def schwab_equity_tif_requires_limit_order(time_in_force: str | TimeInForce) -> bool:
+    return normalize_time_in_force(time_in_force) in SCHWAB_EQUITY_EXTENDED_HOURS_TIFS
+
+
+def schwab_equity_tif_from_session_duration(session: str, duration: str) -> TimeInForce:
+    clean_session = str(session or "NORMAL").strip().upper().replace(" ", "_")
+    clean_duration = str(duration or "DAY").strip().upper().replace(" ", "_")
     mapping = {
-        TimeInForce.DAY: ("NORMAL", "DAY"),
-        TimeInForce.GTC: ("NORMAL", "GOOD_TILL_CANCEL"),
-        TimeInForce.EXT: ("SEAMLESS", "DAY"),
-        TimeInForce.GTC_EXT: ("SEAMLESS", "GOOD_TILL_CANCEL"),
-        TimeInForce.EXTO: ("EXTO", "DAY"),
-        TimeInForce.GTC_EXTO: ("EXTO", "GOOD_TILL_CANCEL"),
-        TimeInForce.AM: ("AM", "DAY"),
-        TimeInForce.PM: ("PM", "DAY"),
+        ("NORMAL", "DAY"): TimeInForce.DAY,
+        ("NORMAL", "GOOD_TILL_CANCEL"): TimeInForce.GTC,
+        ("SEAMLESS", "DAY"): TimeInForce.EXT,
+        ("SEAMLESS", "GOOD_TILL_CANCEL"): TimeInForce.GTC_EXT,
+        ("AM", "DAY"): TimeInForce.AM,
+        ("PM", "DAY"): TimeInForce.PM,
+        ("EXTO", "DAY"): TimeInForce.EXTO,
+        ("EXTO", "GOOD_TILL_CANCEL"): TimeInForce.GTC_EXTO,
     }
-    return mapping[tif]
+    return mapping.get((clean_session, clean_duration), TimeInForce.GTC if clean_duration == "GOOD_TILL_CANCEL" else TimeInForce.DAY)
 
 
 @dataclass(frozen=True)
