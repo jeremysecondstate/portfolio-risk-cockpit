@@ -78,7 +78,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
     def _build_header(self, parent: ttk.Frame) -> None:
         header = ttk.Frame(parent)
         header.pack(fill=tk.X)
-        ttk.Label(header, text="Schwab Trading Cockpit", style="Header.TLabel").pack(side=tk.LEFT)
+        ttk.Label(header, text="Schwab & Hyperliquid", style="Header.TLabel").pack(side=tk.LEFT)
 
         right = ttk.Frame(header)
         right.pack(side=tk.RIGHT)
