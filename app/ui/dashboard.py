@@ -33,7 +33,7 @@ load_dotenv()
 class PortfolioRiskCockpitApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Schwab Trading Cockpit")
+        self.title("Schwyperliquid Market Cockpit")
         self.geometry("1180x760")
         self.minsize(1060, 680)
 

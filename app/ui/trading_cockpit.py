@@ -34,11 +34,11 @@ from app.ui.dashboard import PortfolioRiskCockpitApp
 
 
 class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
-    """UI extension for the Schwab Trading Cockpit."""
+    """UI extension for the Schwyperliquid Market Cockpit."""
 
     def __init__(self) -> None:
         tk.Tk.__init__(self)
-        self.title("Schwab Trading Cockpit")
+        self.title("Schwyperliquid Market Cockpit")
         self.geometry("1180x760")
         self.minsize(1060, 680)
 

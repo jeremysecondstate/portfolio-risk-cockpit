@@ -92,6 +92,32 @@ class _FakeTkVar:
         self.value = value
 
 
+class _FakeTextWidget:
+    def __init__(self) -> None:
+        self.content = ""
+        self.options: dict[str, object] = {}
+
+    def configure(self, **kwargs) -> None:
+        self.options.update(kwargs)
+
+    def delete(self, *_args) -> None:
+        self.content = ""
+
+    def insert(self, _index, text: str) -> None:
+        self.content += text
+
+
+class _FakeTree:
+    def __init__(self, selection=()) -> None:
+        self._selection = tuple(selection)
+
+    def selection(self):
+        return self._selection
+
+    def select(self, *iids: str) -> None:
+        self._selection = tuple(iids)
+
+
 class _FakeMarketDataProvider:
     provider_name = "fake_market_data"
 
@@ -326,6 +352,37 @@ def test_market_screener_selected_row_enrichment_requests_only_selected_symbol(m
     earnings_radar_extension._request_selected_row_market_data_enrichment(app, MarketScreenerRecord("BETA", "Beta Inc"))
 
     assert calls == [(("BETA",), {"reason": "selected row", "force_refresh": False, "max_symbols": 1})]
+
+
+def test_market_screener_selection_change_refreshes_popout_context(monkeypatch) -> None:
+    tree = _FakeTree()
+    acme = MarketScreenerRecord("ACME", "Acme Corp", signals=("Upcoming earnings",), sources=("Alpha Vantage",))
+    beta = MarketScreenerRecord("BETA", "Beta Inc", risk_flags=("Revenue decline",), sources=("SEC EDGAR",))
+    app = SimpleNamespace(
+        market_screener_table=tree,
+        market_screener_row_map={"row_acme": acme, "row_beta": beta},
+        market_screener_ai_status_var=_FakeTkVar(),
+        market_screener_detail_text=_FakeTextWidget(),
+        _market_screener_ai_running=False,
+    )
+    enrichment_requests: list[MarketScreenerRecord] = []
+    monkeypatch.setattr(earnings_radar_extension, "_request_selected_row_market_data_enrichment", lambda _app, record: enrichment_requests.append(record))
+
+    tree.select("row_acme")
+    earnings_radar_extension._on_screener_selection_changed(app)
+
+    assert app.market_screener_selected_record == acme
+    assert app.market_screener_ai_status_var.value.startswith("Selected ACME")
+    assert "ACME | Acme Corp" in app.market_screener_detail_text.content
+
+    tree.select("row_beta")
+    earnings_radar_extension._on_screener_selection_changed(app)
+
+    assert app.market_screener_selected_record == beta
+    assert app.market_screener_ai_status_var.value.startswith("Selected BETA")
+    assert "BETA | Beta Inc" in app.market_screener_detail_text.content
+    assert "ACME | Acme Corp" not in app.market_screener_detail_text.content
+    assert enrichment_requests == [acme, beta]
 
 
 def test_local_market_data_file_provider_loads_capped_requested_symbols(tmp_path) -> None:

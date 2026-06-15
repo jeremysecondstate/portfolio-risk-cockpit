@@ -118,6 +118,11 @@ RECENT_NUMERIC_COLUMNS = {"revenue", "revenue_growth", "eps", "net_income"}
 UPCOMING_NUMERIC_COLUMNS = {"estimate"}
 SCREENER_NUMERIC_COLUMNS = {"price", "change_percent", "volume", "avg_volume", "market_cap", "pe_ratio", "eps", "revenue_growth", "float_shares", "data_completeness", "signals", "risk_flags", "sources"}
 MARKET_DATA_PAGE_ENRICHMENT_CAP = 100
+MARKET_SCREENER_TABLE_STYLE = "MarketScreener.Treeview"
+MARKET_SCREENER_TABLE_HEIGHT = 18
+MARKET_SCREENER_TABLE_ROWHEIGHT = 38
+MARKET_SCREENER_TEXT_FONT = ("Segoe UI", 11)
+MARKET_SCREENER_SOURCE_FONT = ("Segoe UI", 10)
 
 
 def install_earnings_radar_extension(app_cls: Type[tk.Tk]) -> None:
@@ -218,6 +223,7 @@ def _ensure_state(self: tk.Tk) -> None:
     self.market_screener_has_price_volume_data_var = tk.BooleanVar(value=False)
     self.market_screener_page_size_var = tk.StringVar(value="100")
     self.market_screener_selected_record: MarketScreenerRecord | None = None
+    self.market_screener_selected_summary_var = tk.StringVar(value="No screener row selected.")
     self.market_screener_ai_status_var = tk.StringVar(value="Select a screener row for row-grounded AI.")
     self.market_screener_source_summary_var = tk.StringVar(value="Market data/source status will appear here after load.")
     self._market_screener_ai_running = False
@@ -272,6 +278,7 @@ def _ensure_state(self: tk.Tk) -> None:
 def _build_screener_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     parent.columnconfigure(0, weight=1)
     parent.rowconfigure(3, weight=1)
+    _configure_market_screener_tree_style(parent)
     _header(
         parent,
         "Market Intelligence Screener",
@@ -280,17 +287,24 @@ def _build_screener_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
     _build_screener_filters(self, parent)
     self.market_screener_chart = _chart(parent, row=2)
-    self.market_screener_table = _table(parent, row=3, title="All Stocks / Screener", columns=SCREENER_COLUMNS, sort=lambda col: _sort_screener(self, col))
+    self.market_screener_table = _table(
+        parent,
+        row=3,
+        title="All Stocks / Screener",
+        columns=SCREENER_COLUMNS,
+        sort=lambda col: _sort_screener(self, col),
+        style=MARKET_SCREENER_TABLE_STYLE,
+        height=MARKET_SCREENER_TABLE_HEIGHT,
+    )
     self.market_screener_table.bind("<Double-1>", lambda _event, app=self: _open_screener_source(app), add="+")
     self.market_screener_table.bind("<<TreeviewSelect>>", lambda _event, app=self: _on_screener_selection_changed(app), add="+")
     self.market_screener_table.tag_configure("holding", foreground=polished_theme.ACCENT)
     self.market_screener_table.tag_configure("signal", foreground=polished_theme.ACCENT_SOFT)
     self.market_screener_table.tag_configure("risk", foreground=polished_theme.NEGATIVE)
-    _build_screener_detail_panel(self, parent, row=4)
     _footer(
         self,
         parent,
-        row=5,
+        row=4,
         page_var_name="market_screener_page_var",
         size_var=self.market_screener_page_size_var,
         prev=lambda: _turn_screener_page(self, -1),
@@ -339,69 +353,168 @@ def _build_screener_filters(self: tk.Tk, parent: ttk.Frame) -> None:
     ttk.Button(actions, text="Open Source", command=lambda: _open_screener_source(self)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Open Symbol Chat", command=lambda: _open_screener_symbol_chat(self)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Clear Filters", command=lambda: _clear_screener_filters(self)).pack(side=tk.LEFT, padx=(8, 0))
-
-
-def _build_screener_detail_panel(self: tk.Tk, parent: ttk.Frame, *, row: int) -> None:
-    detail = ttk.LabelFrame(parent, text="Selected Screener Context + AI", style="Card.TLabelframe")
-    detail.grid(row=row, column=0, sticky="ew", pady=(0, 8))
-    detail.columnconfigure(0, weight=1)
-    detail.columnconfigure(1, weight=0)
-    ttk.Label(detail, textvariable=self.market_screener_ai_status_var, style="Chip.TLabel").grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(8, 6))
-
-    text_frame = ttk.Frame(detail, style="Panel.TFrame")
-    text_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 8))
-    text_frame.columnconfigure(0, weight=1)
-    self.market_screener_detail_text = tk.Text(
-        text_frame,
-        height=5,
-        wrap=tk.WORD,
-        bg=polished_theme.PANEL,
-        fg=polished_theme.TEXT,
-        insertbackground=polished_theme.TEXT,
-        relief=tk.FLAT,
-        padx=10,
-        pady=8,
-        font=("Segoe UI", 9),
-    )
-    self.market_screener_detail_text.grid(row=0, column=0, sticky="ew")
-    self.market_screener_detail_text.configure(state=tk.DISABLED)
-
-    ttk.Label(text_frame, textvariable=self.market_screener_source_summary_var, style="Chip.TLabel", wraplength=1100).grid(row=1, column=0, sticky="ew", pady=(6, 0))
-    self.market_screener_source_text = tk.Text(
-        text_frame,
-        height=5,
-        wrap=tk.WORD,
-        bg=polished_theme.INPUT,
-        fg=polished_theme.MUTED,
-        insertbackground=polished_theme.TEXT,
-        relief=tk.FLAT,
-        padx=10,
-        pady=6,
-        font=("Segoe UI", 9),
-    )
-    self.market_screener_source_text.grid(row=2, column=0, sticky="ew", pady=(6, 0))
-    self.market_screener_source_text.configure(state=tk.DISABLED)
-
-    actions = ttk.Frame(detail, style="Panel.TFrame")
-    actions.grid(row=1, column=1, sticky="nsew", padx=(0, 8), pady=(0, 8))
-    self.market_screener_ai_analyze_button = ttk.Button(actions, text="Analyze Selected", command=lambda app=self: _run_screener_ai_prompt(app, "Analyze Selected", MARKET_SCREENER_AI_ANALYZE_PROMPT), style="Accent.TButton")
-    self.market_screener_ai_analyze_button.grid(row=0, column=0, sticky="ew", pady=(0, 4))
-    self.market_screener_ai_why_button = ttk.Button(actions, text="Why Interesting?", command=lambda app=self: _run_screener_ai_prompt(app, "Why Interesting?", MARKET_SCREENER_AI_QUICK_PROMPTS["Why Interesting?"]))
-    self.market_screener_ai_why_button.grid(row=1, column=0, sticky="ew", pady=(0, 4))
-    self.market_screener_ai_risks_button = ttk.Button(actions, text="Risks + Diligence", command=lambda app=self: _run_screener_ai_prompt(app, "Risks + Diligence", MARKET_SCREENER_AI_QUICK_PROMPTS["Risks + Diligence"]))
-    self.market_screener_ai_risks_button.grid(row=2, column=0, sticky="ew", pady=(0, 4))
-    self.market_screener_ai_symbol_chat_button = ttk.Button(actions, text="Open Symbol Chat", command=lambda app=self: _open_screener_symbol_chat(app))
-    self.market_screener_ai_symbol_chat_button.grid(row=3, column=0, sticky="ew", pady=(0, 4))
-
-    quick = ttk.Frame(detail, style="Panel.TFrame")
-    quick.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8))
-    ttk.Label(quick, text="AI", style="Subtle.TLabel").pack(side=tk.LEFT, padx=(0, 6))
+    self.market_screener_context_button = ttk.Button(actions, text="Open Selected Context + AI", command=lambda app=self: _open_screener_context_popout(app))
+    self.market_screener_context_button.pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Label(actions, textvariable=self.market_screener_selected_summary_var, style="Chip.TLabel", width=48).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(12, 0))
     self.market_screener_ai_quick_buttons: list[ttk.Button] = []
-    for label, prompt in MARKET_SCREENER_AI_QUICK_PROMPTS.items():
-        button = ttk.Button(quick, text=label, command=lambda prompt_label=label, value=prompt, app=self: _run_screener_ai_prompt(app, prompt_label, value))
-        button.pack(side=tk.LEFT, padx=(0, 6))
-        self.market_screener_ai_quick_buttons.append(button)
     _set_screener_ai_actions_enabled(self, False)
+
+
+def _configure_market_screener_tree_style(parent: tk.Widget) -> None:
+    style = ttk.Style(parent)
+    style.configure(
+        MARKET_SCREENER_TABLE_STYLE,
+        background=polished_theme.INPUT,
+        fieldbackground=polished_theme.INPUT,
+        foreground=polished_theme.TEXT,
+        rowheight=MARKET_SCREENER_TABLE_ROWHEIGHT,
+        font=("Segoe UI", 10),
+        bordercolor=polished_theme.BORDER,
+        borderwidth=0,
+    )
+    style.configure(
+        f"{MARKET_SCREENER_TABLE_STYLE}.Heading",
+        background=polished_theme.TREE_HEADING,
+        foreground=polished_theme.TEXT,
+        font=("Segoe UI", 10, "bold"),
+        padding=10,
+        relief=tk.FLAT,
+    )
+    style.map(MARKET_SCREENER_TABLE_STYLE, background=[("selected", polished_theme.SELECTED)], foreground=[("selected", polished_theme.SELECTED_TEXT)])
+    style.map(f"{MARKET_SCREENER_TABLE_STYLE}.Heading", background=[("active", polished_theme.PANEL_ALT)], foreground=[("active", polished_theme.TEXT)])
+
+
+def _open_screener_context_popout(self: tk.Tk) -> None:
+    window = getattr(self, "market_screener_context_window", None)
+    if not _widget_exists(window):
+        parent = getattr(self, "earnings_radar_window", None)
+        window = tk.Toplevel(parent if _widget_exists(parent) else self)
+        polished_theme.configure_toplevel(window)
+        window.title("Selected Screener Context + AI")
+        window.geometry("1080x780")
+        window.minsize(800, 560)
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(3, weight=3)
+        window.rowconfigure(6, weight=2)
+        self.market_screener_context_window = window
+
+        ttk.Label(window, textvariable=self.market_screener_ai_status_var, style="Chip.TLabel", wraplength=1010).grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 8))
+        actions = ttk.Frame(window, style="Panel.TFrame")
+        actions.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 10))
+        self.market_screener_ai_analyze_button = ttk.Button(
+            actions,
+            text="Analyze Selected",
+            command=lambda app=self: _run_screener_ai_prompt(app, "Analyze Selected", MARKET_SCREENER_AI_ANALYZE_PROMPT),
+            style="Accent.TButton",
+        )
+        self.market_screener_ai_analyze_button.pack(side=tk.LEFT, padx=(0, 8))
+        self.market_screener_ai_why_button = ttk.Button(
+            actions,
+            text="Why Interesting?",
+            command=lambda app=self: _run_screener_ai_prompt(app, "Why Interesting?", MARKET_SCREENER_AI_QUICK_PROMPTS["Why Interesting?"]),
+        )
+        self.market_screener_ai_why_button.pack(side=tk.LEFT, padx=(0, 8))
+        self.market_screener_ai_risks_button = ttk.Button(
+            actions,
+            text="Risks + Diligence",
+            command=lambda app=self: _run_screener_ai_prompt(app, "Risks + Diligence", MARKET_SCREENER_AI_QUICK_PROMPTS["Risks + Diligence"]),
+        )
+        self.market_screener_ai_risks_button.pack(side=tk.LEFT, padx=(0, 8))
+        self.market_screener_ai_quick_buttons = []
+        for label, prompt in MARKET_SCREENER_AI_QUICK_PROMPTS.items():
+            if label in {"Why Interesting?", "Risks + Diligence"}:
+                continue
+            button = ttk.Button(actions, text=label, command=lambda prompt_label=label, value=prompt, app=self: _run_screener_ai_prompt(app, prompt_label, value))
+            button.pack(side=tk.LEFT, padx=(0, 8))
+            self.market_screener_ai_quick_buttons.append(button)
+        self.market_screener_ai_symbol_chat_button = ttk.Button(actions, text="Open Symbol Chat", command=lambda app=self: _open_screener_symbol_chat(app))
+        self.market_screener_ai_symbol_chat_button.pack(side=tk.LEFT)
+
+        ttk.Label(window, text="Selected row context", style="Subtle.TLabel").grid(row=2, column=0, sticky="w", padx=14, pady=(0, 4))
+        self.market_screener_detail_text = _readonly_scrolled_text(
+            window,
+            row=3,
+            bg=polished_theme.PANEL,
+            fg=polished_theme.TEXT,
+            font=MARKET_SCREENER_TEXT_FONT,
+            height=14,
+        )
+        ttk.Label(window, textvariable=self.market_screener_source_summary_var, style="Chip.TLabel", wraplength=1010).grid(row=4, column=0, sticky="ew", padx=14, pady=(12, 4))
+        ttk.Label(window, text="Source/status", style="Subtle.TLabel").grid(row=5, column=0, sticky="w", padx=14, pady=(0, 4))
+        self.market_screener_source_text = _readonly_scrolled_text(
+            window,
+            row=6,
+            bg=polished_theme.INPUT,
+            fg=polished_theme.MUTED,
+            font=MARKET_SCREENER_SOURCE_FONT,
+            height=8,
+        )
+
+        def _close() -> None:
+            self.market_screener_context_window = None
+            self.market_screener_detail_text = None
+            self.market_screener_source_text = None
+            self.market_screener_ai_analyze_button = None
+            self.market_screener_ai_why_button = None
+            self.market_screener_ai_risks_button = None
+            self.market_screener_ai_symbol_chat_button = None
+            self.market_screener_ai_quick_buttons = []
+            window.destroy()
+
+        window.protocol("WM_DELETE_WINDOW", _close)
+
+    record = _selected_screener_record(self, show_message=False)
+    self.market_screener_selected_record = record
+    _update_screener_detail_panel(self, record)
+    _refresh_screener_source_text(self)
+    _set_screener_ai_actions_enabled(self, record is not None)
+    try:
+        window.deiconify()
+        window.lift()
+        window.focus_force()
+    except tk.TclError:
+        pass
+
+
+def _readonly_scrolled_text(
+    parent: tk.Widget,
+    *,
+    row: int,
+    bg: str,
+    fg: str,
+    font: tuple[str, int],
+    height: int,
+) -> tk.Text:
+    frame = ttk.Frame(parent, style="Panel.TFrame")
+    frame.grid(row=row, column=0, sticky="nsew", padx=14)
+    frame.columnconfigure(0, weight=1)
+    frame.rowconfigure(0, weight=1)
+    text = tk.Text(
+        frame,
+        height=height,
+        wrap=tk.WORD,
+        bg=bg,
+        fg=fg,
+        insertbackground=polished_theme.TEXT,
+        relief=tk.FLAT,
+        padx=12,
+        pady=10,
+        font=font,
+    )
+    text.grid(row=0, column=0, sticky="nsew")
+    scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=text.yview)
+    scroll.grid(row=0, column=1, sticky="ns")
+    text.configure(yscrollcommand=scroll.set, state=tk.DISABLED)
+    return text
+
+
+def _widget_exists(widget: Any) -> bool:
+    if widget is None:
+        return False
+    try:
+        return bool(widget.winfo_exists())
+    except (AttributeError, tk.TclError):
+        return False
 
 
 def _build_recent_tab(self: tk.Tk, parent: ttk.Frame) -> None:
@@ -697,8 +810,7 @@ def _populate_screener_table(self: tk.Tk) -> None:
         tags = (tag,) if tag else ()
         tree.insert("", tk.END, iid=iid, values=_screener_values(record), tags=tags)
     self.market_screener_page_var.set(f"Page {self.market_screener_page + 1} / {page_count} - {total} records")
-    if hasattr(self, "market_screener_detail_text"):
-        _on_screener_selection_changed(self)
+    _on_screener_selection_changed(self)
     _request_visible_page_market_data_enrichment(self, force_refresh=False)
 
 
@@ -1238,12 +1350,14 @@ def _on_screener_selection_changed(self: tk.Tk) -> None:
 def _update_screener_detail_panel(self: tk.Tk, record: MarketScreenerRecord | None) -> None:
     if record is None:
         self.market_screener_ai_status_var.set("Select a screener row for row-grounded AI.")
+        _set_var_if_present(self, "market_screener_selected_summary_var", "No screener row selected.")
         _set_screener_detail_text(self, "No screener row selected.")
         return
     symbol = record.symbol or record.cik or "selected row"
     signal = ", ".join(record.signals[:3]) if record.signals else "no screener signals"
     risk = f"{len(record.risk_flags)} risk flag(s)" if record.risk_flags else "no risk flags"
     self.market_screener_ai_status_var.set(f"Selected {symbol} - {market_screener_data_label(record)}; {market_screener_data_completeness_label(record)}; {signal}; {risk}.")
+    _set_var_if_present(self, "market_screener_selected_summary_var", f"{symbol} - {market_screener_data_label(record)}; {market_screener_data_completeness_label(record)}; {risk}.")
     _set_screener_detail_text(self, _screener_detail_text(record))
 
 
@@ -1256,6 +1370,16 @@ def _set_screener_detail_text(self: tk.Tk, text: str) -> None:
         widget.delete("1.0", tk.END)
         widget.insert(tk.END, redact_symbol_chat_secrets(text))
         widget.configure(state=tk.DISABLED)
+    except tk.TclError:
+        return
+
+
+def _set_var_if_present(self: tk.Tk, name: str, value: str) -> None:
+    variable = getattr(self, name, None)
+    if variable is None:
+        return
+    try:
+        variable.set(value)
     except tk.TclError:
         return
 
@@ -1979,12 +2103,29 @@ def _chart(parent: ttk.Frame, *, row: int) -> tk.Canvas:
     return canvas
 
 
-def _table(parent: ttk.Frame, *, row: int, title: str, columns: tuple[tuple[str, str, int, str], ...], sort: Callable[[str], None]) -> ttk.Treeview:
+def _table(
+    parent: ttk.Frame,
+    *,
+    row: int,
+    title: str,
+    columns: tuple[tuple[str, str, int, str], ...],
+    sort: Callable[[str], None],
+    style: str | None = None,
+    height: int = 14,
+) -> ttk.Treeview:
     frame = ttk.LabelFrame(parent, text=title, style="Card.TLabelframe")
     frame.grid(row=row, column=0, sticky="nsew", pady=(0, 8))
     frame.rowconfigure(0, weight=1)
     frame.columnconfigure(0, weight=1)
-    tree = ttk.Treeview(frame, columns=tuple(column_id for column_id, _label, _width, _anchor in columns), show="headings", height=14, selectmode="browse")
+    tree_kwargs: dict[str, Any] = {
+        "columns": tuple(column_id for column_id, _label, _width, _anchor in columns),
+        "show": "headings",
+        "height": height,
+        "selectmode": "browse",
+    }
+    if style is not None:
+        tree_kwargs["style"] = style
+    tree = ttk.Treeview(frame, **tree_kwargs)
     for column_id, label, width, anchor in columns:
         tree.heading(column_id, text=label, command=lambda col=column_id: sort(col))
         tree.column(column_id, width=width, minwidth=min(width, 90), anchor=anchor, stretch=column_id in {"company", "industry", "data_status", "signals", "risk_flags", "sources", "filing_link", "exhibit_link", "source_link"})
