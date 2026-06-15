@@ -68,6 +68,7 @@ MARKET_SCREENER_AI_QUICK_PROMPTS: dict[str, str] = {
 
 EVENT_TYPE_OPTIONS = (
     "All",
+    "My Holdings",
     "Quote-enriched",
     "Fundamentals available",
     "Upcoming earnings",
@@ -78,6 +79,13 @@ EVENT_TYPE_OPTIONS = (
     "Schwab holding/watchlist",
 )
 EARNINGS_WINDOW_OPTIONS = ("All", "Next 7 days", "Next 30 days", "Next 90 days")
+DATA_COMPLETENESS_OPTIONS = (
+    "All",
+    "High completeness (>=75%)",
+    "Partial completeness (40-74%)",
+    "Low completeness (<40%)",
+    "Has field provenance",
+)
 
 ProgressCallback = Callable[[str], None]
 
@@ -88,6 +96,25 @@ class MarketScreenerSourceStatus:
     status: str
     fetched_at: str
     message: str
+
+
+@dataclass(frozen=True)
+class MarketScreenerFieldProvenance:
+    field: str
+    source: str
+    source_detail: str = ""
+    source_link: str | None = None
+    fetched_at: str = ""
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "MarketScreenerFieldProvenance":
+        return cls(
+            field=str(payload.get("field") or "").strip(),
+            source=str(payload.get("source") or "").strip() or "Unknown source",
+            source_detail=str(payload.get("source_detail") or "").strip(),
+            source_link=_optional_text(payload.get("source_link") or payload.get("source_url") or payload.get("url")),
+            fetched_at=str(payload.get("fetched_at") or "").strip(),
+        )
 
 
 @dataclass(frozen=True)
@@ -117,6 +144,12 @@ class MarketScreenerRecord:
     fetched_at: str = ""
     cik: str | None = None
     source_excerpt: str | None = None
+    portfolio_quantity: float | None = None
+    portfolio_average_cost: float | None = None
+    portfolio_market_value: float | None = None
+    portfolio_unrealized_pnl: float | None = None
+    portfolio_weight: float | None = None
+    field_provenance: tuple[MarketScreenerFieldProvenance, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -129,6 +162,7 @@ class MarketScreenerRecord:
         values["risk_flags"] = tuple(values.get("risk_flags") or ())
         values["sources"] = tuple(values.get("sources") or ())
         values["source_links"] = tuple(values.get("source_links") or ())
+        values["field_provenance"] = _field_provenance_from_payload(values.get("field_provenance"))
         return cls(**values)
 
 
@@ -419,16 +453,75 @@ def market_screener_record_has_fundamentals(record: MarketScreenerRecord) -> boo
     return any(value is not None for value in (record.market_cap, record.pe_ratio, record.eps, record.revenue_growth))
 
 
+def market_screener_is_my_holding(record: MarketScreenerRecord) -> bool:
+    signals = set(record.signals)
+    sources = " ".join(record.sources).lower()
+    return (
+        "Schwab holding" in signals
+        or "Watchlist" in signals
+        or "local app holdings" in sources
+        or record.portfolio_quantity is not None
+        or record.portfolio_market_value is not None
+    )
+
+
 def market_screener_data_label(record: MarketScreenerRecord) -> str:
-    if any(signal in {"Schwab holding", "Watchlist"} for signal in record.signals):
-        return "Holding"
+    parts: list[str] = []
+    if market_screener_is_my_holding(record):
+        parts.append("Holding")
     if market_screener_record_has_quote_fields(record):
-        return "Quote"
+        parts.append("Quote")
+    elif market_screener_record_has_market_data(record):
+        parts.append("Market data")
+    if _record_has_source_label(record, "fmp"):
+        parts.append("FMP")
     if record.recent_filing_date:
-        return "Filing"
+        parts.append("Filing")
     if record.next_earnings_date:
-        return "Earnings"
-    return "Universe only"
+        parts.append("Earnings")
+    return " + ".join(_dedupe_texts(parts)) if parts else "Universe only"
+
+
+def market_screener_data_completeness(record: MarketScreenerRecord) -> dict[str, Any]:
+    checks = (
+        ("symbol", record.symbol),
+        ("company_name", record.company_name),
+        ("exchange", record.exchange),
+        ("sector", record.sector),
+        ("industry", record.industry),
+        ("price", record.price),
+        ("change_percent", record.change_percent),
+        ("volume", record.volume),
+        ("avg_volume", record.avg_volume),
+        ("market_cap", record.market_cap),
+        ("pe_ratio", record.pe_ratio),
+        ("eps", record.eps),
+        ("revenue_growth", record.revenue_growth),
+        ("shares_float_or_outstanding", record.shares_float if record.shares_float is not None else record.shares_outstanding),
+        ("event_context", record.next_earnings_date or record.recent_filing_date or record.recent_filing_type or record.signals or record.risk_flags),
+        ("source_links", record.source_links),
+        ("field_provenance", record.field_provenance),
+        ("portfolio_context", record.portfolio_quantity if record.portfolio_quantity is not None else record.portfolio_market_value),
+    )
+    present = [field for field, value in checks if _has_value(value)]
+    missing = [field for field, value in checks if not _has_value(value)]
+    score = int(round((len(present) / max(len(checks), 1)) * 100))
+    if score >= 75:
+        label = "High"
+    elif score >= 40:
+        label = "Partial"
+    else:
+        label = "Low"
+    return {"score": score, "label": label, "present_fields": tuple(present), "missing_fields": tuple(missing)}
+
+
+def market_screener_data_completeness_score(record: MarketScreenerRecord) -> int:
+    return int(market_screener_data_completeness(record)["score"])
+
+
+def market_screener_data_completeness_label(record: MarketScreenerRecord) -> str:
+    completeness = market_screener_data_completeness(record)
+    return f"{completeness['score']}% {str(completeness['label']).lower()}"
 
 
 def filter_market_screener_records(
@@ -440,6 +533,7 @@ def filter_market_screener_records(
     event_type: str = "All",
     risk_flag: str = "All",
     earnings_date_window: str = "All",
+    data_completeness: str = "All",
     has_ai_signal: bool = False,
     has_price_volume_data: bool = False,
     today: date | None = None,
@@ -461,6 +555,8 @@ def filter_market_screener_records(
         if not _event_type_matches(record, event_type):
             continue
         if not _earnings_window_matches(record, earnings_date_window, today):
+            continue
+        if not _data_completeness_matches(record, data_completeness):
             continue
         if has_ai_signal and not market_screener_has_ai_signal(record):
             continue
@@ -506,6 +602,7 @@ def market_screener_ai_request_payload(
             "Do not infer missing prices, volume, market cap, valuation, EPS, revenue growth, earnings dates, filings, catalysts, or source links.",
             "Treat signals and risk flags as deterministic app/provider observations, not audited conclusions.",
             "Use source_links as pointers only; do not claim to have opened them unless source_snippets contain text.",
+            "Use field_provenance to label where selected-row fields came from; do not use it to infer missing values.",
             "Keep the answer research-only. Do not place trades, submit orders, automate broker actions, or tell the user to buy, sell, or hold.",
             "Separate confirmed selected-row facts from assumptions, caveats, missing data, and diligence questions.",
         ],
@@ -518,6 +615,7 @@ def market_screener_ai_request_payload(
 
 
 def market_screener_record_context(record: MarketScreenerRecord) -> dict[str, Any]:
+    completeness = market_screener_data_completeness(record)
     fields = {
         "symbol": _text_or_missing(record.symbol, "symbol"),
         "company_name": _text_or_missing(record.company_name, "company_name"),
@@ -525,6 +623,22 @@ def market_screener_record_context(record: MarketScreenerRecord) -> dict[str, An
         "exchange": _text_or_missing(record.exchange, "exchange"),
         "sector": _text_or_missing(record.sector, "sector"),
         "industry": _text_or_missing(record.industry, "industry"),
+        "data_label": market_screener_data_label(record),
+        "data_completeness": {
+            "score": completeness["score"],
+            "label": completeness["label"],
+            "present_fields": list(completeness["present_fields"]),
+            "missing_fields": list(completeness["missing_fields"]),
+        },
+        "portfolio_context": {
+            "is_my_holding": market_screener_is_my_holding(record),
+            "quantity": _number_or_missing(record.portfolio_quantity, "portfolio_quantity"),
+            "average_cost": _number_or_missing(record.portfolio_average_cost, "portfolio_average_cost"),
+            "market_value": _number_or_missing(record.portfolio_market_value, "portfolio_market_value"),
+            "unrealized_pnl": _number_or_missing(record.portfolio_unrealized_pnl, "portfolio_unrealized_pnl"),
+            "portfolio_weight": _number_or_missing(record.portfolio_weight, "portfolio_weight"),
+            "source": "Local Schwab holdings" if market_screener_is_my_holding(record) else _not_available("The selected row is not marked as a loaded Schwab holding."),
+        },
         "market_data": {
             "price": _number_or_missing(record.price, "price"),
             "market_cap": _number_or_missing(record.market_cap, "market_cap"),
@@ -548,6 +662,7 @@ def market_screener_record_context(record: MarketScreenerRecord) -> dict[str, An
         "risk_flags": list(record.risk_flags) if record.risk_flags else _not_available("No risk flags are present in the selected row."),
         "sources": list(record.sources) if record.sources else _not_available("No source labels are present in the selected row."),
         "source_links": list(record.source_links) if record.source_links else _not_available("No source links are present in the selected row."),
+        "field_provenance": _field_provenance_payload(record),
         "fetched_at": _text_or_missing(record.fetched_at, "fetched_at"),
         "missing_fields": _missing_fields(record),
         "analysis_policy": {
@@ -800,8 +915,17 @@ def _market_data_candidate_symbols(records: Iterable[MarketScreenerRecord], limi
 
 def _record_from_universe(entry: MarketUniverseEntry, *, fetched_at: str) -> MarketScreenerRecord:
     source_links = (entry.source_url,) if entry.source_url else ()
+    symbol = _normalize_symbol(entry.symbol)
+    values = {
+        "symbol": symbol,
+        "company_name": entry.company_name,
+        "cik": entry.cik,
+        "exchange": entry.exchange,
+        "sector": entry.sector,
+        "industry": entry.industry,
+    }
     return MarketScreenerRecord(
-        symbol=_normalize_symbol(entry.symbol),
+        symbol=symbol,
         company_name=entry.company_name,
         cik=entry.cik,
         exchange=entry.exchange,
@@ -810,6 +934,7 @@ def _record_from_universe(entry: MarketUniverseEntry, *, fetched_at: str) -> Mar
         sources=(entry.source,),
         source_links=source_links,
         fetched_at=fetched_at,
+        field_provenance=_provenance_for_values(values, source=entry.source, source_link=entry.source_url, fetched_at=fetched_at),
     )
 
 
@@ -825,8 +950,24 @@ def _record_from_recent_earnings(record: RecentEarningsRecord, *, fetched_at: st
     source_links = [record.filing_url]
     if record.exhibit_url:
         source_links.append(record.exhibit_url)
+    source = record.source or "SEC EDGAR"
+    values = {
+        "symbol": _normalize_symbol(record.ticker),
+        "company_name": record.company_name,
+        "cik": record.cik,
+        "exchange": record.exchange,
+        "sector": record.sector,
+        "industry": record.industry,
+        "eps": record.eps,
+        "revenue_growth": record.revenue_growth,
+        "recent_filing_date": record.filed_date,
+        "recent_filing_type": f"{record.form} {record.items or record.filing_type}".strip(),
+        "signals": tuple(_dedupe_texts(signals)),
+        "risk_flags": tuple(record.risk_flags),
+        "source_excerpt": getattr(record, "source_excerpt", None),
+    }
     return MarketScreenerRecord(
-        symbol=_normalize_symbol(record.ticker),
+        symbol=values["symbol"],
         company_name=record.company_name,
         cik=record.cik,
         exchange=record.exchange,
@@ -836,25 +977,34 @@ def _record_from_recent_earnings(record: RecentEarningsRecord, *, fetched_at: st
         revenue_growth=record.revenue_growth,
         recent_filing_date=record.filed_date,
         recent_filing_type=f"{record.form} {record.items or record.filing_type}".strip(),
-        signals=tuple(_dedupe_texts(signals)),
+        signals=values["signals"],
         risk_flags=tuple(record.risk_flags),
-        sources=(record.source or "SEC EDGAR",),
+        sources=(source,),
         source_links=tuple(_dedupe_texts(source_links)),
         fetched_at=fetched_at,
         source_excerpt=getattr(record, "source_excerpt", None),
+        field_provenance=_provenance_for_values(values, source=source, source_link=record.filing_url, fetched_at=fetched_at),
     )
 
 
 def _record_from_upcoming_earnings(record: UpcomingEarningsRecord, *, fetched_at: str) -> MarketScreenerRecord:
     source_links = (record.source_url,) if record.source_url else ()
+    source = record.source or "Upcoming earnings calendar"
+    values = {
+        "symbol": _normalize_symbol(record.symbol),
+        "company_name": record.company_name,
+        "next_earnings_date": record.report_date,
+        "signals": ("Upcoming earnings",),
+    }
     return MarketScreenerRecord(
-        symbol=_normalize_symbol(record.symbol),
+        symbol=values["symbol"],
         company_name=record.company_name,
         next_earnings_date=record.report_date,
         signals=("Upcoming earnings",),
-        sources=(record.source or "Upcoming earnings calendar",),
+        sources=(source,),
         source_links=source_links,
         fetched_at=fetched_at,
+        field_provenance=_provenance_for_values(values, source=source, source_link=record.source_url, fetched_at=fetched_at),
     )
 
 
@@ -867,8 +1017,27 @@ def _record_from_market_data(record: MarketQuoteFundamentalsRecord, *, fetched_a
         signals.append("High volume")
     if mover:
         signals.append("Mover")
+    values = {
+        "symbol": _normalize_symbol(record.symbol),
+        "exchange": record.exchange,
+        "sector": record.sector,
+        "industry": record.industry,
+        "price": record.price,
+        "market_cap": record.market_cap,
+        "volume": record.volume,
+        "avg_volume": record.avg_volume,
+        "change_percent": record.change_percent,
+        "pe_ratio": record.pe_ratio,
+        "eps": record.eps,
+        "revenue_growth": record.revenue_growth,
+        "shares_float": record.shares_float,
+        "shares_outstanding": record.shares_outstanding,
+        "signals": tuple(signals),
+    }
+    source = record.source or "Market quote/fundamental provider"
+    record_fetched_at = record.fetched_at or fetched_at
     return MarketScreenerRecord(
-        symbol=_normalize_symbol(record.symbol),
+        symbol=values["symbol"],
         exchange=record.exchange,
         sector=record.sector,
         industry=record.industry,
@@ -883,9 +1052,10 @@ def _record_from_market_data(record: MarketQuoteFundamentalsRecord, *, fetched_a
         shares_float=record.shares_float,
         shares_outstanding=record.shares_outstanding,
         signals=tuple(signals),
-        sources=(record.source or "Market quote/fundamental provider",),
+        sources=(source,),
         source_links=source_links,
-        fetched_at=record.fetched_at or fetched_at,
+        fetched_at=record_fetched_at,
+        field_provenance=_market_data_provenance(record, values, source=source, source_link=record.source_url, fetched_at=record_fetched_at),
     )
 
 
@@ -916,6 +1086,12 @@ def _normalize_record(record: MarketScreenerRecord, *, fetched_at: str) -> Marke
         fetched_at=record.fetched_at or fetched_at,
         cik=record.cik,
         source_excerpt=record.source_excerpt,
+        portfolio_quantity=record.portfolio_quantity,
+        portfolio_average_cost=record.portfolio_average_cost,
+        portfolio_market_value=record.portfolio_market_value,
+        portfolio_unrealized_pnl=record.portfolio_unrealized_pnl,
+        portfolio_weight=record.portfolio_weight,
+        field_provenance=_field_provenance_from_payload(record.field_provenance) or _provenance_for_existing_record(record, fetched_at=fetched_at),
     )
 
 
@@ -954,6 +1130,12 @@ def merge_market_screener_record(existing: MarketScreenerRecord, incoming: Marke
         fetched_at=incoming.fetched_at or existing.fetched_at,
         cik=existing.cik or incoming.cik,
         source_excerpt=existing.source_excerpt or incoming.source_excerpt,
+        portfolio_quantity=_prefer_number(incoming.portfolio_quantity, existing.portfolio_quantity),
+        portfolio_average_cost=_prefer_number(incoming.portfolio_average_cost, existing.portfolio_average_cost),
+        portfolio_market_value=_prefer_number(incoming.portfolio_market_value, existing.portfolio_market_value),
+        portfolio_unrealized_pnl=_prefer_number(incoming.portfolio_unrealized_pnl, existing.portfolio_unrealized_pnl),
+        portfolio_weight=_prefer_number(incoming.portfolio_weight, existing.portfolio_weight),
+        field_provenance=_dedupe_field_provenance((*existing.field_provenance, *incoming.field_provenance)),
     )
 
 
@@ -984,8 +1166,23 @@ def _event_type_matches(record: MarketScreenerRecord, event_type: str) -> bool:
         high_volume = record.volume is not None and record.avg_volume not in (None, 0) and record.volume >= record.avg_volume * 1.5
         mover = record.change_percent is not None and abs(record.change_percent) >= 5.0
         return bool(high_volume or mover)
-    if event_type == "Schwab holding/watchlist":
-        return any(signal in {"Schwab holding", "Watchlist"} for signal in record.signals)
+    if event_type in {"My Holdings", "Schwab holding/watchlist"}:
+        return market_screener_is_my_holding(record)
+    return True
+
+
+def _data_completeness_matches(record: MarketScreenerRecord, data_completeness: str) -> bool:
+    if data_completeness == "All":
+        return True
+    score = market_screener_data_completeness_score(record)
+    if data_completeness == "High completeness (>=75%)":
+        return score >= 75
+    if data_completeness == "Partial completeness (40-74%)":
+        return 40 <= score < 75
+    if data_completeness == "Low completeness (<40%)":
+        return score < 40
+    if data_completeness == "Has field provenance":
+        return bool(record.field_provenance)
     return True
 
 
@@ -1021,6 +1218,8 @@ def _sort_value(record: MarketScreenerRecord, column: str) -> Any:
         "shares_float": record.shares_float,
         "shares_outstanding": record.shares_outstanding,
         "data_status": market_screener_data_label(record),
+        "data_completeness": market_screener_data_completeness_score(record),
+        "my_holding": market_screener_is_my_holding(record),
         "next_earnings": record.next_earnings_date,
         "recent_filing": record.recent_filing_date,
         "recent_type": record.recent_filing_type,
@@ -1040,9 +1239,11 @@ def _screener_search_text(record: MarketScreenerRecord) -> str:
             record.sector or "",
             record.industry or "",
             record.recent_filing_type or "",
+            market_screener_data_label(record),
             " ".join(record.signals),
             " ".join(record.risk_flags),
             " ".join(record.sources),
+            " ".join(f"{row.field} {row.source}" for row in record.field_provenance),
         ]
     ).lower()
 
@@ -1070,8 +1271,176 @@ def _missing_fields(record: MarketScreenerRecord) -> list[str]:
         "risk_flags": record.risk_flags,
         "source_links": record.source_links,
         "source_excerpt": record.source_excerpt,
+        "portfolio_quantity": record.portfolio_quantity,
+        "portfolio_average_cost": record.portfolio_average_cost,
+        "portfolio_market_value": record.portfolio_market_value,
+        "portfolio_unrealized_pnl": record.portfolio_unrealized_pnl,
+        "portfolio_weight": record.portfolio_weight,
+        "field_provenance": record.field_provenance,
     }
     return [field for field, value in checks.items() if value in (None, "", ())]
+
+
+def _field_provenance_payload(record: MarketScreenerRecord) -> Any:
+    rows = _field_provenance_from_payload(record.field_provenance)
+    if not rows:
+        return _not_available("No field-level provenance is present in the selected Market Intelligence Screener row.")
+    payload: list[dict[str, str]] = []
+    for row in rows:
+        item = {
+            "field": row.field,
+            "source": row.source,
+        }
+        if row.source_detail:
+            item["source_detail"] = row.source_detail
+        if row.source_link:
+            item["source_link"] = row.source_link
+        if row.fetched_at:
+            item["fetched_at"] = row.fetched_at
+        payload.append(item)
+    return payload
+
+
+def _field_provenance_from_payload(payload: Any) -> tuple[MarketScreenerFieldProvenance, ...]:
+    if not payload:
+        return ()
+    rows: list[MarketScreenerFieldProvenance] = []
+    for item in payload if isinstance(payload, (list, tuple)) else ():
+        if isinstance(item, MarketScreenerFieldProvenance):
+            row = item
+        elif isinstance(item, Mapping):
+            row = MarketScreenerFieldProvenance.from_dict(item)
+        else:
+            continue
+        if row.field and row.source:
+            rows.append(row)
+    return _dedupe_field_provenance(rows)
+
+
+def _market_data_provenance(
+    record: MarketQuoteFundamentalsRecord,
+    values: Mapping[str, Any],
+    *,
+    source: str,
+    source_link: str | None,
+    fetched_at: str,
+) -> tuple[MarketScreenerFieldProvenance, ...]:
+    rows: list[MarketScreenerFieldProvenance] = []
+    raw_rows = getattr(record, "field_provenance", ()) or ()
+    for item in raw_rows if isinstance(raw_rows, (list, tuple)) else ():
+        if isinstance(item, Mapping):
+            field = str(item.get("field") or "").strip()
+            row_source = str(item.get("source") or source).strip() or source
+            row_link = _optional_text(item.get("source_url") or item.get("source_link") or source_link)
+            row_fetched_at = str(item.get("fetched_at") or fetched_at).strip()
+        else:
+            field = str(getattr(item, "field", "") or "").strip()
+            row_source = str(getattr(item, "source", "") or source).strip() or source
+            row_link = _optional_text(getattr(item, "source_url", None) or getattr(item, "source_link", None) or source_link)
+            row_fetched_at = str(getattr(item, "fetched_at", "") or fetched_at).strip()
+        if field and _has_value(values.get(field)):
+            rows.append(
+                MarketScreenerFieldProvenance(
+                    field=field,
+                    source=redact_symbol_chat_secrets(row_source),
+                    source_detail="market data enrichment",
+                    source_link=row_link,
+                    fetched_at=row_fetched_at,
+                )
+            )
+    if _has_value(values.get("signals")):
+        rows.append(MarketScreenerFieldProvenance("signals", redact_symbol_chat_secrets(source), "market data enrichment", source_link, fetched_at))
+    fallback_rows = _provenance_for_values(values, source=source, source_link=source_link, fetched_at=fetched_at, source_detail="market data enrichment")
+    return _dedupe_field_provenance((*rows, *fallback_rows))
+
+
+def _provenance_for_existing_record(record: MarketScreenerRecord, *, fetched_at: str) -> tuple[MarketScreenerFieldProvenance, ...]:
+    source = record.sources[0] if record.sources else "Market Screener row"
+    source_link = record.source_links[0] if record.source_links else None
+    values = {
+        "symbol": record.symbol,
+        "company_name": record.company_name,
+        "cik": record.cik,
+        "exchange": record.exchange,
+        "sector": record.sector,
+        "industry": record.industry,
+        "price": record.price,
+        "market_cap": record.market_cap,
+        "volume": record.volume,
+        "avg_volume": record.avg_volume,
+        "change_percent": record.change_percent,
+        "pe_ratio": record.pe_ratio,
+        "eps": record.eps,
+        "revenue_growth": record.revenue_growth,
+        "shares_float": record.shares_float,
+        "shares_outstanding": record.shares_outstanding,
+        "next_earnings_date": record.next_earnings_date,
+        "recent_filing_date": record.recent_filing_date,
+        "recent_filing_type": record.recent_filing_type,
+        "signals": record.signals,
+        "risk_flags": record.risk_flags,
+        "source_links": record.source_links,
+        "source_excerpt": record.source_excerpt,
+        "portfolio_quantity": record.portfolio_quantity,
+        "portfolio_average_cost": record.portfolio_average_cost,
+        "portfolio_market_value": record.portfolio_market_value,
+        "portfolio_unrealized_pnl": record.portfolio_unrealized_pnl,
+        "portfolio_weight": record.portfolio_weight,
+    }
+    return _provenance_for_values(values, source=source, source_link=source_link, fetched_at=record.fetched_at or fetched_at)
+
+
+def _provenance_for_values(
+    values: Mapping[str, Any],
+    *,
+    source: str,
+    source_link: str | None,
+    fetched_at: str,
+    source_detail: str = "",
+) -> tuple[MarketScreenerFieldProvenance, ...]:
+    clean_source = redact_symbol_chat_secrets(str(source or "").strip() or "Unknown source")
+    clean_detail = redact_symbol_chat_secrets(str(source_detail or "").strip())
+    clean_link = _optional_text(source_link)
+    rows = [
+        MarketScreenerFieldProvenance(field=str(field), source=clean_source, source_detail=clean_detail, source_link=clean_link, fetched_at=fetched_at)
+        for field, value in values.items()
+        if _has_value(value)
+    ]
+    return _dedupe_field_provenance(rows)
+
+
+def _dedupe_field_provenance(rows: Iterable[MarketScreenerFieldProvenance]) -> tuple[MarketScreenerFieldProvenance, ...]:
+    seen: set[tuple[str, str, str, str, str]] = set()
+    result: list[MarketScreenerFieldProvenance] = []
+    for row in rows:
+        key = (row.field, row.source, row.source_detail, row.source_link or "", row.fetched_at)
+        if not row.field or not row.source or key in seen:
+            continue
+        seen.add(key)
+        result.append(
+            MarketScreenerFieldProvenance(
+                field=redact_symbol_chat_secrets(row.field),
+                source=redact_symbol_chat_secrets(row.source),
+                source_detail=redact_symbol_chat_secrets(row.source_detail),
+                source_link=_optional_text(row.source_link),
+                fetched_at=redact_symbol_chat_secrets(row.fetched_at),
+            )
+        )
+    return tuple(result)
+
+
+def _record_has_source_label(record: MarketScreenerRecord, needle: str) -> bool:
+    lower = str(needle or "").lower()
+    return bool(lower and lower in " ".join(record.sources).lower())
+
+
+def _has_value(value: Any) -> bool:
+    return value not in (None, "", ())
+
+
+def _optional_text(value: Any) -> str | None:
+    text = redact_symbol_chat_secrets(str(value or "").strip())
+    return text or None
 
 
 def _record_source_snippets(record: MarketScreenerRecord) -> tuple[str, ...]:
@@ -1100,6 +1469,11 @@ def _source_debug_lines(request_payload: Mapping[str, Any], diagnostics: Mapping
             lines.append(f"{key}={value}")
         missing = selected.get("missing_fields") if isinstance(selected.get("missing_fields"), list) else []
         lines.append(f"missing_field_count={len(missing)}")
+        completeness = selected.get("data_completeness") if isinstance(selected.get("data_completeness"), Mapping) else {}
+        if isinstance(completeness, Mapping):
+            lines.append(f"data_completeness_score={completeness.get('score')}")
+        provenance = selected.get("field_provenance")
+        lines.append(f"field_provenance_count={len(provenance) if isinstance(provenance, list) else 0}")
     lines.append(f"source_snippet_count={len(snippets) if isinstance(snippets, list) else 0}")
     for key, value in diagnostics.items():
         lines.append(f"{key}={value}")
@@ -1120,6 +1494,8 @@ def _enforce_request_payload_budget(payload: dict[str, Any]) -> dict[str, Any]:
         selected = payload.get("selected_market_screener_record")
         if isinstance(selected, dict) and isinstance(selected.get("missing_fields"), list):
             selected["missing_fields"] = selected["missing_fields"][:20]
+        if isinstance(selected, dict) and isinstance(selected.get("field_provenance"), list):
+            selected["field_provenance"] = selected["field_provenance"][:40]
         payload["source_snippets"] = _not_available("Source snippets were omitted to fit the OpenAI request budget.")
         trimmed = True
     request_budget = payload.setdefault("request_budget", {})

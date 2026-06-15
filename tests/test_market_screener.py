@@ -14,7 +14,9 @@ from app.analytics.market_screener import (
     fetch_market_screener_snapshot,
     filter_market_screener_records,
     market_screener_ai_request_payload,
+    market_screener_data_completeness_score,
     market_screener_data_label,
+    market_screener_is_my_holding,
     market_screener_record_has_quote_fields,
     merge_market_data_records_into_screener_records,
     sort_market_screener_records,
@@ -435,10 +437,10 @@ def test_fmp_missing_fields_remain_none_and_screener_renders_dashes() -> None:
     assert row.volume is None
     assert row.market_cap is None
     values = earnings_radar_extension._screener_values(row)
-    assert values[6] == "--"
-    assert values[8] == "--"
-    assert values[10] == "--"
-    assert values[14] == "--"
+    assert values[7] == "--"
+    assert values[9] == "--"
+    assert values[11] == "--"
+    assert values[15] == "--"
 
 
 def test_fmp_cap_and_cache_prevent_full_universe_calls() -> None:
@@ -510,6 +512,66 @@ def test_composite_market_data_provider_merges_local_schwab_and_fmp_without_dupl
     assert record.source == "Schwab quote, FMP quote, FMP profile"
 
 
+def test_market_screener_holding_quote_fmp_row_has_label_completeness_and_provenance() -> None:
+    records = build_market_screener_records(
+        [MarketUniverseEntry("ACME", "Acme Corp", cik="0000000001", exchange="Nasdaq", sector="Technology", industry="Software")],
+        supplemental_records=[
+            MarketScreenerRecord(
+                "ACME",
+                price=119.0,
+                signals=("Schwab holding",),
+                sources=("Local app holdings",),
+                portfolio_quantity=10,
+                portfolio_average_cost=100.0,
+                portfolio_market_value=1190.0,
+                portfolio_unrealized_pnl=190.0,
+                portfolio_weight=0.02,
+            )
+        ],
+        market_data_records=[
+            MarketQuoteFundamentalsRecord("ACME", price=121.25, volume=2_500_000, source="Schwab quote", fetched_at="2026-06-14T10:00:00+00:00"),
+            MarketQuoteFundamentalsRecord(
+                "ACME",
+                avg_volume=1_000_000,
+                change_percent=5.6,
+                market_cap=12_000_000_000,
+                pe_ratio=31.5,
+                eps=1.22,
+                revenue_growth=14.4,
+                shares_float=120_000_000,
+                shares_outstanding=150_000_000,
+                source="FMP quote, FMP profile",
+                source_url="https://example.test/fmp",
+                fetched_at="2026-06-14T10:01:00+00:00",
+            ),
+        ],
+        fetched_at="2026-06-14T10:00:00+00:00",
+    )
+
+    acme = records[0]
+    assert market_screener_is_my_holding(acme) is True
+    assert market_screener_data_label(acme) == "Holding + Quote + FMP"
+    assert market_screener_data_completeness_score(acme) >= 75
+    assert filter_market_screener_records(records, event_type="My Holdings") == [acme]
+    assert filter_market_screener_records(records, data_completeness="High completeness (>=75%)") == [acme]
+    assert sort_market_screener_records([MarketScreenerRecord("SPRS"), acme], "data_completeness", descending=True)[0] == acme
+
+    provenance = {(row.field, row.source) for row in acme.field_provenance}
+    assert ("portfolio_quantity", "Local app holdings") in provenance
+    assert ("price", "Schwab quote") in provenance
+    assert ("market_cap", "FMP quote, FMP profile") in provenance
+    detail = earnings_radar_extension._screener_detail_text(acme)
+    assert "Portfolio:" in detail
+    assert "Field provenance:" in detail
+    assert "market_cap: FMP quote, FMP profile" in detail
+    payload = market_screener_ai_request_payload(acme, "Explain the selected row.", timeout_seconds=30)
+    selected = payload["selected_market_screener_record"]
+    assert selected["data_label"] == "Holding + Quote + FMP"
+    assert selected["portfolio_context"]["is_my_holding"] is True
+    assert selected["portfolio_context"]["quantity"] == 10
+    assert any(row["field"] == "market_cap" and row["source"] == "FMP quote, FMP profile" for row in selected["field_provenance"])
+
+
 def test_market_screener_filters_and_sorting_cover_events_risks_windows_and_movers() -> None:
     acme = MarketScreenerRecord(
         "ACME",
@@ -541,6 +603,7 @@ def test_market_screener_filters_and_sorting_cover_events_risks_windows_and_move
     assert filter_market_screener_records([acme, beta], earnings_date_window="Next 7 days", today=date(2026, 6, 13)) == [acme]
     assert filter_market_screener_records([acme, beta], has_ai_signal=True) == [acme]
     assert filter_market_screener_records([acme, beta], has_price_volume_data=True) == [acme]
+    assert filter_market_screener_records([holding_only, beta], event_type="My Holdings") == [holding_only]
     assert sort_market_screener_records([beta, acme], "change_percent", descending=True) == [acme, beta]
     assert sort_market_screener_records(
         [beta, MarketScreenerRecord("LOW", price=8.0), MarketScreenerRecord("HIGH", price=30.0)],
@@ -552,7 +615,7 @@ def test_market_screener_filters_and_sorting_cover_events_risks_windows_and_move
         "price",
         descending=True,
     ) == [MarketScreenerRecord("HIGH", price=30.0), MarketScreenerRecord("LOW", price=8.0), beta]
-    assert market_screener_data_label(acme) == "Quote"
+    assert market_screener_data_label(acme) == "Quote + Filing + Earnings"
     assert market_screener_data_label(holding_only) == "Holding"
     assert market_screener_data_label(filing_only) == "Filing"
     assert market_screener_data_label(earnings_only) == "Earnings"
@@ -564,7 +627,8 @@ def test_market_screener_ui_values_handle_missing_numeric_fields() -> None:
 
     assert values[0] == "ACME"
     assert values[1] == "Universe only"
-    assert values[2] == "Acme Corp"
+    assert values[2].endswith("low")
+    assert values[3] == "Acme Corp"
     assert "--" in values
     assert "Not extracted" not in values
 
@@ -586,9 +650,9 @@ def test_high_volume_mover_filter_requires_actual_market_data() -> None:
     ) == [mover, high_volume]
     values = earnings_radar_extension._screener_values(schwab_quote_only)
     assert values[1] == "Quote"
-    assert values[6] == "$12.50"
-    assert values[7] == "--"
-    assert values[9] == "--"
+    assert values[7] == "$12.50"
+    assert values[8] == "--"
+    assert values[10] == "--"
     assert "High volume" not in schwab_quote_only.signals
     assert "Mover" not in schwab_quote_only.signals
 

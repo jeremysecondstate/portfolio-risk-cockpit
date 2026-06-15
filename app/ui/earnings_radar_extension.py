@@ -30,6 +30,7 @@ from app.analytics.earnings_pipeline import (
     filter_upcoming_earnings_records,
 )
 from app.analytics.market_screener import (
+    DATA_COMPLETENESS_OPTIONS,
     EARNINGS_WINDOW_OPTIONS,
     EVENT_TYPE_OPTIONS,
     MARKET_SCREENER_AI_ANALYZE_PROMPT,
@@ -40,7 +41,10 @@ from app.analytics.market_screener import (
     OpenAiMarketScreenerClient,
     fetch_market_screener_snapshot,
     filter_market_screener_records,
+    market_screener_data_completeness,
+    market_screener_data_completeness_label,
     market_screener_data_label,
+    market_screener_is_my_holding,
     market_screener_record_has_quote_fields,
     market_screener_has_ai_signal,
     merge_market_data_records_into_screener_records,
@@ -88,7 +92,8 @@ UPCOMING_COLUMNS = (
 )
 SCREENER_COLUMNS = (
     ("symbol", "Symbol", 86, tk.W),
-    ("data_status", "Data", 92, tk.W),
+    ("data_status", "Data", 150, tk.W),
+    ("data_completeness", "Complete", 98, tk.E),
     ("company", "Company", 230, tk.W),
     ("exchange", "Exchange", 110, tk.W),
     ("sector", "Sector", 150, tk.W),
@@ -111,7 +116,7 @@ SCREENER_COLUMNS = (
 )
 RECENT_NUMERIC_COLUMNS = {"revenue", "revenue_growth", "eps", "net_income"}
 UPCOMING_NUMERIC_COLUMNS = {"estimate"}
-SCREENER_NUMERIC_COLUMNS = {"price", "change_percent", "volume", "avg_volume", "market_cap", "pe_ratio", "eps", "revenue_growth", "float_shares", "signals", "risk_flags", "sources"}
+SCREENER_NUMERIC_COLUMNS = {"price", "change_percent", "volume", "avg_volume", "market_cap", "pe_ratio", "eps", "revenue_growth", "float_shares", "data_completeness", "signals", "risk_flags", "sources"}
 MARKET_DATA_PAGE_ENRICHMENT_CAP = 100
 
 
@@ -208,6 +213,7 @@ def _ensure_state(self: tk.Tk) -> None:
     self.market_screener_event_type_var = tk.StringVar(value="All")
     self.market_screener_risk_flag_var = tk.StringVar(value="All")
     self.market_screener_earnings_window_var = tk.StringVar(value="All")
+    self.market_screener_data_completeness_var = tk.StringVar(value="All")
     self.market_screener_has_ai_signal_var = tk.BooleanVar(value=False)
     self.market_screener_has_price_volume_data_var = tk.BooleanVar(value=False)
     self.market_screener_page_size_var = tk.StringVar(value="100")
@@ -277,6 +283,7 @@ def _build_screener_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     self.market_screener_table = _table(parent, row=3, title="All Stocks / Screener", columns=SCREENER_COLUMNS, sort=lambda col: _sort_screener(self, col))
     self.market_screener_table.bind("<Double-1>", lambda _event, app=self: _open_screener_source(app), add="+")
     self.market_screener_table.bind("<<TreeviewSelect>>", lambda _event, app=self: _on_screener_selection_changed(app), add="+")
+    self.market_screener_table.tag_configure("holding", foreground=polished_theme.ACCENT)
     self.market_screener_table.tag_configure("signal", foreground=polished_theme.ACCENT_SOFT)
     self.market_screener_table.tag_configure("risk", foreground=polished_theme.NEGATIVE)
     _build_screener_detail_panel(self, parent, row=4)
@@ -303,8 +310,9 @@ def _build_screener_filters(self: tk.Tk, parent: ttk.Frame) -> None:
     _combo_filter(box, "Event", self.market_screener_event_type_var, list(EVENT_TYPE_OPTIONS), row=0, column=6, command=lambda: _apply_screener_filters(self))
     self.market_screener_risk_flag_combo = _combo_filter(box, "Risk flag", self.market_screener_risk_flag_var, ["All"], row=1, column=0, command=lambda: _apply_screener_filters(self))
     _combo_filter(box, "Earnings", self.market_screener_earnings_window_var, list(EARNINGS_WINDOW_OPTIONS), row=1, column=2, command=lambda: _apply_screener_filters(self))
+    _combo_filter(box, "Completeness", self.market_screener_data_completeness_var, list(DATA_COMPLETENESS_OPTIONS), row=1, column=4, command=lambda: _apply_screener_filters(self))
     checks = ttk.Frame(box, style="Panel.TFrame")
-    checks.grid(row=1, column=4, columnspan=4, sticky="ew", pady=4)
+    checks.grid(row=1, column=6, columnspan=2, sticky="ew", pady=4)
     ttk.Checkbutton(checks, text="Has AI-worthy signal", variable=self.market_screener_has_ai_signal_var, command=lambda: _apply_screener_filters(self)).pack(side=tk.LEFT)
     ttk.Checkbutton(checks, text="Has price/volume data", variable=self.market_screener_has_price_volume_data_var, command=lambda: _apply_screener_filters(self)).pack(side=tk.LEFT, padx=(12, 0))
 
@@ -320,6 +328,7 @@ def _build_screener_filters(self: tk.Tk, parent: ttk.Frame) -> None:
         ("Quote-enriched", "quote_enriched"),
         ("Fundamentals", "fundamentals"),
         ("My Holdings", "holdings"),
+        ("Complete Data", "complete_data"),
     ):
         ttk.Button(quick, text=label, command=lambda value=preset, app=self: _apply_screener_quick_preset(app, value)).pack(side=tk.LEFT, padx=(0, 6))
 
@@ -543,11 +552,16 @@ def _market_screener_holdings_records(self: tk.Tk) -> list[MarketScreenerRecord]
     if not isinstance(positions, dict):
         return []
     fetched_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    total_value = max(_safe_float(getattr(portfolio, "total_value", None)) or 0.0, 0.01)
     records: list[MarketScreenerRecord] = []
     for symbol, position in sorted(positions.items()):
         clean_symbol = str(getattr(position, "symbol", symbol) or symbol).strip().upper()
         if not clean_symbol or clean_symbol.startswith("HL:") or clean_symbol == "USD":
             continue
+        quantity = _safe_float(getattr(position, "quantity", None))
+        average_cost = _safe_float(getattr(position, "average_cost", None))
+        market_value = _safe_float(getattr(position, "market_value", None))
+        unrealized_pnl = _safe_float(getattr(position, "unrealized_profit_loss", None))
         records.append(
             MarketScreenerRecord(
                 symbol=clean_symbol,
@@ -556,11 +570,16 @@ def _market_screener_holdings_records(self: tk.Tk) -> list[MarketScreenerRecord]
                 signals=("Schwab holding",),
                 sources=("Local app holdings",),
                 fetched_at=fetched_at,
+                portfolio_quantity=quantity,
+                portfolio_average_cost=average_cost,
+                portfolio_market_value=market_value,
+                portfolio_unrealized_pnl=unrealized_pnl,
+                portfolio_weight=(market_value / total_value) if market_value is not None else None,
                 source_excerpt=(
-                    f"Local holdings context: quantity={_safe_float(getattr(position, 'quantity', None))}; "
-                    f"average_cost={_safe_float(getattr(position, 'average_cost', None))}; "
-                    f"market_value={_safe_float(getattr(position, 'market_value', None))}; "
-                    f"unrealized_pnl={_safe_float(getattr(position, 'unrealized_profit_loss', None))}."
+                    f"Local holdings context: quantity={quantity}; "
+                    f"average_cost={average_cost}; "
+                    f"market_value={market_value}; "
+                    f"unrealized_pnl={unrealized_pnl}."
                 ),
             )
         )
@@ -606,8 +625,9 @@ def _finish_screener_success(self: tk.Tk, snapshot: MarketScreenerSnapshot) -> N
     self._market_screener_refreshing = False
     _load_screener_snapshot(self, snapshot)
     signals = sum(1 for record in snapshot.records if market_screener_has_ai_signal(record))
+    holdings = sum(1 for record in snapshot.records if market_screener_is_my_holding(record))
     warnings = f" ({len(snapshot.errors)} nonblocking warning(s))" if snapshot.errors else ""
-    self.market_screener_status_var.set(f"Loaded {len(snapshot.records)} screener rows; {signals} with AI-worthy signals. Fetched {snapshot.fetched_at}.{warnings}")
+    self.market_screener_status_var.set(f"Loaded {len(snapshot.records)} screener rows; {holdings} My Holdings; {signals} with AI-worthy signals. Fetched {snapshot.fetched_at}.{warnings}")
     _run_pending_screener_refresh(self)
 
 
@@ -653,6 +673,7 @@ def _apply_screener_filters(self: tk.Tk) -> None:
         event_type=self.market_screener_event_type_var.get(),
         risk_flag=self.market_screener_risk_flag_var.get(),
         earnings_date_window=self.market_screener_earnings_window_var.get(),
+        data_completeness=self.market_screener_data_completeness_var.get(),
         has_ai_signal=self.market_screener_has_ai_signal_var.get(),
         has_price_volume_data=self.market_screener_has_price_volume_data_var.get(),
     )
@@ -672,7 +693,7 @@ def _populate_screener_table(self: tk.Tk) -> None:
     for index, record in enumerate(self.market_screener_filtered_records[start : start + page_size]):
         iid = f"market_screener_{start + index}"
         self.market_screener_row_map[iid] = record
-        tag = "risk" if record.risk_flags else "signal" if market_screener_has_ai_signal(record) else ""
+        tag = "holding" if market_screener_is_my_holding(record) else "risk" if record.risk_flags else "signal" if market_screener_has_ai_signal(record) else ""
         tags = (tag,) if tag else ()
         tree.insert("", tk.END, iid=iid, values=_screener_values(record), tags=tags)
     self.market_screener_page_var.set(f"Page {self.market_screener_page + 1} / {page_count} - {total} records")
@@ -685,6 +706,7 @@ def _screener_values(record: MarketScreenerRecord) -> tuple[str, ...]:
     return (
         record.symbol or EMPTY_VALUE,
         market_screener_data_label(record),
+        market_screener_data_completeness_label(record),
         display_optional_text(record.company_name),
         display_optional_text(record.exchange),
         display_optional_text(record.sector),
@@ -712,9 +734,9 @@ def _draw_screener_chart(self: tk.Tk) -> None:
     _draw_grouped_chart(
         self.market_screener_chart,
         (
-            ("Signals", _counts(records, _primary_screener_signal)),
-            ("Sector", _counts(records, lambda record: record.sector or "Unknown")),
-            ("Sources", _counts(records, lambda record: (record.sources[0] if record.sources else "Unknown"))),
+            ("Portfolio", _counts(records, lambda record: "My Holdings" if market_screener_is_my_holding(record) else "Not held")),
+            ("Data", _counts(records, market_screener_data_label)),
+            ("Completeness", _counts(records, lambda record: str(market_screener_data_completeness(record)["label"]))),
         ),
     )
 
@@ -826,7 +848,8 @@ def _finish_screener_market_data_enrichment(
         ),
     )
     signals = sum(1 for record in self.market_screener_records if market_screener_has_ai_signal(record))
-    self.market_screener_status_var.set(f"Loaded {len(self.market_screener_records)} screener rows; {signals} with AI-worthy signals. Market data {reason} updated.")
+    holdings = sum(1 for record in self.market_screener_records if market_screener_is_my_holding(record))
+    self.market_screener_status_var.set(f"Loaded {len(self.market_screener_records)} screener rows; {holdings} My Holdings; {signals} with AI-worthy signals. Market data {reason} updated.")
 
 
 def _finish_screener_market_data_enrichment_error(self: tk.Tk, requested_symbols: tuple[str, ...], reason: str, error: Exception) -> None:
@@ -1220,7 +1243,7 @@ def _update_screener_detail_panel(self: tk.Tk, record: MarketScreenerRecord | No
     symbol = record.symbol or record.cik or "selected row"
     signal = ", ".join(record.signals[:3]) if record.signals else "no screener signals"
     risk = f"{len(record.risk_flags)} risk flag(s)" if record.risk_flags else "no risk flags"
-    self.market_screener_ai_status_var.set(f"Selected {symbol} - {signal}; {risk}.")
+    self.market_screener_ai_status_var.set(f"Selected {symbol} - {market_screener_data_label(record)}; {market_screener_data_completeness_label(record)}; {signal}; {risk}.")
     _set_screener_detail_text(self, _screener_detail_text(record))
 
 
@@ -1627,6 +1650,7 @@ def _clear_screener_filters(self: tk.Tk) -> None:
         self.market_screener_event_type_var,
         self.market_screener_risk_flag_var,
         self.market_screener_earnings_window_var,
+        self.market_screener_data_completeness_var,
     ):
         variable.set("All")
     self.market_screener_has_ai_signal_var.set(False)
@@ -1658,7 +1682,11 @@ def _apply_screener_quick_preset(self: tk.Tk, preset: str) -> None:
         self.market_screener_earnings_window_var.set("All")
         self.market_screener_has_price_volume_data_var.set(False)
     elif preset == "holdings":
-        self.market_screener_event_type_var.set("Schwab holding/watchlist")
+        self.market_screener_event_type_var.set("My Holdings")
+        self.market_screener_data_completeness_var.set("All")
+    elif preset == "complete_data":
+        self.market_screener_event_type_var.set("All")
+        self.market_screener_data_completeness_var.set("High completeness (>=75%)")
     self.market_screener_page = 0
     _apply_screener_filters(self)
 
@@ -1718,8 +1746,10 @@ def _clear_upcoming_filters(self: tk.Tk) -> None:
 
 
 def _screener_detail_text(record: MarketScreenerRecord) -> str:
+    completeness = market_screener_data_completeness(record)
     lines = [
         f"{record.symbol or EMPTY_VALUE} | {display_optional_text(record.company_name)} | CIK {display_optional_text(record.cik)}",
+        f"Data: {market_screener_data_label(record)} | Completeness: {completeness['score']}% {str(completeness['label']).lower()} | Provenance fields: {len(record.field_provenance)}",
         f"Exchange: {display_optional_text(record.exchange)} | Sector: {display_optional_text(record.sector)} | Industry: {display_optional_text(record.industry)}",
         (
             "Market fields: "
@@ -1740,12 +1770,61 @@ def _screener_detail_text(record: MarketScreenerRecord) -> str:
         f"Risk flags: {', '.join(record.risk_flags) if record.risk_flags else EMPTY_VALUE}",
         f"Sources: {', '.join(record.sources) if record.sources else EMPTY_VALUE}",
     ]
+    if market_screener_is_my_holding(record):
+        lines.append(
+            "Portfolio: "
+            f"Qty {_display_market_decimal(record.portfolio_quantity)} | "
+            f"Avg cost {_display_market_money(record.portfolio_average_cost)} | "
+            f"Value {_display_market_money(record.portfolio_market_value)} | "
+            f"uPnL {_display_market_money(record.portfolio_unrealized_pnl)} | "
+            f"Weight {_display_market_percent((record.portfolio_weight or 0) * 100 if record.portfolio_weight is not None else None)}"
+        )
     if record.source_links:
         lines.append("Source links: " + " | ".join(record.source_links[:4]))
+    if record.field_provenance:
+        lines.append("Field provenance:")
+        ordered_provenance = _ordered_screener_field_provenance(record)
+        for item in ordered_provenance[:12]:
+            detail = f" ({item.source_detail})" if item.source_detail else ""
+            link = f" | {item.source_link}" if item.source_link else ""
+            lines.append(f"- {item.field}: {item.source}{detail}{link}")
+        if len(ordered_provenance) > 12:
+            lines.append(f"- ... {len(ordered_provenance) - 12} more field provenance row(s).")
     source_excerpt = str(getattr(record, "source_excerpt", "") or "").strip()
     if source_excerpt:
         lines.append(f"Source excerpt: {_truncate(source_excerpt, 520)}")
     return "\n".join(lines)
+
+
+def _ordered_screener_field_provenance(record: MarketScreenerRecord) -> tuple[Any, ...]:
+    priority = {
+        field: index
+        for index, field in enumerate(
+            (
+                "portfolio_quantity",
+                "portfolio_average_cost",
+                "portfolio_market_value",
+                "portfolio_unrealized_pnl",
+                "portfolio_weight",
+                "price",
+                "change_percent",
+                "volume",
+                "avg_volume",
+                "market_cap",
+                "pe_ratio",
+                "eps",
+                "revenue_growth",
+                "shares_float",
+                "shares_outstanding",
+                "next_earnings_date",
+                "recent_filing_date",
+                "recent_filing_type",
+                "signals",
+                "risk_flags",
+            )
+        )
+    }
+    return tuple(sorted(record.field_provenance, key=lambda row: (priority.get(getattr(row, "field", ""), 999), getattr(row, "field", ""), getattr(row, "source", ""))))
 
 
 def _format_screener_ai_result(record: MarketScreenerRecord, label: str, prompt: str, response: MarketScreenerAiResponse) -> str:
@@ -1754,6 +1833,7 @@ def _format_screener_ai_result(record: MarketScreenerRecord, label: str, prompt:
         "=" * (21 + len(label)),
         "",
         f"Selected: {record.symbol or record.cik or EMPTY_VALUE} - {record.company_name or EMPTY_VALUE}",
+        f"Data: {market_screener_data_label(record)} | Completeness: {market_screener_data_completeness_label(record)} | Provenance fields: {len(record.field_provenance)}",
         f"Signals: {', '.join(record.signals) if record.signals else EMPTY_VALUE}",
         f"Risk flags: {', '.join(record.risk_flags) if record.risk_flags else EMPTY_VALUE}",
         f"Model: {response.model}",

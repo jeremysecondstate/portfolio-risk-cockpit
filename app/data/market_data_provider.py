@@ -30,6 +30,23 @@ _SHARED_FMP_CACHE: dict[tuple[str, str, str], tuple[float, Mapping[str, Any]]] =
 
 
 @dataclass(frozen=True)
+class MarketDataFieldProvenance:
+    field: str
+    source: str
+    source_url: str | None = None
+    fetched_at: str = ""
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "MarketDataFieldProvenance":
+        return cls(
+            field=str(payload.get("field") or "").strip(),
+            source=_optional_string(payload.get("source")) or "Market data provider",
+            source_url=_optional_string(payload.get("source_url") or payload.get("url")),
+            fetched_at=_optional_string(payload.get("fetched_at")) or "",
+        )
+
+
+@dataclass(frozen=True)
 class MarketQuoteFundamentalsRecord:
     symbol: str
     price: float | None = None
@@ -48,30 +65,42 @@ class MarketQuoteFundamentalsRecord:
     industry: str | None = None
     shares_float: float | None = None
     shares_outstanding: float | None = None
+    field_provenance: tuple[MarketDataFieldProvenance, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "MarketQuoteFundamentalsRecord":
+        source = _optional_string(payload.get("source")) or "Market data provider"
+        source_url = _optional_string(payload.get("source_url") or payload.get("url"))
+        fetched_at = _optional_string(payload.get("fetched_at")) or _now()
+        values = {
+            "symbol": _normalize_symbol(_first_present(payload, "symbol", "ticker")),
+            "exchange": _optional_string(_first_present(payload, "exchange", "exchangeShortName", "exchange_short_name")),
+            "sector": _optional_string(_first_present(payload, "sector")),
+            "industry": _optional_string(_first_present(payload, "industry")),
+            "price": _optional_float(_first_present(payload, "price", "last", "last_price")),
+            "change_percent": _optional_float(_first_present(payload, "change_percent", "percent_change", "changesPercentage", "changePercentage", "changePercent", "change_percent")),
+            "volume": _optional_float(_first_present(payload, "volume", "total_volume", "totalVolume")),
+            "avg_volume": _optional_float(_first_present(payload, "avg_volume", "average_volume", "avgVolume", "averageVolume")),
+            "market_cap": _optional_float(_first_present(payload, "market_cap", "marketCap", "mktCap", "marketCapitalization", "MarketCapitalization")),
+            "pe_ratio": _optional_float(_first_present(payload, "pe_ratio", "pe", "peRatio", "PERatio", "priceEarningsRatio")),
+            "eps": _optional_float(_first_present(payload, "eps", "EPS", "earnings_per_share")),
+            "revenue_growth": _optional_float(_first_present(payload, "revenue_growth", "revenueGrowth", "revenueGrowthTTM", "QuarterlyRevenueGrowthYOY")),
+            "shares_float": _optional_float(_first_present(payload, "shares_float", "float", "sharesFloat", "floatShares")),
+            "shares_outstanding": _optional_float(_first_present(payload, "shares_outstanding", "sharesOutstanding", "shares_outstanding")),
+        }
+        provenance_payload = payload.get("field_provenance")
+        field_provenance = _field_provenance_from_payload(provenance_payload)
+        if not field_provenance:
+            field_provenance = _provenance_for_values(values, source=source, source_url=source_url, fetched_at=fetched_at)
         return cls(
-            symbol=_normalize_symbol(_first_present(payload, "symbol", "ticker")),
-            exchange=_optional_string(_first_present(payload, "exchange", "exchangeShortName", "exchange_short_name")),
-            sector=_optional_string(_first_present(payload, "sector")),
-            industry=_optional_string(_first_present(payload, "industry")),
-            price=_optional_float(_first_present(payload, "price", "last", "last_price")),
-            change_percent=_optional_float(_first_present(payload, "change_percent", "percent_change", "changesPercentage", "changePercentage", "changePercent", "change_percent")),
-            volume=_optional_float(_first_present(payload, "volume", "total_volume", "totalVolume")),
-            avg_volume=_optional_float(_first_present(payload, "avg_volume", "average_volume", "avgVolume", "averageVolume")),
-            market_cap=_optional_float(_first_present(payload, "market_cap", "marketCap", "mktCap", "marketCapitalization", "MarketCapitalization")),
-            pe_ratio=_optional_float(_first_present(payload, "pe_ratio", "pe", "peRatio", "PERatio", "priceEarningsRatio")),
-            eps=_optional_float(_first_present(payload, "eps", "EPS", "earnings_per_share")),
-            revenue_growth=_optional_float(_first_present(payload, "revenue_growth", "revenueGrowth", "revenueGrowthTTM", "QuarterlyRevenueGrowthYOY")),
-            shares_float=_optional_float(_first_present(payload, "shares_float", "float", "sharesFloat", "floatShares")),
-            shares_outstanding=_optional_float(_first_present(payload, "shares_outstanding", "sharesOutstanding", "shares_outstanding")),
-            source=_optional_string(payload.get("source")) or "Market data provider",
-            source_url=_optional_string(payload.get("source_url") or payload.get("url")),
-            fetched_at=_optional_string(payload.get("fetched_at")) or _now(),
+            **values,
+            source=source,
+            source_url=source_url,
+            fetched_at=fetched_at,
+            field_provenance=field_provenance,
         )
 
 
@@ -525,6 +554,7 @@ def configured_market_data_symbol_limit(default: int = DEFAULT_MARKET_DATA_SYMBO
 
 def _merge_quote_records(left: MarketQuoteFundamentalsRecord, right: MarketQuoteFundamentalsRecord) -> MarketQuoteFundamentalsRecord:
     right_is_newer = _record_is_newer(right, left)
+    field_provenance = _merge_quote_field_provenance(left, right, right_is_newer)
     return MarketQuoteFundamentalsRecord(
         symbol=left.symbol or right.symbol,
         exchange=_prefer_field(left.exchange, right.exchange, right_is_newer),
@@ -543,7 +573,25 @@ def _merge_quote_records(left: MarketQuoteFundamentalsRecord, right: MarketQuote
         source=", ".join(dict.fromkeys([source for source in (left.source, right.source) if source])),
         source_url=right.source_url if right_is_newer and right.source_url else left.source_url or right.source_url,
         fetched_at=right.fetched_at if right_is_newer else left.fetched_at or right.fetched_at,
+        field_provenance=field_provenance,
     )
+
+
+def _merge_quote_field_provenance(
+    left: MarketQuoteFundamentalsRecord,
+    right: MarketQuoteFundamentalsRecord,
+    right_is_newer: bool,
+) -> tuple[MarketDataFieldProvenance, ...]:
+    left_by_field = _quote_provenance_by_field(left)
+    right_by_field = _quote_provenance_by_field(right)
+    merged: list[MarketDataFieldProvenance] = []
+    for field in _QUOTE_VALUE_FIELDS:
+        selected = right_by_field.get(field) if _field_was_selected_from_right(left, right, field, right_is_newer) else left_by_field.get(field)
+        if selected is None:
+            selected = left_by_field.get(field) or right_by_field.get(field)
+        if selected is not None:
+            merged.append(selected)
+    return _dedupe_field_provenance(merged)
 
 
 def _quote_record_has_any_value(record: MarketQuoteFundamentalsRecord) -> bool:
@@ -565,6 +613,89 @@ def _quote_record_has_any_value(record: MarketQuoteFundamentalsRecord) -> bool:
             record.shares_outstanding,
         )
     )
+
+
+_QUOTE_VALUE_FIELDS = (
+    "exchange",
+    "sector",
+    "industry",
+    "price",
+    "market_cap",
+    "volume",
+    "avg_volume",
+    "change_percent",
+    "pe_ratio",
+    "eps",
+    "revenue_growth",
+    "shares_float",
+    "shares_outstanding",
+)
+
+
+def _field_was_selected_from_right(
+    left: MarketQuoteFundamentalsRecord,
+    right: MarketQuoteFundamentalsRecord,
+    field: str,
+    right_is_newer: bool,
+) -> bool:
+    right_value = getattr(right, field)
+    left_value = getattr(left, field)
+    return right_value is not None and (left_value is None or right_is_newer)
+
+
+def _quote_provenance_by_field(record: MarketQuoteFundamentalsRecord) -> dict[str, MarketDataFieldProvenance]:
+    rows = _field_provenance_from_payload(getattr(record, "field_provenance", ()))
+    if not rows:
+        rows = _provenance_for_values(
+            {field: getattr(record, field) for field in _QUOTE_VALUE_FIELDS},
+            source=record.source,
+            source_url=record.source_url,
+            fetched_at=record.fetched_at,
+        )
+    return {row.field: row for row in rows if row.field}
+
+
+def _field_provenance_from_payload(payload: Any) -> tuple[MarketDataFieldProvenance, ...]:
+    if not payload:
+        return ()
+    rows: list[MarketDataFieldProvenance] = []
+    for item in payload if isinstance(payload, (list, tuple)) else ():
+        if isinstance(item, MarketDataFieldProvenance):
+            row = item
+        elif isinstance(item, Mapping):
+            row = MarketDataFieldProvenance.from_dict(item)
+        else:
+            continue
+        if row.field:
+            rows.append(row)
+    return _dedupe_field_provenance(rows)
+
+
+def _provenance_for_values(
+    values: Mapping[str, Any],
+    *,
+    source: str,
+    source_url: str | None,
+    fetched_at: str,
+) -> tuple[MarketDataFieldProvenance, ...]:
+    rows = [
+        MarketDataFieldProvenance(field=field, source=source, source_url=source_url, fetched_at=fetched_at)
+        for field, value in values.items()
+        if value is not None and field in _QUOTE_VALUE_FIELDS
+    ]
+    return _dedupe_field_provenance(rows)
+
+
+def _dedupe_field_provenance(rows: Iterable[MarketDataFieldProvenance]) -> tuple[MarketDataFieldProvenance, ...]:
+    seen: set[tuple[str, str, str, str]] = set()
+    result: list[MarketDataFieldProvenance] = []
+    for row in rows:
+        key = (row.field, row.source, row.source_url or "", row.fetched_at)
+        if not row.field or key in seen:
+            continue
+        seen.add(key)
+        result.append(row)
+    return tuple(result)
 
 
 def _prefer_field(left: Any, right: Any, right_is_newer: bool) -> Any:
