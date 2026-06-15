@@ -255,20 +255,6 @@ def _build_header(self: tk.Tk, parent: ttk.Frame) -> None:
     header.pack(fill=tk.X)
     header.columnconfigure(0, weight=1)
 
-    # title_stack = ttk.Frame(header, style="Hero.TFrame")
-    # title_stack.grid(row=0, column=0, sticky="w")
-    # ttk.Label(title_stack, text="Portfolio Risk Cockpit", style="Header.TLabel").pack(anchor=tk.W)
-    # ttk.Label(
-    #     title_stack,
-    #     text="A safer, cleaner control surface for paper planning and Schwab previews.",
-    #     style="HeroSubtle.TLabel",
-    # ).pack(anchor=tk.W, pady=(4, 0))
-
-    # status_stack = ttk.Frame(header, style="Hero.TFrame")
-    # status_stack.grid(row=0, column=1, sticky="e")
-    # ttk.Label(status_stack, text="TRADE CENTER", style="Mode.TLabel").pack(anchor=tk.E)
-    # ttk.Label(status_stack, text="Lock In", style="HeroSubtle.TLabel").pack(anchor=tk.E, pady=(4, 0))
-
 
 def _build_portfolio_panel(self: tk.Tk, parent: ttk.Frame) -> None:
     stack = _make_paned(parent, tk.VERTICAL)
