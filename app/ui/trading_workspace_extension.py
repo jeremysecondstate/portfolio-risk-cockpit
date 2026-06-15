@@ -1556,6 +1556,22 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
         ),
     ).grid(row=0, column=2, sticky="ew")
 
+    hyperliquid_transfer_actions = ttk.LabelFrame(hyperliquid_holdings_frame,text="USDC Transfers",style="Card.TLabelframe")
+    hyperliquid_transfer_actions.pack(fill=tk.X, pady=(8, 0))
+    hyperliquid_transfer_actions.columnconfigure((0, 1), weight=1)
+    ttk.Button(
+        hyperliquid_transfer_actions,
+        text="Transfer USDC to Jeremy from Alex",
+        command=lambda: self.show_hyperliquid_usdc_transfer("alex", "jeremy"),
+        style="Danger.TButton",
+    ).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+    ttk.Button(
+        hyperliquid_transfer_actions,
+        text="Transfer USDC to Alex from Jeremy",
+        command=lambda: self.show_hyperliquid_usdc_transfer("jeremy", "alex"),
+        style="Danger.TButton",
+    ).grid(row=0, column=1, sticky="ew")
+
     hyperliquid_orders_frame = ttk.LabelFrame(orders_shell, text="Hyperliquid Open Orders", style="Card.TLabelframe")
     hyperliquid_orders_frame.pack(fill=tk.BOTH, expand=True)
     self.hyperliquid_workspace_open_orders_table = _workspace_open_orders_table(hyperliquid_orders_frame)
@@ -1721,7 +1737,7 @@ def _build_hyperliquid_trading_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     _add_workspace_button(spot_actions, row=1, column=2, text="Cancel Order", command=hyperliquid_action("spot", "cancel_hyperliquid_order"), style="Danger.TButton")
     _add_workspace_button(spot_actions, row=2, column=0, text="LIVE Submit Jeremy", command=hyperliquid_account_action("spot", "jeremy", "show_hyperliquid_spot_live_submit_for_account"), style="Danger.TButton", columnspan=3,)
     _add_workspace_button(spot_actions, row=3, column=0, text="LIVE Submit Alex", command=hyperliquid_account_action("spot", "alex", "show_hyperliquid_spot_live_submit_for_account"), style="Danger.TButton", columnspan=3,)
-    # _add_workspace_button(spot_actions, row=2, column=0, text="LIVE Submit", command=hyperliquid_action("spot", "show_hyperliquid_spot_live_submit_safety_review"), style="Danger.TButton", columnspan=3)
+
 
     ticket = perp_ticket
     ttk.Label(ticket, text="Coin", style="Subtle.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=6)

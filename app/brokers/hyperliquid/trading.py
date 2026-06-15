@@ -25,6 +25,7 @@ class HyperliquidLiveAccountProfile:
     wallet_address_env_keys: tuple[str, ...]
     api_address_env_keys: tuple[str, ...]
     api_secret_env_keys: tuple[str, ...]
+    transfer_secret_env_keys: tuple[str, ...] = ()
 
 
 HYPERLIQUID_LIVE_ACCOUNTS: dict[str, HyperliquidLiveAccountProfile] = {
@@ -37,6 +38,7 @@ HYPERLIQUID_LIVE_ACCOUNTS: dict[str, HyperliquidLiveAccountProfile] = {
         ),
         api_address_env_keys=("HYPE_API_ADDRESS_JEREMY",),
         api_secret_env_keys=("HYPE_API_SECRET_JEREMY",),
+        transfer_secret_env_keys=("HYPE_WALLET_SECRET_JEREMY",),
     ),
     "alex": HyperliquidLiveAccountProfile(
         key="alex",
@@ -47,6 +49,7 @@ HYPERLIQUID_LIVE_ACCOUNTS: dict[str, HyperliquidLiveAccountProfile] = {
         ),
         api_address_env_keys=("HYPE_API_ADDRESS_ALEX",),
         api_secret_env_keys=("HYPE_API_SECRET_ALEX",),
+        transfer_secret_env_keys=("HYPE_WALLET_SECRET_ALEX",),
     ),
 }
 
@@ -208,6 +211,12 @@ class HyperliquidTradingConfig:
         self.has_signing_secret = bool(self.api_secret)
         self.live_enabled = os.getenv("HYPERLIQUID_ENABLE_LIVE_ORDERS", "").strip().lower() == "true"
         self.max_live_notional = _float_env("HYPERLIQUID_MAX_LIVE_ORDER_DOLLARS", 500.0)
+        self.transfer_secret = _first_env_value(self.account.transfer_secret_env_keys)
+        self.has_transfer_secret = bool(self.transfer_secret)
+        self.fund_transfers_enabled = (
+                os.getenv("HYPERLIQUID_ENABLE_FUND_TRANSFERS", "").strip().lower() == "true"
+        )
+        self.max_fund_transfer = _float_env("HYPERLIQUID_MAX_FUND_TRANSFER_DOLLARS", 1000.0)
 
     def validation_lines(self) -> list[str]:
         lines: list[str] = []
@@ -337,6 +346,28 @@ class HyperliquidTradingConfig:
             raise ValueError("HYPE_API_SECRET is missing from local .env.")
         if not self.live_enabled:
             raise PermissionError("Set HYPERLIQUID_ENABLE_LIVE_ORDERS=true in .env before live Hyperliquid actions.")
+
+    def validate_for_usdc_transfer(self, amount: float, destination: str) -> None:
+        if amount <= 0:
+            raise ValueError("USDC transfer amount must be positive.")
+        if amount > self.max_fund_transfer:
+            raise PermissionError(
+                f"Transfer ${amount:,.2f} exceeds "
+                f"HYPERLIQUID_MAX_FUND_TRANSFER_DOLLARS=${self.max_fund_transfer:,.2f}."
+            )
+        if not destination.startswith("0x") or len(destination) != 42:
+            raise ValueError("Destination must be a 42-character 0x Hyperliquid address.")
+        if not self.wallet_address.startswith("0x") or len(self.wallet_address) != 42:
+            raise ValueError("Source wallet address is missing or invalid.")
+        if not self.has_transfer_secret:
+            raise ValueError(
+                f"{self.account_label} transfer wallet secret is missing. "
+                "Set the source account's HYPE_WALLET_SECRET_* locally."
+            )
+        if not self.fund_transfers_enabled:
+            raise PermissionError(
+                "Set HYPERLIQUID_ENABLE_FUND_TRANSFERS=true in local .env before moving funds."
+            )
 
 
 class HyperliquidExecutionAdapter:
@@ -571,6 +602,32 @@ class HyperliquidExecutionAdapter:
         )
 
         return exchange.update_leverage(int(leverage), coin, is_cross=is_cross)
+
+    def transfer_usdc(self, amount: float, destination: str) -> Any:
+        config = self._config()
+        config.validate_for_usdc_transfer(amount, destination)
+        return self._local_signed_usdc_transfer(amount, destination, config)
+
+    def _local_signed_usdc_transfer(
+            self,
+            amount: float,
+            destination: str,
+            config: HyperliquidTradingConfig,
+    ) -> Any:
+        from eth_account import Account
+        from hyperliquid.exchange import Exchange
+        from hyperliquid.utils import constants
+
+        source_wallet = Account.from_key(config.transfer_secret)
+
+        if source_wallet.address.lower() != config.wallet_address.lower():
+            raise ValueError(
+                f"{config.account_label} transfer secret does not match "
+                f"{config.account_label} wallet address."
+            )
+
+        exchange = Exchange(source_wallet, constants.MAINNET_API_URL)
+        return exchange.usd_transfer(amount, destination)
 
 
 def normalize_hyperliquid_ticket_limit_price(ticket: HyperliquidOrderTicket) -> HyperliquidOrderTicket:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, simpledialog
 from typing import Type
 
 from app.brokers.hyperliquid.trading import (
@@ -24,6 +24,7 @@ def install_hyperliquid_submit_flow(app_cls: Type[tk.Tk]) -> None:
 
     app_cls.show_hyperliquid_spot_live_submit_for_account = _show_hyperliquid_spot_live_submit_no_autosync  # type: ignore[attr-defined]
     app_cls.show_hyperliquid_perp_live_submit_for_account = _show_hyperliquid_perp_live_submit_safety_review  # type: ignore[attr-defined]
+    app_cls.show_hyperliquid_usdc_transfer = _show_hyperliquid_usdc_transfer  # type: ignore[attr-defined]
 
 
 def _show_hyperliquid_spot_live_submit_no_autosync(self: tk.Tk, account_key: str = "jeremy") -> None:
@@ -98,6 +99,84 @@ def _show_hyperliquid_perp_live_submit_safety_review(self: tk.Tk, account_key: s
     except Exception as exc:
         self.hyperliquid_status_var.set("Hyperliquid perp: live blocked")
         messagebox.showerror("Hyperliquid perp live submit blocked", str(exc))
+
+
+def _show_hyperliquid_usdc_transfer(
+    self: tk.Tk,
+    source_account_key: str,
+    destination_account_key: str,
+) -> None:
+    try:
+        source_config = HyperliquidTradingConfig(source_account_key)
+        destination_config = HyperliquidTradingConfig(destination_account_key)
+
+        amount = simpledialog.askfloat(
+            "Transfer USDC",
+            (
+                f"Transfer USDC from {source_config.account_label} "
+                f"to {destination_config.account_label}\n\n"
+                f"Destination: {destination_config.wallet_address}\n\n"
+                "Amount:"
+            ),
+            minvalue=0.01,
+            parent=self,
+        )
+        if amount is None:
+            return
+
+        expected = (
+            f"TRANSFER {amount:g} USDC FROM "
+            f"{source_config.account_label.upper()} TO "
+            f"{destination_config.account_label.upper()}"
+        )
+
+        confirmation = simpledialog.askstring(
+            "Confirm USDC Transfer",
+            (
+                "This moves real USDC.\n\n"
+                f"Type exactly:\n{expected}"
+            ),
+            parent=self,
+        )
+        if confirmation != expected:
+            raise PermissionError("Transfer confirmation text did not match.")
+
+        self._set_preview_text(
+            "HYPERLIQUID USDC TRANSFER REVIEW\n"
+            "================================\n\n"
+            f"Source: {source_config.account_label}\n"
+            f"Destination: {destination_config.account_label}\n"
+            f"Destination address: {destination_config.wallet_address}\n"
+            f"Amount: {amount:g} USDC\n\n"
+            "Submitting signed transfer..."
+        )
+
+        result = HyperliquidExecutionAdapter(source_account_key).transfer_usdc(
+            amount,
+            destination_config.wallet_address,
+        )
+
+        self.hyperliquid_status_var.set(
+            f"Hyperliquid transfer: {amount:g} USDC "
+            f"{source_config.account_label} → {destination_config.account_label}"
+        )
+
+        sync_result = _sync_hyperliquid_account_best_effort(self)
+
+        self._set_preview_text(
+            "HYPERLIQUID USDC TRANSFER RESULT\n"
+            "================================\n\n"
+            f"Source: {source_config.account_label}\n"
+            f"Destination: {destination_config.account_label}\n"
+            f"Destination address: {destination_config.wallet_address}\n"
+            f"Amount: {amount:g} USDC\n\n"
+            "Transfer result:\n"
+            f"{result}\n\n"
+            f"{sync_result}"
+        )
+    except Exception as exc:
+        self.hyperliquid_status_var.set("Hyperliquid transfer: blocked")
+        messagebox.showerror("Hyperliquid USDC transfer blocked", str(exc))
 
 
 def _sync_perp_ticket_fields_to_shared(self: tk.Tk) -> None:
