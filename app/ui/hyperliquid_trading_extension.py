@@ -812,6 +812,10 @@ def _format_hyperliquid_size(value: float) -> str:
     return text or "0"
 
 
+def hyperliquid_open_order_live_account_key(order: dict[str, Any] | None) -> str:
+    return hyperliquid_open_order_account_key(order) or "jeremy"
+
+
 def hyperliquid_open_order_account_key(order: dict[str, Any] | None) -> str:
     return str((order or {}).get("accountKey") or "").strip().lower()
 
@@ -838,7 +842,15 @@ def hyperliquid_open_order_lookup_key(order: dict[str, Any] | None) -> str:
 
 def hyperliquid_open_order_is_read_only(order: dict[str, Any] | None) -> bool:
     account_key = hyperliquid_open_order_account_key(order)
-    return bool(account_key and account_key != "jeremy")
+    if not account_key:
+        return False
+
+    try:
+        HyperliquidTradingConfig(account_key)
+    except ValueError:
+        return True
+
+    return False
 
 
 def _load_selected_recent_orders(self: tk.Tk) -> None:
@@ -1397,6 +1409,9 @@ def _edit_hyperliquid_order(
     if _block_hyperliquid_account_live_action(self, "edit", selected_order):
         return
 
+    account_key = hyperliquid_open_order_live_account_key(selected_order)
+    account_label = hyperliquid_open_order_account_label(selected_order)
+
     try:
         market = _normalize_edit_market(raw_market, raw_context)
         side = raw_side.strip().lower()
@@ -1435,7 +1450,7 @@ def _edit_hyperliquid_order(
         messagebox.showerror("Hyperliquid edit blocked", str(exc))
         return
 
-    config = HyperliquidTradingConfig()
+    config = HyperliquidTradingConfig(account_key)
     try:
         config.validate_edit_for_live(ticket)
     except Exception as exc:
@@ -1469,7 +1484,7 @@ def _edit_hyperliquid_order(
         return
 
     try:
-        result = HyperliquidExecutionAdapter().modify_order_edit(order_id, ticket)
+        result = HyperliquidExecutionAdapter(account_key).modify_order_edit(order_id, ticket)
         self.cancel_order_id_var.set(str(order_id))
         self.symbol_var.set(_display_spot_base(ticket.coin))
         self.hyperliquid_coin_var.set(_display_spot_base(ticket.coin))
@@ -1483,6 +1498,7 @@ def _edit_hyperliquid_order(
             "HYPERLIQUID EDIT ORDER RESULT\n"
             "=============================\n\n"
             f"Order ID: {order_id}\n"
+            f"Account: {account_label}\n"
             f"Market: {ticket.coin}\n"
             f"Side: {ticket.side_label}\n"
             f"Size: {ticket.size_label}\n"
@@ -2370,13 +2386,16 @@ def _cancel_hyperliquid_order(self: tk.Tk) -> None:
     if _block_hyperliquid_account_live_action(self, "cancel", selected_order):
         return
 
+    account_key = hyperliquid_open_order_live_account_key(selected_order)
+    account_label = hyperliquid_open_order_account_label(selected_order)
+
     try:
         coin = _hyperliquid_cancel_coin_for_order(self, raw_order_id, selected_order)
     except Exception as exc:
         messagebox.showerror("Hyperliquid cancel blocked", str(exc))
         return
 
-    config = HyperliquidTradingConfig()
+    config = HyperliquidTradingConfig(account_key)
     try:
         config.validate_for_live_action()
     except Exception as exc:
@@ -2396,6 +2415,7 @@ def _cancel_hyperliquid_order(self: tk.Tk) -> None:
     ok = messagebox.askyesno(
         "FINAL HYPERLIQUID CANCEL CONFIRMATION",
         "This will send a LIVE Hyperliquid cancel request.\n\n"
+        f"Account: {account_label}\n"
         f"Market: {coin}\n"
         f"Order ID: {order_id}\n\n"
         "Continue?",
@@ -2404,11 +2424,12 @@ def _cancel_hyperliquid_order(self: tk.Tk) -> None:
         return
 
     try:
-        result = HyperliquidExecutionAdapter().cancel(coin, order_id)
+        result = HyperliquidExecutionAdapter(account_key).cancel(coin, order_id)
         self.hyperliquid_status_var.set("Hyperliquid: cancel attempted")
         self._set_preview_text(
             "HYPERLIQUID CANCEL ORDER RESULT\n"
             "===============================\n\n"
+            f"Account: {account_label}\n"
             f"Market: {coin}\n"
             f"Order ID: {order_id}\n\n"
             f"Response:\n{result}\n\n"
