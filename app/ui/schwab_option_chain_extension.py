@@ -163,7 +163,7 @@ def _request_option_chain(session: Any, symbol: str, *, strike_count: int) -> tu
             "strikeCount": strike_count,
             "includeUnderlyingQuote": "true",
         },
-        timeout=30,
+        timeout=5,
     )
     try:
         payload: Any = response.json()

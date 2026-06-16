@@ -48,7 +48,7 @@ def _exchange_authorization_code_hardened(self: SchwabSession, authorization_cod
             "redirect_uri": self.config.redirect_uri,
         },
         auth=(self.config.client_id, self.config.client_secret),
-        timeout=30,
+        timeout=5,
     )
     _raise_for_schwab_token_error(response, "Schwab authorization code exchange failed")
     payload: dict[str, Any] = response.json()

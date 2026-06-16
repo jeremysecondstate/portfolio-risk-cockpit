@@ -166,7 +166,7 @@ class SchwabSession:
                 "redirect_uri": self.config.redirect_uri,
             },
             auth=(self.config.client_id, self.config.client_secret),
-            timeout=30,
+            timeout=5,
         )
         if not response.ok:
             raise SchwabTokenError("Schwab authorization code exchange failed", response)
@@ -185,7 +185,7 @@ class SchwabSession:
                 "refresh_token": self.refresh_token,
             },
             auth=(self.config.client_id, self.config.client_secret),
-            timeout=30,
+            timeout=5,
         )
         if not response.ok:
             raise SchwabTokenError("Schwab refresh token exchange failed", response)
@@ -234,7 +234,7 @@ class SchwabSession:
             "GET",
             f"{TRADER_BASE_URL}/accounts/accountNumbers",
             headers=self._headers(),
-            timeout=30,
+            timeout=5,
         )
         response.raise_for_status()
         accounts = response.json()
@@ -256,7 +256,7 @@ class SchwabSession:
             f"{TRADER_BASE_URL}/accounts/{account_hash}",
             headers=self._headers(),
             params={"fields": fields} if fields else None,
-            timeout=30,
+            timeout=5,
         )
         return response.status_code, response.json()
 
@@ -267,7 +267,7 @@ class SchwabSession:
             f"{TRADER_BASE_URL}/accounts/{account_hash}/previewOrder",
             headers={**self._headers(), "Content-Type": "application/json"},
             json=order_payload,
-            timeout=30,
+            timeout=5,
         )
         return response.status_code, response.json()
 
@@ -281,7 +281,7 @@ class SchwabSession:
                 "fromEnteredTime": from_entered_time.astimezone(timezone.utc).isoformat(timespec="seconds"),
                 "toEnteredTime": to_entered_time.astimezone(timezone.utc).isoformat(timespec="seconds"),
             },
-            timeout=30,
+            timeout=5,
         )
         return response.status_code, response.json()
 
@@ -296,7 +296,7 @@ class SchwabSession:
             f"{MARKETDATA_BASE_URL}/quotes",
             headers=self._headers(),
             params={"symbols": cleaned_symbol, "fields": "quote"},
-            timeout=30,
+            timeout=5,
         )
         return response.status_code, response.json()
 
@@ -327,7 +327,7 @@ class SchwabSession:
                 "frequency": frequency,
                 "needExtendedHoursData": str(need_extended_hours_data).lower(),
             },
-            timeout=30,
+            timeout=5,
         )
         return response.status_code, response.json()
 
@@ -346,7 +346,7 @@ class SchwabSession:
             "DELETE",
             f"{TRADER_BASE_URL}/accounts/{account_hash}/orders/{cleaned_order_id}",
             headers=self._headers(),
-            timeout=30,
+            timeout=5,
         )
 
         if not response.text:
@@ -376,7 +376,7 @@ class SchwabSession:
             f"{TRADER_BASE_URL}/accounts/{account_hash}/orders/{cleaned_order_id}",
             headers={**self._headers(), "Content-Type": "application/json"},
             json=order_payload,
-            timeout=30,
+            timeout=5,
         )
 
         location = response.headers.get("Location")
@@ -404,7 +404,7 @@ class SchwabSession:
             f"{TRADER_BASE_URL}/accounts/{account_hash}/orders",
             headers={**self._headers(), "Content-Type": "application/json"},
             json=order_payload,
-            timeout=30,
+            timeout=5,
         )
 
         location = response.headers.get("Location")

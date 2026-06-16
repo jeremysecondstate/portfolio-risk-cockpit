@@ -307,7 +307,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
                     "redirect_uri": redirect_uri,
                 },
                 auth=(client_id, client_secret),
-                timeout=30,
+                timeout=5,
             )
 
             token_response.raise_for_status()
@@ -322,7 +322,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
             account_response = requests.get(
                 "https://api.schwabapi.com/trader/v1/accounts/accountNumbers",
                 headers=headers,
-                timeout=30,
+                timeout=5,
             )
 
             account_response.raise_for_status()
@@ -343,7 +343,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
                     "Content-Type": "application/json",
                 },
                 json=schwab_order,
-                timeout=30,
+                timeout=5,
             )
 
             preview_payload = preview_response.json()
@@ -480,7 +480,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
                     "redirect_uri": redirect_uri,
                 },
                 auth=(client_id, client_secret),
-                timeout=30,
+                timeout=5,
             )
             token_response.raise_for_status()
             access_token = token_response.json()["access_token"]
@@ -493,7 +493,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
             account_response = requests.get(
                 "https://api.schwabapi.com/trader/v1/accounts/accountNumbers",
                 headers=headers,
-                timeout=30,
+                timeout=5,
             )
             account_response.raise_for_status()
 
@@ -513,7 +513,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
                     "fromEnteredTime": from_time.isoformat(timespec="seconds"),
                     "toEnteredTime": to_time.isoformat(timespec="seconds"),
                 },
-                timeout=30,
+                timeout=5,
             )
 
             orders_payload = orders_response.json()
@@ -573,7 +573,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
                     "redirect_uri": redirect_uri,
                 },
                 auth=(client_id, client_secret),
-                timeout=30,
+                timeout=5,
             )
             token_response.raise_for_status()
             access_token = token_response.json()["access_token"]
@@ -586,7 +586,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
             account_response = requests.get(
                 "https://api.schwabapi.com/trader/v1/accounts/accountNumbers",
                 headers=headers,
-                timeout=30,
+                timeout=5,
             )
             account_response.raise_for_status()
 
@@ -606,7 +606,7 @@ class PortfolioRiskCockpitApp(tk.Tk):
                     "fromEnteredTime": from_time.isoformat(timespec="seconds"),
                     "toEnteredTime": to_time.isoformat(timespec="seconds"),
                 },
-                timeout=30,
+                timeout=5,
             )
 
             orders_payload = orders_response.json()

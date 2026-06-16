@@ -287,7 +287,10 @@ def _build_screener_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     parent.columnconfigure(0, weight=1)
     parent.rowconfigure(3, weight=1)
     _configure_market_screener_tree_style(parent)
-    _header(self.market_screener_status_var).grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    _header(
+        parent,
+        self.market_screener_status_var,
+    ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
     _build_screener_filters(self, parent)
     self.market_screener_chart = _screener_summary_panel(self, parent, row=2)
     self.market_screener_table = _table(
@@ -525,8 +528,6 @@ def _build_recent_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     parent.rowconfigure(3, weight=1)
     _header(
         parent,
-        "Recent EDGAR Earnings Drops",
-        "Companies listed here recently filed earnings-related SEC documents. 8-K Item 2.02 and earnings-looking EX-99 exhibits are treated as earnings drops; formal 10-Q/10-K/20-F/40-F filings are shown as report filings.",
         self.earnings_recent_status_var,
     ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
     _build_recent_filters(self, parent)
@@ -545,8 +546,6 @@ def _build_upcoming_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     parent.rowconfigure(3, weight=1)
     _header(
         parent,
-        "Upcoming Earnings Calendar",
-        "Upcoming dates come from the configured earnings-calendar provider, not EDGAR. Dates can change and should be treated as planning inputs, not official SEC filings.",
         self.earnings_upcoming_status_var,
     ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
     _build_upcoming_filters(self, parent)
@@ -2106,11 +2105,13 @@ def _upcoming_sort_value(record: UpcomingEarningsRecord, column: str) -> Any:
     }.get(column)
 
 
-def _header(parent: ttk.Frame, title: str, body: str, status_var: tk.StringVar) -> ttk.LabelFrame:
-    header = ttk.LabelFrame(parent, text=title, style="Card.TLabelframe")
+def _header(
+        parent: ttk.Frame,
+        status_var: tk.StringVar) -> ttk.LabelFrame:
+    header = ttk.LabelFrame(parent, style="Card.TLabelframe")
     header.columnconfigure(0, weight=1)
-    ttk.Label(header, text=body, style="Subtle.TLabel", wraplength=1120).grid(row=0, column=0, sticky="w")
-    ttk.Label(header, textvariable=status_var, style="Chip.TLabel").grid(row=0, column=1, sticky="e", padx=(12, 0))
+    ttk.Label(header, style="Subtle.TLabel", wraplength=1120).grid(row=0, column=0, sticky="w")
+    ttk.Label(header, textvariable=status_var, style="Chip.TLabel").grid(row=0, column=1, sticky="e", padx=(4, 0))
     return header
 
 
