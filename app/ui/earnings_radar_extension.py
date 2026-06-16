@@ -129,6 +129,8 @@ MARKET_SCREENER_SOURCE_FONT = ("Segoe UI", 10)
 EARNINGS_RADAR_CHART_HEIGHT = 150
 MARKET_SCREENER_SUMMARY_STRIP_HEIGHT = 68
 MARKET_SCREENER_SUMMARY_MAX_ITEMS = 5
+STATUS_CHIP_DISPLAY_LIMIT = 96
+STATUS_CHIP_WIDTH = 96
 
 
 def install_earnings_radar_extension(app_cls: Type[tk.Tk]) -> None:
@@ -290,7 +292,7 @@ def _build_screener_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     _header(
         parent,
         self.market_screener_status_var,
-    ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    ).grid(row=0, column=0, sticky="ew", pady=(0, 3))
     _build_screener_filters(self, parent)
     self.market_screener_chart = _screener_summary_panel(self, parent, row=2)
     self.market_screener_table = _table(
@@ -529,7 +531,7 @@ def _build_recent_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     _header(
         parent,
         self.earnings_recent_status_var,
-    ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    ).grid(row=0, column=0, sticky="ew", pady=(0, 3))
     _build_recent_filters(self, parent)
     self.earnings_recent_chart = _chart(parent, row=2)
     self.earnings_recent_table = _table(parent, row=3, title="Recent EDGAR Drops", columns=RECENT_COLUMNS, sort=lambda col: _sort_recent(self, col))
@@ -547,7 +549,7 @@ def _build_upcoming_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     _header(
         parent,
         self.earnings_upcoming_status_var,
-    ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    ).grid(row=0, column=0, sticky="ew", pady=(0, 3))
     _build_upcoming_filters(self, parent)
     self.earnings_upcoming_chart = _chart(parent, row=2)
     self.earnings_upcoming_table = _table(parent, row=3, title="Upcoming Earnings", columns=UPCOMING_COLUMNS, sort=lambda col: _sort_upcoming(self, col))
@@ -2107,11 +2109,35 @@ def _upcoming_sort_value(record: UpcomingEarningsRecord, column: str) -> Any:
 
 def _header(
         parent: ttk.Frame,
-        status_var: tk.StringVar) -> ttk.LabelFrame:
-    header = ttk.LabelFrame(parent, style="Card.TLabelframe")
+        status_var: tk.StringVar) -> ttk.Frame:
+    header = ttk.Frame(parent, style="Panel.TFrame")
     header.columnconfigure(0, weight=1)
-    ttk.Label(header, style="Subtle.TLabel", wraplength=1120).grid(row=0, column=0, sticky="w")
-    ttk.Label(header, textvariable=status_var, style="Chip.TLabel").grid(row=0, column=1, sticky="e", padx=(4, 0))
+    display_var = tk.StringVar(master=parent, value=_truncate(status_var.get(), STATUS_CHIP_DISPLAY_LIMIT))
+
+    def _sync_status(*_args: str) -> None:
+        display_var.set(_truncate(status_var.get(), STATUS_CHIP_DISPLAY_LIMIT))
+
+    trace_name = status_var.trace_add("write", _sync_status)
+
+    def _remove_trace(event: tk.Event) -> None:
+        if event.widget is not header:
+            return
+        try:
+            status_var.trace_remove("write", trace_name)
+        except tk.TclError:
+            pass
+
+    header.bind("<Destroy>", _remove_trace, add="+")
+    header._status_display_var = display_var  # type: ignore[attr-defined]
+    header._status_trace_name = trace_name  # type: ignore[attr-defined]
+    label = ttk.Label(
+        header,
+        textvariable=display_var,
+        style="Chip.TLabel",
+        width=STATUS_CHIP_WIDTH,
+        anchor=tk.E,
+    )
+    label.grid(row=0, column=1, sticky="e", padx=(4, 0), pady=(0, 1))
     return header
 
 
