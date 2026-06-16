@@ -8,7 +8,10 @@ from app.analytics.earnings_pipeline import EARNINGS_DROP_KIND, RecentEarningsRe
 from app.analytics.market_screener import (
     MARKET_SCREENER_AI_SYSTEM_PROMPT,
     MARKET_SCREENER_SOURCE_MODE,
+    MarketScreenerCoverageDiagnostics,
     MarketScreenerRecord,
+    MarketScreenerSnapshot,
+    MarketScreenerSourceStatus,
     OpenAiMarketScreenerClient,
     build_market_screener_records,
     fetch_market_screener_snapshot,
@@ -1069,6 +1072,116 @@ def test_high_volume_mover_filter_requires_actual_market_data() -> None:
     assert values[10] == "--"
     assert "High volume" not in schwab_quote_only.signals
     assert "Mover" not in schwab_quote_only.signals
+
+
+def test_high_volume_mover_empty_state_explains_missing_fields() -> None:
+    text = earnings_radar_extension._high_volume_mover_empty_state_text(
+        [
+            MarketScreenerRecord("ACME", "Acme Corp"),
+            MarketScreenerRecord("BETA", "Beta Inc", volume=100_000),
+        ]
+    )
+
+    assert "High Volume / Mover returned 0 rows because mover fields are sparse" in text
+    assert "missing change %" in text
+    assert "missing avg volume" in text
+    assert "Missing values are not treated as zero" in text
+    assert "enrich a visible page or selected row" in text
+
+    threshold_text = earnings_radar_extension._high_volume_mover_empty_state_text(
+        [MarketScreenerRecord("GAMMA", "Gamma Inc", change_percent=1.2, volume=100_000, avg_volume=100_000)]
+    )
+
+    assert "no change % reached +/-5%" in threshold_text
+    assert "no volume reached 1.5x average volume" in threshold_text
+
+
+def test_screener_source_diagnostics_popout_shows_full_counters_and_company_tickers_limits() -> None:
+    record = MarketScreenerRecord("ACME", "Acme Corp", sources=("SEC company_tickers.json",))
+    snapshot = MarketScreenerSnapshot(
+        records=(record,),
+        fetched_at="2026-06-14T10:00:00+00:00",
+        sources=("SEC company_tickers.json",),
+        statuses=(
+            MarketScreenerSourceStatus(
+                "FMP profile",
+                "unavailable",
+                "2026-06-14T10:00:00+00:00",
+                "Plan limit reached for profile endpoint.",
+            ),
+        ),
+        diagnostics=MarketScreenerCoverageDiagnostics(
+            total_rows=1,
+            rows_with_symbol=1,
+            rows_missing_cik=1,
+            rows_enriched_by_fmp_profile_by_cik=0,
+            rows_blocked_by_provider_plan_rate_auth_limit=1,
+            rows_skipped_by_configured_symbol_cap=2,
+            provider_unavailable=1,
+            rows_still_missing_price_volume=1,
+            rows_still_missing_fundamentals=1,
+        ),
+    )
+
+    text = earnings_radar_extension._screener_diagnostics_popout_text(snapshot, selected_record=record)
+
+    assert "SOURCE DIAGNOSTICS / WHY BLANKS?" in text
+    assert "SEC company_tickers supplies symbol, company name, and CIK only" in text
+    assert "Rows skipped by configured symbol cap: 2" in text
+    assert "Rows blocked by provider plan/rate/auth limit: 1" in text
+    assert "FMP quote/profile/profile-by-CIK" in text
+    assert "Would paid FMP help?" in text
+    assert "Selected row why blanks?" in text
+    assert "fallback disabled/not attempted" in text
+
+
+def test_screener_detail_text_includes_snapshot_provider_reasons_for_blanks() -> None:
+    record = MarketScreenerRecord("ACME", "Acme Corp", sources=("SEC company_tickers.json",))
+    snapshot = MarketScreenerSnapshot(
+        records=(record,),
+        fetched_at="2026-06-14T10:00:00+00:00",
+        sources=("SEC company_tickers.json",),
+        statuses=(
+            MarketScreenerSourceStatus(
+                "Market data enrichment",
+                "empty",
+                "2026-06-14T10:00:00+00:00",
+                "Provider returned 0 usable quote/profile row(s).",
+            ),
+            MarketScreenerSourceStatus(
+                "FMP quote/profile",
+                "unavailable",
+                "2026-06-14T10:00:00+00:00",
+                "API key plan limit reached.",
+            ),
+        ),
+        diagnostics=MarketScreenerCoverageDiagnostics(
+            total_rows=1,
+            rows_with_symbol=1,
+            rows_missing_cik=1,
+            rows_blocked_by_provider_plan_rate_auth_limit=1,
+            rows_skipped_by_configured_symbol_cap=4,
+            rows_provider_returned_no_usable_data=1,
+            provider_unavailable=1,
+            rows_still_missing_price_volume=1,
+            rows_still_missing_fundamentals=1,
+        ),
+    )
+
+    detail = earnings_radar_extension._screener_detail_text(
+        record,
+        snapshot=snapshot,
+        session_lines=("Market data selected row: enriched 0 of 1 requested symbol(s). Provider empty.",),
+    )
+
+    assert "Source-aware missing reasons:" in detail
+    assert "missing CIK" in detail
+    assert "skipped by cap: 4 row(s)" in detail
+    assert "provider unavailable: 1 provider status row(s)" in detail
+    assert "provider returned no usable data: 1 requested row(s)" in detail
+    assert "provider auth/plan/rate limit: 1 provider attempt(s)" in detail
+    assert "fallback disabled/not attempted" in detail
+    assert "session enrichment detail: Market data selected row: enriched 0 of 1 requested symbol(s)." in detail
 
 
 def test_market_screener_missing_providers_degrade_to_fallback_and_status_messages(monkeypatch) -> None:

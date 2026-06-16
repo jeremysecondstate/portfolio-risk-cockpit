@@ -48,6 +48,7 @@ from app.analytics.market_screener import (
     market_screener_diagnostics_summary,
     market_screener_is_my_holding,
     market_screener_record_missing_reason_lines,
+    market_screener_record_has_fundamentals,
     market_screener_record_has_quote_fields,
     market_screener_has_ai_signal,
     merge_market_data_records_into_screener_records,
@@ -234,6 +235,8 @@ def _ensure_state(self: tk.Tk) -> None:
     self.market_screener_selected_summary_var = tk.StringVar(value="No screener row selected.")
     self.market_screener_ai_status_var = tk.StringVar(value="Select a screener row for row-grounded AI.")
     self.market_screener_source_summary_var = tk.StringVar(value="Market data/source status will appear here after load.")
+    self.market_screener_last_snapshot: MarketScreenerSnapshot | None = None
+    self.market_screener_empty_state_text = ""
     self.market_screener_summary_visible_var = tk.BooleanVar(value=True)
     self.market_screener_summary_toggle_var = tk.StringVar(value="Hide Summary")
     self._market_screener_ai_running = False
@@ -360,6 +363,7 @@ def _build_screener_filters(self: tk.Tk, parent: ttk.Frame) -> None:
     ttk.Button(actions, text="Enrich Visible Page", command=lambda: _request_visible_page_market_data_enrichment(self, force_refresh=False)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Open Source", command=lambda: _open_screener_source(self)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Open Symbol Chat", command=lambda: _open_screener_symbol_chat(self)).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(actions, text="Source Diagnostics / Why blanks?", command=lambda app=self: _open_screener_diagnostics_popout(app)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Clear Filters", command=lambda: _clear_screener_filters(self)).pack(side=tk.LEFT, padx=(8, 0))
     self.market_screener_context_button = ttk.Button(actions, text="Open Selected Context + AI", command=lambda app=self: _open_screener_context_popout(app))
     self.market_screener_context_button.pack(side=tk.LEFT, padx=(8, 0))
@@ -476,6 +480,51 @@ def _open_screener_context_popout(self: tk.Tk) -> None:
     _update_screener_detail_panel(self, record)
     _refresh_screener_source_text(self)
     _set_screener_ai_actions_enabled(self, record is not None)
+    try:
+        window.deiconify()
+        window.lift()
+        window.focus_force()
+    except tk.TclError:
+        pass
+
+
+def _open_screener_diagnostics_popout(self: tk.Tk) -> None:
+    window = getattr(self, "market_screener_diagnostics_window", None)
+    if not _widget_exists(window):
+        parent = getattr(self, "earnings_radar_window", None)
+        window = tk.Toplevel(parent if _widget_exists(parent) else self)
+        polished_theme.configure_toplevel(window)
+        window.title("Source Diagnostics / Why blanks?")
+        window.geometry("1040x760")
+        window.minsize(780, 520)
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(2, weight=1)
+        self.market_screener_diagnostics_window = window
+
+        ttk.Label(window, textvariable=self.market_screener_source_summary_var, style="Chip.TLabel", wraplength=970).grid(row=0, column=0, sticky="ew", padx=14, pady=(14, 8))
+        actions = ttk.Frame(window, style="Panel.TFrame")
+        actions.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 10))
+        ttk.Button(actions, text="Refresh Screener", command=lambda app=self: _refresh_screener(app, force_refresh=True), style="Accent.TButton").pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(actions, text="Enrich Visible Page", command=lambda app=self: _request_visible_page_market_data_enrichment(app, force_refresh=False)).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(actions, text="Open Selected Context + AI", command=lambda app=self: _open_screener_context_popout(app)).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(actions, text="Clear Filters", command=lambda app=self: _clear_screener_filters(app)).pack(side=tk.LEFT)
+        self.market_screener_diagnostics_text = _readonly_scrolled_text(
+            window,
+            row=2,
+            bg=polished_theme.INPUT,
+            fg=polished_theme.TEXT,
+            font=MARKET_SCREENER_SOURCE_FONT,
+            height=26,
+        )
+
+        def _close() -> None:
+            self.market_screener_diagnostics_window = None
+            self.market_screener_diagnostics_text = None
+            window.destroy()
+
+        window.protocol("WM_DELETE_WINDOW", _close)
+
+    _refresh_screener_diagnostics_text(self)
     try:
         window.deiconify()
         window.lift()
@@ -768,6 +817,7 @@ def _run_pending_screener_refresh(self: tk.Tk) -> None:
 
 
 def _load_screener_snapshot(self: tk.Tk, snapshot: MarketScreenerSnapshot) -> None:
+    self.market_screener_last_snapshot = snapshot
     self.market_screener_records = list(snapshot.records)
     attempted_symbols = getattr(self, "market_screener_market_data_attempted_symbols", set())
     if isinstance(attempted_symbols, set):
@@ -795,10 +845,51 @@ def _apply_screener_filters(self: tk.Tk) -> None:
         has_ai_signal=self.market_screener_has_ai_signal_var.get(),
         has_price_volume_data=self.market_screener_has_price_volume_data_var.get(),
     )
+    self.market_screener_empty_state_text = _screener_filter_empty_state_text(self, filtered)
     self.market_screener_filtered_records = sort_market_screener_records(filtered, self.market_screener_sort_column, descending=self.market_screener_sort_desc)
     self.market_screener_page = min(self.market_screener_page, _max_page(self.market_screener_filtered_records, _screener_page_size(self)))
     _populate_screener_table(self)
     _draw_screener_chart(self)
+
+
+def _screener_filter_empty_state_text(self: tk.Tk, filtered: Iterable[MarketScreenerRecord]) -> str:
+    if list(filtered) or self.market_screener_event_type_var.get() != "High volume / mover":
+        return ""
+    candidate_records = filter_market_screener_records(
+        self.market_screener_records,
+        search=self.market_screener_search_var.get(),
+        sector=self.market_screener_sector_var.get(),
+        exchange=self.market_screener_exchange_var.get(),
+        event_type="All",
+        risk_flag=self.market_screener_risk_flag_var.get(),
+        earnings_date_window=self.market_screener_earnings_window_var.get(),
+        data_completeness=self.market_screener_data_completeness_var.get(),
+        has_ai_signal=self.market_screener_has_ai_signal_var.get(),
+        has_price_volume_data=self.market_screener_has_price_volume_data_var.get(),
+    )
+    return _high_volume_mover_empty_state_text(candidate_records)
+
+
+def _high_volume_mover_empty_state_text(records: Iterable[MarketScreenerRecord]) -> str:
+    rows = list(records)
+    if not rows:
+        return "High Volume / Mover has no candidates after the active non-mover filters. Clear filters or refresh the screener before applying the mover filter."
+    missing_change = sum(1 for record in rows if record.change_percent is None)
+    missing_volume = sum(1 for record in rows if record.volume is None)
+    missing_avg_volume = sum(1 for record in rows if record.avg_volume is None)
+    evaluable_change = len(rows) - missing_change
+    evaluable_volume = sum(1 for record in rows if record.volume is not None and record.avg_volume not in (None, 0))
+    if missing_change or missing_volume or missing_avg_volume:
+        return (
+            "High Volume / Mover returned 0 rows because mover fields are sparse: "
+            f"{missing_change} of {len(rows)} candidate row(s) are missing change %, "
+            f"{missing_volume} are missing current volume, and {missing_avg_volume} are missing avg volume. "
+            f"Only {evaluable_change} row(s) can be checked for +/-5% moves and {evaluable_volume} row(s) can be checked for volume >= 1.5x average. "
+            "Missing values are not treated as zero. Clear the mover filter, enrich a visible page or selected row, or configure local market data, FMP quote/profile, Schwab, or fallback before reapplying."
+        )
+    return (
+        f"High Volume / Mover found 0 rows among {len(rows)} candidate row(s): no change % reached +/-5% and no volume reached 1.5x average volume."
+    )
 
 
 def _populate_screener_table(self: tk.Tk) -> None:
@@ -816,6 +907,13 @@ def _populate_screener_table(self: tk.Tk) -> None:
         tree.insert("", tk.END, iid=iid, values=_screener_values(record), tags=tags)
     self.market_screener_page_var.set(f"Page {self.market_screener_page + 1} / {page_count} - {total} records")
     _on_screener_selection_changed(self)
+    empty_state = str(getattr(self, "market_screener_empty_state_text", "") or "").strip()
+    if total == 0 and empty_state:
+        self.market_screener_page_var.set(f"Page {self.market_screener_page + 1} / {page_count} - 0 records - {empty_state}")
+        self.market_screener_status_var.set(empty_state)
+        self.market_screener_ai_status_var.set(empty_state)
+        _set_var_if_present(self, "market_screener_selected_summary_var", empty_state)
+        _set_screener_detail_text(self, empty_state)
     _request_visible_page_market_data_enrichment(self, force_refresh=False)
 
 
@@ -1348,6 +1446,7 @@ def _on_screener_selection_changed(self: tk.Tk) -> None:
     record = _selected_screener_record(self, show_message=False)
     self.market_screener_selected_record = record
     _update_screener_detail_panel(self, record)
+    _refresh_screener_diagnostics_text(self)
     _set_screener_ai_actions_enabled(self, record is not None)
     if record is not None:
         _request_selected_row_market_data_enrichment(self, record)
@@ -1364,7 +1463,14 @@ def _update_screener_detail_panel(self: tk.Tk, record: MarketScreenerRecord | No
     risk = f"{len(record.risk_flags)} risk flag(s)" if record.risk_flags else "no risk flags"
     self.market_screener_ai_status_var.set(f"Selected {symbol} - {market_screener_data_label(record)}; {market_screener_data_completeness_label(record)}; {signal}; {risk}.")
     _set_var_if_present(self, "market_screener_selected_summary_var", f"{symbol} - {market_screener_data_label(record)}; {market_screener_data_completeness_label(record)}; {risk}.")
-    _set_screener_detail_text(self, _screener_detail_text(record))
+    _set_screener_detail_text(
+        self,
+        _screener_detail_text(
+            record,
+            snapshot=getattr(self, "market_screener_last_snapshot", None),
+            session_lines=getattr(self, "market_screener_market_data_status_lines", ()) or (),
+        ),
+    )
 
 
 def _set_screener_detail_text(self: tk.Tk, text: str) -> None:
@@ -1403,6 +1509,19 @@ def _set_screener_source_text(self: tk.Tk, text: str) -> None:
         return
 
 
+def _set_screener_diagnostics_text(self: tk.Tk, text: str) -> None:
+    widget = getattr(self, "market_screener_diagnostics_text", None)
+    if widget is None:
+        return
+    try:
+        widget.configure(state=tk.NORMAL)
+        widget.delete("1.0", tk.END)
+        widget.insert(tk.END, redact_symbol_chat_secrets(text))
+        widget.configure(state=tk.DISABLED)
+    except tk.TclError:
+        return
+
+
 def _append_screener_market_data_status(self: tk.Tk, line: str) -> None:
     lines = list(getattr(self, "market_screener_market_data_status_lines", []) or [])
     clean = str(line or "").strip()
@@ -1427,6 +1546,16 @@ def _refresh_screener_source_text(self: tk.Tk) -> None:
     else:
         text = base
     _set_screener_source_text(self, text or "Source/status: Market Intelligence Screener has not loaded yet.")
+    _refresh_screener_diagnostics_text(self)
+
+
+def _refresh_screener_diagnostics_text(self: tk.Tk) -> None:
+    if not _widget_exists(getattr(self, "market_screener_diagnostics_window", None)):
+        return
+    snapshot = getattr(self, "market_screener_last_snapshot", None)
+    record = getattr(self, "market_screener_selected_record", None)
+    session_lines = getattr(self, "market_screener_market_data_status_lines", ()) or ()
+    _set_screener_diagnostics_text(self, _screener_diagnostics_popout_text(snapshot, selected_record=record, session_lines=session_lines))
 
 
 def _set_screener_ai_actions_enabled(self: tk.Tk, enabled: bool) -> None:
@@ -1875,7 +2004,12 @@ def _clear_upcoming_filters(self: tk.Tk) -> None:
     _apply_upcoming_filters(self)
 
 
-def _screener_detail_text(record: MarketScreenerRecord) -> str:
+def _screener_detail_text(
+    record: MarketScreenerRecord,
+    *,
+    snapshot: MarketScreenerSnapshot | None = None,
+    session_lines: Iterable[str] = (),
+) -> str:
     completeness = market_screener_data_completeness(record)
     lines = [
         f"{record.symbol or EMPTY_VALUE} | {display_optional_text(record.company_name)} | CIK {display_optional_text(record.cik)}",
@@ -1911,10 +2045,10 @@ def _screener_detail_text(record: MarketScreenerRecord) -> str:
         )
     if record.source_links:
         lines.append("Source links: " + " | ".join(record.source_links[:4]))
-    missing_reasons = market_screener_record_missing_reason_lines(record)
+    missing_reasons = _selected_screener_missing_reason_lines(record, snapshot=snapshot, session_lines=session_lines)
     if missing_reasons:
         lines.append("Source-aware missing reasons:")
-        lines.extend(f"- {reason}" for reason in missing_reasons[:6])
+        lines.extend(f"- {reason}" for reason in missing_reasons)
     if record.field_provenance:
         lines.append("Field provenance:")
         ordered_provenance = _ordered_screener_field_provenance(record)
@@ -1928,6 +2062,94 @@ def _screener_detail_text(record: MarketScreenerRecord) -> str:
     if source_excerpt:
         lines.append(f"Source excerpt: {_truncate(source_excerpt, 520)}")
     return "\n".join(lines)
+
+
+def _selected_screener_missing_reason_lines(
+    record: MarketScreenerRecord,
+    *,
+    snapshot: MarketScreenerSnapshot | None = None,
+    session_lines: Iterable[str] = (),
+) -> list[str]:
+    reasons = list(market_screener_record_missing_reason_lines(record))
+    record_has_market_blanks = (
+        record.price is None
+        or record.volume is None
+        or record.avg_volume is None
+        or record.change_percent is None
+        or not market_screener_record_has_fundamentals(record)
+    )
+    if snapshot is not None:
+        diagnostics = snapshot.diagnostics
+        if diagnostics.rows_skipped_by_configured_symbol_cap:
+            reasons.append(
+                "skipped by cap: "
+                f"{diagnostics.rows_skipped_by_configured_symbol_cap} row(s) were outside the configured provider symbol cap; "
+                "this selected row may require selected-row enrichment or a higher MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT."
+            )
+        if diagnostics.provider_unavailable:
+            reasons.append(
+                "provider unavailable: "
+                f"{diagnostics.provider_unavailable} provider status row(s) were unavailable or errored; see Source Diagnostics for the exact provider."
+            )
+        if diagnostics.rows_provider_returned_no_usable_data:
+            reasons.append(
+                "provider returned no usable data: "
+                f"{diagnostics.rows_provider_returned_no_usable_data} requested row(s) came back without fields the screener can merge."
+            )
+        if diagnostics.rows_blocked_by_provider_plan_rate_auth_limit:
+            reasons.append(
+                "provider auth/plan/rate limit: "
+                f"{diagnostics.rows_blocked_by_provider_plan_rate_auth_limit} provider attempt(s) were blocked; paid FMP would help only when the blocked source is FMP quote/profile/profile-by-CIK."
+            )
+        for status in snapshot.statuses:
+            if _screener_status_mentions_auth_plan_rate(status):
+                reasons.append(f"FMP/provider auth-plan-rate detail: {status.source} {status.status} - {status.message}")
+            elif _screener_status_is_provider_unavailable(status):
+                reasons.append(f"provider unavailable detail: {status.source} {status.status} - {status.message}")
+            elif _screener_status_is_provider_empty(status):
+                reasons.append(f"provider returned no usable data detail: {status.source} {status.status} - {status.message}")
+        if record_has_market_blanks and not _snapshot_mentions_text(snapshot, "fallback"):
+            reasons.append(
+                "fallback disabled/not attempted: optional fallback data only runs when MARKET_SCREENER_FALLBACK_PROVIDER=alpha_vantage is configured, and only during visible-page or selected-row enrichment."
+            )
+    for line in session_lines:
+        clean = str(line or "").strip()
+        lower = clean.lower()
+        if clean and ("provider error" in lower or "enriched 0" in lower or "0 of" in lower):
+            reasons.append(f"session enrichment detail: {clean}")
+    return list(dict.fromkeys(reasons))
+
+
+def _screener_status_mentions_auth_plan_rate(status: Any) -> bool:
+    text = f"{getattr(status, 'source', '')} {getattr(status, 'status', '')} {getattr(status, 'message', '')}".lower()
+    return any(token in text for token in ("auth", "401", "403", "api key", "apikey", "plan", "rate", "limit", "quota", "upgrade"))
+
+
+def _screener_status_is_provider_unavailable(status: Any) -> bool:
+    source = str(getattr(status, "source", "") or "").lower()
+    state = str(getattr(status, "status", "") or "").lower()
+    return state in {"unavailable", "error"} and _source_name_is_market_data_provider(source)
+
+
+def _screener_status_is_provider_empty(status: Any) -> bool:
+    source = str(getattr(status, "source", "") or "").lower()
+    state = str(getattr(status, "status", "") or "").lower()
+    return state == "empty" and _source_name_is_market_data_provider(source)
+
+
+def _source_name_is_market_data_provider(source: str) -> bool:
+    return any(token in source for token in ("market data", "schwab", "fmp", "fallback", "alpha vantage", "local market"))
+
+
+def _snapshot_mentions_text(snapshot: MarketScreenerSnapshot, needle: str) -> bool:
+    target = needle.lower()
+    if any(target in str(source or "").lower() for source in snapshot.sources):
+        return True
+    for status in snapshot.statuses:
+        text = f"{getattr(status, 'source', '')} {getattr(status, 'status', '')} {getattr(status, 'message', '')}".lower()
+        if target in text:
+            return True
+    return False
 
 
 def _ordered_screener_field_provenance(record: MarketScreenerRecord) -> tuple[Any, ...]:
@@ -1986,34 +2208,110 @@ def _format_screener_ai_result(record: MarketScreenerRecord, label: str, prompt:
 
 
 def _screener_source_status_text(snapshot: MarketScreenerSnapshot) -> str:
-    market_data_statuses = [status for status in snapshot.statuses if status.source == "Market data enrichment"]
-    diagnostics_statuses = [status for status in snapshot.statuses if status.source == "Source ladder diagnostics"]
-    other_statuses = [status for status in snapshot.statuses if status.source not in {"Market data enrichment", "Source ladder diagnostics"}]
+    return _screener_diagnostics_popout_text(snapshot)
+
+
+def _screener_diagnostics_popout_text(
+    snapshot: MarketScreenerSnapshot | None,
+    *,
+    selected_record: MarketScreenerRecord | None = None,
+    session_lines: Iterable[str] = (),
+) -> str:
     lines: list[str] = []
-    if market_data_statuses:
-        lines.append("Market data")
-        lines.extend(f"- {status.status}: {status.message}" for status in market_data_statuses)
-    if diagnostics_statuses or snapshot.diagnostics.total_rows:
+    lines.append("SOURCE DIAGNOSTICS / WHY BLANKS?")
+    lines.append("")
+    if snapshot is None:
+        lines.append("No Market Screener snapshot has loaded yet. Refresh the screener to load source statuses and diagnostics counters.")
+        lines.append("")
+        lines.extend(_screener_source_ladder_lines())
+        lines.append("")
+        lines.extend(_screener_blank_explanation_lines())
+        return "\n".join(lines)
+
+    lines.append("Summary")
+    lines.append(f"- {market_screener_diagnostics_summary(snapshot.diagnostics)}")
+    lines.append(f"- Rows loaded: {len(snapshot.records)}")
+    lines.append(f"- Fetched at: {snapshot.fetched_at}")
+    lines.append("")
+    lines.extend(_screener_source_ladder_lines())
+    lines.append("")
+    lines.extend(_screener_blank_explanation_lines())
+    lines.append("")
+    lines.append("Counters")
+    lines.extend(f"- {line}" for line in market_screener_diagnostics_detail_lines(snapshot.diagnostics))
+    lines.append("")
+    lines.append("Provider/source statuses")
+    if snapshot.statuses:
+        lines.extend(f"- {status.source}: {status.status} - {status.message}" for status in snapshot.statuses)
+    else:
+        lines.append("- No provider/source status rows were reported.")
+    lines.append("")
+    lines.append("Would paid FMP help?")
+    lines.extend(
+        [
+            "- Yes, if FMP quote, profile, or profile-by-CIK is configured but blocked by auth, plan, quota, or rate limit, or if the free plan does not expose needed profile/fundamental fields.",
+            "- No, if the row lacks a trusted CIK/symbol, a provider returned no usable data for that symbol, Schwab/local data is the desired source, or rows were skipped by this app's configured cap.",
+            "- Paid FMP still will not justify guessing tickers from company names; identity must come from SEC CIK/ticker data, SEC submissions, local seed data, Schwab, FMP, or a configured fallback.",
+        ]
+    )
+    lines.append("")
+    if selected_record is not None:
+        lines.append("Selected row why blanks?")
+        lines.append(f"- Selected: {selected_record.symbol or selected_record.cik or EMPTY_VALUE} - {display_optional_text(selected_record.company_name)}")
+        selected_reasons = _selected_screener_missing_reason_lines(selected_record, snapshot=snapshot, session_lines=session_lines)
+        if selected_reasons:
+            lines.extend(f"- {reason}" for reason in selected_reasons)
+        else:
+            lines.append("- No blank-field reasons were detected for the selected row.")
+        if selected_record.field_provenance:
+            lines.append("")
+            lines.append("Selected row field provenance")
+            for item in _ordered_screener_field_provenance(selected_record):
+                detail = f" ({item.source_detail})" if item.source_detail else ""
+                link = f" | {item.source_link}" if item.source_link else ""
+                lines.append(f"- {item.field}: {item.source}{detail}{link}")
+    else:
+        lines.append("Selected row why blanks?")
+        lines.append("- No screener row selected. Select a row to see row-specific missing-field reasons and field provenance.")
+    session = [str(line or "").strip() for line in session_lines if str(line or "").strip()]
+    if session:
         if lines:
             lines.append("")
-        lines.append("Source ladder diagnostics")
-        lines.extend(f"- {line}" for line in market_screener_diagnostics_detail_lines(snapshot.diagnostics))
-    if other_statuses:
-        if lines:
-            lines.append("")
-        lines.append("Source coverage")
-        lines.extend(f"- {status.source}: {status.status} - {status.message}" for status in other_statuses)
+        lines.append("Session enrichment")
+        lines.extend(f"- {line}" for line in session)
     if snapshot.errors:
         if lines:
             lines.append("")
         lines.append("Warnings:")
         lines.extend(f"- {error}" for error in snapshot.errors[:6])
-    return "\n".join(lines or ["Source/status: Market Intelligence Screener has not loaded provider status yet."])
+    return "\n".join(lines)
+
+
+def _screener_source_ladder_lines() -> list[str]:
+    return [
+        "Provider/source ladder",
+        "- 1. Local market-data file/cache",
+        "- 2. SEC CIK/ticker identity resolution",
+        "- 3. SEC submissions metadata",
+        "- 4. Schwab quote",
+        "- 5. FMP quote/profile/profile-by-CIK",
+        "- 6. Optional fallback provider, only when configured, and only for visible-page or selected-row enrichment",
+    ]
+
+
+def _screener_blank_explanation_lines() -> list[str]:
+    return [
+        "Why blanks happen",
+        "- SEC company_tickers supplies symbol, company name, and CIK only. It does not supply exchange, sector, industry, price, avg volume, change %, market cap, P/E, EPS, or revenue growth.",
+        "- Exchange, sector, and industry require SEC submissions metadata, local seed data, FMP profile/profile-by-CIK, a local market-data file, or a configured fallback profile.",
+        "- Price, volume, change %, and avg volume require a local market-data file/cache, Schwab quote, FMP quote, or configured fallback quote.",
+        "- Fundamentals require local market-data/fundamental seed data, parsed SEC filing rows, FMP quote/profile fields, or a configured fallback profile. Missing values are left blank and are not inferred.",
+    ]
 
 
 def _screener_source_summary_text(snapshot: MarketScreenerSnapshot) -> str:
     if snapshot.diagnostics.total_rows:
-        return _truncate(market_screener_diagnostics_summary(snapshot.diagnostics), 240)
+        return _truncate(f"Source-aware coverage: {market_screener_diagnostics_summary(snapshot.diagnostics)} Open Source Diagnostics / Why blanks? for full counters.", 240)
     market_data_status = next((status for status in snapshot.statuses if status.source == "Market data enrichment"), None)
     if market_data_status is not None:
         return _truncate(market_data_status.message, 240)
