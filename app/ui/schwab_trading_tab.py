@@ -8,7 +8,14 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Any, Callable, Type
 
-from app.core.order_models import SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, TimeInForce, normalize_time_in_force, schwab_equity_session_duration
+from app.core.order_models import (
+    SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES,
+    TimeInForce,
+    normalize_time_in_force,
+    schwab_equity_session_duration,
+    schwab_equity_tif_from_session_duration,
+    schwab_equity_tif_requires_limit_order,
+)
 from app.ui.trading_workspace import (
     OPTION_TYPES,
     ORDER_TYPES,
@@ -159,7 +166,7 @@ def _rebuild_schwab_ticket_side_by_side(self: tk.Tk, ticket: ttk.LabelFrame) -> 
         1,
         "Order type",
         ttk.Combobox(stock, textvariable=self.order_type_var, values=["market", "limit", "stop", "stop_limit"], state="readonly"),
-        "Duration",
+        "TIF",
         ttk.Combobox(stock, textvariable=self.time_in_force_var, values=SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, state="readonly"),
     )
     self._grid_row(
@@ -167,15 +174,20 @@ def _rebuild_schwab_ticket_side_by_side(self: tk.Tk, ticket: ttk.LabelFrame) -> 
         2,
         "Position effect",
         ttk.Combobox(stock, textvariable=self.schwab_stock_position_effect_var, values=["AUTO", "OPENING", "CLOSING"], state="readonly"),
-        "Session",
-        ttk.Combobox(stock, textvariable=self.schwab_stock_session_var, values=["NORMAL", "AM", "PM", "SEAMLESS"], state="readonly"),
+        "Quantity",
+        ttk.Entry(stock, textvariable=self.quantity_var),
     )
-    self._grid_row(stock, 3, "Quantity", ttk.Entry(stock, textvariable=self.quantity_var), "Entry / Limit", ttk.Entry(stock, textvariable=self.limit_price_var))
+    self._grid_row(
+        stock,
+        3,
+        "Entry / Limit",
+        ttk.Entry(stock, textvariable=self.limit_price_var),
+        "Stop price",
+        ttk.Entry(stock, textvariable=self.stop_price_var),
+    )
     self._grid_row(
         stock,
         4,
-        "Stop price",
-        ttk.Entry(stock, textvariable=self.stop_price_var),
         "Use Mid",
         ttk.Button(
             stock,
@@ -183,9 +195,9 @@ def _rebuild_schwab_ticket_side_by_side(self: tk.Tk, ticket: ttk.LabelFrame) -> 
             command=lambda app=self: _run_schwab_workspace_action(app, "use_schwab_mid_market", "use_selected_venue_mid_market"),
             style="Accent.TButton",
         ),
+        "Cancel order ID",
+        ttk.Entry(stock, textvariable=self.cancel_order_id_var),
     )
-    ttk.Label(stock, text="Cancel order ID", style="Subtle.TLabel").grid(row=5, column=0, sticky="w", padx=(0, 8), pady=5)
-    ttk.Entry(stock, textvariable=self.cancel_order_id_var).grid(row=5, column=1, columnspan=3, sticky="ew", pady=5)
 
     options = ttk.LabelFrame(ticket_fields, text="Options Ticket Fields", style="Card.TLabelframe")
     options.grid(row=0, column=1, sticky="new", padx=(8, 0))
@@ -242,19 +254,17 @@ def _build_schwab_stock_order_json_from_ui(self: tk.Tk) -> dict[str, Any]:
     limit_price = _optional_positive_float(_get_string_var(self, "limit_price_var"), "Entry / Limit")
     stop_price = _optional_positive_float(_get_string_var(self, "stop_price_var"), "Stop price")
 
-    duration_choice = _supported_duration(_get_string_var(self, "time_in_force_var"))
-    derived_session, duration = schwab_equity_session_duration(duration_choice)
-    session_input = _get_string_var(self, "schwab_stock_session_var")
-    if derived_session != "NORMAL" and session_input in {"", "NORMAL"}:
-        session = derived_session
-    else:
-        session = _supported_session(session_input or derived_session)
+    tif = _supported_duration(_get_string_var(self, "time_in_force_var"))
+    _validate_schwab_equity_tif_order_type(tif, order_type)
+    session, duration = schwab_equity_session_duration(tif)
     position_effect = _normalized_stock_position_effect(_get_string_var(self, "schwab_stock_position_effect_var"))
 
     if order_type in {"LIMIT", "STOP_LIMIT"} and limit_price is None:
         raise ValueError("Entry / Limit is required for LIMIT and STOP_LIMIT stock orders.")
     if order_type in {"STOP", "STOP_LIMIT"} and stop_price is None:
         raise ValueError("Stop price is required for STOP and STOP_LIMIT stock orders.")
+    if order_type not in {"STOP", "STOP_LIMIT"} and stop_price is not None:
+        raise ValueError("Stop price can only be used with STOP or STOP_LIMIT stock orders. Clear Stop price or change Order type.")
 
     leg: dict[str, Any] = {
         "instruction": "BUY" if side == "buy" else "SELL",
@@ -934,8 +944,7 @@ def _show_schwab_replace_dialog(self: tk.Tk, order: dict[str, Any], parsed: dict
     type_var = tk.StringVar(value=_supported_order_type(parsed["order_type"]))
     limit_var = tk.StringVar(value=parsed["limit_price"].replace("$", "").replace(",", "") if parsed["limit_price"] != "--" else "")
     stop_var = tk.StringVar(value=parsed["stop_price"].replace("$", "").replace(",", "") if parsed["stop_price"] != "--" else "")
-    duration_var = tk.StringVar(value=_supported_duration(parsed["duration"]))
-    session_var = tk.StringVar(value=_supported_session(parsed["session"]))
+    tif_var = tk.StringVar(value=_display_tif_from_order_fields(parsed["session"], parsed["duration"]))
 
     _grid_pair(form, 0, "Original order ID", ttk.Entry(form, textvariable=order_id_var, state="readonly"), "Symbol", ttk.Entry(form, textvariable=symbol_var))
     _grid_pair(form, 1, "Side", ttk.Combobox(form, textvariable=side_var, values=["buy", "sell"], state="readonly"), "Quantity", ttk.Entry(form, textvariable=quantity_var))
@@ -945,7 +954,14 @@ def _show_schwab_replace_dialog(self: tk.Tk, order: dict[str, Any], parsed: dict
     ttk.Entry(limit_box, textvariable=limit_var).grid(row=0, column=0, sticky="ew")
     ttk.Button(limit_box, text="Use Mid", command=lambda: use_mid_for_replace(), style="Accent.TButton").grid(row=0, column=1, sticky="e", padx=(6, 0))
     _grid_pair(form, 3, "Limit price", limit_box, "Stop price", ttk.Entry(form, textvariable=stop_var))
-    _grid_pair(form, 4, "Duration", ttk.Combobox(form, textvariable=duration_var, values=SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, state="readonly"), "Session", ttk.Combobox(form, textvariable=session_var, values=["NORMAL", "AM", "PM", "SEAMLESS"], state="readonly"))
+    ttk.Label(form, text="TIF", style="Subtle.TLabel").grid(row=4, column=0, sticky="w", padx=(0, 6), pady=4)
+    ttk.Combobox(form, textvariable=tif_var, values=SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, state="readonly").grid(
+        row=4,
+        column=1,
+        sticky="ew",
+        padx=(0, 10),
+        pady=4,
+    )
 
     preview_frame = ttk.LabelFrame(window, text="Replacement Payload Preview", style="Card.TLabelframe", padding=10)
     preview_frame.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 8))
@@ -969,8 +985,7 @@ def _show_schwab_replace_dialog(self: tk.Tk, order: dict[str, Any], parsed: dict
             order_type=type_var.get(),
             limit_price=limit_var.get(),
             stop_price=stop_var.get(),
-            duration=duration_var.get(),
-            session=session_var.get(),
+            tif=tif_var.get(),
             position_effect=effect_var.get(),
         )
 
@@ -1080,7 +1095,7 @@ def _show_schwab_replace_dialog(self: tk.Tk, order: dict[str, Any], parsed: dict
     ttk.Button(buttons, text="Cancel Order", command=lambda app=self, win=window: _cancel_selected_schwab_open_order(app, parent=win)).grid(row=0, column=2, sticky="e", padx=(8, 0))
     ttk.Button(buttons, text="Close", command=window.destroy).grid(row=0, column=3, sticky="e", padx=(8, 0))
 
-    for variable in (symbol_var, side_var, quantity_var, effect_var, type_var, limit_var, stop_var, duration_var, session_var):
+    for variable in (symbol_var, side_var, quantity_var, effect_var, type_var, limit_var, stop_var, tif_var):
         variable.trace_add("write", lambda *_args: render_preview())
     render_preview()
 
@@ -1094,8 +1109,7 @@ def _replacement_payload_from_fields(
     order_type: str,
     limit_price: str,
     stop_price: str,
-    duration: str,
-    session: str,
+    tif: str,
     position_effect: str,
 ) -> dict[str, Any]:
     clean_symbol = symbol.strip().upper()
@@ -1106,9 +1120,9 @@ def _replacement_payload_from_fields(
         raise ValueError("Quantity must be positive.")
 
     clean_type = _supported_order_type(order_type)
-    clean_duration_choice = _supported_duration(duration)
-    derived_session, clean_duration = schwab_equity_session_duration(clean_duration_choice)
-    clean_session = _supported_session(session or derived_session)
+    clean_tif = _supported_duration(tif)
+    _validate_schwab_equity_tif_order_type(clean_tif, clean_type)
+    clean_session, clean_duration = schwab_equity_session_duration(clean_tif)
     instruction = "BUY" if side.strip().lower() == "buy" else "SELL"
     asset_type = _asset_type_from_order(original_order)
 
@@ -1136,6 +1150,8 @@ def _replacement_payload_from_fields(
         payload["price"] = _decimal_text(limit_price, field="Limit price")
     if clean_type in {"STOP", "STOP_LIMIT"}:
         payload["stopPrice"] = _decimal_text(stop_price, field="Stop price")
+    if clean_type not in {"STOP", "STOP_LIMIT"} and str(stop_price or "").strip():
+        raise ValueError("Stop price can only be used with STOP or STOP_LIMIT stock orders. Clear Stop price or change Order type.")
 
     return payload
 
@@ -1222,8 +1238,8 @@ def _load_schwab_order_into_ticket(self: tk.Tk, order: dict[str, Any], parsed: d
         self.limit_price_var.set(parsed["limit_price"].replace("$", "").replace(",", ""))
     if parsed["stop_price"] != "--" and hasattr(self, "stop_price_var"):
         self.stop_price_var.set(parsed["stop_price"].replace("$", "").replace(",", ""))
-    if parsed["duration"] and hasattr(self, "time_in_force_var"):
-        self.time_in_force_var.set(_supported_duration(parsed["duration"]))
+    if (parsed["duration"] or parsed["session"]) and hasattr(self, "time_in_force_var"):
+        self.time_in_force_var.set(_display_tif_from_order_fields(parsed["session"], parsed["duration"]))
     if parsed["session"] and hasattr(self, "schwab_stock_session_var"):
         self.schwab_stock_session_var.set(_supported_session(parsed["session"]))
     if parsed["position_effect"] and hasattr(self, "schwab_stock_position_effect_var"):
@@ -1337,22 +1353,24 @@ def _supported_order_type(value: str) -> str:
 
 
 def _supported_duration(value: str) -> str:
-    raw = str(value or "").strip()
-    if raw in SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES:
-        return raw
-    aliases = {
-        "DAY": "Day",
-        "GTC": "GTC",
-        "GOOD_TILL_CANCEL": "GTC",
-        "EXT": "Day (EXT 13h)",
-        "DAY_EXT": "Day (EXT 13h)",
-        "GTC_EXT": "GTC (EXT 13h)",
-        "AM": "Day (EXT AM)",
-        "DAY_EXT_AM": "Day (EXT AM)",
-        "PM": "Day (EXT PM)",
-        "DAY_EXT_PM": "Day (EXT PM)",
-    }
-    return aliases.get(raw.upper().replace(" ", "_"), "Day")
+    try:
+        return normalize_time_in_force(value).value
+    except ValueError as exc:
+        raise ValueError(f"Unsupported Schwab stock TIF: {value!r}") from exc
+
+
+def _display_tif_from_order_fields(session: str, duration: str) -> str:
+    return schwab_equity_tif_from_session_duration(session, duration).value
+
+
+def _validate_schwab_equity_tif_order_type(tif: str, order_type: str) -> None:
+    normalized_tif = normalize_time_in_force(tif)
+    schwab_equity_session_duration(normalized_tif)
+    if schwab_equity_tif_requires_limit_order(normalized_tif) and order_type != "LIMIT":
+        raise ValueError(
+            f"TIF {normalized_tif.value} is an extended-hours equity selection. Schwab extended-hours "
+            f"stock/ETF orders must use Order type LIMIT; current order type is {order_type}."
+        )
 
 
 def _supported_session(value: str) -> str:

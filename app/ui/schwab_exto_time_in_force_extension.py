@@ -4,16 +4,16 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Any, Type
 
-from app.core.order_models import normalize_time_in_force
+from app.core.order_models import SCHWAB_EQUITY_API_SESSION_CHOICES, normalize_time_in_force
 from app.ui import schwab_trading_tab
 
 
-SCHWAB_EQUITY_SESSION_CHOICES = ("NORMAL", "AM", "PM", "SEAMLESS", "EXTO")
+SCHWAB_EQUITY_SESSION_CHOICES = SCHWAB_EQUITY_API_SESSION_CHOICES
 _LEGACY_SESSION_CHOICES = ("NORMAL", "AM", "PM", "SEAMLESS")
 
 
 def install_schwab_exto_time_in_force_extension(app_cls: Type[tk.Tk]) -> None:
-    """Expose the full thinkorswim-style equity TIF/session set in Schwab tickets."""
+    """Keep old TIF aliases without exposing undocumented raw API sessions."""
 
     if getattr(app_cls, "_schwab_exto_time_in_force_extension_installed", False):
         return
@@ -40,8 +40,8 @@ def _patch_supported_duration() -> None:
     def _supported_duration_with_tos_codes(value: str) -> str:
         try:
             return normalize_time_in_force(value).value
-        except ValueError:
-            return "DAY"
+        except ValueError as exc:
+            raise ValueError(f"Unsupported Schwab stock TIF: {value!r}") from exc
 
     schwab_trading_tab._supported_duration = _supported_duration_with_tos_codes  # type: ignore[attr-defined]
     schwab_trading_tab._schwab_exto_supported_duration_patched = True  # type: ignore[attr-defined]
@@ -51,20 +51,11 @@ def _patch_supported_session() -> None:
     if getattr(schwab_trading_tab, "_schwab_exto_supported_session_patched", False):
         return
 
-    def _supported_session_with_exto(value: str) -> str:
+    def _supported_api_session(value: str) -> str:
         clean = str(value or "NORMAL").strip().upper().replace(" ", "_")
-        aliases = {
-            "OVERNIGHT": "EXTO",
-            "EXT_OVERNIGHT": "EXTO",
-            "EXTENDED_OVERNIGHT": "EXTO",
-            "24H": "EXTO",
-            "24_5": "EXTO",
-            "24/5": "EXTO",
-        }
-        clean = aliases.get(clean, clean)
         return clean if clean in SCHWAB_EQUITY_SESSION_CHOICES else "NORMAL"
 
-    schwab_trading_tab._supported_session = _supported_session_with_exto  # type: ignore[attr-defined]
+    schwab_trading_tab._supported_session = _supported_api_session  # type: ignore[attr-defined]
     schwab_trading_tab._schwab_exto_supported_session_patched = True  # type: ignore[attr-defined]
 
 
