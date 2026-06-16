@@ -287,12 +287,7 @@ def _build_screener_tab(self: tk.Tk, parent: ttk.Frame) -> None:
     parent.columnconfigure(0, weight=1)
     parent.rowconfigure(3, weight=1)
     _configure_market_screener_tree_style(parent)
-    _header(
-        parent,
-        "Market Intelligence Screener",
-        "Public-company universe, earnings events, SEC filing signals, local holdings, and optional provider-backed market fields are merged into one row-grounded research surface. Missing provider fields remain blank instead of inferred.",
-        self.market_screener_status_var,
-    ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
+    _header(self.market_screener_status_var).grid(row=0, column=0, sticky="ew", pady=(0, 8))
     _build_screener_filters(self, parent)
     self.market_screener_chart = _screener_summary_panel(self, parent, row=2)
     self.market_screener_table = _table(
