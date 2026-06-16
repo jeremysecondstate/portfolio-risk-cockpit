@@ -126,6 +126,9 @@ MARKET_SCREENER_TABLE_HEIGHT = 18
 MARKET_SCREENER_TABLE_ROWHEIGHT = 38
 MARKET_SCREENER_TEXT_FONT = ("Segoe UI", 11)
 MARKET_SCREENER_SOURCE_FONT = ("Segoe UI", 10)
+EARNINGS_RADAR_CHART_HEIGHT = 150
+MARKET_SCREENER_SUMMARY_STRIP_HEIGHT = 68
+MARKET_SCREENER_SUMMARY_MAX_ITEMS = 5
 
 
 def install_earnings_radar_extension(app_cls: Type[tk.Tk]) -> None:
@@ -229,6 +232,8 @@ def _ensure_state(self: tk.Tk) -> None:
     self.market_screener_selected_summary_var = tk.StringVar(value="No screener row selected.")
     self.market_screener_ai_status_var = tk.StringVar(value="Select a screener row for row-grounded AI.")
     self.market_screener_source_summary_var = tk.StringVar(value="Market data/source status will appear here after load.")
+    self.market_screener_summary_visible_var = tk.BooleanVar(value=True)
+    self.market_screener_summary_toggle_var = tk.StringVar(value="Hide Summary")
     self._market_screener_ai_running = False
     self._market_screener_refreshing = False
     self._market_screener_refresh_pending = False
@@ -289,7 +294,7 @@ def _build_screener_tab(self: tk.Tk, parent: ttk.Frame) -> None:
         self.market_screener_status_var,
     ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
     _build_screener_filters(self, parent)
-    self.market_screener_chart = _chart(parent, row=2)
+    self.market_screener_chart = _screener_summary_panel(self, parent, row=2)
     self.market_screener_table = _table(
         parent,
         row=3,
@@ -847,13 +852,14 @@ def _screener_values(record: MarketScreenerRecord) -> tuple[str, ...]:
 
 def _draw_screener_chart(self: tk.Tk) -> None:
     records = self.market_screener_filtered_records
-    _draw_grouped_chart(
-        self.market_screener_chart,
-        (
-            ("Portfolio", _counts(records, lambda record: "My Holdings" if market_screener_is_my_holding(record) else "Not held")),
-            ("Data", _counts(records, market_screener_data_label)),
-            ("Completeness", _counts(records, lambda record: str(market_screener_data_completeness(record)["label"]))),
-        ),
+    _draw_screener_summary_strip(self.market_screener_chart, _screener_summary_groups(records))
+
+
+def _screener_summary_groups(records: Iterable[MarketScreenerRecord]) -> tuple[tuple[str, dict[str, int]], ...]:
+    return (
+        ("Portfolio", _counts(records, lambda record: "My Holdings" if market_screener_is_my_holding(record) else "Not held")),
+        ("Data", _counts(records, market_screener_data_label)),
+        ("Completeness", _counts(records, lambda record: str(market_screener_data_completeness(record)["label"]))),
     )
 
 
@@ -2114,9 +2120,55 @@ def _header(parent: ttk.Frame, title: str, body: str, status_var: tk.StringVar) 
 
 
 def _chart(parent: ttk.Frame, *, row: int) -> tk.Canvas:
-    canvas = tk.Canvas(parent, height=150, bg=polished_theme.PANEL, highlightthickness=1, highlightbackground=polished_theme.BORDER)
+    canvas = tk.Canvas(parent, height=EARNINGS_RADAR_CHART_HEIGHT, bg=polished_theme.PANEL, highlightthickness=1, highlightbackground=polished_theme.BORDER)
     canvas.grid(row=row, column=0, sticky="ew", pady=(0, 8))
     return canvas
+
+
+def _screener_summary_panel(owner: tk.Tk, parent: ttk.Frame, *, row: int) -> tk.Canvas:
+    shell = ttk.Frame(parent, style="Panel.TFrame")
+    shell.grid(row=row, column=0, sticky="ew", pady=(0, 6))
+    shell.columnconfigure(0, weight=1)
+    header = ttk.Frame(shell, style="Panel.TFrame")
+    header.grid(row=0, column=0, sticky="ew")
+    header.columnconfigure(1, weight=1)
+    ttk.Label(header, text="Summary", style="Subtle.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
+    ttk.Label(header, text="Portfolio / Data / Completeness", style="Subtle.TLabel").grid(row=0, column=1, sticky="w")
+    ttk.Button(header, textvariable=owner.market_screener_summary_toggle_var, command=lambda app=owner: _toggle_screener_summary(app)).grid(row=0, column=2, sticky="e")
+    canvas = tk.Canvas(shell, height=MARKET_SCREENER_SUMMARY_STRIP_HEIGHT, bg=polished_theme.PANEL, highlightthickness=1, highlightbackground=polished_theme.BORDER)
+    canvas.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+    owner.market_screener_summary_panel = shell
+    return canvas
+
+
+def _toggle_screener_summary(self: tk.Tk) -> None:
+    visible_var = getattr(self, "market_screener_summary_visible_var", None)
+    if visible_var is None:
+        return
+    visible_var.set(not bool(visible_var.get()))
+    _apply_screener_summary_visibility(self)
+    if bool(visible_var.get()):
+        _draw_screener_chart(self)
+
+
+def _apply_screener_summary_visibility(self: tk.Tk) -> None:
+    visible_var = getattr(self, "market_screener_summary_visible_var", None)
+    if visible_var is None:
+        return
+    visible = bool(visible_var.get())
+    toggle_var = getattr(self, "market_screener_summary_toggle_var", None)
+    if toggle_var is not None:
+        toggle_var.set("Hide Summary" if visible else "Show Summary")
+    chart = getattr(self, "market_screener_chart", None)
+    if chart is None:
+        return
+    try:
+        if visible:
+            chart.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        else:
+            chart.grid_remove()
+    except tk.TclError:
+        return
 
 
 def _table(
@@ -2217,6 +2269,32 @@ def _draw_grouped_chart(canvas: tk.Canvas, groups: tuple[tuple[str, dict[str, in
             canvas.create_text(x0, y, text=_truncate(label, 16), anchor="nw", fill=polished_theme.MUTED, font=("Segoe UI", 8))
             canvas.create_rectangle(x0 + 105, y + 2, x0 + 105 + bar_width, y + 13, fill=polished_theme.ACCENT, outline="")
             canvas.create_text(x0 + panel_width - 16, y, text=str(count), anchor="ne", fill=polished_theme.TEXT, font=("Segoe UI", 8, "bold"))
+
+
+def _draw_screener_summary_strip(canvas: tk.Canvas, groups: tuple[tuple[str, dict[str, int]], ...]) -> None:
+    canvas.delete("all")
+    width = max(canvas.winfo_width(), 720)
+    panel_width = max(220, width // max(len(groups), 1))
+    for group_index, (title, counts) in enumerate(groups):
+        x0 = group_index * panel_width + 10
+        x1 = min(width - 12, (group_index + 1) * panel_width - 16)
+        canvas.create_text(x0, 7, text=title, anchor="nw", fill=polished_theme.TEXT, font=("Segoe UI", 8, "bold"))
+        if not counts:
+            canvas.create_text(x0, 29, text="No matches.", anchor="nw", fill=polished_theme.MUTED, font=("Segoe UI", 8))
+            continue
+        items = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:MARKET_SCREENER_SUMMARY_MAX_ITEMS]
+        max_value = max(count for _label, count in items) or 1
+        label_width = 102 if panel_width >= 300 else 82
+        label_limit = 18 if panel_width >= 300 else 14
+        count_x = max(x0 + 138, x1)
+        bar_x0 = x0 + label_width
+        bar_max_width = max(18, count_x - bar_x0 - 32)
+        for index, (label, count) in enumerate(items):
+            y = 22 + index * 9
+            bar_width = max(3, int(bar_max_width * (count / max_value)))
+            canvas.create_text(x0, y, text=_truncate(label, label_limit), anchor="nw", fill=polished_theme.MUTED, font=("Segoe UI", 7))
+            canvas.create_rectangle(bar_x0, y + 4, bar_x0 + bar_width, y + 7, fill=polished_theme.ACCENT, outline="")
+            canvas.create_text(count_x, y - 1, text=str(count), anchor="ne", fill=polished_theme.TEXT, font=("Segoe UI", 7, "bold"))
 
 
 def _sorted(records: list[Any], column: str, desc: bool, sort_value: Callable[[Any, str], Any]) -> list[Any]:

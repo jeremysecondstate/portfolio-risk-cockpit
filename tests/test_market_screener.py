@@ -121,11 +121,14 @@ class _FakeOpenAiClient:
 
 
 class _FakeTkVar:
-    def __init__(self, value: str = "") -> None:
+    def __init__(self, value: object = "") -> None:
         self.value = value
 
-    def set(self, value: str) -> None:
+    def set(self, value: object) -> None:
         self.value = value
+
+    def get(self):
+        return self.value
 
 
 class _FakeTextWidget:
@@ -152,6 +155,36 @@ class _FakeTree:
 
     def select(self, *iids: str) -> None:
         self._selection = tuple(iids)
+
+
+class _FakeCanvas:
+    def __init__(self, width: int = 900) -> None:
+        self.width = width
+        self.calls: list[tuple[str, tuple, dict]] = []
+        self.visible = True
+        self.grid_calls: list[tuple[str, tuple, dict]] = []
+
+    def delete(self, *args) -> None:
+        self.calls.append(("delete", args, {}))
+
+    def winfo_width(self) -> int:
+        return self.width
+
+    def grid(self, *args, **kwargs) -> None:
+        self.visible = True
+        self.grid_calls.append(("grid", args, kwargs))
+
+    def grid_remove(self) -> None:
+        self.visible = False
+        self.grid_calls.append(("grid_remove", (), {}))
+
+    def create_text(self, *args, **kwargs) -> int:
+        self.calls.append(("text", args, kwargs))
+        return len(self.calls)
+
+    def create_rectangle(self, *args, **kwargs) -> int:
+        self.calls.append(("rectangle", args, kwargs))
+        return len(self.calls)
 
 
 class _FakeMarketDataProvider:
@@ -936,6 +969,82 @@ def test_market_screener_ui_values_handle_missing_numeric_fields() -> None:
     assert values[3] == "Acme Corp"
     assert "--" in values
     assert "Not extracted" not in values
+
+
+def test_market_screener_summary_strip_is_compact_and_keeps_counts_visible() -> None:
+    records = [
+        MarketScreenerRecord(
+            "HOLD",
+            "Held Corp",
+            exchange="Nasdaq",
+            sector="Technology",
+            industry="Software",
+            price=120.0,
+            market_cap=1_000_000_000,
+            volume=2_000_000,
+            avg_volume=1_500_000,
+            change_percent=3.2,
+            pe_ratio=22.0,
+            eps=1.25,
+            revenue_growth=12.0,
+            shares_float=50_000_000,
+            next_earnings_date="2026-07-21",
+            signals=("Schwab holding",),
+            sources=("Local app holdings", "FMP quote"),
+            source_links=("https://example.test/hold",),
+            portfolio_quantity=10,
+        ),
+        MarketScreenerRecord("QUOT", "Quote Corp", price=14.0, volume=100_000, sources=("Schwab quote",)),
+        MarketScreenerRecord("FILI", "Filing Corp", recent_filing_date="2026-06-12", sources=("SEC EDGAR",)),
+        MarketScreenerRecord("BASE", "Base Corp"),
+    ]
+
+    groups = earnings_radar_extension._screener_summary_groups(records)
+    canvas = _FakeCanvas()
+    earnings_radar_extension._draw_screener_summary_strip(canvas, groups)
+    text_values = [kwargs["text"] for call, _args, kwargs in canvas.calls if call == "text"]
+
+    assert earnings_radar_extension.MARKET_SCREENER_SUMMARY_STRIP_HEIGHT < earnings_radar_extension.EARNINGS_RADAR_CHART_HEIGHT
+    assert earnings_radar_extension.MARKET_SCREENER_TABLE_ROWHEIGHT == 38
+    assert groups[0][1] == {"My Holdings": 1, "Not held": 3}
+    assert "Portfolio" in text_values
+    assert "Data" in text_values
+    assert "Completeness" in text_values
+    assert "My Holdings" in text_values
+    assert "Not held" in text_values
+    assert "Universe only" in text_values
+    assert "1" in text_values
+    assert "3" in text_values
+    assert any(call == "rectangle" for call, _args, _kwargs in canvas.calls)
+
+
+def test_market_screener_summary_toggle_collapses_canvas_and_restores_redraw(monkeypatch) -> None:
+    canvas = _FakeCanvas()
+    app = SimpleNamespace(
+        market_screener_summary_visible_var=_FakeTkVar(True),
+        market_screener_summary_toggle_var=_FakeTkVar("Hide Summary"),
+        market_screener_chart=canvas,
+        market_screener_filtered_records=[MarketScreenerRecord("ACME", "Acme Corp")],
+    )
+    redraws: list[list[MarketScreenerRecord]] = []
+    monkeypatch.setattr(earnings_radar_extension, "_draw_screener_chart", lambda target: redraws.append(list(target.market_screener_filtered_records)))
+
+    earnings_radar_extension._toggle_screener_summary(app)
+
+    assert app.market_screener_summary_visible_var.get() is False
+    assert app.market_screener_summary_toggle_var.get() == "Show Summary"
+    assert canvas.visible is False
+    assert canvas.grid_calls[-1][0] == "grid_remove"
+    assert redraws == []
+
+    app.market_screener_filtered_records = [MarketScreenerRecord("BETA", "Beta Inc")]
+    earnings_radar_extension._toggle_screener_summary(app)
+
+    assert app.market_screener_summary_visible_var.get() is True
+    assert app.market_screener_summary_toggle_var.get() == "Hide Summary"
+    assert canvas.visible is True
+    assert canvas.grid_calls[-1][0] == "grid"
+    assert [[record.symbol for record in rows] for rows in redraws] == [["BETA"]]
 
 
 def test_high_volume_mover_filter_requires_actual_market_data() -> None:
