@@ -5,7 +5,7 @@ import statistics
 from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 from app.analytics.capital_structure_pressure import (
@@ -355,6 +355,8 @@ class TechnicalCommandCenterReport:
             warnings=[],
         )
     )
+    market_intelligence: Any | None = None
+    market_intelligence_source_statuses: tuple[Any, ...] = ()
 
 
 DEFAULT_COMMAND_CENTER_TIMEFRAMES: tuple[TimeframeSpec, ...] = (
@@ -521,6 +523,7 @@ def build_technical_command_center_report(
     ticket: TechnicalTicket | None = None,
     warnings: list[str] | None = None,
     capital_structure_pressure: CapitalStructurePressureReport | None = None,
+    external_intelligence: Any | None = None,
 ) -> TechnicalCommandCenterReport:
     clean_symbol = symbol.strip().upper()
     snapshots: dict[str, TimeframeTechnicalSnapshot] = {}
@@ -546,6 +549,8 @@ def build_technical_command_center_report(
         report_warnings.append("Benchmark relative-strength data unavailable; PRC excludes relative-strength adjustment.")
     if quote_snapshot is not None:
         report_warnings.extend(quote_snapshot.data_quality_warnings)
+    if external_intelligence is not None:
+        report_warnings.extend(_external_intelligence_warning_lines(external_intelligence))
     active_ticket = ticket or TechnicalTicket()
     relative_strength_score = prc_relative_strength_score(benchmark_reads)
     prc_indexes = build_prc_index_prices(
@@ -606,7 +611,31 @@ def build_technical_command_center_report(
         capital_structure_pressure=capital_structure_pressure,
         capital_structure_indicator=capital_structure_indicator,
         setup_classification=setup_classification,
+        market_intelligence=external_intelligence,
+        market_intelligence_source_statuses=_external_intelligence_source_statuses(external_intelligence),
     )
+
+
+def _external_intelligence_source_statuses(external_intelligence: Any | None) -> tuple[Any, ...]:
+    if external_intelligence is None:
+        return ()
+    statuses = getattr(external_intelligence, "source_statuses", ()) or ()
+    try:
+        return tuple(statuses)
+    except TypeError:
+        return ()
+
+
+def _external_intelligence_warning_lines(external_intelligence: Any) -> list[str]:
+    warnings = [str(warning) for warning in (getattr(external_intelligence, "warnings", ()) or ()) if str(warning).strip()]
+    for status in _external_intelligence_source_statuses(external_intelligence):
+        status_value = str(getattr(status, "status", "") or "").strip().lower()
+        if status_value not in {"warning", "error"}:
+            continue
+        source = str(getattr(status, "source", "") or "Market intelligence source").strip()
+        message = str(getattr(status, "message", "") or "").strip()
+        warnings.append(f"{source}: {message}" if message else f"{source}: {status_value}.")
+    return _dedupe(warnings)
 
 
 def build_timeframe_technical_snapshot(
@@ -2664,10 +2693,148 @@ def format_technical_command_center_report(report: TechnicalCommandCenterReport)
             f"- {capital_structure_technical_modifier(report.overall_read, report.capital_structure_pressure)}"
         )
     lines.extend(f"- {line}" for line in report.plain_english_plan)
+    lines.extend(_format_market_intelligence_section(report))
     if report.warnings:
         lines.extend(["", "DATA WARNINGS"])
         lines.extend(f"- {warning}" for warning in report.warnings)
     return "\n".join(lines)
+
+
+def _format_market_intelligence_section(report: TechnicalCommandCenterReport) -> list[str]:
+    intelligence = getattr(report, "market_intelligence", None)
+    statuses = tuple(getattr(report, "market_intelligence_source_statuses", ()) or ())
+    if intelligence is None and not statuses:
+        return []
+
+    lines = ["", "MARKET INTELLIGENCE SOURCES", "---------------------------"]
+    if statuses:
+        for status in statuses:
+            source = str(getattr(status, "source", "") or "Market intelligence source")
+            state = str(getattr(status, "status", "") or "unknown")
+            fetched_at = str(getattr(status, "fetched_at", "") or "--")
+            message = str(getattr(status, "message", "") or "")
+            lines.append(f"- {source}: {state}; fetched {fetched_at}; {message}")
+    else:
+        lines.append("- No external market-intelligence source status rows were reported.")
+
+    if intelligence is None:
+        return lines
+
+    context_lines = _format_market_intelligence_context(intelligence)
+    if context_lines:
+        lines.extend(["", "MARKET INTELLIGENCE CONTEXT", "---------------------------"])
+        lines.extend(context_lines)
+    return lines
+
+
+def _format_market_intelligence_context(intelligence: Any) -> list[str]:
+    lines: list[str] = []
+    fmp_profile = _external_mapping(getattr(intelligence, "fmp_profile", None))
+    fmp_quote = _external_mapping(getattr(intelligence, "fmp_quote", None))
+    fmp_fundamentals = _external_mapping(getattr(intelligence, "fmp_fundamentals", None))
+    equity_tape = _external_mapping(getattr(intelligence, "databento_equity_tape", None))
+    futures_context = _external_mapping(getattr(intelligence, "databento_futures_context", None))
+    equity_candles = getattr(intelligence, "databento_equity_candles", None)
+
+    profile_bits = [
+        _optional_text(fmp_profile.get("company_name")),
+        _optional_text(fmp_profile.get("exchange")),
+        _slash_join(_optional_text(fmp_profile.get("sector")), _optional_text(fmp_profile.get("industry"))),
+    ]
+    profile_line = "; ".join(bit for bit in profile_bits if bit)
+    if profile_line:
+        lines.append(f"- FMP profile/classification: {profile_line}.")
+
+    quote_bits = [
+        f"price {_money(_optional_number(fmp_quote.get('price')))}" if _optional_number(fmp_quote.get("price")) is not None else "",
+        f"volume {_format_optional(_optional_number(fmp_quote.get('volume')))}" if _optional_number(fmp_quote.get("volume")) is not None else "",
+        f"change {_fmt_percent(_optional_number(fmp_quote.get('change_percent')))}" if _optional_number(fmp_quote.get("change_percent")) is not None else "",
+    ]
+    if any(quote_bits):
+        lines.append(f"- FMP quote/tape: {', '.join(bit for bit in quote_bits if bit)}.")
+
+    fundamental_bits = [
+        f"market cap {_money(_optional_number(fmp_fundamentals.get('market_cap')))}" if _optional_number(fmp_fundamentals.get("market_cap")) is not None else "",
+        f"P/E {_format_optional(_optional_number(fmp_fundamentals.get('pe_ratio')))}" if _optional_number(fmp_fundamentals.get("pe_ratio")) is not None else "",
+        f"EPS {_format_optional(_optional_number(fmp_fundamentals.get('eps')))}" if _optional_number(fmp_fundamentals.get("eps")) is not None else "",
+        f"revenue growth {_fmt_percent(_optional_number(fmp_fundamentals.get('revenue_growth')))}" if _optional_number(fmp_fundamentals.get("revenue_growth")) is not None else "",
+        f"float {_format_optional(_optional_number(fmp_fundamentals.get('shares_float')))}" if _optional_number(fmp_fundamentals.get("shares_float")) is not None else "",
+        f"shares out {_format_optional(_optional_number(fmp_fundamentals.get('shares_outstanding')))}" if _optional_number(fmp_fundamentals.get("shares_outstanding")) is not None else "",
+    ]
+    if any(fundamental_bits):
+        lines.append(f"- FMP fundamentals: {', '.join(bit for bit in fundamental_bits if bit)}.")
+
+    equity_bits = [
+        f"price {_money(_optional_number(equity_tape.get('price')))}" if _optional_number(equity_tape.get("price")) is not None else "",
+        f"volume {_format_optional(_optional_number(equity_tape.get('volume')))}" if _optional_number(equity_tape.get("volume")) is not None else "",
+        f"change {_fmt_percent(_optional_number(equity_tape.get('change_percent')))}" if _optional_number(equity_tape.get("change_percent")) is not None else "",
+        f"avg volume {_format_optional(_optional_number(equity_tape.get('avg_volume')))}" if _optional_number(equity_tape.get("avg_volume")) is not None else "",
+        f"fresh {_optional_text(equity_tape.get('fetched_at'))}" if _optional_text(equity_tape.get("fetched_at")) else "",
+    ]
+    candle_count = _external_candle_count(equity_candles)
+    if candle_count:
+        equity_bits.append(f"{candle_count} Databento candle row(s)")
+    if any(equity_bits):
+        lines.append(f"- Databento US equities tape/candles: {', '.join(bit for bit in equity_bits if bit)}.")
+
+    futures_lines = _format_futures_context_lines(futures_context)
+    if futures_lines:
+        lines.append("- Databento CME/futures cross-asset context is kept separate from selected-equity quote/fundamental fields.")
+        lines.extend(futures_lines)
+
+    return lines
+
+
+def _format_futures_context_lines(futures_context: Mapping[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for symbol, raw in list(futures_context.items())[:6]:
+        payload = _external_mapping(raw)
+        price = _optional_number(payload.get("price"))
+        volume = _optional_number(payload.get("volume"))
+        timestamp = _optional_text(payload.get("timestamp") or payload.get("fetched_at"))
+        bits = [
+            f"price {_money(price)}" if price is not None else "",
+            f"volume {_format_optional(volume)}" if volume is not None else "",
+            f"time {timestamp}" if timestamp else "",
+        ]
+        if any(bits):
+            lines.append(f"  - {symbol}: {', '.join(bit for bit in bits if bit)}.")
+    return lines
+
+
+def _external_candle_count(candles_by_symbol: Any) -> int:
+    if not isinstance(candles_by_symbol, Mapping):
+        return 0
+    count = 0
+    for rows in candles_by_symbol.values():
+        try:
+            count += len(rows)
+        except TypeError:
+            continue
+    return count
+
+
+def _external_mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _optional_number(value: Any) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_text(value: Any) -> str:
+    return str(value).strip() if value not in (None, "") else ""
+
+
+def _slash_join(left: str, right: str) -> str:
+    if left and right:
+        return f"{left}/{right}"
+    return left or right
 
 
 def _format_capital_structure_indicator_section(indicator: CapitalStructureIndicatorRead) -> list[str]:

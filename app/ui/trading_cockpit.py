@@ -29,6 +29,7 @@ from app.brokers.schwab.session import SchwabSession, schwab_auth_error_requires
 from app.brokers.schwab.token_store import clear_token_payload
 from app.core.order_models import SCHWAB_EQUITY_TIME_IN_FORCE_CHOICES, OrderSide, OrderType, TimeInForce
 from app.core.portfolio import Portfolio, Position
+from app.data.market_intelligence import build_external_market_intelligence
 from app.ui import polished_theme
 from app.ui.dashboard import PortfolioRiskCockpitApp
 
@@ -364,6 +365,16 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             except Exception as exc:
                 warnings.append(f"{symbol} quote fetch failed: {exc}")
 
+            external_intelligence = None
+            try:
+                external_intelligence = build_external_market_intelligence(
+                    symbol,
+                    schwab_session=session,
+                    force_refresh=False,
+                )
+            except Exception:
+                warnings.append("External market intelligence unavailable due to an unexpected enrichment error.")
+
             try:
                 capital_structure_pressure = analyze_capital_structure_pressure(symbol)
             except Exception as exc:
@@ -380,6 +391,7 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
                 ticket=_technical_ticket_from_ui(self),
                 warnings=warnings,
                 capital_structure_pressure=capital_structure_pressure,
+                external_intelligence=external_intelligence,
             )
             self.schwab_status_var.set("Schwab: connected")
             self._set_preview_text(self.format_technical_analysis_report(report))
