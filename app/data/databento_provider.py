@@ -75,6 +75,15 @@ class DatabentoCrossAssetContextSnapshot:
     diagnostics: Mapping[str, int] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class DatabentoEquityRowsSnapshot:
+    rows_by_symbol: Mapping[str, Mapping[str, Any]]
+    fetched_at: str
+    statuses: tuple[MarketDataProviderStatus, ...]
+    errors: tuple[str, ...] = ()
+    diagnostics: Mapping[str, int] = field(default_factory=dict)
+
+
 class DatabentoEquitiesProvider:
     provider_name = "databento_us_equities"
 
@@ -122,6 +131,99 @@ class DatabentoEquitiesProvider:
         max_symbols: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
     ) -> MarketQuoteFundamentalsSnapshot:
         return self.quote_fundamentals(symbols, force_refresh=force_refresh, max_symbols=max_symbols)
+
+    def row_context(
+        self,
+        symbols: Iterable[str],
+        *,
+        force_refresh: bool = False,
+        max_symbols: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
+    ) -> DatabentoEquityRowsSnapshot:
+        fetched_at = _now()
+        capped_input = _limited_symbols(symbols, max_symbols)
+        requested = capped_input[: self.symbol_limit]
+        skipped_limited = max(0, len(capped_input) - len(requested))
+
+        disabled = self._disabled_snapshot(fetched_at, len(capped_input))
+        if disabled is not None:
+            return DatabentoEquityRowsSnapshot(
+                rows_by_symbol={},
+                fetched_at=fetched_at,
+                statuses=disabled.statuses,
+                errors=disabled.errors,
+                diagnostics=disabled.diagnostics,
+            )
+        if max_symbols <= 0 or self.symbol_limit <= 0:
+            return DatabentoEquityRowsSnapshot(
+                rows_by_symbol={},
+                fetched_at=fetched_at,
+                statuses=(
+                    MarketDataProviderStatus(
+                        "Databento US Equities",
+                        "disabled",
+                        fetched_at,
+                        f"Databento US Equities row context: 0 rows updated; {len(capped_input)} skipped/limited because the symbol cap is 0.",
+                    ),
+                ),
+                diagnostics={"rows_skipped_by_configured_symbol_cap": len(capped_input)},
+            )
+
+        if _looks_like_cme_dataset(self.dataset):
+            message = (
+                f"Databento US Equities row context: configured dataset '{self.dataset}' looks like CME/futures coverage. "
+                "Refusing to merge futures/options data into selected-equity tape/candle fields; configure "
+                f"{DATABENTO_EQUITIES_DATASET_ENV} for US equities or enable CME context separately."
+            )
+            return DatabentoEquityRowsSnapshot(
+                rows_by_symbol={},
+                fetched_at=fetched_at,
+                statuses=(MarketDataProviderStatus("Databento US Equities", "warning", fetched_at, message),),
+                errors=(message,),
+                diagnostics={
+                    "databento_dataset_mismatch_warnings": 1,
+                    "rows_provider_returned_no_usable_data": len(requested),
+                    "rows_skipped_by_configured_symbol_cap": skipped_limited,
+                },
+            )
+
+        config_warnings = _databento_equities_config_warnings(self.dataset, self.schema)
+        rows_by_symbol, cache_hits, chunks_attempted, fetch_warnings = self._rows_by_symbol(requested, force_refresh=force_refresh)
+        warnings = [*config_warnings, *fetch_warnings]
+        status = "available" if rows_by_symbol else "empty"
+        if warnings:
+            status = "partial" if rows_by_symbol else "warning"
+        no_usable = max(0, len(requested) - len(rows_by_symbol))
+        message = (
+            f"Databento US Equities row context: {len(rows_by_symbol)} raw row set(s) updated; attempted {len(requested)} symbol(s) "
+            f"in {chunks_attempted} chunk(s); cache used for {cache_hits}; {skipped_limited} skipped/limited; {no_usable} no usable data. "
+            f"Dataset={self.dataset or 'not configured'}; schema={self.schema or 'not configured'}. "
+            "Rows are selected-equity tape/candle context only; CME/futures context remains separate."
+        )
+        if warnings:
+            message += f" Provider warning: {_short_warning(warnings[0], self.api_key)}"
+        return DatabentoEquityRowsSnapshot(
+            rows_by_symbol=rows_by_symbol,
+            fetched_at=fetched_at,
+            statuses=(MarketDataProviderStatus("Databento US Equities", status, fetched_at, _redact_databento_secret(message, self.api_key)),),
+            errors=tuple(_redact_databento_secret(warning, self.api_key) for warning in warnings[:4]),
+            diagnostics={
+                "databento_equities_symbols_attempted": len(requested),
+                "databento_equities_chunks_attempted": chunks_attempted,
+                "databento_equities_cache_hits": cache_hits,
+                "provider_rows_requested": len(requested),
+                "provider_rows_returned": len(rows_by_symbol),
+                "provider_rows_parsed": len(rows_by_symbol),
+                "provider_rows_updated": len(rows_by_symbol),
+                "provider_calls_attempted": chunks_attempted,
+                "provider_cache_hits": cache_hits,
+                "provider_warnings": len(warnings),
+                "databento_dataset_mismatch_warnings": len(config_warnings),
+                "rows_provider_returned_no_usable_data": no_usable,
+                "rows_skipped_by_configured_symbol_cap": skipped_limited,
+                "provider_unavailable": 1 if fetch_warnings and not rows_by_symbol else 0,
+                "rows_blocked_by_provider_plan_rate_auth_limit": 1 if any(_is_provider_limit_warning(warning) for warning in fetch_warnings) else 0,
+            },
+        )
 
     def quote_fundamentals(
         self,
