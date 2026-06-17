@@ -15,6 +15,8 @@ import requests
 from app.analytics.technical_analysis import parse_quote_snapshot
 MARKET_DATA_FILE_PATH_ENV = "MARKET_SCREENER_MARKET_DATA_PATH"
 MARKET_DATA_SYMBOL_LIMIT_ENV = "MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT"
+MARKET_SCREENER_BACKFILL_BATCH_SIZE_ENV = "MARKET_SCREENER_BACKFILL_BATCH_SIZE"
+MARKET_SCREENER_BACKFILL_CACHE_TTL_SECONDS_ENV = "MARKET_SCREENER_BACKFILL_CACHE_TTL_SECONDS"
 DEFAULT_MARKET_DATA_SYMBOL_LIMIT = 100
 LOCAL_FILE_CACHE_TTL = timedelta(minutes=10)
 FMP_API_KEY_ENV = "FMP_API_KEY"
@@ -28,7 +30,10 @@ ALPHA_VANTAGE_BASE_URL_ENV = "ALPHA_VANTAGE_BASE_URL"
 ALPHA_VANTAGE_CACHE_TTL_SECONDS_ENV = "ALPHA_VANTAGE_CACHE_TTL_SECONDS"
 DEFAULT_FMP_BASE_URL = "https://financialmodelingprep.com/stable"
 DEFAULT_FMP_MARKET_DATA_SYMBOL_LIMIT = 100
+MAX_FMP_MARKET_DATA_SYMBOL_LIMIT = 5000
 DEFAULT_FMP_CACHE_TTL_SECONDS = 900
+DEFAULT_MARKET_SCREENER_BACKFILL_BATCH_SIZE = 100
+DEFAULT_MARKET_SCREENER_BACKFILL_CACHE_TTL_SECONDS = 3600
 DEFAULT_ALPHA_VANTAGE_BASE_URL = "https://www.alphavantage.co/query"
 DEFAULT_ALPHA_VANTAGE_FALLBACK_SYMBOL_LIMIT = 25
 DEFAULT_ALPHA_VANTAGE_CACHE_TTL_SECONDS = 900
@@ -66,6 +71,7 @@ class MarketDataFieldProvenance:
 @dataclass(frozen=True)
 class MarketQuoteFundamentalsRecord:
     symbol: str
+    company_name: str | None = None
     price: float | None = None
     change_percent: float | None = None
     volume: float | None = None
@@ -95,6 +101,7 @@ class MarketQuoteFundamentalsRecord:
         fetched_at = _optional_string(payload.get("fetched_at")) or _now()
         values = {
             "symbol": _normalize_symbol(_first_present(payload, "symbol", "ticker")),
+            "company_name": _optional_string(_first_present(payload, "company_name", "companyName", "name", "company")),
             "exchange": _optional_string(_first_present(payload, "exchange", "exchangeShortName", "exchange_short_name")),
             "sector": _optional_string(_first_present(payload, "sector")),
             "industry": _optional_string(_first_present(payload, "industry")),
@@ -337,22 +344,218 @@ class FmpQuoteFundamentalsProvider:
         timeout_seconds: float = 8.0,
         symbol_limit: int | None = None,
         cache_ttl_seconds: int | None = None,
+        batch_size: int | None = None,
     ) -> None:
         self.api_key = api_key if api_key is not None else os.getenv(FMP_API_KEY_ENV, "")
         self.base_url = (base_url or os.getenv(FMP_BASE_URL_ENV, DEFAULT_FMP_BASE_URL) or DEFAULT_FMP_BASE_URL).rstrip("/")
         self.session = session or requests.Session()
         self.timeout_seconds = timeout_seconds
         self.symbol_limit = (
-            max(0, min(100, int(symbol_limit)))
+            max(0, min(MAX_FMP_MARKET_DATA_SYMBOL_LIMIT, int(symbol_limit)))
             if symbol_limit is not None
-            else _configured_int(FMP_MARKET_DATA_SYMBOL_LIMIT_ENV, DEFAULT_FMP_MARKET_DATA_SYMBOL_LIMIT, minimum=0, maximum=100)
+            else _configured_int(FMP_MARKET_DATA_SYMBOL_LIMIT_ENV, DEFAULT_FMP_MARKET_DATA_SYMBOL_LIMIT, minimum=0, maximum=MAX_FMP_MARKET_DATA_SYMBOL_LIMIT)
         )
         self.cache_ttl_seconds = (
             max(0, int(cache_ttl_seconds))
             if cache_ttl_seconds is not None
             else _configured_int(FMP_CACHE_TTL_SECONDS_ENV, DEFAULT_FMP_CACHE_TTL_SECONDS, minimum=0, maximum=86_400)
         )
+        self.batch_size = (
+            max(1, int(batch_size))
+            if batch_size is not None
+            else _configured_int(MARKET_SCREENER_BACKFILL_BATCH_SIZE_ENV, DEFAULT_MARKET_SCREENER_BACKFILL_BATCH_SIZE, minimum=1, maximum=500)
+        )
         self._cache: dict[tuple[str, str, str], tuple[float, Mapping[str, Any]]] = {} if session is not None else _SHARED_FMP_CACHE
+
+    def profile_classification(
+        self,
+        symbols: Iterable[str],
+        *,
+        force_refresh: bool = False,
+        max_symbols: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
+    ) -> MarketQuoteFundamentalsSnapshot:
+        fetched_at = _now()
+        capped_input = _limited_symbols(symbols, max_symbols)
+        requested = capped_input[: self.symbol_limit]
+        skipped_limited = max(0, len(capped_input) - len(requested))
+        unavailable = self._unavailable_snapshot(
+            source="FMP profile/classification",
+            fetched_at=fetched_at,
+            requested_count=len(requested),
+            skipped_limited=skipped_limited,
+            disabled_message="FMP profile/classification enrichment is disabled because the symbol cap is 0.",
+        )
+        if unavailable is not None:
+            return unavailable
+
+        records: list[MarketQuoteFundamentalsRecord] = []
+        warnings: list[str] = []
+        cache_hits = 0
+        calls_attempted = 0
+        rows_returned = 0
+        try:
+            payloads, cache_hits, calls_attempted, rows_returned = self._profile_payloads(requested, force_refresh=force_refresh)
+        except FmpProviderWarning as exc:
+            warnings.append(str(exc))
+            payloads = {}
+        for symbol in requested:
+            payload = payloads.get(symbol)
+            if not payload:
+                continue
+            record = self._record_from_payload(symbol, payload, source="FMP profile", source_url=FMP_PROFILE_DOC_URL, fetched_at=fetched_at)
+            record = _record_with_family_fields(record, "profile_classification")
+            if _quote_record_has_any_value(record):
+                records.append(record)
+
+        return self._family_snapshot(
+            source="FMP profile/classification",
+            fetched_at=fetched_at,
+            records=tuple(records),
+            requested_count=len(requested),
+            returned_count=rows_returned,
+            calls_attempted=calls_attempted,
+            cache_hits=cache_hits,
+            warnings=warnings,
+            skipped_limited=skipped_limited,
+            extra_diagnostics={"rows_enriched_by_fmp_profile": len(records)},
+            detail="profile/classification fields only",
+        )
+
+    def quote_tape(
+        self,
+        symbols: Iterable[str],
+        *,
+        force_refresh: bool = False,
+        max_symbols: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
+    ) -> MarketQuoteFundamentalsSnapshot:
+        fetched_at = _now()
+        capped_input = _limited_symbols(symbols, max_symbols)
+        requested = capped_input[: self.symbol_limit]
+        skipped_limited = max(0, len(capped_input) - len(requested))
+        unavailable = self._unavailable_snapshot(
+            source="FMP quote/tape",
+            fetched_at=fetched_at,
+            requested_count=len(requested),
+            skipped_limited=skipped_limited,
+            disabled_message="FMP quote/tape enrichment is disabled because the symbol cap is 0.",
+        )
+        if unavailable is not None:
+            return unavailable
+
+        warnings: list[str] = []
+        cache_hits = 0
+        calls_attempted = 0
+        rows_returned = 0
+        records: list[MarketQuoteFundamentalsRecord] = []
+        try:
+            payloads, cache_hits, _endpoint, calls_attempted, rows_returned = self._quote_payloads(requested, force_refresh=force_refresh)
+        except FmpProviderWarning as exc:
+            warnings.append(str(exc))
+            payloads = {}
+        for symbol, payload in payloads.items():
+            record = self._record_from_payload(symbol, payload, source="FMP quote", source_url=FMP_QUOTE_DOC_URL, fetched_at=fetched_at)
+            record = _record_with_family_fields(record, "quote_tape")
+            if _quote_record_has_any_value(record):
+                records.append(record)
+
+        return self._family_snapshot(
+            source="FMP quote/tape",
+            fetched_at=fetched_at,
+            records=tuple(records),
+            requested_count=len(requested),
+            returned_count=rows_returned,
+            calls_attempted=calls_attempted,
+            cache_hits=cache_hits,
+            warnings=warnings,
+            skipped_limited=skipped_limited,
+            extra_diagnostics={"rows_enriched_by_fmp_quote": len(records)},
+            detail="quote/tape fields only",
+        )
+
+    def fundamentals(
+        self,
+        symbols: Iterable[str],
+        *,
+        force_refresh: bool = False,
+        max_symbols: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
+    ) -> MarketQuoteFundamentalsSnapshot:
+        fetched_at = _now()
+        capped_input = _limited_symbols(symbols, max_symbols)
+        requested = capped_input[: self.symbol_limit]
+        skipped_limited = max(0, len(capped_input) - len(requested))
+        unavailable = self._unavailable_snapshot(
+            source="FMP fundamentals",
+            fetched_at=fetched_at,
+            requested_count=len(requested),
+            skipped_limited=skipped_limited,
+            disabled_message="FMP fundamentals enrichment is disabled because the symbol cap is 0.",
+        )
+        if unavailable is not None:
+            return unavailable
+
+        records_by_symbol: dict[str, MarketQuoteFundamentalsRecord] = {}
+        warnings: list[str] = []
+        cache_hits = 0
+        calls_attempted = 0
+        rows_returned = 0
+        endpoint_rows = {
+            "key-metrics-ttm": 0,
+            "ratios-ttm": 0,
+            "income-statement-growth": 0,
+            "shares-float": 0,
+        }
+        for symbol in requested:
+            for endpoint, source, source_url in _FMP_DEEP_ENDPOINTS:
+                try:
+                    payload, endpoint_cache_hit, endpoint_calls, endpoint_returned = self._single_symbol_payload(endpoint, symbol, force_refresh=force_refresh)
+                    cache_hits += int(endpoint_cache_hit)
+                    calls_attempted += endpoint_calls
+                    rows_returned += endpoint_returned
+                except FmpProviderWarning as exc:
+                    warnings.append(str(exc))
+                    if _is_fmp_limit_warning(str(exc)):
+                        break
+                    continue
+                if not payload:
+                    continue
+                endpoint_record = self._record_from_payload(symbol, payload, source=source, source_url=source_url, fetched_at=fetched_at)
+                endpoint_record = _record_with_family_fields(endpoint_record, "fundamentals")
+                if not _quote_record_has_any_value(endpoint_record):
+                    continue
+                endpoint_rows[endpoint] += 1
+                existing = records_by_symbol.get(symbol)
+                records_by_symbol[symbol] = endpoint_record if existing is None else _merge_quote_records(existing, endpoint_record)
+            if warnings and _is_fmp_limit_warning(warnings[-1]):
+                break
+
+        records = tuple(records_by_symbol.values())
+        return self._family_snapshot(
+            source="FMP fundamentals",
+            fetched_at=fetched_at,
+            records=records,
+            requested_count=len(requested),
+            returned_count=rows_returned,
+            calls_attempted=calls_attempted,
+            cache_hits=cache_hits,
+            warnings=warnings,
+            skipped_limited=skipped_limited,
+            extra_diagnostics={
+                "rows_enriched_by_fmp_key_metrics": endpoint_rows["key-metrics-ttm"],
+                "rows_enriched_by_fmp_ratios": endpoint_rows["ratios-ttm"],
+                "rows_enriched_by_fmp_income_growth": endpoint_rows["income-statement-growth"],
+                "rows_enriched_by_fmp_shares_float": endpoint_rows["shares-float"],
+            },
+            detail="fundamental/metrics fields only",
+        )
+
+    def all_market_data(
+        self,
+        symbols: Iterable[str],
+        *,
+        force_refresh: bool = False,
+        max_symbols: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
+    ) -> MarketQuoteFundamentalsSnapshot:
+        return self.quote_fundamentals(symbols, force_refresh=force_refresh, max_symbols=max_symbols)
 
     def quote_fundamentals(
         self,
@@ -408,13 +611,17 @@ class FmpQuoteFundamentalsProvider:
         ratios_rows = 0
         growth_rows = 0
         shares_float_rows = 0
+        calls_attempted = 0
+        provider_rows_returned = 0
 
         quote_payloads: dict[str, Mapping[str, Any]] = {}
         quote_endpoint = "none"
         quote_blocked = False
         try:
-            quote_payloads, quote_cache_hits, quote_endpoint = self._quote_payloads(requested, force_refresh=force_refresh)
+            quote_payloads, quote_cache_hits, quote_endpoint, quote_calls, quote_returned = self._quote_payloads(requested, force_refresh=force_refresh)
             cache_hits += quote_cache_hits
+            calls_attempted += quote_calls
+            provider_rows_returned += quote_returned
         except FmpProviderWarning as exc:
             warnings.append(str(exc))
             quote_blocked = _is_fmp_limit_warning(str(exc))
@@ -428,8 +635,10 @@ class FmpQuoteFundamentalsProvider:
         profile_symbols = () if quote_blocked else requested
         for symbol in profile_symbols:
             try:
-                profile_payload, profile_cache_hit = self._profile_payload(symbol, force_refresh=force_refresh)
+                profile_payload, profile_cache_hit, _profile_calls, _profile_returned = self._profile_payload(symbol, force_refresh=force_refresh)
                 cache_hits += int(profile_cache_hit)
+                calls_attempted += _profile_calls
+                provider_rows_returned += _profile_returned
             except FmpProviderWarning as exc:
                 warnings.append(str(exc))
                 if _is_fmp_limit_warning(str(exc)):
@@ -454,8 +663,10 @@ class FmpQuoteFundamentalsProvider:
                     if existing is not None and not _record_needs_fmp_endpoint(existing, endpoint):
                         continue
                     try:
-                        payload, endpoint_cache_hit = self._single_symbol_payload(endpoint, symbol, force_refresh=force_refresh)
+                        payload, endpoint_cache_hit, _endpoint_calls, _endpoint_returned = self._single_symbol_payload(endpoint, symbol, force_refresh=force_refresh)
                         cache_hits += int(endpoint_cache_hit)
+                        calls_attempted += _endpoint_calls
+                        provider_rows_returned += _endpoint_returned
                     except FmpProviderWarning as exc:
                         warnings.append(str(exc))
                         if _is_fmp_limit_warning(str(exc)):
@@ -511,6 +722,13 @@ class FmpQuoteFundamentalsProvider:
                 "rows_enriched_by_fmp_income_growth": growth_rows,
                 "rows_enriched_by_fmp_shares_float": shares_float_rows,
                 "fmp_cache_hits": cache_hits,
+                "provider_rows_requested": len(requested),
+                "provider_rows_returned": provider_rows_returned,
+                "provider_rows_parsed": len(records),
+                "provider_rows_updated": len(records),
+                "provider_cache_hits": cache_hits,
+                "provider_warnings": len(warnings),
+                "provider_calls_attempted": calls_attempted,
                 "rows_blocked_by_provider_plan_rate_auth_limit": 1 if any(_is_fmp_limit_warning(warning) for warning in warnings) else 0,
                 "rows_skipped_by_configured_symbol_cap": skipped_limited,
                 "rows_provider_returned_no_usable_data": no_usable_rows,
@@ -565,10 +783,14 @@ class FmpQuoteFundamentalsProvider:
         records: list[MarketQuoteFundamentalsRecord] = []
         warnings: list[str] = []
         cache_hits = 0
+        calls_attempted = 0
+        provider_rows_returned = 0
         for cik in requested:
             try:
-                payload, cache_hit = self._profile_by_cik_payload(cik, force_refresh=force_refresh)
+                payload, cache_hit, endpoint_calls, endpoint_returned = self._profile_by_cik_payload(cik, force_refresh=force_refresh)
                 cache_hits += int(cache_hit)
+                calls_attempted += endpoint_calls
+                provider_rows_returned += endpoint_returned
             except FmpProviderWarning as exc:
                 warnings.append(str(exc))
                 if _is_fmp_limit_warning(str(exc)):
@@ -607,16 +829,121 @@ class FmpQuoteFundamentalsProvider:
             diagnostics={
                 "rows_enriched_by_fmp_profile_by_cik": len(records),
                 "fmp_cache_hits": cache_hits,
+                "provider_rows_requested": len(requested),
+                "provider_rows_returned": provider_rows_returned,
+                "provider_rows_parsed": len(records),
+                "provider_rows_updated": len(records),
+                "provider_cache_hits": cache_hits,
+                "provider_warnings": len(warnings),
+                "provider_calls_attempted": calls_attempted,
                 "rows_blocked_by_provider_plan_rate_auth_limit": 1 if any(_is_fmp_limit_warning(warning) for warning in warnings) else 0,
                 "rows_skipped_by_configured_symbol_cap": skipped_limited,
                 "rows_provider_returned_no_usable_data": no_usable_rows,
             },
         )
 
-    def _quote_payloads(self, symbols: tuple[str, ...], *, force_refresh: bool) -> tuple[dict[str, Mapping[str, Any]], int, str]:
+    def _unavailable_snapshot(
+        self,
+        *,
+        source: str,
+        fetched_at: str,
+        requested_count: int,
+        skipped_limited: int,
+        disabled_message: str,
+    ) -> MarketQuoteFundamentalsSnapshot | None:
+        if not _optional_string(self.api_key):
+            return MarketQuoteFundamentalsSnapshot(
+                records=(),
+                fetched_at=fetched_at,
+                statuses=(
+                    MarketDataProviderStatus(
+                        source,
+                        "unavailable",
+                        fetched_at,
+                        f"{source}: 0 rows updated; requested {requested_count}; {skipped_limited} skipped/limited; cache used for 0. No {FMP_API_KEY_ENV} is configured.",
+                    ),
+                ),
+                diagnostics={
+                    "provider_unavailable": 1,
+                    "rows_skipped_by_configured_symbol_cap": skipped_limited,
+                    "provider_rows_requested": requested_count,
+                },
+            )
+        if requested_count <= 0 or self.symbol_limit <= 0:
+            return MarketQuoteFundamentalsSnapshot(
+                records=(),
+                fetched_at=fetched_at,
+                statuses=(
+                    MarketDataProviderStatus(
+                        source,
+                        "disabled",
+                        fetched_at,
+                        f"{source}: 0 rows updated; {skipped_limited} skipped/limited. {disabled_message}",
+                    ),
+                ),
+                diagnostics={
+                    "rows_skipped_by_configured_symbol_cap": skipped_limited,
+                    "provider_rows_requested": requested_count,
+                },
+            )
+        return None
+
+    def _family_snapshot(
+        self,
+        *,
+        source: str,
+        fetched_at: str,
+        records: tuple[MarketQuoteFundamentalsRecord, ...],
+        requested_count: int,
+        returned_count: int,
+        calls_attempted: int,
+        cache_hits: int,
+        warnings: Iterable[str],
+        skipped_limited: int,
+        extra_diagnostics: Mapping[str, int],
+        detail: str,
+    ) -> MarketQuoteFundamentalsSnapshot:
+        warning_rows = tuple(warnings)
+        no_usable_rows = max(0, requested_count - len(records))
+        status = "available" if records else "empty"
+        if warning_rows:
+            status = "partial" if records else "warning"
+        message = (
+            f"{source}: {len(records)} rows updated; requested {requested_count}; returned rows {returned_count}; "
+            f"parsed rows {len(records)}; provider calls attempted {calls_attempted}; cache used for {cache_hits}; "
+            f"{skipped_limited} skipped/limited; {no_usable_rows} no usable data; {detail}. "
+            f"FMP cap is {self.symbol_limit} symbol(s); batch size {self.batch_size}."
+        )
+        if warning_rows:
+            message += f" Provider warning: {_short_warning(warning_rows[0], self.api_key)}"
+        diagnostics = {
+            "provider_rows_requested": requested_count,
+            "provider_rows_returned": returned_count,
+            "provider_rows_parsed": len(records),
+            "provider_rows_updated": len(records),
+            "provider_calls_attempted": calls_attempted,
+            "provider_cache_hits": cache_hits,
+            "provider_warnings": len(warning_rows),
+            "fmp_cache_hits": cache_hits,
+            "rows_blocked_by_provider_plan_rate_auth_limit": 1 if any(_is_fmp_limit_warning(warning) for warning in warning_rows) else 0,
+            "rows_skipped_by_configured_symbol_cap": skipped_limited,
+            "rows_provider_returned_no_usable_data": no_usable_rows,
+        }
+        diagnostics.update(extra_diagnostics)
+        return MarketQuoteFundamentalsSnapshot(
+            records=records,
+            fetched_at=fetched_at,
+            statuses=(MarketDataProviderStatus(source, status, fetched_at, _redact_fmp_secret(message, self.api_key)),),
+            errors=tuple(_redact_fmp_secret(warning, self.api_key) for warning in warning_rows[:4]),
+            diagnostics=diagnostics,
+        )
+
+    def _quote_payloads(self, symbols: tuple[str, ...], *, force_refresh: bool) -> tuple[dict[str, Mapping[str, Any]], int, str, int, int]:
         payloads: dict[str, Mapping[str, Any]] = {}
         missing: list[str] = []
         cache_hits = 0
+        calls_attempted = 0
+        rows_returned = 0
         for symbol in symbols:
             cached = self._cache_get("quote", symbol, force_refresh=force_refresh)
             if cached is None:
@@ -625,24 +952,32 @@ class FmpQuoteFundamentalsProvider:
                 payloads[symbol] = cached
                 cache_hits += 1
         if not missing:
-            return payloads, cache_hits, "cache"
+            return payloads, cache_hits, "cache", calls_attempted, rows_returned
 
-        rows, endpoint = self._quote_rows_from_batch_endpoint(tuple(missing))
-        for symbol, row in _fmp_quote_rows_by_symbol(rows, tuple(missing)).items():
-            payloads[symbol] = row
-            self._cache_set("quote", symbol, row)
-        return payloads, cache_hits, endpoint
+        endpoints: list[str] = []
+        for chunk in _chunk_symbols(tuple(missing), self.batch_size):
+            rows, endpoint, endpoint_calls = self._quote_rows_from_batch_endpoint(chunk)
+            calls_attempted += endpoint_calls
+            rows_returned += len(rows)
+            endpoints.append(endpoint)
+            for symbol, row in _fmp_quote_rows_by_symbol(rows, chunk).items():
+                payloads[symbol] = row
+                self._cache_set("quote", symbol, row)
+        endpoint_text = endpoints[0] if len(set(endpoints)) == 1 else "+".join(dict.fromkeys(endpoints))
+        return payloads, cache_hits, endpoint_text, calls_attempted, rows_returned
 
-    def _quote_rows_from_batch_endpoint(self, missing: tuple[str, ...]) -> tuple[list[Mapping[str, Any]], str]:
+    def _quote_rows_from_batch_endpoint(self, missing: tuple[str, ...]) -> tuple[list[Mapping[str, Any]], str, int]:
         primary_endpoint = "batch-quote-short"
         fallback_endpoint = "batch-quote"
         primary_warning: str | None = None
+        calls_attempted = 0
         try:
+            calls_attempted += 1
             payload = self._get_json(primary_endpoint, {"symbols": ",".join(missing)})
             if not _fmp_payload_shape_is_unexpected(payload):
                 rows = _coerce_fmp_rows(payload)
                 if _fmp_quote_rows_are_recognizable(rows, missing):
-                    return rows, primary_endpoint
+                    return rows, primary_endpoint, calls_attempted
                 primary_warning = f"FMP {primary_endpoint} returned rows without recognizable requested symbols."
             else:
                 primary_warning = f"FMP {primary_endpoint} returned a malformed payload."
@@ -652,6 +987,7 @@ class FmpQuoteFundamentalsProvider:
             primary_warning = str(exc)
 
         try:
+            calls_attempted += 1
             fallback_payload = self._get_json(fallback_endpoint, {"symbols": ",".join(missing)})
         except FmpProviderWarning as exc:
             message = f"{primary_warning or f'FMP {primary_endpoint} was unusable'} FMP {fallback_endpoint} fallback failed: {exc}"
@@ -663,43 +999,81 @@ class FmpQuoteFundamentalsProvider:
         if not _fmp_quote_rows_are_recognizable(rows, missing):
             message = f"{primary_warning or f'FMP {primary_endpoint} was unusable'} FMP {fallback_endpoint} fallback returned rows without recognizable requested symbols."
             raise FmpProviderWarning(_redact_fmp_secret(message, self.api_key)) from None
-        return rows, fallback_endpoint
+        return rows, fallback_endpoint, calls_attempted
 
-    def _profile_payload(self, symbol: str, *, force_refresh: bool) -> tuple[Mapping[str, Any] | None, bool]:
+    def _profile_payload(self, symbol: str, *, force_refresh: bool) -> tuple[Mapping[str, Any] | None, bool, int, int]:
         cached = self._cache_get("profile", symbol, force_refresh=force_refresh)
         if cached is not None:
-            return cached, True
+            return cached, True, 0, 0
         payload = self._get_json("profile", {"symbol": symbol})
         rows = _coerce_fmp_rows(payload)
         selected = next((row for row in rows if _normalize_symbol(_first_present(row, "symbol", "ticker")) == symbol), rows[0] if rows else None)
         if selected is not None:
             self._cache_set("profile", symbol, selected)
-        return selected, False
+        return selected, False, 1, len(rows)
 
-    def _profile_by_cik_payload(self, cik: str, *, force_refresh: bool) -> tuple[Mapping[str, Any] | None, bool]:
+    def _profile_payloads(self, symbols: tuple[str, ...], *, force_refresh: bool) -> tuple[dict[str, Mapping[str, Any]], int, int, int]:
+        payloads: dict[str, Mapping[str, Any]] = {}
+        missing: list[str] = []
+        cache_hits = 0
+        calls_attempted = 0
+        rows_returned = 0
+        for symbol in symbols:
+            cached = self._cache_get("profile", symbol, force_refresh=force_refresh)
+            if cached is None:
+                missing.append(symbol)
+            else:
+                payloads[symbol] = cached
+                cache_hits += 1
+        if not missing:
+            return payloads, cache_hits, calls_attempted, rows_returned
+
+        for chunk in _chunk_symbols(tuple(missing), self.batch_size):
+            calls_attempted += 1
+            payload = self._get_json("profile", {"symbol": ",".join(chunk)})
+            rows = _coerce_fmp_rows(payload)
+            rows_returned += len(rows)
+            rows_by_symbol = _fmp_profile_rows_by_symbol(rows, chunk)
+            if len(chunk) > 1 and not rows_by_symbol:
+                # Some FMP plans only accept one profile symbol at a time. Fall back without
+                # treating that as a hard provider failure.
+                for symbol in chunk:
+                    selected, selected_cache_hit, selected_calls, selected_returned = self._profile_payload(symbol, force_refresh=force_refresh)
+                    cache_hits += int(selected_cache_hit)
+                    calls_attempted += selected_calls
+                    rows_returned += selected_returned
+                    if selected is not None:
+                        payloads[symbol] = selected
+                continue
+            for symbol, row in rows_by_symbol.items():
+                payloads[symbol] = row
+                self._cache_set("profile", symbol, row)
+        return payloads, cache_hits, calls_attempted, rows_returned
+
+    def _profile_by_cik_payload(self, cik: str, *, force_refresh: bool) -> tuple[Mapping[str, Any] | None, bool, int, int]:
         normalized_cik = _normalize_cik(cik)
         if not normalized_cik:
-            return None, False
+            return None, False, 0, 0
         cached = self._cache_get("profile-cik", normalized_cik, force_refresh=force_refresh)
         if cached is not None:
-            return cached, True
+            return cached, True, 0, 0
         payload = self._get_json("profile-cik", {"cik": _fmp_cik_param(normalized_cik)})
         rows = _coerce_fmp_rows(payload)
         selected = rows[0] if rows else None
         if selected is not None:
             self._cache_set("profile-cik", normalized_cik, selected)
-        return selected, False
+        return selected, False, 1, len(rows)
 
-    def _single_symbol_payload(self, endpoint: str, symbol: str, *, force_refresh: bool) -> tuple[Mapping[str, Any] | None, bool]:
+    def _single_symbol_payload(self, endpoint: str, symbol: str, *, force_refresh: bool) -> tuple[Mapping[str, Any] | None, bool, int, int]:
         cached = self._cache_get(endpoint, symbol, force_refresh=force_refresh)
         if cached is not None:
-            return cached, True
+            return cached, True, 0, 0
         payload = self._get_json(endpoint, {"symbol": symbol})
         rows = _coerce_fmp_rows(payload)
         selected = next((row for row in rows if _normalize_symbol(_first_present(row, "symbol", "ticker")) == symbol), rows[0] if rows else None)
         if selected is not None:
             self._cache_set(endpoint, symbol, selected)
-        return selected, False
+        return selected, False, 1, len(rows)
 
     def _record_from_payload(
         self,
@@ -994,6 +1368,7 @@ def _record_needs_deeper_fmp_fields(record: MarketQuoteFundamentalsRecord) -> bo
             record.revenue_growth,
             record.shares_float,
             record.shares_outstanding,
+            record.cik,
         )
     )
 
@@ -1010,15 +1385,50 @@ def _record_needs_fmp_endpoint(record: MarketQuoteFundamentalsRecord, endpoint: 
     return _record_needs_deeper_fmp_fields(record)
 
 
+def _record_with_family_fields(record: MarketQuoteFundamentalsRecord, family: str) -> MarketQuoteFundamentalsRecord:
+    fields_by_family = {
+        "profile_classification": {"company_name", "exchange", "sector", "industry", "cik"},
+        "quote_tape": {"price", "change_percent", "volume", "avg_volume"},
+        "fundamentals": {"market_cap", "pe_ratio", "eps", "revenue_growth", "shares_float", "shares_outstanding"},
+    }
+    allowed = fields_by_family.get(family)
+    if not allowed:
+        return record
+    values = record.to_dict()
+    for field in (
+        "company_name",
+        "exchange",
+        "sector",
+        "industry",
+        "price",
+        "change_percent",
+        "volume",
+        "avg_volume",
+        "market_cap",
+        "pe_ratio",
+        "eps",
+        "revenue_growth",
+        "shares_float",
+        "shares_outstanding",
+        "cik",
+    ):
+        if field not in allowed:
+            values[field] = None
+    values["field_provenance"] = tuple(row for row in record.field_provenance if row.field in allowed)
+    return MarketQuoteFundamentalsRecord.from_dict(values)
+
+
 def _normalized_fmp_payload_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
     normalized: dict[str, Any] = {}
     for target, keys in (
+        ("company_name", ("companyName", "company_name", "name", "company")),
         ("market_cap", ("marketCap", "marketCapTTM", "mktCap")),
         ("pe_ratio", ("pe", "peRatio", "peRatioTTM", "PERatio", "priceEarningsRatio", "priceEarningsRatioTTM", "priceToEarningsRatioTTM")),
         ("eps", ("eps", "EPS", "epsTTM", "earningsPerShareTTM", "netIncomePerShareTTM")),
         ("shares_float", ("sharesFloat", "floatShares", "freeFloat", "float")),
         ("shares_outstanding", ("sharesOutstanding", "outstandingShares", "weightedAverageShsOut", "weightedAverageShsOutTTM")),
         ("exchange", ("exchangeShortName", "exchange")),
+        ("cik", ("cik", "CIK", "cik_str")),
     ):
         value = _first_present(payload, *keys)
         if value not in (None, ""):
@@ -1043,6 +1453,42 @@ class CompositeMarketDataProvider:
 
     def __init__(self, providers: Iterable[MarketQuoteFundamentalsProvider]) -> None:
         self.providers = tuple(providers)
+
+    def profile_classification(
+        self,
+        symbols: Iterable[str],
+        *,
+        force_refresh: bool = False,
+        max_symbols: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
+    ) -> MarketQuoteFundamentalsSnapshot:
+        return self._family_snapshot("profile_classification", symbols, force_refresh=force_refresh, max_symbols=max_symbols)
+
+    def quote_tape(
+        self,
+        symbols: Iterable[str],
+        *,
+        force_refresh: bool = False,
+        max_symbols: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
+    ) -> MarketQuoteFundamentalsSnapshot:
+        return self._family_snapshot("quote_tape", symbols, force_refresh=force_refresh, max_symbols=max_symbols)
+
+    def fundamentals(
+        self,
+        symbols: Iterable[str],
+        *,
+        force_refresh: bool = False,
+        max_symbols: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
+    ) -> MarketQuoteFundamentalsSnapshot:
+        return self._family_snapshot("fundamentals", symbols, force_refresh=force_refresh, max_symbols=max_symbols)
+
+    def all_market_data(
+        self,
+        symbols: Iterable[str],
+        *,
+        force_refresh: bool = False,
+        max_symbols: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
+    ) -> MarketQuoteFundamentalsSnapshot:
+        return self.quote_fundamentals(symbols, force_refresh=force_refresh, max_symbols=max_symbols)
 
     def quote_fundamentals(
         self,
@@ -1072,6 +1518,69 @@ class CompositeMarketDataProvider:
             for record in snapshot.records:
                 existing = merged.get(record.symbol)
                 merged[record.symbol] = record if existing is None else _merge_quote_records(existing, record)
+        return MarketQuoteFundamentalsSnapshot(
+            records=tuple(merged.values()),
+            fetched_at=fetched_at,
+            statuses=tuple(statuses),
+            errors=tuple(errors),
+            diagnostics=diagnostics,
+        )
+
+    def _family_snapshot(
+        self,
+        family: str,
+        symbols: Iterable[str],
+        *,
+        force_refresh: bool,
+        max_symbols: int,
+    ) -> MarketQuoteFundamentalsSnapshot:
+        fetched_at = _now()
+        requested = _limited_symbols(symbols, max_symbols)
+        if not self.providers:
+            return MarketQuoteFundamentalsSnapshot(
+                records=(),
+                fetched_at=fetched_at,
+                statuses=(MarketDataProviderStatus("Market quote/fundamental provider", "unavailable", fetched_at, "No market quote/fundamental provider is configured."),),
+                diagnostics={"provider_unavailable": 1},
+            )
+
+        merged: dict[str, MarketQuoteFundamentalsRecord] = {}
+        statuses: list[MarketDataProviderStatus] = []
+        errors: list[str] = []
+        diagnostics: dict[str, int] = {}
+        for provider in self.providers:
+            method = getattr(provider, family, None)
+            snapshot: MarketQuoteFundamentalsSnapshot | None = None
+            if callable(method):
+                snapshot = method(requested, force_refresh=force_refresh, max_symbols=max_symbols)
+            elif family == "quote_tape" and callable(getattr(provider, "quote_fundamentals", None)):
+                snapshot = provider.quote_fundamentals(requested, force_refresh=force_refresh, max_symbols=max_symbols)
+            elif family == "profile_classification" and isinstance(provider, LocalMarketDataFileProvider):
+                snapshot = provider.quote_fundamentals(requested, force_refresh=force_refresh, max_symbols=max_symbols)
+            elif family == "fundamentals" and isinstance(provider, LocalMarketDataFileProvider):
+                snapshot = provider.quote_fundamentals(requested, force_refresh=force_refresh, max_symbols=max_symbols)
+            if snapshot is None:
+                continue
+            statuses.extend(snapshot.statuses)
+            errors.extend(snapshot.errors)
+            _merge_diagnostics(diagnostics, snapshot.diagnostics)
+            for record in snapshot.records:
+                filtered = _record_with_family_fields(record, family)
+                key = _normalize_symbol(filtered.symbol)
+                if not key or not _quote_record_has_any_value(filtered):
+                    continue
+                existing = merged.get(key)
+                merged[key] = filtered if existing is None else _merge_quote_records(existing, filtered)
+        if not statuses:
+            statuses.append(
+                MarketDataProviderStatus(
+                    f"Market {family.replace('_', ' ')} provider",
+                    "unavailable",
+                    fetched_at,
+                    f"No configured provider supports {family.replace('_', ' ')} enrichment.",
+                )
+            )
+            diagnostics["provider_unavailable"] = diagnostics.get("provider_unavailable", 0) + 1
         return MarketQuoteFundamentalsSnapshot(
             records=tuple(merged.values()),
             fetched_at=fetched_at,
@@ -1139,14 +1648,30 @@ def configured_market_data_provider(
     schwab_session: Any | None = None,
     local_path: str | Path | None = None,
     include_fallback_provider: bool = False,
+    fmp_symbol_limit: int | None = None,
+    databento_symbol_limit: int | None = None,
+    cache_ttl_seconds: int | None = None,
+    batch_size: int | None = None,
 ) -> CompositeMarketDataProvider:
     providers: list[MarketQuoteFundamentalsProvider] = [LocalMarketDataFileProvider(local_path)]
     if schwab_session is not None:
         providers.append(SchwabQuoteFundamentalsProvider(schwab_session))
     from app.data.databento_provider import configured_databento_equities_provider
 
-    providers.append(configured_databento_equities_provider())
-    providers.append(FmpQuoteFundamentalsProvider())
+    providers.append(
+        configured_databento_equities_provider(
+            symbol_limit=databento_symbol_limit,
+            cache_ttl_seconds=cache_ttl_seconds,
+            batch_size=batch_size,
+        )
+    )
+    providers.append(
+        FmpQuoteFundamentalsProvider(
+            symbol_limit=fmp_symbol_limit,
+            cache_ttl_seconds=cache_ttl_seconds,
+            batch_size=batch_size,
+        )
+    )
     if include_fallback_provider:
         fallback_provider = configured_fallback_market_data_provider()
         if fallback_provider is not None:
@@ -1169,6 +1694,7 @@ def _merge_quote_records(left: MarketQuoteFundamentalsRecord, right: MarketQuote
     field_provenance = _merge_quote_field_provenance(left, right)
     return MarketQuoteFundamentalsRecord(
         symbol=left.symbol or right.symbol,
+        company_name=_prefer_ladder_field(left.company_name, right.company_name),
         exchange=_prefer_ladder_field(left.exchange, right.exchange),
         sector=_prefer_ladder_field(left.sector, right.sector),
         industry=_prefer_ladder_field(left.industry, right.industry),
@@ -1186,7 +1712,7 @@ def _merge_quote_records(left: MarketQuoteFundamentalsRecord, right: MarketQuote
         source_url=left.source_url or right.source_url,
         fetched_at=left.fetched_at or right.fetched_at,
         field_provenance=field_provenance,
-        cik=left.cik or right.cik,
+        cik=_prefer_ladder_field(left.cik, right.cik),
     )
 
 
@@ -1211,6 +1737,7 @@ def _quote_record_has_any_value(record: MarketQuoteFundamentalsRecord) -> bool:
         value is not None
         for value in (
             record.exchange,
+            record.company_name,
             record.sector,
             record.industry,
             record.price,
@@ -1228,6 +1755,7 @@ def _quote_record_has_any_value(record: MarketQuoteFundamentalsRecord) -> bool:
 
 
 _QUOTE_VALUE_FIELDS = (
+    "company_name",
     "exchange",
     "sector",
     "industry",
@@ -1241,6 +1769,7 @@ _QUOTE_VALUE_FIELDS = (
     "revenue_growth",
     "shares_float",
     "shares_outstanding",
+    "cik",
 )
 
 
@@ -1371,6 +1900,11 @@ def _limited_ciks(ciks: Iterable[str], max_symbols: int) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _chunk_symbols(symbols: tuple[str, ...], chunk_size: int) -> tuple[tuple[str, ...], ...]:
+    size = max(1, int(chunk_size))
+    return tuple(tuple(symbols[index : index + size]) for index in range(0, len(symbols), size))
+
+
 def _normalize_symbol(value: Any) -> str:
     symbol = str(value or "").strip().upper().replace("/", ".")
     return symbol if symbol and len(symbol) <= 16 else ""
@@ -1441,6 +1975,19 @@ def _fmp_payload_shape_is_unexpected(payload: Any) -> bool:
 
 
 def _fmp_quote_rows_by_symbol(rows: Iterable[Mapping[str, Any]], requested: tuple[str, ...]) -> dict[str, Mapping[str, Any]]:
+    requested_set = set(requested)
+    selected: dict[str, Mapping[str, Any]] = {}
+    for row in rows:
+        symbol = _normalize_symbol(_first_present(row, "symbol", "ticker"))
+        if not symbol and len(requested) == 1:
+            symbol = requested[0]
+        if not symbol or symbol not in requested_set:
+            continue
+        selected[symbol] = row
+    return selected
+
+
+def _fmp_profile_rows_by_symbol(rows: Iterable[Mapping[str, Any]], requested: tuple[str, ...]) -> dict[str, Mapping[str, Any]]:
     requested_set = set(requested)
     selected: dict[str, Mapping[str, Any]] = {}
     for row in rows:

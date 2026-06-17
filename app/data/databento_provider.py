@@ -9,10 +9,12 @@ from typing import Any, Iterable, Mapping
 
 from app.data.market_data_provider import (
     DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
+    DEFAULT_MARKET_SCREENER_BACKFILL_BATCH_SIZE,
     MarketDataFieldProvenance,
     MarketDataProviderStatus,
     MarketQuoteFundamentalsRecord,
     MarketQuoteFundamentalsSnapshot,
+    MARKET_SCREENER_BACKFILL_BATCH_SIZE_ENV,
 )
 
 
@@ -29,7 +31,7 @@ MARKET_SCREENER_ENABLE_DATABENTO_EQUITIES_ENV = "MARKET_SCREENER_ENABLE_DATABENT
 MARKET_SCREENER_ENABLE_DATABENTO_CME_CONTEXT_ENV = "MARKET_SCREENER_ENABLE_DATABENTO_CME_CONTEXT"
 
 DEFAULT_DATABENTO_EQUITIES_SYMBOL_LIMIT = 100
-MAX_DATABENTO_EQUITIES_SYMBOL_LIMIT = 1000
+MAX_DATABENTO_EQUITIES_SYMBOL_LIMIT = 5000
 DEFAULT_DATABENTO_EQUITIES_CHUNK_SIZE = 100
 DEFAULT_DATABENTO_CME_SYMBOL_LIMIT = 25
 DEFAULT_DATABENTO_CACHE_TTL_SECONDS = 900
@@ -86,6 +88,7 @@ class DatabentoEquitiesProvider:
         client: Any | None = None,
         symbol_limit: int | None = None,
         cache_ttl_seconds: int | None = None,
+        batch_size: int | None = None,
         lookback_minutes: int = 60,
     ) -> None:
         self.api_key = api_key if api_key is not None else os.getenv(DATABENTO_API_KEY_ENV, "")
@@ -103,8 +106,22 @@ class DatabentoEquitiesProvider:
             if cache_ttl_seconds is not None
             else _configured_int(DATABENTO_CACHE_TTL_SECONDS_ENV, DEFAULT_DATABENTO_CACHE_TTL_SECONDS, minimum=0, maximum=86_400)
         )
+        self.batch_size = (
+            max(1, int(batch_size))
+            if batch_size is not None
+            else _configured_int(MARKET_SCREENER_BACKFILL_BATCH_SIZE_ENV, DEFAULT_MARKET_SCREENER_BACKFILL_BATCH_SIZE, minimum=1, maximum=500)
+        )
         self.lookback_minutes = max(1, int(lookback_minutes))
         self._cache = {} if client is not None else _SHARED_DATABENTO_CACHE
+
+    def quote_tape(
+        self,
+        symbols: Iterable[str],
+        *,
+        force_refresh: bool = False,
+        max_symbols: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
+    ) -> MarketQuoteFundamentalsSnapshot:
+        return self.quote_fundamentals(symbols, force_refresh=force_refresh, max_symbols=max_symbols)
 
     def quote_fundamentals(
         self,
@@ -180,9 +197,12 @@ class DatabentoEquitiesProvider:
             f"Databento US Equities: {len(records)} rows updated; attempted {len(requested)} symbol(s) in {chunks_attempted} chunk(s); tape/computed tape fields only; cache used for {cache_hits}; "
             f"{skipped_limited} skipped/limited; {no_usable} no usable data. "
             f"Dataset={self.dataset or 'not configured'}; schema={self.schema or 'not configured'}. "
+            "Path=historical timeseries backfill; live subscriptions and CME/futures context are not merged into equity screener tape fields. "
             f"Recommended equity tape config is {RECOMMENDED_DATABENTO_EQUITIES_DATASET} + {RECOMMENDED_DATABENTO_EQUITIES_SCHEMA}. "
             "Databento fills supported equity tape fields only; FMP remains the fundamentals/profile source."
         )
+        if warnings and any(_is_provider_limit_warning(warning) for warning in warnings):
+            message += " Entitlement/auth/rate issue detected; verify Databento API key, dataset entitlement, and rate limits."
         if config_warnings:
             message += f" Config warning: {_short_warning(config_warnings[0], self.api_key)}"
         if warnings:
@@ -199,6 +219,13 @@ class DatabentoEquitiesProvider:
                 "databento_equities_chunks_attempted": chunks_attempted,
                 "databento_equities_cache_hits": cache_hits,
                 "databento_equities_provider_warnings": len(warnings),
+                "provider_rows_requested": len(requested),
+                "provider_rows_returned": len(rows_by_symbol),
+                "provider_rows_parsed": len(records),
+                "provider_rows_updated": len(records),
+                "provider_calls_attempted": chunks_attempted,
+                "provider_cache_hits": cache_hits,
+                "provider_warnings": len(warnings) + len(config_warnings),
                 "databento_dataset_mismatch_warnings": len(config_warnings),
                 "rows_provider_returned_no_usable_data": no_usable,
                 "rows_skipped_by_configured_symbol_cap": skipped_limited,
@@ -241,6 +268,7 @@ class DatabentoEquitiesProvider:
                         f"Databento US Equities disabled; set {MARKET_SCREENER_ENABLE_DATABENTO_EQUITIES_ENV}=true with dataset/schema to add equity tape fields.",
                     ),
                 ),
+                diagnostics={"provider_rows_requested": capped_count},
             )
         missing = []
         if not _secret_configured(self.api_key):
@@ -261,7 +289,7 @@ class DatabentoEquitiesProvider:
                         f"Databento US Equities enabled but missing {', '.join(missing)}; 0 of {capped_count} requested row(s) updated.",
                     ),
                 ),
-                diagnostics={"provider_unavailable": 1},
+                diagnostics={"provider_unavailable": 1, "provider_rows_requested": capped_count},
             )
         return None
 
@@ -284,7 +312,7 @@ class DatabentoEquitiesProvider:
             except DatabentoProviderWarning as exc:
                 warnings.append(_redact_databento_secret(str(exc), self.api_key))
                 return rows, cache_hits, chunks_attempted, warnings
-            for chunk in _chunk_symbols(tuple(missing), DEFAULT_DATABENTO_EQUITIES_CHUNK_SIZE):
+            for chunk in _chunk_symbols(tuple(missing), self.batch_size):
                 chunks_attempted += 1
                 try:
                     fetched_rows = _call_databento_rows(
@@ -542,8 +570,13 @@ class DatabentoCmeContextProvider:
         self._cache[key] = (time.time(), dict(payload))
 
 
-def configured_databento_equities_provider() -> DatabentoEquitiesProvider:
-    return DatabentoEquitiesProvider()
+def configured_databento_equities_provider(
+    *,
+    symbol_limit: int | None = None,
+    cache_ttl_seconds: int | None = None,
+    batch_size: int | None = None,
+) -> DatabentoEquitiesProvider:
+    return DatabentoEquitiesProvider(symbol_limit=symbol_limit, cache_ttl_seconds=cache_ttl_seconds, batch_size=batch_size)
 
 
 def configured_databento_cme_context_provider() -> DatabentoCmeContextProvider:
