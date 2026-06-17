@@ -49,7 +49,6 @@ from app.analytics.market_screener import (
     market_screener_is_my_holding,
     market_screener_record_missing_reason_lines,
     market_screener_record_has_fundamentals,
-    market_screener_record_has_quote_fields,
     market_screener_has_ai_signal,
     merge_market_data_records_into_screener_records,
     sort_market_screener_records,
@@ -1018,7 +1017,7 @@ def _request_visible_page_market_data_enrichment(self: tk.Tk, *, force_refresh: 
 
 
 def _request_selected_row_market_data_enrichment(self: tk.Tk, record: MarketScreenerRecord) -> None:
-    if record.price is not None and record.volume is not None:
+    if not _market_screener_record_needs_market_data_enrichment(record):
         return
     symbols = _symbols_needing_market_data_enrichment(self, [record], require_price_or_volume=True)
     if not symbols:
@@ -1129,18 +1128,34 @@ def _symbols_needing_market_data_enrichment(
         symbol = _normalize_screener_symbol(record.symbol)
         if not symbol or symbol in attempted or symbol in running:
             continue
+        needs_data = _market_screener_record_needs_market_data_enrichment(record)
         if require_price_or_volume:
-            needs_data = record.price is None or record.volume is None
-        else:
-            needs_data = (
-                not market_screener_record_has_quote_fields(record)
-                or record.change_percent is None
-                or record.volume is None
-                or record.avg_volume is None
-            )
+            needs_data = needs_data or record.price is None or record.volume is None
         if needs_data:
             symbols.append(symbol)
     return _dedupe_market_data_symbols(symbols)
+
+
+def _market_screener_record_needs_market_data_enrichment(record: MarketScreenerRecord) -> bool:
+    return bool(_market_screener_enrichment_missing_fields(record))
+
+
+def _market_screener_enrichment_missing_fields(record: MarketScreenerRecord) -> tuple[str, ...]:
+    fields = (
+        "price",
+        "change_percent",
+        "volume",
+        "avg_volume",
+        "market_cap",
+        "pe_ratio",
+        "eps",
+        "revenue_growth",
+        "shares_float",
+        "shares_outstanding",
+        "sector",
+        "industry",
+    )
+    return tuple(field for field in fields if getattr(record, field, None) in (None, ""))
 
 
 def _clear_market_data_attempted_symbols(self: tk.Tk, symbols: Iterable[str]) -> None:
@@ -1165,7 +1180,7 @@ def _reset_screener_market_data_enrichment_state(self: tk.Tk) -> None:
 
 
 def _market_data_symbols_from_records(records: Iterable[MarketScreenerRecord]) -> tuple[str, ...]:
-    return _dedupe_market_data_symbols(record.symbol for record in records if market_screener_record_has_quote_fields(record))
+    return _dedupe_market_data_symbols(record.symbol for record in records if not _market_screener_record_needs_market_data_enrichment(record))
 
 
 def _dedupe_market_data_symbols(symbols: Iterable[str]) -> tuple[str, ...]:
@@ -2126,6 +2141,14 @@ def _selected_screener_missing_reason_lines(
         or record.volume is None
         or record.avg_volume is None
         or record.change_percent is None
+        or record.market_cap is None
+        or record.pe_ratio is None
+        or record.eps is None
+        or record.revenue_growth is None
+        or record.shares_float is None
+        or record.shares_outstanding is None
+        or not record.sector
+        or not record.industry
         or not market_screener_record_has_fundamentals(record)
     )
     if snapshot is not None:
@@ -2152,10 +2175,14 @@ def _selected_screener_missing_reason_lines(
                 f"{diagnostics.rows_blocked_by_provider_plan_rate_auth_limit} provider attempt(s) were blocked; paid FMP helps FMP quote/profile/profile-by-CIK limits, while Databento limits require Databento dataset/schema/entitlement fixes."
             )
         for status in snapshot.statuses:
-            if _screener_status_mentions_auth_plan_rate(status):
+            if _screener_status_mentions_missing_config(status):
+                reasons.append(f"provider disabled/missing config detail: {status.source} {status.status} - {status.message}")
+            elif _screener_status_mentions_auth_plan_rate(status):
                 reasons.append(f"FMP/provider auth-plan-rate detail: {status.source} {status.status} - {status.message}")
             elif _screener_status_is_provider_unavailable(status):
                 reasons.append(f"provider unavailable detail: {status.source} {status.status} - {status.message}")
+            elif _screener_status_mentions_unsupported_field(status):
+                reasons.append(f"unsupported source field detail: {status.source} {status.status} - {status.message}")
             elif _screener_status_is_provider_empty(status):
                 reasons.append(f"provider returned no usable data detail: {status.source} {status.status} - {status.message}")
         if record_has_market_blanks and not _snapshot_mentions_text(snapshot, "fallback"):
@@ -2170,9 +2197,31 @@ def _selected_screener_missing_reason_lines(
     return list(dict.fromkeys(reasons))
 
 
+def _screener_status_mentions_missing_config(status: Any) -> bool:
+    text = f"{getattr(status, 'source', '')} {getattr(status, 'status', '')} {getattr(status, 'message', '')}".lower()
+    return any(
+        token in text
+        for token in (
+            " disabled",
+            "missing ",
+            "not configured",
+            "no fmp_api_key",
+            "no databento_api_key",
+            "no alpha_vantage_api_key",
+            "no market_screener",
+            "not installed",
+        )
+    )
+
+
 def _screener_status_mentions_auth_plan_rate(status: Any) -> bool:
     text = f"{getattr(status, 'source', '')} {getattr(status, 'status', '')} {getattr(status, 'message', '')}".lower()
     return any(token in text for token in ("auth", "401", "403", "api key", "apikey", "plan", "rate", "limit", "quota", "upgrade"))
+
+
+def _screener_status_mentions_unsupported_field(status: Any) -> bool:
+    text = f"{getattr(status, 'source', '')} {getattr(status, 'status', '')} {getattr(status, 'message', '')}".lower()
+    return any(token in text for token in ("unsupported", "not used to fill", "not merged", "schema", "futures/options", "cme context"))
 
 
 def _screener_status_is_provider_unavailable(status: Any) -> bool:

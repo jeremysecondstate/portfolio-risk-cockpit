@@ -197,6 +197,28 @@ def test_databento_equities_refuses_cme_dataset_for_equity_rows() -> None:
     assert snapshot.diagnostics["databento_dataset_mismatch_warnings"] == 1
 
 
+def test_databento_equities_warns_for_non_intraday_equity_dataset_schema() -> None:
+    provider = DatabentoEquitiesProvider(
+        enabled=True,
+        api_key="db-secret",
+        dataset="EQUS.SUMMARY",
+        schema="statistics",
+        client=_FakeDatabentoClient({}),
+    )
+
+    snapshot = provider.quote_fundamentals(["ACME"], max_symbols=5)
+
+    combined = " ".join(status.message for status in snapshot.statuses) + " " + " ".join(snapshot.errors)
+    assert snapshot.records == ()
+    assert snapshot.statuses[0].status == "warning"
+    assert "EQUS.SUMMARY" in combined
+    assert "cannot reasonably produce intraday price/volume/change/avg-volume" in combined
+    assert "EQUS.MINI" in combined
+    assert "ohlcv-1m" in combined
+    assert snapshot.diagnostics["databento_dataset_mismatch_warnings"] == 2
+    assert snapshot.diagnostics["rows_provider_returned_no_usable_data"] == 1
+
+
 def test_databento_cme_context_stays_separate_from_equity_rows() -> None:
     client = _FakeDatabentoClient(
         {

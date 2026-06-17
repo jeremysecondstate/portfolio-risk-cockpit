@@ -36,6 +36,10 @@ DEFAULT_DATABENTO_CACHE_TTL_SECONDS = 900
 DATABENTO_DOC_URL = "https://databento.com/docs"
 DATABENTO_SCHEMAS_DOC_URL = "https://databento.com/docs/schemas-and-data-formats"
 DATABENTO_HISTORICAL_DOC_URL = "https://databento.com/docs/api-reference-historical"
+RECOMMENDED_DATABENTO_EQUITIES_DATASET = "EQUS.MINI"
+RECOMMENDED_DATABENTO_EQUITIES_SCHEMA = "ohlcv-1m"
+_DATABENTO_EQUITY_INTRADAY_TAPE_SCHEMAS = {"ohlcv-1m", "ohlcv-1s", "trades", "tbbo", "bbo", "mbp-1", "mbp-10"}
+_DATABENTO_EQUITY_UNSUPPORTED_SCREENER_SCHEMAS = {"definition", "definitions", "statistics", "ohlcv-1d"}
 
 _SHARED_DATABENTO_CACHE: dict[tuple[str, str, str, str, str], tuple[float, Mapping[str, Any]]] = {}
 _PLACEHOLDER_SECRETS = {"", "THIS IS NOT A KEY", "NOT_A_KEY", "CHANGEME", "CHANGE_ME"}
@@ -150,6 +154,7 @@ class DatabentoEquitiesProvider:
                 },
             )
 
+        config_warnings = _databento_equities_config_warnings(self.dataset, self.schema)
         records: list[MarketQuoteFundamentalsRecord] = []
         cache_hits = 0
         chunks_attempted = 0
@@ -169,12 +174,17 @@ class DatabentoEquitiesProvider:
         status = "available" if records else "empty"
         if warnings:
             status = "partial" if records else "warning"
+        elif config_warnings:
+            status = "partial" if records else "warning"
         message = (
             f"Databento US Equities: {len(records)} rows updated; attempted {len(requested)} symbol(s) in {chunks_attempted} chunk(s); tape/computed tape fields only; cache used for {cache_hits}; "
             f"{skipped_limited} skipped/limited; {no_usable} no usable data. "
             f"Dataset={self.dataset or 'not configured'}; schema={self.schema or 'not configured'}. "
+            f"Recommended equity tape config is {RECOMMENDED_DATABENTO_EQUITIES_DATASET} + {RECOMMENDED_DATABENTO_EQUITIES_SCHEMA}. "
             "Databento fills supported equity tape fields only; FMP remains the fundamentals/profile source."
         )
+        if config_warnings:
+            message += f" Config warning: {_short_warning(config_warnings[0], self.api_key)}"
         if warnings:
             message += f" Provider warning: {_short_warning(warnings[0], self.api_key)}"
 
@@ -182,13 +192,14 @@ class DatabentoEquitiesProvider:
             records=tuple(records),
             fetched_at=fetched_at,
             statuses=(MarketDataProviderStatus("Databento US Equities", status, fetched_at, _redact_databento_secret(message, self.api_key)),),
-            errors=tuple(_redact_databento_secret(warning, self.api_key) for warning in warnings[:4]),
+            errors=tuple(_redact_databento_secret(warning, self.api_key) for warning in (*config_warnings, *warnings)[:4]),
             diagnostics={
                 "rows_enriched_by_databento_equities": len(records),
                 "databento_equities_symbols_attempted": len(requested),
                 "databento_equities_chunks_attempted": chunks_attempted,
                 "databento_equities_cache_hits": cache_hits,
                 "databento_equities_provider_warnings": len(warnings),
+                "databento_dataset_mismatch_warnings": len(config_warnings),
                 "rows_provider_returned_no_usable_data": no_usable,
                 "rows_skipped_by_configured_symbol_cap": skipped_limited,
                 "provider_unavailable": 1 if warnings and not records else 0,
@@ -927,6 +938,58 @@ def _secret_configured(value: str | None) -> bool:
 def _looks_like_cme_dataset(dataset: str) -> bool:
     text = str(dataset or "").strip().upper()
     return any(token in text for token in ("GLBX", "CME", "CBOT", "NYMEX", "COMEX", "MDP3"))
+
+
+def _looks_like_equities_dataset(dataset: str) -> bool:
+    text = str(dataset or "").strip().upper()
+    if not text:
+        return False
+    return any(
+        token in text
+        for token in (
+            "EQUS",
+            "XNAS",
+            "XNYS",
+            "XASE",
+            "ARCX",
+            "BATS",
+            "IEXG",
+            "MEMX",
+            "FINN",
+            "FINY",
+            "EDGA",
+            "EDGX",
+            "XCHI",
+        )
+    )
+
+
+def _databento_equities_config_warnings(dataset: str, schema: str) -> tuple[str, ...]:
+    dataset_text = str(dataset or "").strip().upper()
+    schema_text = str(schema or "").strip().lower()
+    warnings: list[str] = []
+    recommended = f"{DATABENTO_EQUITIES_DATASET_ENV}={RECOMMENDED_DATABENTO_EQUITIES_DATASET} and {DATABENTO_EQUITIES_SCHEMA_ENV}={RECOMMENDED_DATABENTO_EQUITIES_SCHEMA}"
+    if dataset_text == "EQUS.SUMMARY":
+        warnings.append(
+            "Databento US Equities config: EQUS.SUMMARY is a summary/end-of-day-style equities dataset and may leave intraday screener tape fields blank; "
+            f"use {recommended} for Market Screener equity tape enrichment."
+        )
+    elif dataset_text and not _looks_like_equities_dataset(dataset_text):
+        warnings.append(
+            f"Databento US Equities config: dataset '{dataset}' is not recognized as a US equities tape dataset; "
+            f"use {recommended} unless this is a custom equities-compatible dataset."
+        )
+    if schema_text in _DATABENTO_EQUITY_UNSUPPORTED_SCREENER_SCHEMAS:
+        warnings.append(
+            f"Databento US Equities config: schema '{schema}' cannot reasonably produce intraday price/volume/change/avg-volume screener fields; "
+            f"use {recommended}."
+        )
+    elif schema_text and schema_text not in _DATABENTO_EQUITY_INTRADAY_TAPE_SCHEMAS:
+        warnings.append(
+            f"Databento US Equities config: schema '{schema}' is not a supported intraday tape schema for screener enrichment; "
+            f"use {recommended}."
+        )
+    return tuple(warnings)
 
 
 def _is_provider_limit_warning(message: str) -> bool:

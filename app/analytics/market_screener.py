@@ -805,18 +805,29 @@ def market_screener_record_missing_reason_lines(record: MarketScreenerRecord) ->
         reasons.append("missing CIK: SEC CIK/ticker and submissions metadata cannot resolve this row without a trusted CIK.")
     if not _normalize_symbol(record.symbol):
         reasons.append("missing ticker: no trusted SEC/provider symbol is present; symbol was not guessed from company name.")
-    if not (record.exchange and record.sector and record.industry):
-        missing = ", ".join(field for field, value in (("exchange", record.exchange), ("sector", record.sector), ("industry", record.industry)) if not value)
-        reasons.append(f"missing identity/profile fields: {missing}; requires SEC submissions, local file, FMP profile/profile-by-CIK, or configured fallback data.")
-    if record.price is None or record.volume is None:
-        missing = ", ".join(field for field, value in (("price", record.price), ("volume", record.volume)) if value is None)
-        reasons.append(f"missing price/volume fields: {missing}; requires Schwab quote, Databento US Equities with an equity tape schema/entitlement, local file, FMP quote, or configured fallback quote data.")
-    if record.change_percent is None or record.avg_volume is None:
-        missing = ", ".join(field for field, value in (("change_percent", record.change_percent), ("avg_volume", record.avg_volume)) if value is None)
-        reasons.append(f"missing computed tape fields: {missing}; requires FMP quote fields, local/fallback fields, or Databento rows with enough open/close/volume history. Unsupported schemas leave these blank.")
-    if not market_screener_record_has_fundamentals(record):
-        reasons.append("missing fundamentals: market cap, P/E, EPS, and revenue growth are absent unless a local file, FMP quote/profile/key-metrics/ratios/growth endpoint, SEC filing parse, or configured fallback supplies them; Databento CME context is not used for selected-equity fundamentals.")
+    profile_missing = _missing_named_fields(record, ("exchange", "sector", "industry"))
+    if profile_missing:
+        reasons.append(
+            f"missing profile fields: {', '.join(profile_missing)}; requires SEC submissions metadata, local seed data, FMP profile/profile-by-CIK, or configured fallback profile data. "
+            "Databento US Equities and Databento CME context do not supply sector/industry profile fields."
+        )
+    tape_missing = _missing_named_fields(record, ("price", "volume", "change_percent", "avg_volume"))
+    if tape_missing:
+        reasons.append(
+            f"missing quote/tape fields: {', '.join(tape_missing)}; requires Schwab quote, Databento US Equities with an entitled intraday equity tape schema, local file/cache, FMP quote, or configured fallback quote data. "
+            "Databento CME context is unsupported for selected-equity quote columns."
+        )
+    fundamental_missing = _missing_named_fields(record, ("market_cap", "pe_ratio", "eps", "revenue_growth", "shares_float", "shares_outstanding"))
+    if fundamental_missing:
+        reasons.append(
+            f"missing FMP/profile fundamental fields: {', '.join(fundamental_missing)}; requires local seed data, parsed SEC filing rows, FMP quote/profile/key-metrics/ratios/income-growth/shares-float endpoints, or configured fallback profile data. "
+            "Databento equities and CME context are unsupported for selected-equity fundamentals."
+        )
     return reasons
+
+
+def _missing_named_fields(record: MarketScreenerRecord, fields: Iterable[str]) -> list[str]:
+    return [field for field in fields if getattr(record, field, None) in (None, "", ())]
 
 
 def _load_recent_records(

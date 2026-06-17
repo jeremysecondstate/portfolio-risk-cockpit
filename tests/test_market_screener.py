@@ -612,6 +612,43 @@ def test_market_screener_visible_page_enrichment_retries_partial_mover_rows_once
     assert calls == [("BETA",)]
 
 
+def test_market_screener_visible_page_enrichment_keeps_price_market_cap_partial_rows_eligible(monkeypatch) -> None:
+    partial = MarketScreenerRecord("ACME", "Acme Corp", price=22.0, market_cap=1_000_000_000)
+    complete = MarketScreenerRecord(
+        "DONE",
+        "Done Corp",
+        sector="Technology",
+        industry="Software",
+        price=10.0,
+        change_percent=1.0,
+        volume=1_000,
+        avg_volume=900,
+        market_cap=1_000_000_000,
+        pe_ratio=20.0,
+        eps=0.5,
+        revenue_growth=5.0,
+        shares_float=10_000_000,
+        shares_outstanding=12_000_000,
+    )
+    assert earnings_radar_extension._market_data_symbols_from_records([partial, complete]) == ("DONE",)
+    app = SimpleNamespace(
+        market_screener_row_map={"row_acme": partial},
+        market_screener_market_data_running_symbols=set(),
+        market_screener_market_data_attempted_symbols=set(),
+    )
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(earnings_radar_extension, "_request_market_data_enrichment", lambda _app, symbols, **_kwargs: calls.append(tuple(symbols)))
+
+    earnings_radar_extension._request_visible_page_market_data_enrichment(app, force_refresh=False)
+
+    assert calls == [("ACME",)]
+
+    app.market_screener_market_data_attempted_symbols.add("ACME")
+    earnings_radar_extension._request_visible_page_market_data_enrichment(app, force_refresh=False)
+
+    assert calls == [("ACME",)]
+
+
 def test_market_screener_visible_page_enrichment_uses_page_size_above_100(monkeypatch) -> None:
     records = {
         f"row_{index}": MarketScreenerRecord(f"SYM{index:03d}", f"Symbol {index}")
@@ -688,7 +725,7 @@ def test_fmp_provider_maps_quote_and_profile_fields_without_key_in_status() -> N
     api_key = "fmp-secret-key-123"
 
     def handler(url: str, params: dict[str, object]) -> _FakeFmpResponse:
-        if url.endswith("/batch-quote"):
+        if url.endswith("/batch-quote-short"):
             assert "apikey" not in params
             return _FakeFmpResponse(
                 200,
@@ -755,9 +792,94 @@ def test_fmp_provider_maps_quote_and_profile_fields_without_key_in_status() -> N
     assert all("apikey" not in call["params"] for call in session.calls)
 
 
+def test_fmp_batch_quote_short_empty_response_is_nonblocking() -> None:
+    def handler(url: str, params: dict[str, object]) -> _FakeFmpResponse:
+        if url.endswith("/batch-quote-short"):
+            assert params["symbols"] == "ACME"
+            return _FakeFmpResponse(200, [])
+        if url.endswith("/profile") or url.endswith("/key-metrics-ttm") or url.endswith("/ratios-ttm") or url.endswith("/income-statement-growth") or url.endswith("/shares-float"):
+            return _FakeFmpResponse(200, [])
+        raise AssertionError(url)
+
+    session = _FakeFmpSession(handler)
+    provider = FmpQuoteFundamentalsProvider(api_key="secret", session=session, symbol_limit=5)
+
+    snapshot = provider.quote_fundamentals(["ACME"], max_symbols=5)
+
+    assert snapshot.records == ()
+    assert snapshot.statuses[0].status == "empty"
+    assert snapshot.errors == ()
+    assert snapshot.diagnostics["rows_provider_returned_no_usable_data"] == 1
+    endpoints = [str(call["url"]).rsplit("/", 1)[-1] for call in session.calls]
+    assert endpoints[0] == "batch-quote-short"
+    assert "batch-quote" not in endpoints
+
+
+def test_fmp_batch_quote_short_auth_rate_errors_are_redacted_nonblocking() -> None:
+    api_key = "fmp-secret-auth"
+    for status_code in (401, 403, 429):
+        session = _FakeFmpSession(lambda _url, _params, code=status_code: _FakeFmpResponse(code, {"message": f"blocked {api_key}"}))
+        provider = FmpQuoteFundamentalsProvider(api_key=api_key, session=session, symbol_limit=5)
+
+        snapshot = provider.quote_fundamentals(["ACME"], max_symbols=5)
+
+        combined = " ".join(status.message for status in snapshot.statuses) + " " + " ".join(snapshot.errors)
+        assert snapshot.records == ()
+        assert snapshot.statuses[0].status == "warning"
+        assert snapshot.diagnostics["rows_blocked_by_provider_plan_rate_auth_limit"] == 1
+        assert len(session.calls) == 1
+        assert api_key not in combined
+
+
+def test_fmp_batch_quote_short_malformed_payload_falls_back_to_batch_quote() -> None:
+    def handler(url: str, _params: dict[str, object]) -> _FakeFmpResponse:
+        if url.endswith("/batch-quote-short"):
+            return _FakeFmpResponse(200, {"data": {"unexpected": "shape"}})
+        if url.endswith("/batch-quote"):
+            return _FakeFmpResponse(200, [{"symbol": "ACME", "price": 12.34, "changesPercentage": 1.2, "volume": 1234}])
+        if url.endswith("/profile") or url.endswith("/key-metrics-ttm") or url.endswith("/ratios-ttm") or url.endswith("/income-statement-growth") or url.endswith("/shares-float"):
+            return _FakeFmpResponse(200, [])
+        raise AssertionError(url)
+
+    session = _FakeFmpSession(handler)
+    provider = FmpQuoteFundamentalsProvider(api_key="secret", session=session, symbol_limit=5)
+
+    snapshot = provider.quote_fundamentals(["ACME"], max_symbols=5)
+
+    record = snapshot.records[0]
+    assert record.symbol == "ACME"
+    assert record.price == 12.34
+    assert record.change_percent == 1.2
+    assert record.volume == 1234
+    assert "quote endpoint batch-quote" in snapshot.statuses[0].message
+    assert [str(call["url"]).rsplit("/", 1)[-1] for call in session.calls[:2]] == ["batch-quote-short", "batch-quote"]
+
+
+def test_fmp_batch_quote_short_and_fallback_malformed_status_is_redacted() -> None:
+    api_key = "fmp-secret-malformed"
+
+    def handler(url: str, _params: dict[str, object]) -> _FakeFmpResponse:
+        if url.endswith("/batch-quote-short") or url.endswith("/batch-quote"):
+            return _FakeFmpResponse(200, {"data": {"unexpected": api_key}})
+        if url.endswith("/profile") or url.endswith("/key-metrics-ttm") or url.endswith("/ratios-ttm") or url.endswith("/income-statement-growth") or url.endswith("/shares-float"):
+            return _FakeFmpResponse(200, [])
+        raise AssertionError(url)
+
+    session = _FakeFmpSession(handler)
+    provider = FmpQuoteFundamentalsProvider(api_key=api_key, session=session, symbol_limit=5)
+
+    snapshot = provider.quote_fundamentals(["ACME"], max_symbols=5)
+
+    combined = " ".join(status.message for status in snapshot.statuses) + " " + " ".join(snapshot.errors)
+    assert snapshot.records == ()
+    assert snapshot.statuses[0].status == "warning"
+    assert "malformed payload" in combined
+    assert api_key not in combined
+
+
 def test_fmp_provider_deeper_endpoints_fill_remaining_fundamentals_and_cache() -> None:
     def handler(url: str, params: dict[str, object]) -> _FakeFmpResponse:
-        if url.endswith("/batch-quote"):
+        if url.endswith("/batch-quote-short"):
             return _FakeFmpResponse(200, [{"symbol": "ACME", "price": 12.34}])
         symbol = params["symbol"]
         if url.endswith("/profile"):
@@ -832,7 +954,7 @@ def test_fmp_missing_fields_remain_none_and_screener_renders_dashes() -> None:
 
 def test_fmp_cap_and_cache_prevent_full_universe_calls() -> None:
     def handler(url: str, params: dict[str, object]) -> _FakeFmpResponse:
-        if url.endswith("/batch-quote"):
+        if url.endswith("/batch-quote-short"):
             symbols = str(params["symbols"]).split(",")
             assert symbols == ["SYM000", "SYM001"]
             return _FakeFmpResponse(200, [{"symbol": symbol, "price": index + 1.0} for index, symbol in enumerate(symbols)])
@@ -891,7 +1013,7 @@ def test_composite_market_data_provider_merges_local_schwab_and_fmp_without_dupl
     local_provider = _FakeMarketDataProvider({"ACME": MarketQuoteFundamentalsRecord("ACME", price=10.0, volume=1000, source="Schwab quote")})
 
     def handler(url: str, params: dict[str, object]) -> _FakeFmpResponse:
-        if url.endswith("/batch-quote"):
+        if url.endswith("/batch-quote-short"):
             return _FakeFmpResponse(200, [{"symbol": "ACME", "marketCap": 5_000_000_000, "peRatio": 20.0}])
         if url.endswith("/profile"):
             return _FakeFmpResponse(
@@ -1363,6 +1485,52 @@ def test_screener_detail_text_includes_snapshot_provider_reasons_for_blanks() ->
     assert "provider auth/plan/rate limit: 1 provider attempt(s)" in detail
     assert "fallback disabled/not attempted" in detail
     assert "session enrichment detail: Market data selected row: enriched 0 of 1 requested symbol(s)." in detail
+
+
+def test_screener_diagnostics_selected_row_groups_blank_reasons_by_source_family() -> None:
+    record = MarketScreenerRecord("ACME", "Acme Corp", price=12.0, market_cap=1_000_000_000, sources=("SEC company_tickers.json",))
+    snapshot = MarketScreenerSnapshot(
+        records=(record,),
+        fetched_at="2026-06-14T10:00:00+00:00",
+        sources=("SEC company_tickers.json",),
+        statuses=(
+            MarketScreenerSourceStatus(
+                "Databento US Equities",
+                "disabled",
+                "2026-06-14T10:00:00+00:00",
+                "Databento US Equities disabled; set MARKET_SCREENER_ENABLE_DATABENTO_EQUITIES=true with dataset/schema to add equity tape fields.",
+            ),
+            MarketScreenerSourceStatus(
+                "Databento US Equities",
+                "warning",
+                "2026-06-14T10:00:00+00:00",
+                "Config warning: schema 'statistics' is unsupported for intraday screener tape fields.",
+            ),
+            MarketScreenerSourceStatus(
+                "FMP quote/fundamentals",
+                "empty",
+                "2026-06-14T10:00:00+00:00",
+                "FMP enrichment: 0 rows updated; 1 no usable data.",
+            ),
+        ),
+        diagnostics=MarketScreenerCoverageDiagnostics(
+            total_rows=1,
+            rows_with_symbol=1,
+            rows_missing_cik=1,
+            rows_provider_returned_no_usable_data=1,
+            rows_still_missing_price_volume=1,
+            rows_still_missing_fundamentals=1,
+        ),
+    )
+
+    text = earnings_radar_extension._screener_diagnostics_popout_text(snapshot, selected_record=record)
+
+    assert "missing quote/tape fields: volume, change_percent, avg_volume" in text
+    assert "missing profile fields: exchange, sector, industry" in text
+    assert "missing FMP/profile fundamental fields: pe_ratio, eps, revenue_growth, shares_float, shares_outstanding" in text
+    assert "provider disabled/missing config detail: Databento US Equities disabled" in text
+    assert "unsupported source field detail: Databento US Equities warning" in text
+    assert "provider returned no usable data detail: FMP quote/fundamentals empty" in text
 
 
 def test_market_screener_missing_providers_degrade_to_fallback_and_status_messages(monkeypatch) -> None:
