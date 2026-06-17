@@ -33,12 +33,17 @@ from app.analytics.market_screener import (
     DATA_COMPLETENESS_OPTIONS,
     EARNINGS_WINDOW_OPTIONS,
     EVENT_TYPE_OPTIONS,
+    AskScreenerExecutionResult,
+    AskScreenerPlan,
+    AskScreenerPlannerError,
     MARKET_SCREENER_AI_ANALYZE_PROMPT,
     MARKET_SCREENER_AI_QUICK_PROMPTS,
     MarketScreenerAiResponse,
     MarketScreenerRecord,
     MarketScreenerSnapshot,
+    OpenAiAskScreenerPlannerClient,
     OpenAiMarketScreenerClient,
+    execute_ask_screener_plan,
     fetch_market_screener_snapshot,
     filter_market_screener_records,
     market_screener_data_completeness,
@@ -51,6 +56,7 @@ from app.analytics.market_screener import (
     market_screener_record_has_fundamentals,
     market_screener_has_ai_signal,
     merge_market_data_records_into_screener_records,
+    parse_ask_screener_fallback,
     sort_market_screener_records,
 )
 from app.analytics.symbol_chat import redact_symbol_chat_secrets
@@ -230,6 +236,11 @@ def _ensure_state(self: tk.Tk) -> None:
     self.market_screener_has_ai_signal_var = tk.BooleanVar(value=False)
     self.market_screener_has_price_volume_data_var = tk.BooleanVar(value=False)
     self.market_screener_page_size_var = tk.StringVar(value="100")
+    self.market_screener_ask_var = tk.StringVar(value="")
+    self.market_screener_ask_summary_var = tk.StringVar(value="Ask Screener is ready.")
+    self.market_screener_quick_preset_var = tk.StringVar(value="Quick filter")
+    self.market_screener_ask_plan: AskScreenerPlan | None = None
+    self.market_screener_ask_result: AskScreenerExecutionResult | None = None
     self.market_screener_selected_record: MarketScreenerRecord | None = None
     self.market_screener_selected_summary_var = tk.StringVar(value="No screener row selected.")
     self.market_screener_ai_status_var = tk.StringVar(value="Select a screener row for row-grounded AI.")
@@ -242,6 +253,7 @@ def _ensure_state(self: tk.Tk) -> None:
     self._market_screener_refreshing = False
     self._market_screener_refresh_pending = False
     self._market_screener_refresh_pending_force = False
+    self._market_screener_ask_running = False
     self.market_screener_source_status_base_text = "Source/status: Market Intelligence Screener has not loaded yet."
     self.market_screener_market_data_status_lines: list[str] = []
     self.market_screener_market_data_attempted_symbols: set[str] = set()
@@ -328,37 +340,58 @@ def _build_screener_filters(self: tk.Tk, parent: ttk.Frame) -> None:
     box.grid(row=1, column=0, sticky="ew", pady=(0, 8))
     for column in range(8):
         box.columnconfigure(column, weight=1 if column in {1, 3, 5, 7} else 0)
-    _entry_filter(box, "Search", self.market_screener_search_var, row=0, column=0, command=lambda: _apply_screener_filters(self))
-    self.market_screener_sector_combo = _combo_filter(box, "Sector", self.market_screener_sector_var, ["All"], row=0, column=2, command=lambda: _apply_screener_filters(self))
-    self.market_screener_exchange_combo = _combo_filter(box, "Exchange", self.market_screener_exchange_var, ["All"], row=0, column=4, command=lambda: _apply_screener_filters(self))
-    _combo_filter(box, "Event", self.market_screener_event_type_var, list(EVENT_TYPE_OPTIONS), row=0, column=6, command=lambda: _apply_screener_filters(self))
-    self.market_screener_risk_flag_combo = _combo_filter(box, "Risk flag", self.market_screener_risk_flag_var, ["All"], row=1, column=0, command=lambda: _apply_screener_filters(self))
-    _combo_filter(box, "Earnings", self.market_screener_earnings_window_var, list(EARNINGS_WINDOW_OPTIONS), row=1, column=2, command=lambda: _apply_screener_filters(self))
-    _combo_filter(box, "Completeness", self.market_screener_data_completeness_var, list(DATA_COMPLETENESS_OPTIONS), row=1, column=4, command=lambda: _apply_screener_filters(self))
+
+    ask = ttk.Frame(box, style="Panel.TFrame")
+    ask.grid(row=0, column=0, columnspan=8, sticky="ew", pady=(0, 8))
+    ask.columnconfigure(1, weight=1)
+    ttk.Label(ask, text="Ask Screener", style="Subtle.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
+    ask_entry = ttk.Entry(ask, textvariable=self.market_screener_ask_var)
+    ask_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+    ask_entry.bind("<Return>", lambda _event, app=self: _run_ask_screener_query(app), add="+")
+    self.market_screener_ask_button = ttk.Button(ask, text="Ask", command=lambda app=self: _run_ask_screener_query(app), style="Accent.TButton")
+    self.market_screener_ask_button.grid(row=0, column=2, sticky="e", padx=(0, 8))
+    ttk.Button(ask, text="Clear Ask", command=lambda app=self: _clear_ask_screener(app)).grid(row=0, column=3, sticky="e")
+    ttk.Label(ask, textvariable=self.market_screener_ask_summary_var, style="Chip.TLabel", wraplength=980).grid(row=1, column=1, columnspan=3, sticky="ew", pady=(6, 0))
+
+    _entry_filter(box, "Search", self.market_screener_search_var, row=1, column=0, command=lambda: _apply_screener_filters(self))
+    self.market_screener_sector_combo = _combo_filter(box, "Sector", self.market_screener_sector_var, ["All"], row=1, column=2, command=lambda: _apply_screener_filters(self))
+    self.market_screener_exchange_combo = _combo_filter(box, "Exchange", self.market_screener_exchange_var, ["All"], row=1, column=4, command=lambda: _apply_screener_filters(self))
+    _combo_filter(box, "Event", self.market_screener_event_type_var, list(EVENT_TYPE_OPTIONS), row=1, column=6, command=lambda: _apply_screener_filters(self))
+    self.market_screener_risk_flag_combo = _combo_filter(box, "Risk flag", self.market_screener_risk_flag_var, ["All"], row=2, column=0, command=lambda: _apply_screener_filters(self))
+    _combo_filter(box, "Earnings", self.market_screener_earnings_window_var, list(EARNINGS_WINDOW_OPTIONS), row=2, column=2, command=lambda: _apply_screener_filters(self))
+    _combo_filter(box, "Completeness", self.market_screener_data_completeness_var, list(DATA_COMPLETENESS_OPTIONS), row=2, column=4, command=lambda: _apply_screener_filters(self))
     checks = ttk.Frame(box, style="Panel.TFrame")
-    checks.grid(row=1, column=6, columnspan=2, sticky="ew", pady=4)
+    checks.grid(row=2, column=6, columnspan=2, sticky="ew", pady=4)
     ttk.Checkbutton(checks, text="Has AI-worthy signal", variable=self.market_screener_has_ai_signal_var, command=lambda: _apply_screener_filters(self)).pack(side=tk.LEFT)
     ttk.Checkbutton(checks, text="Has price/volume data", variable=self.market_screener_has_price_volume_data_var, command=lambda: _apply_screener_filters(self)).pack(side=tk.LEFT, padx=(12, 0))
 
     quick = ttk.Frame(box, style="Panel.TFrame")
-    quick.grid(row=2, column=0, columnspan=8, sticky="ew", pady=(8, 0))
+    quick.grid(row=3, column=0, columnspan=8, sticky="ew", pady=(2, 0))
     ttk.Label(quick, text="Quick", style="Subtle.TLabel").pack(side=tk.LEFT, padx=(0, 6))
-    for label, preset in (
-        ("Earnings Soon", "earnings_soon"),
-        ("Recent SEC Filing", "recent_filing"),
-        ("Guidance", "guidance"),
-        ("Risk Flags", "risk"),
-        ("High Volume / Mover", "mover"),
-        ("Quote-enriched", "quote_enriched"),
-        ("Fundamentals", "fundamentals"),
-        ("My Holdings", "holdings"),
-        ("Complete Data", "complete_data"),
-    ):
-        ttk.Button(quick, text=label, command=lambda value=preset, app=self: _apply_screener_quick_preset(app, value)).pack(side=tk.LEFT, padx=(0, 6))
+    self.market_screener_quick_preset_combo = ttk.Combobox(
+        quick,
+        textvariable=self.market_screener_quick_preset_var,
+        values=[
+            "Quick filter",
+            "Earnings Soon",
+            "Recent SEC Filing",
+            "Guidance",
+            "Risk Flags",
+            "High Volume / Mover",
+            "Quote-enriched",
+            "Fundamentals",
+            "My Holdings",
+            "Complete Data",
+        ],
+        width=24,
+        state="readonly",
+    )
+    self.market_screener_quick_preset_combo.pack(side=tk.LEFT, padx=(0, 6))
+    self.market_screener_quick_preset_combo.bind("<<ComboboxSelected>>", lambda _event, app=self: _apply_selected_screener_quick_preset(app), add="+")
 
     actions = ttk.Frame(box, style="Panel.TFrame")
-    actions.grid(row=3, column=0, columnspan=8, sticky="ew", pady=(8, 0))
-    ttk.Button(actions, text="Refresh Screener", command=lambda: _refresh_screener(self, force_refresh=True), style="Accent.TButton").pack(side=tk.LEFT)
+    actions.grid(row=4, column=0, columnspan=8, sticky="ew", pady=(8, 0))
+    ttk.Button(actions, text="Refresh", command=lambda: _refresh_screener(self, force_refresh=True), style="Accent.TButton").pack(side=tk.LEFT)
     ttk.Button(actions, text="Enrich Visible Page", command=lambda: _request_visible_page_market_data_enrichment(self, force_refresh=False)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Re-enrich Visible Page", command=lambda: _request_visible_page_market_data_enrichment(self, force_refresh=True)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Open Source", command=lambda: _open_screener_source(self)).pack(side=tk.LEFT, padx=(8, 0))
@@ -833,6 +866,111 @@ def _load_screener_snapshot(self: tk.Tk, snapshot: MarketScreenerSnapshot) -> No
     _apply_screener_filters(self)
 
 
+def _run_ask_screener_query(self: tk.Tk) -> None:
+    query = self.market_screener_ask_var.get().strip()
+    if not query:
+        self.market_screener_ask_summary_var.set("Enter an Ask Screener question first.")
+        return
+    if getattr(self, "_market_screener_ask_running", False):
+        self.market_screener_ask_summary_var.set("Ask Screener is already planning a query.")
+        return
+    local_plan = parse_ask_screener_fallback(query, records=getattr(self, "market_screener_records", ()) or ())
+    if local_plan is not None:
+        _apply_ask_screener_plan(self, local_plan, source_label="local")
+        return
+
+    self._market_screener_ask_running = True
+    _set_ask_screener_actions_enabled(self, False)
+    self.market_screener_ask_summary_var.set("Ask Screener is planning with compact schema metadata...")
+
+    def progress(message: str) -> None:
+        _post_to_earnings_ui(self, lambda value=message: self.market_screener_ask_summary_var.set(f"Ask Screener: {value}"))
+
+    def worker() -> None:
+        try:
+            client = _ask_screener_planner_client(self)
+            plan = client.plan(query, getattr(self, "market_screener_records", ()) or (), progress_callback=progress)
+        except Exception as exc:
+            _post_to_earnings_ui(self, lambda error=exc: _finish_ask_screener_error(self, error))
+            return
+        _post_to_earnings_ui(self, lambda loaded=plan: _finish_ask_screener_success(self, loaded))
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _ask_screener_planner_client(self: tk.Tk) -> OpenAiAskScreenerPlannerClient:
+    factory = getattr(self, "ask_screener_planner_client_factory", None)
+    if callable(factory):
+        return factory()
+    return OpenAiAskScreenerPlannerClient()
+
+
+def _finish_ask_screener_success(self: tk.Tk, plan: AskScreenerPlan) -> None:
+    self._market_screener_ask_running = False
+    _set_ask_screener_actions_enabled(self, True)
+    _apply_ask_screener_plan(self, plan, source_label="OpenAI JSON plan")
+
+
+def _finish_ask_screener_error(self: tk.Tk, error: Exception) -> None:
+    self._market_screener_ask_running = False
+    _set_ask_screener_actions_enabled(self, True)
+    message = redact_symbol_chat_secrets(str(error))
+    if isinstance(error, AskScreenerPlannerError):
+        self.market_screener_ask_summary_var.set(message)
+    else:
+        self.market_screener_ask_summary_var.set(f"Ask Screener could not plan this query: {message}")
+
+
+def _apply_ask_screener_plan(self: tk.Tk, plan: AskScreenerPlan, *, source_label: str) -> None:
+    if plan.clear_filters:
+        _clear_screener_filters(self)
+        self.market_screener_ask_summary_var.set("Ask Screener cleared filters.")
+        self.market_screener_status_var.set("Ask Screener cleared filters.")
+        return
+    self.market_screener_ask_plan = plan
+    self.market_screener_ask_result = None
+    if plan.sort is not None:
+        self.market_screener_sort_column = _ask_sort_field_to_screener_column(plan.sort.field)
+        self.market_screener_sort_desc = plan.sort.descending
+    self.market_screener_page = 0
+    _apply_screener_filters(self)
+    result = getattr(self, "market_screener_ask_result", None)
+    summary = result.summary if result is not None else "Ask Screener applied the validated plan."
+    message = f"{summary} Source: {source_label}."
+    self.market_screener_ask_summary_var.set(message)
+    self.market_screener_status_var.set(message)
+
+
+def _clear_ask_screener(self: tk.Tk) -> None:
+    self.market_screener_ask_var.set("")
+    self.market_screener_ask_plan = None
+    self.market_screener_ask_result = None
+    self.market_screener_ask_summary_var.set("Ask Screener cleared.")
+    self.market_screener_page = 0
+    _apply_screener_filters(self)
+
+
+def _set_ask_screener_actions_enabled(self: tk.Tk, enabled: bool) -> None:
+    button = getattr(self, "market_screener_ask_button", None)
+    if button is None:
+        return
+    try:
+        button.configure(state=tk.NORMAL if enabled else tk.DISABLED)
+    except tk.TclError:
+        pass
+
+
+def _ask_sort_field_to_screener_column(field: str) -> str:
+    return {
+        "company_name": "company",
+        "data_completeness_score": "data_completeness",
+        "next_earnings_date": "next_earnings",
+        "recent_filing_date": "recent_filing",
+        "shares_float": "float_shares",
+        "shares_outstanding": "float_shares",
+    }.get(field, field)
+
+
 def _apply_screener_filters(self: tk.Tk) -> None:
     filtered = filter_market_screener_records(
         self.market_screener_records,
@@ -846,7 +984,18 @@ def _apply_screener_filters(self: tk.Tk) -> None:
         has_ai_signal=self.market_screener_has_ai_signal_var.get(),
         has_price_volume_data=self.market_screener_has_price_volume_data_var.get(),
     )
-    self.market_screener_empty_state_text = _screener_filter_empty_state_text(self, filtered)
+    ask_plan = getattr(self, "market_screener_ask_plan", None)
+    if ask_plan is not None:
+        ask_result = execute_ask_screener_plan(filtered, ask_plan)
+        self.market_screener_ask_result = ask_result
+        filtered = list(ask_result.records)
+        if ask_result.total_matched_rows == 0:
+            self.market_screener_empty_state_text = ask_result.summary
+        else:
+            self.market_screener_empty_state_text = ""
+    else:
+        self.market_screener_ask_result = None
+        self.market_screener_empty_state_text = _screener_filter_empty_state_text(self, filtered)
     self.market_screener_filtered_records = sort_market_screener_records(filtered, self.market_screener_sort_column, descending=self.market_screener_sort_desc)
     self.market_screener_page = min(self.market_screener_page, _max_page(self.market_screener_filtered_records, _screener_page_size(self)))
     _populate_screener_table(self)
@@ -1968,6 +2117,11 @@ def _open_upcoming_source(self: tk.Tk) -> None:
 
 def _clear_screener_filters(self: tk.Tk) -> None:
     self.market_screener_search_var.set("")
+    self.market_screener_ask_var.set("")
+    self.market_screener_ask_plan = None
+    self.market_screener_ask_result = None
+    self.market_screener_ask_summary_var.set("Ask Screener cleared.")
+    self.market_screener_quick_preset_var.set("Quick filter")
     for variable in (
         self.market_screener_sector_var,
         self.market_screener_exchange_var,
@@ -1983,7 +2137,27 @@ def _clear_screener_filters(self: tk.Tk) -> None:
     _apply_screener_filters(self)
 
 
+def _apply_selected_screener_quick_preset(self: tk.Tk) -> None:
+    mapping = {
+        "Earnings Soon": "earnings_soon",
+        "Recent SEC Filing": "recent_filing",
+        "Guidance": "guidance",
+        "Risk Flags": "risk",
+        "High Volume / Mover": "mover",
+        "Quote-enriched": "quote_enriched",
+        "Fundamentals": "fundamentals",
+        "My Holdings": "holdings",
+        "Complete Data": "complete_data",
+    }
+    preset = mapping.get(self.market_screener_quick_preset_var.get())
+    if preset:
+        _apply_screener_quick_preset(self, preset)
+
+
 def _apply_screener_quick_preset(self: tk.Tk, preset: str) -> None:
+    self.market_screener_ask_plan = None
+    self.market_screener_ask_result = None
+    self.market_screener_ask_summary_var.set("Ask Screener cleared for quick filter.")
     if preset == "earnings_soon":
         self.market_screener_event_type_var.set("Upcoming earnings")
         self.market_screener_earnings_window_var.set("Next 30 days")
