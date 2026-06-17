@@ -26,6 +26,17 @@ class _FailingDatabentoClient:
         raise RuntimeError(self.message)
 
 
+class _ListDatabentoClient:
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+        self.equity_calls: list[dict[str, object]] = []
+
+    def fetch_equity_rows(self, *, symbols, dataset, schema):
+        requested = set(symbols)
+        self.equity_calls.append({"symbols": tuple(symbols), "dataset": dataset, "schema": schema})
+        return [row for row in self.rows if row.get("symbol") in requested]
+
+
 def test_databento_equities_disabled_returns_status_without_network() -> None:
     client = _FakeDatabentoClient({"ACME": {"symbol": "ACME", "price": 12.5}})
     provider = DatabentoEquitiesProvider(enabled=False, api_key="", dataset="", schema="", client=client)
@@ -87,6 +98,65 @@ def test_databento_equities_success_maps_tape_fields_and_uses_cache() -> None:
     assert first.diagnostics["rows_enriched_by_databento_equities"] == 1
     assert second.diagnostics["databento_equities_cache_hits"] == 1
     assert len(client.equity_calls) == 1
+
+
+def test_databento_equities_batches_above_100_and_reports_attempts() -> None:
+    rows = {
+        f"SYM{index:03d}": {"symbol": f"SYM{index:03d}", "price": float(index + 1), "volume": index + 100}
+        for index in range(250)
+    }
+    client = _FakeDatabentoClient(rows)
+    provider = DatabentoEquitiesProvider(
+        enabled=True,
+        api_key="db-secret",
+        dataset="XNAS.ITCH",
+        schema="trades",
+        client=client,
+        symbol_limit=250,
+        cache_ttl_seconds=0,
+    )
+
+    snapshot = provider.quote_fundamentals(rows.keys(), max_symbols=250)
+
+    assert len(snapshot.records) == 250
+    assert [len(call["symbols"]) for call in client.equity_calls] == [100, 100, 50]
+    assert snapshot.diagnostics["databento_equities_symbols_attempted"] == 250
+    assert snapshot.diagnostics["databento_equities_chunks_attempted"] == 3
+    assert snapshot.diagnostics["rows_skipped_by_configured_symbol_cap"] == 0
+    assert "attempted 250 symbol(s) in 3 chunk(s)" in snapshot.statuses[0].message
+
+
+def test_databento_equities_computes_tape_metrics_only_from_supported_rows() -> None:
+    client = _ListDatabentoClient(
+        [
+            {"symbol": "ACME", "open": 10.0, "close": 11.0, "volume": 100, "ts_event": "2026-06-16T19:54:00+00:00"},
+            {"symbol": "ACME", "open": 11.0, "close": 12.0, "volume": 300, "ts_event": "2026-06-16T19:55:00+00:00"},
+            {"symbol": "BETA", "price": 20.0, "volume": 50, "ts_event": "2026-06-16T19:55:00+00:00"},
+        ]
+    )
+    provider = DatabentoEquitiesProvider(
+        enabled=True,
+        api_key="db-secret",
+        dataset="XNAS.ITCH",
+        schema="ohlcv-1m",
+        client=client,
+        symbol_limit=5,
+        cache_ttl_seconds=0,
+    )
+
+    snapshot = provider.quote_fundamentals(["ACME", "BETA"], max_symbols=5)
+
+    by_symbol = {record.symbol: record for record in snapshot.records}
+    assert by_symbol["ACME"].price == 12.0
+    assert by_symbol["ACME"].volume == 300
+    assert by_symbol["ACME"].change_percent == 20.0
+    assert by_symbol["ACME"].avg_volume == 100
+    provenance = {row.field: row for row in by_symbol["ACME"].field_provenance}
+    assert provenance["change_percent"].source == "Databento US Equities"
+    assert "computed from Databento" in provenance["change_percent"].source_detail
+    assert "computed from Databento" in provenance["avg_volume"].source_detail
+    assert by_symbol["BETA"].change_percent is None
+    assert by_symbol["BETA"].avg_volume is None
 
 
 def test_databento_equities_warning_redacts_api_key() -> None:

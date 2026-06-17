@@ -29,6 +29,8 @@ MARKET_SCREENER_ENABLE_DATABENTO_EQUITIES_ENV = "MARKET_SCREENER_ENABLE_DATABENT
 MARKET_SCREENER_ENABLE_DATABENTO_CME_CONTEXT_ENV = "MARKET_SCREENER_ENABLE_DATABENTO_CME_CONTEXT"
 
 DEFAULT_DATABENTO_EQUITIES_SYMBOL_LIMIT = 100
+MAX_DATABENTO_EQUITIES_SYMBOL_LIMIT = 1000
+DEFAULT_DATABENTO_EQUITIES_CHUNK_SIZE = 100
 DEFAULT_DATABENTO_CME_SYMBOL_LIMIT = 25
 DEFAULT_DATABENTO_CACHE_TTL_SECONDS = 900
 DATABENTO_DOC_URL = "https://databento.com/docs"
@@ -88,9 +90,9 @@ class DatabentoEquitiesProvider:
         self.enabled = _env_flag(MARKET_SCREENER_ENABLE_DATABENTO_EQUITIES_ENV, False) if enabled is None else bool(enabled)
         self.client = client
         self.symbol_limit = (
-            max(0, min(100, int(symbol_limit)))
+            max(0, min(MAX_DATABENTO_EQUITIES_SYMBOL_LIMIT, int(symbol_limit)))
             if symbol_limit is not None
-            else _configured_int(DATABENTO_EQUITIES_SYMBOL_LIMIT_ENV, DEFAULT_DATABENTO_EQUITIES_SYMBOL_LIMIT, minimum=0, maximum=100)
+            else _configured_int(DATABENTO_EQUITIES_SYMBOL_LIMIT_ENV, DEFAULT_DATABENTO_EQUITIES_SYMBOL_LIMIT, minimum=0, maximum=MAX_DATABENTO_EQUITIES_SYMBOL_LIMIT)
         )
         self.cache_ttl_seconds = (
             max(0, int(cache_ttl_seconds))
@@ -150,12 +152,10 @@ class DatabentoEquitiesProvider:
 
         records: list[MarketQuoteFundamentalsRecord] = []
         cache_hits = 0
+        chunks_attempted = 0
         warnings: list[str] = []
-        try:
-            rows_by_symbol, cache_hits = self._rows_by_symbol(requested, force_refresh=force_refresh)
-        except DatabentoProviderWarning as exc:
-            warnings.append(str(exc))
-            rows_by_symbol = {}
+        rows_by_symbol, cache_hits, chunks_attempted, fetch_warnings = self._rows_by_symbol(requested, force_refresh=force_refresh)
+        warnings.extend(fetch_warnings)
 
         for symbol in requested:
             row = rows_by_symbol.get(symbol)
@@ -170,10 +170,10 @@ class DatabentoEquitiesProvider:
         if warnings:
             status = "partial" if records else "warning"
         message = (
-            f"Databento US Equities: {len(records)} rows updated; tape fields only; cache used for {cache_hits}; "
+            f"Databento US Equities: {len(records)} rows updated; attempted {len(requested)} symbol(s) in {chunks_attempted} chunk(s); tape/computed tape fields only; cache used for {cache_hits}; "
             f"{skipped_limited} skipped/limited; {no_usable} no usable data. "
             f"Dataset={self.dataset or 'not configured'}; schema={self.schema or 'not configured'}. "
-            "Databento fills equity price/volume fields only; FMP remains the fundamentals/profile source."
+            "Databento fills supported equity tape fields only; FMP remains the fundamentals/profile source."
         )
         if warnings:
             message += f" Provider warning: {_short_warning(warnings[0], self.api_key)}"
@@ -185,7 +185,10 @@ class DatabentoEquitiesProvider:
             errors=tuple(_redact_databento_secret(warning, self.api_key) for warning in warnings[:4]),
             diagnostics={
                 "rows_enriched_by_databento_equities": len(records),
+                "databento_equities_symbols_attempted": len(requested),
+                "databento_equities_chunks_attempted": chunks_attempted,
                 "databento_equities_cache_hits": cache_hits,
+                "databento_equities_provider_warnings": len(warnings),
                 "rows_provider_returned_no_usable_data": no_usable,
                 "rows_skipped_by_configured_symbol_cap": skipped_limited,
                 "provider_unavailable": 1 if warnings and not records else 0,
@@ -251,10 +254,12 @@ class DatabentoEquitiesProvider:
             )
         return None
 
-    def _rows_by_symbol(self, symbols: tuple[str, ...], *, force_refresh: bool) -> tuple[dict[str, Mapping[str, Any]], int]:
+    def _rows_by_symbol(self, symbols: tuple[str, ...], *, force_refresh: bool) -> tuple[dict[str, Mapping[str, Any]], int, int, list[str]]:
         rows: dict[str, Mapping[str, Any]] = {}
         missing: list[str] = []
         cache_hits = 0
+        chunks_attempted = 0
+        warnings: list[str] = []
         for symbol in symbols:
             cached = self._cache_get("equities", symbol, force_refresh=force_refresh)
             if cached is None:
@@ -263,36 +268,50 @@ class DatabentoEquitiesProvider:
                 rows[symbol] = cached
                 cache_hits += 1
         if missing:
-            client = self.client or _build_default_databento_client(self.api_key)
             try:
-                fetched_rows = _call_databento_rows(
-                    client,
-                    symbols=tuple(missing),
-                    dataset=self.dataset,
-                    schema=self.schema,
-                    lookback_minutes=self.lookback_minutes,
-                    context="equities",
-                )
-            except DatabentoProviderWarning:
-                raise
-            except Exception as exc:
-                raise DatabentoProviderWarning(_redact_databento_secret(f"Databento US Equities fetch failed: {exc}", self.api_key)) from None
-            for symbol, row in _coerce_rows_by_symbol(fetched_rows, tuple(missing)).items():
-                rows[symbol] = row
-                self._cache_set("equities", symbol, row)
-        return rows, cache_hits
+                client = self.client or _build_default_databento_client(self.api_key)
+            except DatabentoProviderWarning as exc:
+                warnings.append(_redact_databento_secret(str(exc), self.api_key))
+                return rows, cache_hits, chunks_attempted, warnings
+            for chunk in _chunk_symbols(tuple(missing), DEFAULT_DATABENTO_EQUITIES_CHUNK_SIZE):
+                chunks_attempted += 1
+                try:
+                    fetched_rows = _call_databento_rows(
+                        client,
+                        symbols=chunk,
+                        dataset=self.dataset,
+                        schema=self.schema,
+                        lookback_minutes=self.lookback_minutes,
+                        context="equities",
+                    )
+                except DatabentoProviderWarning as exc:
+                    warnings.append(_redact_databento_secret(str(exc), self.api_key))
+                    break
+                except Exception as exc:
+                    warnings.append(_redact_databento_secret(f"Databento US Equities fetch failed: {exc}", self.api_key))
+                    break
+                for symbol, row in _coerce_rows_by_symbol(fetched_rows, chunk).items():
+                    rows[symbol] = row
+                    self._cache_set("equities", symbol, row)
+        return rows, cache_hits, chunks_attempted, warnings
 
     def _record_from_row(self, symbol: str, row: Mapping[str, Any], *, fetched_at: str) -> MarketQuoteFundamentalsRecord:
         timestamp = _row_timestamp(row) or fetched_at
+        price = _price_from_row(row)
+        volume = _volume_from_row(row)
+        change_percent = _change_percent_from_row(row)
+        avg_volume = _avg_volume_from_row(row)
         values = {
             "symbol": _normalize_symbol(_first_present(row, "symbol", "raw_symbol", "ticker", "instrument", "instrument_id")) or symbol,
-            "price": _price_from_row(row),
-            "volume": _optional_float(_first_present(row, "volume", "size", "qty", "quantity")),
+            "price": price,
+            "volume": volume,
+            "change_percent": change_percent,
+            "avg_volume": avg_volume,
             "source": "Databento US Equities",
             "source_url": DATABENTO_SCHEMAS_DOC_URL,
             "fetched_at": timestamp,
         }
-        field_provenance = _provenance_for_tape_values(values, source="Databento US Equities", fetched_at=timestamp)
+        field_provenance = _provenance_for_tape_values(row, values, source="Databento US Equities", fetched_at=timestamp)
         return MarketQuoteFundamentalsRecord.from_dict({**values, "field_provenance": field_provenance})
 
     def _cache_get(self, context: str, symbol: str, *, force_refresh: bool) -> Mapping[str, Any] | None:
@@ -586,15 +605,34 @@ def _call_databento_rows(
     raise DatabentoProviderWarning("Databento client has no supported row fetch method.")
 
 
+_DATABENTO_COMPONENT_ROWS_KEY = "__databento_component_rows"
+
+
 def _coerce_rows_by_symbol(payload: Any, requested: tuple[str, ...]) -> dict[str, Mapping[str, Any]]:
-    rows_by_symbol: dict[str, Mapping[str, Any]] = {}
+    rows_by_symbol: dict[str, list[Mapping[str, Any]]] = {}
+    requested_set = set(requested)
+
+    def add_row(symbol: str, row: Mapping[str, Any]) -> None:
+        clean = _normalize_symbol(symbol)
+        if not clean or clean not in requested_set:
+            return
+        rows_by_symbol.setdefault(clean, []).append(dict(row))
+
     if isinstance(payload, Mapping):
-        if all(isinstance(value, Mapping) for value in payload.values()):
+        if all(isinstance(value, (Mapping, list, tuple)) for value in payload.values()):
             for key, value in payload.items():
                 symbol = _normalize_symbol(key)
-                if symbol and symbol in requested:
-                    rows_by_symbol[symbol] = dict(value)
-            return rows_by_symbol
+                if isinstance(value, Mapping):
+                    row = dict(value)
+                    row.setdefault("symbol", symbol)
+                    add_row(symbol, row)
+                elif isinstance(value, (list, tuple)):
+                    for item in value:
+                        if isinstance(item, Mapping):
+                            row = dict(item)
+                            row.setdefault("symbol", symbol)
+                            add_row(symbol, row)
+            return {symbol: _merge_databento_component_rows(rows) for symbol, rows in rows_by_symbol.items()}
         rows = [payload]
     elif isinstance(payload, (list, tuple)):
         rows = [row for row in payload if isinstance(row, Mapping)]
@@ -605,10 +643,24 @@ def _coerce_rows_by_symbol(payload: Any, requested: tuple[str, ...]) -> dict[str
         symbol = _normalize_symbol(_first_present(row, "symbol", "raw_symbol", "ticker", "instrument", "instrument_id"))
         if not symbol and len(requested) == 1:
             symbol = requested[0]
-        if not symbol or symbol not in requested:
-            continue
-        rows_by_symbol[symbol] = dict(row)
-    return rows_by_symbol
+        add_row(symbol, row)
+    return {symbol: _merge_databento_component_rows(rows) for symbol, rows in rows_by_symbol.items()}
+
+
+def _merge_databento_component_rows(rows: list[Mapping[str, Any]]) -> Mapping[str, Any]:
+    ordered = sorted((dict(row) for row in rows), key=_databento_row_sort_key)
+    latest = dict(ordered[-1]) if ordered else {}
+    if len(ordered) > 1:
+        latest[_DATABENTO_COMPONENT_ROWS_KEY] = tuple(ordered)
+    return latest
+
+
+def _databento_row_sort_key(row: Mapping[str, Any]) -> tuple[int, str]:
+    timestamp = _row_timestamp(row)
+    parsed = _parse_timestamp(timestamp)
+    if parsed is None:
+        return (0, timestamp)
+    return (1, parsed.isoformat())
 
 
 def _context_record_from_row(
@@ -638,17 +690,43 @@ def _context_record_from_row(
     )
 
 
-def _provenance_for_tape_values(values: Mapping[str, Any], *, source: str, fetched_at: str) -> tuple[MarketDataFieldProvenance, ...]:
-    rows = [
-        MarketDataFieldProvenance(field=field, source=source, source_url=DATABENTO_SCHEMAS_DOC_URL, fetched_at=fetched_at)
-        for field in ("price", "volume")
-        if values.get(field) is not None
-    ]
+def _provenance_for_tape_values(
+    row: Mapping[str, Any],
+    values: Mapping[str, Any],
+    *,
+    source: str,
+    fetched_at: str,
+) -> tuple[MarketDataFieldProvenance, ...]:
+    rows: list[MarketDataFieldProvenance] = []
+    for field in ("price", "volume"):
+        if values.get(field) is not None:
+            rows.append(MarketDataFieldProvenance(field=field, source=source, source_url=DATABENTO_SCHEMAS_DOC_URL, fetched_at=fetched_at))
+    for field, direct_check, detail in (
+        ("change_percent", _row_has_direct_change_percent, "computed from Databento open/close or multi-row price history"),
+        ("avg_volume", _row_has_direct_avg_volume, "computed from Databento multi-row volume history"),
+    ):
+        if values.get(field) is None:
+            continue
+        source_detail = "" if direct_check(row) else detail
+        rows.append(
+            MarketDataFieldProvenance(
+                field=field,
+                source=source,
+                source_url=DATABENTO_SCHEMAS_DOC_URL,
+                source_detail=source_detail,
+                fetched_at=fetched_at,
+            )
+        )
     return tuple(rows)
 
 
 def _quote_record_has_any_tape_value(record: MarketQuoteFundamentalsRecord) -> bool:
-    return record.price is not None or record.volume is not None or record.change_percent is not None
+    return (
+        record.price is not None
+        or record.volume is not None
+        or record.change_percent is not None
+        or record.avg_volume is not None
+    )
 
 
 def _price_from_row(row: Mapping[str, Any]) -> float | None:
@@ -672,6 +750,79 @@ def _price_from_row(row: Mapping[str, Any]) -> float | None:
     return price
 
 
+def _open_price_from_row(row: Mapping[str, Any]) -> float | None:
+    return _scaled_price(_first_present(row, "open", "open_price", "open_px"))
+
+
+def _close_price_from_row(row: Mapping[str, Any]) -> float | None:
+    return _scaled_price(_first_present(row, "close", "close_price", "close_px", "price", "last", "last_price", "last_px", "px"))
+
+
+def _scaled_price(value: Any) -> float | None:
+    price = _optional_float(value)
+    if price is None:
+        return None
+    if abs(price) >= 10_000_000:
+        return price / 1_000_000_000
+    return price
+
+
+def _volume_from_row(row: Mapping[str, Any]) -> float | None:
+    return _optional_float(_first_present(row, "volume", "size", "qty", "quantity"))
+
+
+def _avg_volume_from_row(row: Mapping[str, Any]) -> float | None:
+    direct = _optional_float(_first_present(row, "avg_volume", "average_volume", "avgVolume", "averageVolume"))
+    if direct is not None:
+        return direct
+    component_rows = _databento_component_rows(row)
+    if len(component_rows) < 2:
+        return None
+    previous_volumes = [volume for component in component_rows[:-1] if (volume := _volume_from_row(component)) is not None]
+    if not previous_volumes:
+        return None
+    return sum(previous_volumes) / len(previous_volumes)
+
+
+def _change_percent_from_row(row: Mapping[str, Any]) -> float | None:
+    direct = _optional_float(
+        _first_present(row, "change_percent", "percent_change", "changesPercentage", "changePercentage", "changePercent")
+    )
+    if direct is not None:
+        return direct
+    component_rows = _databento_component_rows(row)
+    if len(component_rows) >= 2:
+        start = _open_price_from_row(component_rows[0]) or _close_price_from_row(component_rows[0])
+        end = _close_price_from_row(component_rows[-1]) or _price_from_row(component_rows[-1])
+        return _percent_change(start, end)
+    previous_close = _scaled_price(_first_present(row, "previous_close", "prev_close", "prior_close"))
+    latest = _close_price_from_row(row) or _price_from_row(row)
+    if previous_close is not None:
+        return _percent_change(previous_close, latest)
+    return _percent_change(_open_price_from_row(row), latest)
+
+
+def _percent_change(start: float | None, end: float | None) -> float | None:
+    if start in (None, 0) or end is None:
+        return None
+    return ((end - start) / abs(start)) * 100
+
+
+def _databento_component_rows(row: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
+    raw = row.get(_DATABENTO_COMPONENT_ROWS_KEY)
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(component for component in raw if isinstance(component, Mapping))
+
+
+def _row_has_direct_change_percent(row: Mapping[str, Any]) -> bool:
+    return _first_present(row, "change_percent", "percent_change", "changesPercentage", "changePercentage", "changePercent") is not None
+
+
+def _row_has_direct_avg_volume(row: Mapping[str, Any]) -> bool:
+    return _first_present(row, "avg_volume", "average_volume", "avgVolume", "averageVolume") is not None
+
+
 def _row_timestamp(row: Mapping[str, Any]) -> str:
     value = _first_present(row, "timestamp", "ts_event", "ts_recv", "time", "datetime")
     if value in (None, ""):
@@ -684,6 +835,26 @@ def _row_timestamp(row: Mapping[str, Any]) -> str:
     except ValueError:
         return text
     return parsed.isoformat()
+
+
+def _parse_timestamp(value: str | None) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _chunk_symbols(symbols: tuple[str, ...], chunk_size: int) -> tuple[tuple[str, ...], ...]:
+    size = max(1, int(chunk_size))
+    return tuple(tuple(symbols[index : index + size]) for index in range(0, len(symbols), size))
 
 
 def _limited_symbols(symbols: Iterable[str], max_symbols: int) -> tuple[str, ...]:

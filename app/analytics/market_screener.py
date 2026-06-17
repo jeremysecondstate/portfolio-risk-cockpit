@@ -115,9 +115,16 @@ class MarketScreenerCoverageDiagnostics:
     rows_enriched_by_fmp_quote: int = 0
     rows_enriched_by_fmp_profile: int = 0
     rows_enriched_by_fmp_profile_by_cik: int = 0
+    rows_enriched_by_fmp_key_metrics: int = 0
+    rows_enriched_by_fmp_ratios: int = 0
+    rows_enriched_by_fmp_income_growth: int = 0
+    rows_enriched_by_fmp_shares_float: int = 0
     rows_enriched_by_fallback_provider: int = 0
     fmp_cache_hits: int = 0
+    databento_equities_symbols_attempted: int = 0
+    databento_equities_chunks_attempted: int = 0
     databento_equities_cache_hits: int = 0
+    databento_equities_provider_warnings: int = 0
     databento_cme_context_rows: int = 0
     databento_cme_cache_hits: int = 0
     databento_dataset_mismatch_warnings: int = 0
@@ -803,9 +810,12 @@ def market_screener_record_missing_reason_lines(record: MarketScreenerRecord) ->
         reasons.append(f"missing identity/profile fields: {missing}; requires SEC submissions, local file, FMP profile/profile-by-CIK, or configured fallback data.")
     if record.price is None or record.volume is None:
         missing = ", ".join(field for field, value in (("price", record.price), ("volume", record.volume)) if value is None)
-        reasons.append(f"missing price/volume fields: {missing}; requires Schwab quote, Databento US Equities, local file, FMP quote, or configured fallback quote data.")
+        reasons.append(f"missing price/volume fields: {missing}; requires Schwab quote, Databento US Equities with an equity tape schema/entitlement, local file, FMP quote, or configured fallback quote data.")
+    if record.change_percent is None or record.avg_volume is None:
+        missing = ", ".join(field for field, value in (("change_percent", record.change_percent), ("avg_volume", record.avg_volume)) if value is None)
+        reasons.append(f"missing computed tape fields: {missing}; requires FMP quote fields, local/fallback fields, or Databento rows with enough open/close/volume history. Unsupported schemas leave these blank.")
     if not market_screener_record_has_fundamentals(record):
-        reasons.append("missing fundamentals: market cap, P/E, EPS, and revenue growth are absent unless a local file, FMP profile/quote, SEC filing parse, or configured fallback supplies them; Databento CME context is not used for selected-equity fundamentals.")
+        reasons.append("missing fundamentals: market cap, P/E, EPS, and revenue growth are absent unless a local file, FMP quote/profile/key-metrics/ratios/growth endpoint, SEC filing parse, or configured fallback supplies them; Databento CME context is not used for selected-equity fundamentals.")
     return reasons
 
 
@@ -1245,12 +1255,22 @@ def market_screener_diagnostics_summary(diagnostics: MarketScreenerCoverageDiagn
         f"{diagnostics.rows_skipped_by_configured_symbol_cap} skipped by cap",
         f"{diagnostics.unresolved_rows} unresolved",
     ]
+    fmp_deep = (
+        diagnostics.rows_enriched_by_fmp_key_metrics
+        + diagnostics.rows_enriched_by_fmp_ratios
+        + diagnostics.rows_enriched_by_fmp_income_growth
+        + diagnostics.rows_enriched_by_fmp_shares_float
+    )
     if diagnostics.rows_enriched_by_local_file:
         parts.insert(2, f"local {diagnostics.rows_enriched_by_local_file}")
     if diagnostics.rows_enriched_by_fmp_quote:
         parts.insert(-2, f"FMP quotes {diagnostics.rows_enriched_by_fmp_quote}")
+    if fmp_deep:
+        parts.insert(-2, f"FMP deep fields {fmp_deep}")
     if diagnostics.rows_enriched_by_databento_equities:
         parts.insert(-2, f"Databento equities {diagnostics.rows_enriched_by_databento_equities}")
+    if diagnostics.databento_equities_chunks_attempted:
+        parts.insert(-2, f"Databento chunks {diagnostics.databento_equities_chunks_attempted}")
     if diagnostics.databento_cme_context_rows:
         parts.insert(-2, f"Databento CME context {diagnostics.databento_cme_context_rows}")
     if diagnostics.rows_enriched_by_fallback_provider:
@@ -1275,9 +1295,16 @@ def market_screener_diagnostics_detail_lines(diagnostics: MarketScreenerCoverage
         ("Rows enriched by FMP quote", diagnostics.rows_enriched_by_fmp_quote),
         ("Rows enriched by FMP profile", diagnostics.rows_enriched_by_fmp_profile),
         ("Rows enriched by FMP profile-by-CIK", diagnostics.rows_enriched_by_fmp_profile_by_cik),
+        ("Rows enriched by FMP key metrics", diagnostics.rows_enriched_by_fmp_key_metrics),
+        ("Rows enriched by FMP ratios", diagnostics.rows_enriched_by_fmp_ratios),
+        ("Rows enriched by FMP income growth", diagnostics.rows_enriched_by_fmp_income_growth),
+        ("Rows enriched by FMP shares float", diagnostics.rows_enriched_by_fmp_shares_float),
         ("Rows enriched by fallback provider", diagnostics.rows_enriched_by_fallback_provider),
         ("FMP cache hits", diagnostics.fmp_cache_hits),
+        ("Databento US Equities symbols attempted", diagnostics.databento_equities_symbols_attempted),
+        ("Databento US Equities chunks attempted", diagnostics.databento_equities_chunks_attempted),
         ("Databento US Equities cache hits", diagnostics.databento_equities_cache_hits),
+        ("Databento US Equities provider warnings", diagnostics.databento_equities_provider_warnings),
         ("Databento CME context rows", diagnostics.databento_cme_context_rows),
         ("Databento CME cache hits", diagnostics.databento_cme_cache_hits),
         ("Databento dataset mismatch warnings", diagnostics.databento_dataset_mismatch_warnings),
@@ -1347,12 +1374,31 @@ def _build_market_screener_diagnostics(
             _counter(provider_diagnostics, "rows_enriched_by_fmp_profile_by_cik"),
             _count_rows_with_source(rows, "FMP profile-by-CIK"),
         ),
+        rows_enriched_by_fmp_key_metrics=max(
+            _counter(provider_diagnostics, "rows_enriched_by_fmp_key_metrics"),
+            _count_rows_with_source(rows, "FMP key metrics"),
+        ),
+        rows_enriched_by_fmp_ratios=max(
+            _counter(provider_diagnostics, "rows_enriched_by_fmp_ratios"),
+            _count_rows_with_source(rows, "FMP ratios"),
+        ),
+        rows_enriched_by_fmp_income_growth=max(
+            _counter(provider_diagnostics, "rows_enriched_by_fmp_income_growth"),
+            _count_rows_with_source(rows, "FMP income growth"),
+        ),
+        rows_enriched_by_fmp_shares_float=max(
+            _counter(provider_diagnostics, "rows_enriched_by_fmp_shares_float"),
+            _count_rows_with_source(rows, "FMP shares float"),
+        ),
         rows_enriched_by_fallback_provider=max(
             _counter(provider_diagnostics, "rows_enriched_by_fallback_provider"),
             _count_rows_with_source(rows, "Fallback Alpha Vantage"),
         ),
         fmp_cache_hits=_counter(provider_diagnostics, "fmp_cache_hits"),
+        databento_equities_symbols_attempted=_counter(provider_diagnostics, "databento_equities_symbols_attempted"),
+        databento_equities_chunks_attempted=_counter(provider_diagnostics, "databento_equities_chunks_attempted"),
         databento_equities_cache_hits=_counter(provider_diagnostics, "databento_equities_cache_hits"),
+        databento_equities_provider_warnings=_counter(provider_diagnostics, "databento_equities_provider_warnings"),
         databento_cme_context_rows=_counter(provider_diagnostics, "databento_cme_context_rows"),
         databento_cme_cache_hits=_counter(provider_diagnostics, "databento_cme_cache_hits"),
         databento_dataset_mismatch_warnings=_counter(provider_diagnostics, "databento_dataset_mismatch_warnings"),
@@ -2117,25 +2163,29 @@ def _market_data_provenance(
             field = str(item.get("field") or "").strip()
             row_source = str(item.get("source") or source).strip() or source
             row_link = _optional_text(item.get("source_url") or item.get("source_link") or source_link)
+            row_detail = str(item.get("source_detail") or "market data enrichment").strip()
             row_fetched_at = str(item.get("fetched_at") or fetched_at).strip()
         else:
             field = str(getattr(item, "field", "") or "").strip()
             row_source = str(getattr(item, "source", "") or source).strip() or source
             row_link = _optional_text(getattr(item, "source_url", None) or getattr(item, "source_link", None) or source_link)
+            row_detail = str(getattr(item, "source_detail", "") or "market data enrichment").strip()
             row_fetched_at = str(getattr(item, "fetched_at", "") or fetched_at).strip()
         if field and _has_value(values.get(field)):
             rows.append(
                 MarketScreenerFieldProvenance(
                     field=field,
                     source=redact_symbol_chat_secrets(row_source),
-                    source_detail="market data enrichment",
+                    source_detail=redact_symbol_chat_secrets(row_detail),
                     source_link=row_link,
                     fetched_at=row_fetched_at,
                 )
             )
     if _has_value(values.get("signals")):
         rows.append(MarketScreenerFieldProvenance("signals", redact_symbol_chat_secrets(source), "market data enrichment", source_link, fetched_at))
-    fallback_rows = _provenance_for_values(values, source=source, source_link=source_link, fetched_at=fetched_at, source_detail="market data enrichment")
+    covered_fields = {row.field for row in rows}
+    fallback_values = {field: value for field, value in values.items() if field not in covered_fields}
+    fallback_rows = _provenance_for_values(fallback_values, source=source, source_link=source_link, fetched_at=fetched_at, source_detail="market data enrichment")
     return _dedupe_field_provenance((*rows, *fallback_rows))
 
 

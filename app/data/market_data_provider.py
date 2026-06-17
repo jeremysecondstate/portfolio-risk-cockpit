@@ -35,6 +35,10 @@ DEFAULT_ALPHA_VANTAGE_CACHE_TTL_SECONDS = 900
 FMP_QUOTE_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/quote"
 FMP_PROFILE_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/profile-symbol"
 FMP_PROFILE_BY_CIK_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/profile-cik"
+FMP_KEY_METRICS_TTM_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/key-metrics-ttm"
+FMP_RATIOS_TTM_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/ratios-ttm"
+FMP_INCOME_GROWTH_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/income-statement-growth"
+FMP_SHARES_FLOAT_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/shares-float"
 ALPHA_VANTAGE_DOC_URL = "https://www.alphavantage.co/documentation/"
 _SHARED_FMP_CACHE: dict[tuple[str, str, str], tuple[float, Mapping[str, Any]]] = {}
 _SHARED_ALPHA_VANTAGE_CACHE: dict[tuple[str, str, str], tuple[float, Mapping[str, Any]]] = {}
@@ -45,6 +49,7 @@ class MarketDataFieldProvenance:
     field: str
     source: str
     source_url: str | None = None
+    source_detail: str = ""
     fetched_at: str = ""
 
     @classmethod
@@ -53,6 +58,7 @@ class MarketDataFieldProvenance:
             field=str(payload.get("field") or "").strip(),
             source=_optional_string(payload.get("source")) or "Market data provider",
             source_url=_optional_string(payload.get("source_url") or payload.get("url")),
+            source_detail=_optional_string(payload.get("source_detail")) or "",
             fetched_at=_optional_string(payload.get("fetched_at")) or "",
         )
 
@@ -96,12 +102,12 @@ class MarketQuoteFundamentalsRecord:
             "change_percent": _optional_float(_first_present(payload, "change_percent", "percent_change", "changesPercentage", "changePercentage", "changePercent", "change_percent")),
             "volume": _optional_float(_first_present(payload, "volume", "total_volume", "totalVolume")),
             "avg_volume": _optional_float(_first_present(payload, "avg_volume", "average_volume", "avgVolume", "averageVolume")),
-            "market_cap": _optional_float(_first_present(payload, "market_cap", "marketCap", "mktCap", "marketCapitalization", "MarketCapitalization")),
-            "pe_ratio": _optional_float(_first_present(payload, "pe_ratio", "pe", "peRatio", "PERatio", "priceEarningsRatio")),
-            "eps": _optional_float(_first_present(payload, "eps", "EPS", "earnings_per_share")),
-            "revenue_growth": _optional_float(_first_present(payload, "revenue_growth", "revenueGrowth", "revenueGrowthTTM", "QuarterlyRevenueGrowthYOY")),
-            "shares_float": _optional_float(_first_present(payload, "shares_float", "float", "sharesFloat", "floatShares")),
-            "shares_outstanding": _optional_float(_first_present(payload, "shares_outstanding", "sharesOutstanding", "shares_outstanding")),
+            "market_cap": _optional_float(_first_present(payload, "market_cap", "marketCap", "marketCapTTM", "mktCap", "marketCapitalization", "MarketCapitalization")),
+            "pe_ratio": _optional_float(_first_present(payload, "pe_ratio", "pe", "peRatio", "peRatioTTM", "PERatio", "priceEarningsRatio", "priceEarningsRatioTTM", "priceToEarningsRatioTTM")),
+            "eps": _optional_float(_first_present(payload, "eps", "EPS", "epsTTM", "earnings_per_share", "earningsPerShareTTM", "netIncomePerShareTTM")),
+            "revenue_growth": _optional_float(_first_present(payload, "revenue_growth", "revenueGrowth", "revenueGrowthTTM", "growthRevenue", "QuarterlyRevenueGrowthYOY")),
+            "shares_float": _optional_float(_first_present(payload, "shares_float", "float", "sharesFloat", "floatShares", "freeFloat")),
+            "shares_outstanding": _optional_float(_first_present(payload, "shares_outstanding", "sharesOutstanding", "outstandingShares", "shares_outstanding", "weightedAverageShsOut", "weightedAverageShsOutTTM")),
             "cik": _normalize_cik(_first_present(payload, "cik", "cik_str", "CIK")) or None,
         }
         provenance_payload = payload.get("field_provenance")
@@ -398,6 +404,10 @@ class FmpQuoteFundamentalsProvider:
         cache_hits = 0
         quote_rows = 0
         profile_rows = 0
+        key_metrics_rows = 0
+        ratios_rows = 0
+        growth_rows = 0
+        shares_float_rows = 0
 
         quote_payloads: dict[str, Mapping[str, Any]] = {}
         quote_blocked = False
@@ -432,6 +442,41 @@ class FmpQuoteFundamentalsProvider:
             profile_rows += 1
             existing = records_by_symbol.get(symbol)
             records_by_symbol[symbol] = profile_record if existing is None else _merge_quote_records(existing, profile_record)
+        fmp_blocked = quote_blocked or any(_is_fmp_limit_warning(warning) for warning in warnings)
+        if not fmp_blocked:
+            for symbol in requested:
+                existing = records_by_symbol.get(symbol)
+                if existing is not None and not _record_needs_deeper_fmp_fields(existing):
+                    continue
+                for endpoint, source, source_url in _FMP_DEEP_ENDPOINTS:
+                    existing = records_by_symbol.get(symbol)
+                    if existing is not None and not _record_needs_fmp_endpoint(existing, endpoint):
+                        continue
+                    try:
+                        payload, endpoint_cache_hit = self._single_symbol_payload(endpoint, symbol, force_refresh=force_refresh)
+                        cache_hits += int(endpoint_cache_hit)
+                    except FmpProviderWarning as exc:
+                        warnings.append(str(exc))
+                        if _is_fmp_limit_warning(str(exc)):
+                            break
+                        continue
+                    if not payload:
+                        continue
+                    endpoint_record = self._record_from_payload(symbol, payload, source=source, source_url=source_url, fetched_at=fetched_at)
+                    if not _quote_record_has_any_value(endpoint_record):
+                        continue
+                    if endpoint == "key-metrics-ttm":
+                        key_metrics_rows += 1
+                    elif endpoint == "ratios-ttm":
+                        ratios_rows += 1
+                    elif endpoint == "income-statement-growth":
+                        growth_rows += 1
+                    elif endpoint == "shares-float":
+                        shares_float_rows += 1
+                    existing = records_by_symbol.get(symbol)
+                    records_by_symbol[symbol] = endpoint_record if existing is None else _merge_quote_records(existing, endpoint_record)
+                if warnings and _is_fmp_limit_warning(warnings[-1]):
+                    break
 
         records = tuple(records_by_symbol.values())
         status = "available" if records else "empty"
@@ -445,6 +490,7 @@ class FmpQuoteFundamentalsProvider:
         )
         message = (
             f"FMP enrichment: {len(records)} rows updated; quote rows {quote_rows}; profile rows {profile_rows}; "
+            f"key metrics {key_metrics_rows}; ratios {ratios_rows}; growth {growth_rows}; shares-float {shares_float_rows}; "
             f"profile-by-CIK rows 0; cache used for {cache_hits}; {skipped_limited} skipped/limited; {no_usable_rows} no usable data. "
             f"FMP cap is {self.symbol_limit} symbol(s) via {FMP_MARKET_DATA_SYMBOL_LIMIT_ENV}; {paid_mode_text}."
         )
@@ -459,6 +505,10 @@ class FmpQuoteFundamentalsProvider:
             diagnostics={
                 "rows_enriched_by_fmp_quote": quote_rows,
                 "rows_enriched_by_fmp_profile": profile_rows,
+                "rows_enriched_by_fmp_key_metrics": key_metrics_rows,
+                "rows_enriched_by_fmp_ratios": ratios_rows,
+                "rows_enriched_by_fmp_income_growth": growth_rows,
+                "rows_enriched_by_fmp_shares_float": shares_float_rows,
                 "fmp_cache_hits": cache_hits,
                 "rows_blocked_by_provider_plan_rate_auth_limit": 1 if any(_is_fmp_limit_warning(warning) for warning in warnings) else 0,
                 "rows_skipped_by_configured_symbol_cap": skipped_limited,
@@ -613,6 +663,17 @@ class FmpQuoteFundamentalsProvider:
             self._cache_set("profile-cik", normalized_cik, selected)
         return selected, False
 
+    def _single_symbol_payload(self, endpoint: str, symbol: str, *, force_refresh: bool) -> tuple[Mapping[str, Any] | None, bool]:
+        cached = self._cache_get(endpoint, symbol, force_refresh=force_refresh)
+        if cached is not None:
+            return cached, True
+        payload = self._get_json(endpoint, {"symbol": symbol})
+        rows = _coerce_fmp_rows(payload)
+        selected = next((row for row in rows if _normalize_symbol(_first_present(row, "symbol", "ticker")) == symbol), rows[0] if rows else None)
+        if selected is not None:
+            self._cache_set(endpoint, symbol, selected)
+        return selected, False
+
     def _record_from_payload(
         self,
         symbol: str,
@@ -627,6 +688,7 @@ class FmpQuoteFundamentalsProvider:
         values.setdefault("symbol", symbol)
         if cik:
             values.setdefault("cik", cik)
+        values.update(_normalized_fmp_payload_fields(values))
         values["source"] = source
         values["source_url"] = source_url
         values["fetched_at"] = fetched_at
@@ -887,6 +949,68 @@ class AlphaVantageFallbackProvider:
         self._cache[(self.base_url, endpoint, symbol)] = (time.time(), dict(payload))
 
 
+_FMP_DEEP_ENDPOINTS = (
+    ("key-metrics-ttm", "FMP key metrics TTM", FMP_KEY_METRICS_TTM_DOC_URL),
+    ("ratios-ttm", "FMP ratios TTM", FMP_RATIOS_TTM_DOC_URL),
+    ("income-statement-growth", "FMP income growth", FMP_INCOME_GROWTH_DOC_URL),
+    ("shares-float", "FMP shares float", FMP_SHARES_FLOAT_DOC_URL),
+)
+
+
+def _record_needs_deeper_fmp_fields(record: MarketQuoteFundamentalsRecord) -> bool:
+    return any(
+        value is None
+        for value in (
+            record.market_cap,
+            record.pe_ratio,
+            record.eps,
+            record.revenue_growth,
+            record.shares_float,
+            record.shares_outstanding,
+        )
+    )
+
+
+def _record_needs_fmp_endpoint(record: MarketQuoteFundamentalsRecord, endpoint: str) -> bool:
+    if endpoint == "key-metrics-ttm":
+        return record.market_cap is None or record.pe_ratio is None or record.eps is None
+    if endpoint == "ratios-ttm":
+        return record.pe_ratio is None
+    if endpoint == "income-statement-growth":
+        return record.revenue_growth is None
+    if endpoint == "shares-float":
+        return record.shares_float is None or record.shares_outstanding is None
+    return _record_needs_deeper_fmp_fields(record)
+
+
+def _normalized_fmp_payload_fields(payload: Mapping[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for target, keys in (
+        ("market_cap", ("marketCap", "marketCapTTM", "mktCap")),
+        ("pe_ratio", ("pe", "peRatio", "peRatioTTM", "PERatio", "priceEarningsRatio", "priceEarningsRatioTTM", "priceToEarningsRatioTTM")),
+        ("eps", ("eps", "EPS", "epsTTM", "earningsPerShareTTM", "netIncomePerShareTTM")),
+        ("shares_float", ("sharesFloat", "floatShares", "freeFloat", "float")),
+        ("shares_outstanding", ("sharesOutstanding", "outstandingShares", "weightedAverageShsOut", "weightedAverageShsOutTTM")),
+        ("exchange", ("exchangeShortName", "exchange")),
+    ):
+        value = _first_present(payload, *keys)
+        if value not in (None, ""):
+            normalized[target] = value
+    growth = _fmp_percent_value(_first_present(payload, "revenueGrowth", "revenueGrowthTTM", "growthRevenue", "QuarterlyRevenueGrowthYOY"))
+    if growth is not None:
+        normalized["revenue_growth"] = growth
+    return normalized
+
+
+def _fmp_percent_value(value: Any) -> float | None:
+    parsed = _optional_float(value)
+    if parsed is None:
+        return None
+    if abs(parsed) <= 1:
+        return parsed * 100
+    return parsed
+
+
 class CompositeMarketDataProvider:
     provider_name = "composite_market_data"
 
@@ -1011,7 +1135,7 @@ def configured_fallback_market_data_provider() -> MarketQuoteFundamentalsProvide
 
 
 def configured_market_data_symbol_limit(default: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT) -> int:
-    return _configured_int(MARKET_DATA_SYMBOL_LIMIT_ENV, default, minimum=0, maximum=100)
+    return _configured_int(MARKET_DATA_SYMBOL_LIMIT_ENV, default, minimum=0, maximum=1000)
 
 
 def _merge_quote_records(left: MarketQuoteFundamentalsRecord, right: MarketQuoteFundamentalsRecord) -> MarketQuoteFundamentalsRecord:
@@ -1137,9 +1261,10 @@ def _provenance_for_values(
     source: str,
     source_url: str | None,
     fetched_at: str,
+    source_detail: str = "",
 ) -> tuple[MarketDataFieldProvenance, ...]:
     rows = [
-        MarketDataFieldProvenance(field=field, source=source, source_url=source_url, fetched_at=fetched_at)
+        MarketDataFieldProvenance(field=field, source=source, source_url=source_url, source_detail=source_detail, fetched_at=fetched_at)
         for field, value in values.items()
         if value is not None and field in _QUOTE_VALUE_FIELDS
     ]
@@ -1147,10 +1272,10 @@ def _provenance_for_values(
 
 
 def _dedupe_field_provenance(rows: Iterable[MarketDataFieldProvenance]) -> tuple[MarketDataFieldProvenance, ...]:
-    seen: set[tuple[str, str, str, str]] = set()
+    seen: set[tuple[str, str, str, str, str]] = set()
     result: list[MarketDataFieldProvenance] = []
     for row in rows:
-        key = (row.field, row.source, row.source_url or "", row.fetched_at)
+        key = (row.field, row.source, row.source_url or "", row.source_detail, row.fetched_at)
         if not row.field or key in seen:
             continue
         seen.add(key)

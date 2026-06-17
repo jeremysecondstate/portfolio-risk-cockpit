@@ -612,6 +612,28 @@ def test_market_screener_visible_page_enrichment_retries_partial_mover_rows_once
     assert calls == [("BETA",)]
 
 
+def test_market_screener_visible_page_enrichment_uses_page_size_above_100(monkeypatch) -> None:
+    records = {
+        f"row_{index}": MarketScreenerRecord(f"SYM{index:03d}", f"Symbol {index}")
+        for index in range(200)
+    }
+    app = SimpleNamespace(
+        market_screener_row_map=records,
+        market_screener_market_data_running_symbols=set(),
+        market_screener_market_data_attempted_symbols=set(),
+        market_screener_page_size_var=_FakeTkVar("200"),
+    )
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    monkeypatch.setattr(earnings_radar_extension, "_request_market_data_enrichment", lambda _app, symbols, **kwargs: calls.append((tuple(symbols), kwargs)))
+
+    earnings_radar_extension._request_visible_page_market_data_enrichment(app, force_refresh=False)
+
+    assert len(calls) == 1
+    symbols, kwargs = calls[0]
+    assert len(symbols) == 200
+    assert kwargs["max_symbols"] == 200
+
+
 def test_market_screener_selection_change_refreshes_popout_context(monkeypatch) -> None:
     tree = _FakeTree()
     acme = MarketScreenerRecord("ACME", "Acme Corp", signals=("Upcoming earnings",), sources=("Alpha Vantage",))
@@ -680,6 +702,7 @@ def test_fmp_provider_maps_quote_and_profile_fields_without_key_in_status() -> N
                         "marketCap": 2_500_000_000,
                         "pe": 18.5,
                         "EPS": 0.67,
+                        "revenueGrowth": 12.4,
                     }
                 ],
             )
@@ -714,6 +737,7 @@ def test_fmp_provider_maps_quote_and_profile_fields_without_key_in_status() -> N
     assert record.market_cap == 2_500_000_000
     assert record.pe_ratio == 18.5
     assert record.eps == 0.67
+    assert record.revenue_growth == 12.4
     assert record.sector == "Technology"
     assert record.industry == "Software"
     assert record.exchange == "NASDAQ"
@@ -729,6 +753,49 @@ def test_fmp_provider_maps_quote_and_profile_fields_without_key_in_status() -> N
     assert api_key not in status_text
     assert all(api_key not in str(call["url"]) for call in session.calls)
     assert all("apikey" not in call["params"] for call in session.calls)
+
+
+def test_fmp_provider_deeper_endpoints_fill_remaining_fundamentals_and_cache() -> None:
+    def handler(url: str, params: dict[str, object]) -> _FakeFmpResponse:
+        if url.endswith("/batch-quote"):
+            return _FakeFmpResponse(200, [{"symbol": "ACME", "price": 12.34}])
+        symbol = params["symbol"]
+        if url.endswith("/profile"):
+            return _FakeFmpResponse(200, [{"symbol": symbol, "sector": "Technology", "industry": "Software"}])
+        if url.endswith("/key-metrics-ttm"):
+            return _FakeFmpResponse(200, [{"symbol": symbol, "marketCapTTM": 2_500_000_000, "epsTTM": 0.67}])
+        if url.endswith("/ratios-ttm"):
+            return _FakeFmpResponse(200, [{"symbol": symbol, "priceEarningsRatioTTM": 18.5}])
+        if url.endswith("/income-statement-growth"):
+            return _FakeFmpResponse(200, [{"symbol": symbol, "growthRevenue": 0.124}])
+        if url.endswith("/shares-float"):
+            return _FakeFmpResponse(200, [{"symbol": symbol, "floatShares": 120_000_000, "outstandingShares": 150_000_000}])
+        raise AssertionError(url)
+
+    session = _FakeFmpSession(handler)
+    provider = FmpQuoteFundamentalsProvider(api_key="secret", session=session, symbol_limit=5, cache_ttl_seconds=600)
+
+    first = provider.quote_fundamentals(["ACME"], max_symbols=5)
+    first_call_count = len(session.calls)
+    second = provider.quote_fundamentals(["ACME"], max_symbols=5)
+    third = provider.quote_fundamentals(["ACME"], max_symbols=5, force_refresh=True)
+
+    assert first_call_count == 6
+    assert len(session.calls) == first_call_count * 2
+    record = first.records[0]
+    assert record.market_cap == 2_500_000_000
+    assert record.eps == 0.67
+    assert record.pe_ratio == 18.5
+    assert record.revenue_growth == 12.4
+    assert record.shares_float == 120_000_000
+    assert record.shares_outstanding == 150_000_000
+    assert record.source == "FMP quote, FMP profile, FMP key metrics TTM, FMP ratios TTM, FMP income growth, FMP shares float"
+    assert first.diagnostics["rows_enriched_by_fmp_key_metrics"] == 1
+    assert first.diagnostics["rows_enriched_by_fmp_ratios"] == 1
+    assert first.diagnostics["rows_enriched_by_fmp_income_growth"] == 1
+    assert first.diagnostics["rows_enriched_by_fmp_shares_float"] == 1
+    assert second.diagnostics["fmp_cache_hits"] == 6
+    assert third.diagnostics["fmp_cache_hits"] == 0
 
 
 def test_fmp_missing_key_is_optional_and_does_not_call_network() -> None:
@@ -770,7 +837,21 @@ def test_fmp_cap_and_cache_prevent_full_universe_calls() -> None:
             assert symbols == ["SYM000", "SYM001"]
             return _FakeFmpResponse(200, [{"symbol": symbol, "price": index + 1.0} for index, symbol in enumerate(symbols)])
         if url.endswith("/profile"):
-            return _FakeFmpResponse(200, [{"symbol": params["symbol"], "sector": "Technology"}])
+            return _FakeFmpResponse(
+                200,
+                [
+                    {
+                        "symbol": params["symbol"],
+                        "sector": "Technology",
+                        "marketCap": 1_000_000,
+                        "peRatio": 12.0,
+                        "EPS": 0.5,
+                        "revenueGrowth": 10.0,
+                        "sharesFloat": 100_000,
+                        "sharesOutstanding": 120_000,
+                    }
+                ],
+            )
         raise AssertionError(url)
 
     session = _FakeFmpSession(handler)
@@ -813,7 +894,20 @@ def test_composite_market_data_provider_merges_local_schwab_and_fmp_without_dupl
         if url.endswith("/batch-quote"):
             return _FakeFmpResponse(200, [{"symbol": "ACME", "marketCap": 5_000_000_000, "peRatio": 20.0}])
         if url.endswith("/profile"):
-            return _FakeFmpResponse(200, [{"symbol": params["symbol"], "sector": "Technology", "industry": "Software"}])
+            return _FakeFmpResponse(
+                200,
+                [
+                    {
+                        "symbol": params["symbol"],
+                        "sector": "Technology",
+                        "industry": "Software",
+                        "EPS": 1.2,
+                        "revenueGrowth": 8.5,
+                        "sharesFloat": 100_000_000,
+                        "sharesOutstanding": 120_000_000,
+                    }
+                ],
+            )
         raise AssertionError(url)
 
     fmp_provider = FmpQuoteFundamentalsProvider(api_key="secret", session=_FakeFmpSession(handler), symbol_limit=5)

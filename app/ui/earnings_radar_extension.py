@@ -900,10 +900,10 @@ def _high_volume_mover_cap_guidance(diagnostics: Any | None) -> str:
     if skipped:
         return (
             f"Source Diagnostics shows {skipped} row(s) skipped by cap; paid FMP users can raise "
-            "MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT and FMP_MARKET_DATA_SYMBOL_LIMIT up to 100, then Re-enrich Visible Page or Refresh Screener."
+            "MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT up to 1000 for Databento batching and FMP_MARKET_DATA_SYMBOL_LIMIT up to 100 for FMP, then Re-enrich Visible Page or Refresh Screener."
         )
     return (
-        "If Source Diagnostics shows skipped rows, increase MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT and FMP_MARKET_DATA_SYMBOL_LIMIT up to 100 for paid FMP; "
+        "If Source Diagnostics shows skipped rows, increase MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT for page scope, DATABENTO_EQUITIES_SYMBOL_LIMIT for Databento batches, and FMP_MARKET_DATA_SYMBOL_LIMIT up to 100 for paid FMP; "
         "otherwise configure Schwab, Databento US Equities, FMP quote/profile, local market data, or fallback quote data before reapplying."
     )
 
@@ -999,12 +999,21 @@ def _request_visible_page_market_data_enrichment(self: tk.Tk, *, force_refresh: 
     symbols = _symbols_needing_market_data_enrichment(self, rows, require_price_or_volume=False)
     if not symbols:
         return
+    cap = _visible_page_market_data_enrichment_cap(self)
+    if len(symbols) > cap:
+        _append_screener_market_data_status(
+            self,
+            (
+                f"Market data visible page: requesting {cap} of {len(symbols)} visible symbol(s); "
+                "remaining visible rows can be enriched after increasing MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT or changing pages."
+            ),
+        )
     _request_market_data_enrichment(
         self,
-        symbols[:MARKET_DATA_PAGE_ENRICHMENT_CAP],
+        symbols[:cap],
         reason="visible page",
         force_refresh=force_refresh,
-        max_symbols=MARKET_DATA_PAGE_ENRICHMENT_CAP,
+        max_symbols=cap,
     )
 
 
@@ -1138,6 +1147,15 @@ def _clear_market_data_attempted_symbols(self: tk.Tk, symbols: Iterable[str]) ->
     attempted_symbols = getattr(self, "market_screener_market_data_attempted_symbols", set())
     if isinstance(attempted_symbols, set):
         attempted_symbols.difference_update(_dedupe_market_data_symbols(symbols))
+
+
+def _visible_page_market_data_enrichment_cap(self: tk.Tk) -> int:
+    try:
+        page_size = _screener_page_size(self)
+    except Exception:
+        page_size = MARKET_DATA_PAGE_ENRICHMENT_CAP
+    configured_limit = configured_market_data_symbol_limit(default=page_size)
+    return max(1, min(1000, max(page_size, configured_limit, MARKET_DATA_PAGE_ENRICHMENT_CAP)))
 
 
 def _reset_screener_market_data_enrichment_state(self: tk.Tk) -> None:
@@ -2116,7 +2134,7 @@ def _selected_screener_missing_reason_lines(
             reasons.append(
                 "skipped by cap: "
                 f"{diagnostics.rows_skipped_by_configured_symbol_cap} row(s) were outside the configured provider symbol cap; "
-                "this selected row may require selected-row enrichment or a higher MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT."
+                "this selected row may require selected-row enrichment, a higher MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT, a higher DATABENTO_EQUITIES_SYMBOL_LIMIT, or the next visible page batch."
             )
         if diagnostics.provider_unavailable:
             reasons.append(
@@ -2283,7 +2301,7 @@ def _screener_diagnostics_popout_text(
         [
             "- Yes, if FMP quote, profile, or profile-by-CIK is configured but blocked by auth, plan, quota, or rate limit, or if the free plan does not expose needed profile/fundamental fields.",
             "- No, if the row lacks a trusted CIK/symbol, a provider returned no usable data for that symbol, Schwab/Databento/local data is the desired tape source, or rows were skipped by this app's configured cap.",
-            "- Paid FMP still will not justify guessing tickers from company names; identity must come from SEC CIK/ticker data, SEC submissions, local seed data, Schwab, FMP, Databento US Equities, or a configured fallback.",
+            "- Paid FMP can improve key-metrics, ratios, income-growth, and shares-float coverage, but it still will not justify guessing tickers from company names; identity must come from SEC CIK/ticker data, SEC submissions, local seed data, Schwab, FMP, Databento US Equities, or a configured fallback.",
             "- Databento CME Globex context is futures/options macro context only; it is not used to fill selected-equity quote or fundamental fields.",
         ]
     )
@@ -2327,8 +2345,8 @@ def _screener_source_ladder_lines() -> list[str]:
         "- 2. SEC CIK/ticker identity resolution",
         "- 3. SEC submissions metadata",
         "- 4. Schwab quote",
-        "- 5. Databento US Equities, when enabled/configured, for equity tape price/volume fields",
-        "- 6. FMP quote/profile/profile-by-CIK for equity quote, profile, and fundamentals",
+        "- 5. Databento US Equities, when enabled/configured, for equity tape price/volume and supported computed tape fields from OHLCV/trade rows",
+        "- 6. FMP quote/profile/profile-by-CIK/key-metrics/ratios/income-growth/shares-float for equity quote, profile, and fundamentals",
         "- 7. Optional fallback provider, only when configured, and only for visible-page or selected-row enrichment",
         "- Separate. Databento CME context, when enabled/configured, is cross-asset futures/options context and is not merged into equity rows.",
     ]
@@ -2339,8 +2357,9 @@ def _screener_blank_explanation_lines() -> list[str]:
         "Why blanks happen",
         "- SEC company_tickers supplies symbol, company name, and CIK only. It does not supply exchange, sector, industry, price, avg volume, change %, market cap, P/E, EPS, or revenue growth.",
         "- Exchange, sector, and industry require SEC submissions metadata, local seed data, FMP profile/profile-by-CIK, a local market-data file, or a configured fallback profile.",
-        "- Price, volume, change %, and avg volume require a local market-data file/cache, Schwab quote, Databento US Equities, FMP quote, or configured fallback quote.",
-        "- Fundamentals require local market-data/fundamental seed data, parsed SEC filing rows, FMP quote/profile fields, or a configured fallback profile. Databento CME context is not selected-equity fundamentals. Missing values are left blank and are not inferred.",
+        "- Price and volume require a local market-data file/cache, Schwab quote, Databento US Equities, FMP quote, or configured fallback quote.",
+        "- Change % and avg volume require explicit provider fields or enough Databento open/close/volume history to compute them. Unsupported schemas leave these blank; missing values are not treated as zero.",
+        "- Fundamentals require local market-data/fundamental seed data, parsed SEC filing rows, FMP quote/profile/key-metrics/ratios/income-growth/shares-float fields, or a configured fallback profile. Databento CME context is not selected-equity fundamentals. Missing values are left blank and are not inferred.",
     ]
 
 
