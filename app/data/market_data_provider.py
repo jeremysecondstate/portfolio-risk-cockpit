@@ -410,9 +410,10 @@ class FmpQuoteFundamentalsProvider:
         shares_float_rows = 0
 
         quote_payloads: dict[str, Mapping[str, Any]] = {}
+        quote_endpoint = "none"
         quote_blocked = False
         try:
-            quote_payloads, quote_cache_hits = self._quote_payloads(requested, force_refresh=force_refresh)
+            quote_payloads, quote_cache_hits, quote_endpoint = self._quote_payloads(requested, force_refresh=force_refresh)
             cache_hits += quote_cache_hits
         except FmpProviderWarning as exc:
             warnings.append(str(exc))
@@ -491,7 +492,7 @@ class FmpQuoteFundamentalsProvider:
         message = (
             f"FMP enrichment: {len(records)} rows updated; quote rows {quote_rows}; profile rows {profile_rows}; "
             f"key metrics {key_metrics_rows}; ratios {ratios_rows}; growth {growth_rows}; shares-float {shares_float_rows}; "
-            f"profile-by-CIK rows 0; cache used for {cache_hits}; {skipped_limited} skipped/limited; {no_usable_rows} no usable data. "
+            f"profile-by-CIK rows 0; quote endpoint {quote_endpoint}; cache used for {cache_hits}; {skipped_limited} skipped/limited; {no_usable_rows} no usable data. "
             f"FMP cap is {self.symbol_limit} symbol(s) via {FMP_MARKET_DATA_SYMBOL_LIMIT_ENV}; {paid_mode_text}."
         )
         if warnings:
@@ -612,7 +613,7 @@ class FmpQuoteFundamentalsProvider:
             },
         )
 
-    def _quote_payloads(self, symbols: tuple[str, ...], *, force_refresh: bool) -> tuple[dict[str, Mapping[str, Any]], int]:
+    def _quote_payloads(self, symbols: tuple[str, ...], *, force_refresh: bool) -> tuple[dict[str, Mapping[str, Any]], int, str]:
         payloads: dict[str, Mapping[str, Any]] = {}
         missing: list[str] = []
         cache_hits = 0
@@ -624,19 +625,45 @@ class FmpQuoteFundamentalsProvider:
                 payloads[symbol] = cached
                 cache_hits += 1
         if not missing:
-            return payloads, cache_hits
+            return payloads, cache_hits, "cache"
 
-        payload = self._get_json("batch-quote", {"symbols": ",".join(missing)})
-        rows = _coerce_fmp_rows(payload)
-        for row in rows:
-            symbol = _normalize_symbol(_first_present(row, "symbol", "ticker"))
-            if not symbol and len(missing) == 1:
-                symbol = missing[0]
-            if not symbol or symbol not in missing:
-                continue
+        rows, endpoint = self._quote_rows_from_batch_endpoint(tuple(missing))
+        for symbol, row in _fmp_quote_rows_by_symbol(rows, tuple(missing)).items():
             payloads[symbol] = row
             self._cache_set("quote", symbol, row)
-        return payloads, cache_hits
+        return payloads, cache_hits, endpoint
+
+    def _quote_rows_from_batch_endpoint(self, missing: tuple[str, ...]) -> tuple[list[Mapping[str, Any]], str]:
+        primary_endpoint = "batch-quote-short"
+        fallback_endpoint = "batch-quote"
+        primary_warning: str | None = None
+        try:
+            payload = self._get_json(primary_endpoint, {"symbols": ",".join(missing)})
+            if not _fmp_payload_shape_is_unexpected(payload):
+                rows = _coerce_fmp_rows(payload)
+                if _fmp_quote_rows_are_recognizable(rows, missing):
+                    return rows, primary_endpoint
+                primary_warning = f"FMP {primary_endpoint} returned rows without recognizable requested symbols."
+            else:
+                primary_warning = f"FMP {primary_endpoint} returned a malformed payload."
+        except FmpProviderWarning as exc:
+            if _is_fmp_limit_warning(str(exc)):
+                raise
+            primary_warning = str(exc)
+
+        try:
+            fallback_payload = self._get_json(fallback_endpoint, {"symbols": ",".join(missing)})
+        except FmpProviderWarning as exc:
+            message = f"{primary_warning or f'FMP {primary_endpoint} was unusable'} FMP {fallback_endpoint} fallback failed: {exc}"
+            raise FmpProviderWarning(_redact_fmp_secret(message, self.api_key)) from None
+        if _fmp_payload_shape_is_unexpected(fallback_payload):
+            message = f"{primary_warning or f'FMP {primary_endpoint} was unusable'} FMP {fallback_endpoint} fallback returned a malformed payload."
+            raise FmpProviderWarning(_redact_fmp_secret(message, self.api_key)) from None
+        rows = _coerce_fmp_rows(fallback_payload)
+        if not _fmp_quote_rows_are_recognizable(rows, missing):
+            message = f"{primary_warning or f'FMP {primary_endpoint} was unusable'} FMP {fallback_endpoint} fallback returned rows without recognizable requested symbols."
+            raise FmpProviderWarning(_redact_fmp_secret(message, self.api_key)) from None
+        return rows, fallback_endpoint
 
     def _profile_payload(self, symbol: str, *, force_refresh: bool) -> tuple[Mapping[str, Any] | None, bool]:
         cached = self._cache_get("profile", symbol, force_refresh=force_refresh)
@@ -1400,6 +1427,36 @@ def _coerce_fmp_rows(payload: Any) -> list[Mapping[str, Any]]:
             return [row for row in rows if isinstance(row, Mapping)]
         return [payload]
     return []
+
+
+def _fmp_payload_shape_is_unexpected(payload: Any) -> bool:
+    if isinstance(payload, list):
+        return False
+    if isinstance(payload, Mapping):
+        for key in ("data", "results", "records"):
+            if key in payload and not isinstance(payload.get(key), list):
+                return True
+        return False
+    return True
+
+
+def _fmp_quote_rows_by_symbol(rows: Iterable[Mapping[str, Any]], requested: tuple[str, ...]) -> dict[str, Mapping[str, Any]]:
+    requested_set = set(requested)
+    selected: dict[str, Mapping[str, Any]] = {}
+    for row in rows:
+        symbol = _normalize_symbol(_first_present(row, "symbol", "ticker"))
+        if not symbol and len(requested) == 1:
+            symbol = requested[0]
+        if not symbol or symbol not in requested_set:
+            continue
+        selected[symbol] = row
+    return selected
+
+
+def _fmp_quote_rows_are_recognizable(rows: list[Mapping[str, Any]], requested: tuple[str, ...]) -> bool:
+    if not rows:
+        return True
+    return bool(_fmp_quote_rows_by_symbol(rows, requested))
 
 
 def _detect_fmp_plan_limit(payload: Any) -> str | None:
