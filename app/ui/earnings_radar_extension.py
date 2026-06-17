@@ -42,7 +42,10 @@ from app.analytics.market_screener import (
     ASK_SCREENER_PROVIDER_ACTION_MISSING_CONFIG,
     MARKET_SCREENER_AI_ANALYZE_PROMPT,
     MARKET_SCREENER_AI_QUICK_PROMPTS,
+    MARKET_SCREENER_ENRICH_SELECTED_ROW,
+    MARKET_SCREENER_ENRICH_VISIBLE_PAGE,
     MarketScreenerAiResponse,
+    MarketScreenerEnrichmentResult,
     MarketScreenerRecord,
     MarketScreenerSnapshot,
     OpenAiAskScreenerPlannerClient,
@@ -51,6 +54,7 @@ from app.analytics.market_screener import (
     ask_screener_enrichment_decision,
     execute_ask_screener_plan,
     execute_provider_aware_ask_screener_plan,
+    enrich_market_screener_records,
     fetch_market_screener_snapshot,
     filter_market_screener_records,
     market_screener_data_completeness,
@@ -58,6 +62,7 @@ from app.analytics.market_screener import (
     market_screener_data_label,
     market_screener_diagnostics_detail_lines,
     market_screener_diagnostics_summary,
+    market_screener_backfill_config_from_env,
     market_screener_is_my_holding,
     market_screener_record_missing_reason_lines,
     market_screener_record_has_fundamentals,
@@ -1008,7 +1013,15 @@ def _request_ask_screener_provider_enrichment(
     self._market_screener_ask_running = True
     _set_ask_screener_actions_enabled(self, False)
     self.market_screener_ask_summary_var.set("Ask Screener is enriching required provider fields, then filtering locally...")
-    provider = configured_market_data_provider(schwab_session=getattr(self, "schwab_session", None), include_fallback_provider=True)
+    backfill_config = market_screener_backfill_config_from_env()
+    provider = configured_market_data_provider(
+        schwab_session=getattr(self, "schwab_session", None),
+        include_fallback_provider=True,
+        fmp_symbol_limit=max(backfill_config.profile_limit, backfill_config.quote_limit, backfill_config.fundamental_limit),
+        databento_symbol_limit=backfill_config.databento_limit,
+        cache_ttl_seconds=backfill_config.cache_ttl_seconds,
+        batch_size=backfill_config.batch_size,
+    )
     records = list(getattr(self, "market_screener_records", ()) or ())
 
     def worker() -> None:
@@ -1283,6 +1296,8 @@ def _request_market_data_enrichment(
     reason: str,
     force_refresh: bool,
     max_symbols: int,
+    mode: str | None = None,
+    scope_records: Iterable[MarketScreenerRecord] | None = None,
 ) -> None:
     requested = _dedupe_market_data_symbols(symbols)[:max_symbols]
     if not requested:
@@ -1295,16 +1310,33 @@ def _request_market_data_enrichment(
         attempted_symbols.difference_update(requested)
         running_symbols.difference_update(requested)
     running_symbols.update(requested)
-    provider = configured_market_data_provider(schwab_session=getattr(self, "schwab_session", None), include_fallback_provider=True)
+    backfill_config = market_screener_backfill_config_from_env()
+    provider = configured_market_data_provider(
+        schwab_session=getattr(self, "schwab_session", None),
+        include_fallback_provider=True,
+        fmp_symbol_limit=max(backfill_config.profile_limit, backfill_config.quote_limit, backfill_config.fundamental_limit),
+        databento_symbol_limit=backfill_config.databento_limit,
+        cache_ttl_seconds=backfill_config.cache_ttl_seconds,
+        batch_size=backfill_config.batch_size,
+    )
+    effective_mode = mode or (MARKET_SCREENER_ENRICH_SELECTED_ROW if reason == "selected row" else MARKET_SCREENER_ENRICH_VISIBLE_PAGE)
+    effective_scope_records = tuple(scope_records) if scope_records is not None else _market_data_scope_records_for_symbols(self, requested)
     self.market_screener_status_var.set(f"Enriching {reason} market data for {len(requested)} symbol(s)...")
 
     def worker() -> None:
         try:
-            snapshot = provider.quote_fundamentals(requested, force_refresh=force_refresh, max_symbols=max_symbols)
+            result = enrich_market_screener_records(
+                getattr(self, "market_screener_records", ()) or (),
+                effective_mode,
+                provider=provider,
+                scope_records=effective_scope_records,
+                symbols=requested,
+                force_refresh=force_refresh,
+            )
         except Exception as exc:
             self.after(0, lambda error=exc, symbols=requested, why=reason: _finish_screener_market_data_enrichment_error(self, symbols, why, error))
             return
-        self.after(0, lambda loaded=snapshot, symbols=requested, why=reason: _finish_screener_market_data_enrichment(self, symbols, why, loaded))
+        self.after(0, lambda loaded=result, symbols=requested, why=reason: _finish_screener_market_data_enrichment(self, symbols, why, loaded))
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -1313,19 +1345,40 @@ def _finish_screener_market_data_enrichment(
     self: tk.Tk,
     requested_symbols: tuple[str, ...],
     reason: str,
-    snapshot: MarketQuoteFundamentalsSnapshot,
+    result: MarketScreenerEnrichmentResult | MarketQuoteFundamentalsSnapshot,
 ) -> None:
     _mark_market_data_enrichment_finished(self, requested_symbols)
     selected_symbol = _selected_screener_symbol(self)
-    if snapshot.records:
-        self.market_screener_records = merge_market_data_records_into_screener_records(
-            self.market_screener_records,
-            snapshot.records,
-            fetched_at=snapshot.fetched_at,
+    if isinstance(result, MarketQuoteFundamentalsSnapshot):
+        if result.records:
+            self.market_screener_records = merge_market_data_records_into_screener_records(
+                self.market_screener_records,
+                result.records,
+                fetched_at=result.fetched_at,
+            )
+            attempted_symbols = getattr(self, "market_screener_market_data_attempted_symbols", set())
+            if isinstance(attempted_symbols, set):
+                attempted_symbols.update(_dedupe_market_data_symbols(record.symbol for record in result.records))
+            _apply_screener_filters(self)
+            if selected_symbol:
+                _select_screener_symbol(self, selected_symbol)
+                _update_screener_detail_panel(self, _record_by_symbol(self.market_screener_records, selected_symbol))
+        _append_screener_market_data_status(
+            self,
+            (
+                f"Market data {reason}: enriched {len(result.records)} of {len(requested_symbols)} requested symbol(s). "
+                f"{_market_data_provider_status_summary(result)} Missing fields are not inferred."
+            ),
         )
+        signals = sum(1 for record in self.market_screener_records if market_screener_has_ai_signal(record))
+        holdings = sum(1 for record in self.market_screener_records if market_screener_is_my_holding(record))
+        self.market_screener_status_var.set(f"Loaded {len(self.market_screener_records)} screener rows; {holdings} My Holdings; {signals} with AI-worthy signals. Market data {reason} updated.")
+        return
+    if result.records:
+        self.market_screener_records = list(result.records)
         attempted_symbols = getattr(self, "market_screener_market_data_attempted_symbols", set())
         if isinstance(attempted_symbols, set):
-            attempted_symbols.update(_dedupe_market_data_symbols(record.symbol for record in snapshot.records))
+            attempted_symbols.update(result.requested_symbols)
         _apply_screener_filters(self)
         if selected_symbol:
             _select_screener_symbol(self, selected_symbol)
@@ -1333,8 +1386,8 @@ def _finish_screener_market_data_enrichment(
     _append_screener_market_data_status(
         self,
         (
-            f"Market data {reason}: enriched {len(snapshot.records)} of {len(requested_symbols)} requested symbol(s). "
-            f"{_market_data_provider_status_summary(snapshot)} Missing fields are not inferred."
+            f"Market data {reason}: updated {result.report.rows_updated} row(s) from {len(result.requested_symbols)} requested symbol(s). "
+            f"{_market_data_enrichment_status_summary(result)} Missing fields are not inferred."
         ),
     )
     signals = sum(1 for record in self.market_screener_records if market_screener_has_ai_signal(record))
@@ -1428,6 +1481,12 @@ def _market_data_symbols_from_records(records: Iterable[MarketScreenerRecord]) -
     return _dedupe_market_data_symbols(record.symbol for record in records if not _market_screener_record_needs_market_data_enrichment(record))
 
 
+def _market_data_scope_records_for_symbols(self: tk.Tk, symbols: Iterable[str]) -> tuple[MarketScreenerRecord, ...]:
+    wanted = set(_dedupe_market_data_symbols(symbols))
+    rows = list(getattr(self, "market_screener_row_map", {}).values()) or list(getattr(self, "market_screener_records", ()) or ())
+    return tuple(record for record in rows if _normalize_screener_symbol(record.symbol) in wanted)
+
+
 def _dedupe_market_data_symbols(symbols: Iterable[str]) -> tuple[str, ...]:
     seen: set[str] = set()
     result: list[str] = []
@@ -1473,6 +1532,25 @@ def _select_screener_symbol(self: tk.Tk, symbol: str) -> None:
         except tk.TclError:
             pass
         return
+
+
+def _market_data_enrichment_status_summary(result: MarketScreenerEnrichmentResult) -> str:
+    if not result.statuses:
+        return ""
+    sources = ", ".join(dict.fromkeys(status.source for status in result.statuses if status.source))
+    statuses = ", ".join(dict.fromkeys(status.status for status in result.statuses if status.status))
+    provider_message = next((status.message for status in result.statuses if "FMP" in status.source and status.message), "")
+    note = f" {_truncate(provider_message, 240)}" if provider_message else ""
+    coverage = (
+        f" Coverage: price {result.report.rows_with_price}/{result.report.total_rows}, "
+        f"volume {result.report.rows_with_volume}/{result.report.total_rows}, "
+        f"fundamentals {result.report.rows_with_fundamentals}/{result.report.total_rows}."
+    )
+    if sources and statuses:
+        return f"Provider status: {sources} ({statuses}).{note}{coverage}"
+    if sources:
+        return f"Provider status: {sources}.{note}{coverage}"
+    return coverage
 
 
 def _market_data_provider_status_summary(snapshot: MarketQuoteFundamentalsSnapshot) -> str:

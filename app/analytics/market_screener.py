@@ -45,21 +45,55 @@ ASK_SCREENER_QUOTE_ENRICH_LIMIT_ENV = "ASK_SCREENER_QUOTE_ENRICH_LIMIT"
 ASK_SCREENER_FUNDAMENTAL_ENRICH_LIMIT_ENV = "ASK_SCREENER_FUNDAMENTAL_ENRICH_LIMIT"
 ASK_SCREENER_DATABENTO_TAPE_ENRICH_LIMIT_ENV = "ASK_SCREENER_DATABENTO_TAPE_ENRICH_LIMIT"
 ASK_SCREENER_REQUIRE_CONFIRM_ABOVE_ENV = "ASK_SCREENER_REQUIRE_CONFIRM_ABOVE"
+MARKET_SCREENER_PROVIDER_BACKFILL_ENABLED_ENV = "MARKET_SCREENER_PROVIDER_BACKFILL_ENABLED"
+MARKET_SCREENER_PROFILE_BACKFILL_LIMIT_ENV = "MARKET_SCREENER_PROFILE_BACKFILL_LIMIT"
+MARKET_SCREENER_QUOTE_BACKFILL_LIMIT_ENV = "MARKET_SCREENER_QUOTE_BACKFILL_LIMIT"
+MARKET_SCREENER_FUNDAMENTAL_BACKFILL_LIMIT_ENV = "MARKET_SCREENER_FUNDAMENTAL_BACKFILL_LIMIT"
+MARKET_SCREENER_DATABENTO_BACKFILL_LIMIT_ENV = "MARKET_SCREENER_DATABENTO_BACKFILL_LIMIT"
+MARKET_SCREENER_BACKFILL_BATCH_SIZE_ENV = "MARKET_SCREENER_BACKFILL_BATCH_SIZE"
+MARKET_SCREENER_BACKFILL_CACHE_TTL_SECONDS_ENV = "MARKET_SCREENER_BACKFILL_CACHE_TTL_SECONDS"
+MARKET_SCREENER_CONFIRM_BACKFILL_ABOVE_ENV = "MARKET_SCREENER_CONFIRM_BACKFILL_ABOVE"
 ASK_SCREENER_SMALL_CAP_MAX_MARKET_CAP_ENV = "ASK_SCREENER_SMALL_CAP_MAX_MARKET_CAP"
 ASK_SCREENER_PENNY_STOCK_MAX_PRICE_ENV = "ASK_SCREENER_PENNY_STOCK_MAX_PRICE"
 ASK_SCREENER_ENV_NAME_DATABENTO_ENABLED = "MARKET_SCREENER_ENABLE_DATABENTO_EQUITIES"
 DEFAULT_ASK_SCREENER_AUTO_ENRICH = True
-DEFAULT_ASK_SCREENER_PROFILE_ENRICH_LIMIT = 500
-DEFAULT_ASK_SCREENER_QUOTE_ENRICH_LIMIT = 500
-DEFAULT_ASK_SCREENER_FUNDAMENTAL_ENRICH_LIMIT = 200
-DEFAULT_ASK_SCREENER_DATABENTO_TAPE_ENRICH_LIMIT = 500
-DEFAULT_ASK_SCREENER_REQUIRE_CONFIRM_ABOVE = 1000
+DEFAULT_ASK_SCREENER_PROFILE_ENRICH_LIMIT = 2000
+DEFAULT_ASK_SCREENER_QUOTE_ENRICH_LIMIT = 2000
+DEFAULT_ASK_SCREENER_FUNDAMENTAL_ENRICH_LIMIT = 1000
+DEFAULT_ASK_SCREENER_DATABENTO_TAPE_ENRICH_LIMIT = 2000
+DEFAULT_ASK_SCREENER_REQUIRE_CONFIRM_ABOVE = 3000
+DEFAULT_MARKET_SCREENER_PROVIDER_BACKFILL_ENABLED = True
+DEFAULT_MARKET_SCREENER_PROFILE_BACKFILL_LIMIT = 2000
+DEFAULT_MARKET_SCREENER_QUOTE_BACKFILL_LIMIT = 2000
+DEFAULT_MARKET_SCREENER_FUNDAMENTAL_BACKFILL_LIMIT = 1000
+DEFAULT_MARKET_SCREENER_DATABENTO_BACKFILL_LIMIT = 2000
+DEFAULT_MARKET_SCREENER_BACKFILL_BATCH_SIZE = 100
+DEFAULT_MARKET_SCREENER_BACKFILL_CACHE_TTL_SECONDS = 3600
+DEFAULT_MARKET_SCREENER_CONFIRM_BACKFILL_ABOVE = 3000
 DEFAULT_ASK_SCREENER_SMALL_CAP_MAX_MARKET_CAP = 2_000_000_000.0
 DEFAULT_ASK_SCREENER_PENNY_STOCK_MAX_PRICE = 5.0
 ASK_SCREENER_PROVIDER_ACTION_EXECUTE_LOCAL_ONLY = "execute_local_only"
 ASK_SCREENER_PROVIDER_ACTION_ENRICH_THEN_EXECUTE = "enrich_then_execute"
 ASK_SCREENER_PROVIDER_ACTION_CONFIRM_LARGE_ENRICHMENT = "ask_for_confirmation_before_large_enrichment"
 ASK_SCREENER_PROVIDER_ACTION_MISSING_CONFIG = "cannot_execute_missing_provider_config"
+MARKET_SCREENER_ENRICH_PROFILE_CLASSIFICATION = "profile_classification"
+MARKET_SCREENER_ENRICH_QUOTE_TAPE = "quote_tape"
+MARKET_SCREENER_ENRICH_FUNDAMENTALS = "fundamentals"
+MARKET_SCREENER_ENRICH_ALL_MARKET_DATA = "all_market_data"
+MARKET_SCREENER_ENRICH_VISIBLE_PAGE = "visible_page"
+MARKET_SCREENER_ENRICH_SELECTED_ROW = "selected_row"
+MARKET_SCREENER_ENRICH_ASK_SCREENER_CANDIDATE_SET = "ask_screener_candidate_set"
+MARKET_SCREENER_ENRICHMENT_MODES = frozenset(
+    {
+        MARKET_SCREENER_ENRICH_PROFILE_CLASSIFICATION,
+        MARKET_SCREENER_ENRICH_QUOTE_TAPE,
+        MARKET_SCREENER_ENRICH_FUNDAMENTALS,
+        MARKET_SCREENER_ENRICH_ALL_MARKET_DATA,
+        MARKET_SCREENER_ENRICH_VISIBLE_PAGE,
+        MARKET_SCREENER_ENRICH_SELECTED_ROW,
+        MARKET_SCREENER_ENRICH_ASK_SCREENER_CANDIDATE_SET,
+    }
+)
 
 MARKET_SCREENER_AI_SYSTEM_PROMPT = """You are a market intelligence analyst inside Portfolio Risk Cockpit.
 
@@ -337,6 +371,25 @@ class MarketScreenerCoverageDiagnostics:
     provider_unavailable: int = 0
     unresolved_rows: int = 0
     rows_still_missing_exchange_sector_industry: int = 0
+    rows_with_profile_classification: int = 0
+    rows_with_price: int = 0
+    rows_missing_price: int = 0
+    rows_with_volume: int = 0
+    rows_missing_volume: int = 0
+    rows_with_avg_volume: int = 0
+    rows_missing_avg_volume: int = 0
+    rows_with_fundamentals: int = 0
+    rows_with_revenue_growth: int = 0
+    rows_missing_revenue_growth: int = 0
+    rows_with_float_or_shares: int = 0
+    rows_missing_float_or_shares: int = 0
+    provider_calls_attempted: int = 0
+    provider_rows_requested: int = 0
+    provider_rows_returned: int = 0
+    provider_rows_parsed: int = 0
+    provider_rows_updated: int = 0
+    provider_cache_hits: int = 0
+    provider_warnings: int = 0
     rows_still_missing_price_volume: int = 0
     rows_still_missing_fundamentals: int = 0
 
@@ -493,6 +546,75 @@ class AskScreenerProviderConfig:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class MarketScreenerBackfillConfig:
+    enabled: bool = DEFAULT_MARKET_SCREENER_PROVIDER_BACKFILL_ENABLED
+    profile_limit: int = DEFAULT_MARKET_SCREENER_PROFILE_BACKFILL_LIMIT
+    quote_limit: int = DEFAULT_MARKET_SCREENER_QUOTE_BACKFILL_LIMIT
+    fundamental_limit: int = DEFAULT_MARKET_SCREENER_FUNDAMENTAL_BACKFILL_LIMIT
+    databento_limit: int = DEFAULT_MARKET_SCREENER_DATABENTO_BACKFILL_LIMIT
+    batch_size: int = DEFAULT_MARKET_SCREENER_BACKFILL_BATCH_SIZE
+    cache_ttl_seconds: int = DEFAULT_MARKET_SCREENER_BACKFILL_CACHE_TTL_SECONDS
+    confirm_above: int = DEFAULT_MARKET_SCREENER_CONFIRM_BACKFILL_ABOVE
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class MarketScreenerEnrichmentReport:
+    mode: str
+    total_rows: int
+    rows_with_profile_classification: int
+    rows_with_price: int
+    rows_with_volume: int
+    rows_with_avg_volume: int
+    rows_with_fundamentals: int
+    rows_with_revenue_growth: int
+    rows_with_float_or_shares: int
+    rows_missing_profile_classification: int
+    rows_missing_price: int
+    rows_missing_volume: int
+    rows_missing_avg_volume: int
+    rows_missing_fundamentals: int
+    rows_missing_revenue_growth: int
+    rows_missing_float_or_shares: int
+    provider_calls_attempted: int = 0
+    provider_rows_requested: int = 0
+    provider_rows_returned: int = 0
+    provider_rows_parsed: int = 0
+    rows_updated: int = 0
+    cache_hits: int = 0
+    warnings: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class MarketScreenerEnrichmentResult:
+    mode: str
+    records: tuple[MarketScreenerRecord, ...]
+    requested_symbols: tuple[str, ...]
+    fetched_at: str
+    report: MarketScreenerEnrichmentReport
+    statuses: tuple[MarketScreenerSourceStatus, ...] = ()
+    errors: tuple[str, ...] = ()
+    notes: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "records": [record.to_dict() for record in self.records],
+            "requested_symbols": list(self.requested_symbols),
+            "fetched_at": self.fetched_at,
+            "report": self.report.to_dict(),
+            "statuses": [asdict(status) for status in self.statuses],
+            "errors": list(self.errors),
+            "notes": list(self.notes),
+        }
 
 
 @dataclass(frozen=True)
@@ -927,6 +1049,335 @@ def merge_market_data_records_into_screener_records(
     return rows
 
 
+def enrich_market_screener_records(
+    records: Iterable[MarketScreenerRecord],
+    mode: str,
+    *,
+    provider: Any | None = None,
+    config: MarketScreenerBackfillConfig | None = None,
+    scope_records: Iterable[MarketScreenerRecord] | None = None,
+    selected_record: MarketScreenerRecord | None = None,
+    candidate_records: Iterable[MarketScreenerRecord] | None = None,
+    symbols: Iterable[str] | None = None,
+    required_fields: Iterable[str] = (),
+    force_refresh: bool = False,
+    include_fallback_provider: bool = True,
+) -> MarketScreenerEnrichmentResult:
+    clean_mode = str(mode or "").strip().lower()
+    if clean_mode not in MARKET_SCREENER_ENRICHMENT_MODES:
+        raise ValueError(f"Unsupported Market Screener enrichment mode: {mode}")
+    config = config or market_screener_backfill_config_from_env()
+    fetched_at = _now()
+    base_rows = [_normalize_record(record, fetched_at=fetched_at) for record in records]
+    if not config.enabled:
+        report = market_screener_enrichment_report(base_rows, mode=clean_mode)
+        status = MarketScreenerSourceStatus(
+            "Market Screener provider backfill",
+            "disabled",
+            fetched_at,
+            f"Provider backfill disabled by {MARKET_SCREENER_PROVIDER_BACKFILL_ENABLED_ENV}=false.",
+        )
+        return MarketScreenerEnrichmentResult(clean_mode, tuple(base_rows), (), fetched_at, report, statuses=(status,))
+
+    families = _market_screener_enrichment_families(clean_mode, required_fields)
+    scoped_rows = _market_screener_scope_rows(
+        base_rows,
+        clean_mode,
+        scope_records=scope_records,
+        selected_record=selected_record,
+        candidate_records=candidate_records,
+    )
+    active_provider = provider or configured_market_data_provider(
+        include_fallback_provider=include_fallback_provider,
+        fmp_symbol_limit=max(config.profile_limit, config.quote_limit, config.fundamental_limit),
+        databento_symbol_limit=config.databento_limit,
+        cache_ttl_seconds=config.cache_ttl_seconds,
+        batch_size=config.batch_size,
+    )
+
+    enriched_rows = base_rows
+    statuses: list[MarketScreenerSourceStatus] = []
+    errors: list[str] = []
+    diagnostics: dict[str, int] = {}
+    requested_symbols: list[str] = []
+    before_rows = tuple(base_rows)
+    for family in families:
+        family_fields = _market_screener_family_fields(family)
+        family_symbols = _market_screener_stage_symbols(
+            enriched_rows,
+            scoped_rows,
+            family_fields,
+            symbols=symbols,
+            max_symbols=_market_screener_family_limit(family, config),
+        )
+        if not family_symbols:
+            statuses.append(
+                MarketScreenerSourceStatus(
+                    f"Market Screener {family.replace('_', ' ')} backfill",
+                    "empty",
+                    fetched_at,
+                    f"No symbol-bearing rows need {family.replace('_', ' ')} enrichment in this scope.",
+                )
+            )
+            continue
+        requested_symbols.extend(family_symbols)
+        try:
+            snapshot = _market_screener_provider_family_snapshot(
+                active_provider,
+                family,
+                family_symbols,
+                force_refresh=force_refresh,
+                max_symbols=_market_screener_family_limit(family, config),
+            )
+        except Exception as exc:
+            clean_error = redact_symbol_chat_secrets(str(exc))
+            errors.append(f"{family}: {clean_error}")
+            statuses.append(
+                MarketScreenerSourceStatus(
+                    f"Market Screener {family.replace('_', ' ')} backfill",
+                    "error",
+                    fetched_at,
+                    f"Provider failure was nonblocking: {clean_error}",
+                )
+            )
+            diagnostics["provider_warnings"] = diagnostics.get("provider_warnings", 0) + 1
+            continue
+        statuses.extend(MarketScreenerSourceStatus(status.source, status.status, status.fetched_at, status.message) for status in snapshot.statuses)
+        errors.extend(redact_symbol_chat_secrets(error) for error in snapshot.errors)
+        _merge_counter_mapping(diagnostics, snapshot.diagnostics)
+        enriched_rows = merge_market_data_records_into_screener_records(enriched_rows, snapshot.records, fetched_at=snapshot.fetched_at)
+
+    changed_rows = _count_screener_rows_changed(before_rows, enriched_rows, _market_screener_fields_for_families(families))
+    diagnostics["provider_rows_updated"] = max(diagnostics.get("provider_rows_updated", 0), changed_rows)
+    diagnostics["provider_cache_hits"] = max(diagnostics.get("provider_cache_hits", 0), diagnostics.get("fmp_cache_hits", 0) + diagnostics.get("databento_equities_cache_hits", 0))
+    diagnostics["provider_warnings"] = max(
+        diagnostics.get("provider_warnings", 0),
+        diagnostics.get("databento_equities_provider_warnings", 0) + diagnostics.get("databento_dataset_mismatch_warnings", 0),
+    )
+    report = market_screener_enrichment_report(
+        enriched_rows,
+        mode=clean_mode,
+        provider_diagnostics=diagnostics,
+        rows_updated=changed_rows,
+    )
+    statuses.append(_market_screener_enrichment_report_status(report, fetched_at))
+    return MarketScreenerEnrichmentResult(
+        clean_mode,
+        tuple(enriched_rows),
+        tuple(_dedupe_texts(requested_symbols)),
+        fetched_at,
+        report,
+        statuses=tuple(statuses),
+        errors=tuple(errors),
+    )
+
+
+def market_screener_enrichment_report(
+    records: Iterable[MarketScreenerRecord],
+    *,
+    mode: str,
+    provider_diagnostics: Mapping[str, int] | None = None,
+    rows_updated: int = 0,
+) -> MarketScreenerEnrichmentReport:
+    diagnostics = provider_diagnostics or {}
+    rows = list(records)
+    total = len(rows)
+    rows_with_profile = sum(1 for record in rows if _record_has_profile_classification(record))
+    rows_with_price = sum(1 for record in rows if record.price is not None)
+    rows_with_volume = sum(1 for record in rows if record.volume is not None)
+    rows_with_avg_volume = sum(1 for record in rows if record.avg_volume is not None)
+    rows_with_fundamentals = sum(1 for record in rows if market_screener_record_has_fundamentals(record))
+    rows_with_revenue_growth = sum(1 for record in rows if record.revenue_growth is not None)
+    rows_with_float_or_shares = sum(1 for record in rows if record.shares_float is not None or record.shares_outstanding is not None)
+    return MarketScreenerEnrichmentReport(
+        mode=str(mode),
+        total_rows=total,
+        rows_with_profile_classification=rows_with_profile,
+        rows_with_price=rows_with_price,
+        rows_with_volume=rows_with_volume,
+        rows_with_avg_volume=rows_with_avg_volume,
+        rows_with_fundamentals=rows_with_fundamentals,
+        rows_with_revenue_growth=rows_with_revenue_growth,
+        rows_with_float_or_shares=rows_with_float_or_shares,
+        rows_missing_profile_classification=max(0, total - rows_with_profile),
+        rows_missing_price=max(0, total - rows_with_price),
+        rows_missing_volume=max(0, total - rows_with_volume),
+        rows_missing_avg_volume=max(0, total - rows_with_avg_volume),
+        rows_missing_fundamentals=max(0, total - rows_with_fundamentals),
+        rows_missing_revenue_growth=max(0, total - rows_with_revenue_growth),
+        rows_missing_float_or_shares=max(0, total - rows_with_float_or_shares),
+        provider_calls_attempted=_counter(diagnostics, "provider_calls_attempted"),
+        provider_rows_requested=_counter(diagnostics, "provider_rows_requested"),
+        provider_rows_returned=_counter(diagnostics, "provider_rows_returned"),
+        provider_rows_parsed=_counter(diagnostics, "provider_rows_parsed"),
+        rows_updated=max(0, int(rows_updated)),
+        cache_hits=_counter(diagnostics, "provider_cache_hits") or _counter(diagnostics, "fmp_cache_hits") + _counter(diagnostics, "databento_equities_cache_hits"),
+        warnings=_counter(diagnostics, "provider_warnings")
+        or _counter(diagnostics, "databento_equities_provider_warnings")
+        + _counter(diagnostics, "databento_dataset_mismatch_warnings")
+        + _counter(diagnostics, "rows_blocked_by_provider_plan_rate_auth_limit"),
+    )
+
+
+def _market_screener_enrichment_families(mode: str, required_fields: Iterable[str]) -> tuple[str, ...]:
+    if mode == MARKET_SCREENER_ENRICH_PROFILE_CLASSIFICATION:
+        return (MARKET_SCREENER_ENRICH_PROFILE_CLASSIFICATION,)
+    if mode == MARKET_SCREENER_ENRICH_QUOTE_TAPE:
+        return (MARKET_SCREENER_ENRICH_QUOTE_TAPE,)
+    if mode == MARKET_SCREENER_ENRICH_FUNDAMENTALS:
+        return (MARKET_SCREENER_ENRICH_FUNDAMENTALS,)
+    if mode == MARKET_SCREENER_ENRICH_ASK_SCREENER_CANDIDATE_SET:
+        groups = _ask_screener_provider_groups_for_fields(required_fields or ASK_SCREENER_PROVIDER_AWARE_FIELDS)
+        families: list[str] = []
+        if "fmp_profile" in groups:
+            families.append(MARKET_SCREENER_ENRICH_PROFILE_CLASSIFICATION)
+        if "databento_tape" in groups:
+            families.append(MARKET_SCREENER_ENRICH_QUOTE_TAPE)
+        if "fmp_fundamentals" in groups:
+            families.append(MARKET_SCREENER_ENRICH_FUNDAMENTALS)
+        return tuple(families) or (
+            MARKET_SCREENER_ENRICH_PROFILE_CLASSIFICATION,
+            MARKET_SCREENER_ENRICH_QUOTE_TAPE,
+            MARKET_SCREENER_ENRICH_FUNDAMENTALS,
+        )
+    return (
+        MARKET_SCREENER_ENRICH_PROFILE_CLASSIFICATION,
+        MARKET_SCREENER_ENRICH_QUOTE_TAPE,
+        MARKET_SCREENER_ENRICH_FUNDAMENTALS,
+    )
+
+
+def _market_screener_scope_rows(
+    rows: Iterable[MarketScreenerRecord],
+    mode: str,
+    *,
+    scope_records: Iterable[MarketScreenerRecord] | None,
+    selected_record: MarketScreenerRecord | None,
+    candidate_records: Iterable[MarketScreenerRecord] | None,
+) -> tuple[MarketScreenerRecord, ...]:
+    all_rows = tuple(rows)
+    if mode == MARKET_SCREENER_ENRICH_SELECTED_ROW:
+        return (selected_record,) if selected_record is not None else tuple(scope_records or all_rows[:1])
+    if mode == MARKET_SCREENER_ENRICH_VISIBLE_PAGE:
+        return tuple(scope_records or all_rows)
+    if mode == MARKET_SCREENER_ENRICH_ASK_SCREENER_CANDIDATE_SET:
+        return tuple(candidate_records or scope_records or all_rows)
+    return all_rows
+
+
+def _market_screener_family_fields(family: str) -> tuple[str, ...]:
+    if family == MARKET_SCREENER_ENRICH_PROFILE_CLASSIFICATION:
+        return ("company_name", "exchange", "sector", "industry", "cik")
+    if family == MARKET_SCREENER_ENRICH_QUOTE_TAPE:
+        return ("price", "change_percent", "volume", "avg_volume")
+    if family == MARKET_SCREENER_ENRICH_FUNDAMENTALS:
+        return ("market_cap", "pe_ratio", "eps", "revenue_growth", "shares_float", "shares_outstanding")
+    return tuple(sorted(ASK_SCREENER_PROVIDER_AWARE_FIELDS))
+
+
+def _market_screener_fields_for_families(families: Iterable[str]) -> tuple[str, ...]:
+    fields: list[str] = []
+    for family in families:
+        fields.extend(_market_screener_family_fields(family))
+    return tuple(_dedupe_texts(fields))
+
+
+def _market_screener_family_limit(family: str, config: MarketScreenerBackfillConfig) -> int:
+    if family == MARKET_SCREENER_ENRICH_PROFILE_CLASSIFICATION:
+        return config.profile_limit
+    if family == MARKET_SCREENER_ENRICH_QUOTE_TAPE:
+        return max(config.quote_limit, config.databento_limit)
+    if family == MARKET_SCREENER_ENRICH_FUNDAMENTALS:
+        return config.fundamental_limit
+    return max(config.profile_limit, config.quote_limit, config.fundamental_limit, config.databento_limit)
+
+
+def _market_screener_stage_symbols(
+    all_rows: Iterable[MarketScreenerRecord],
+    scoped_rows: Iterable[MarketScreenerRecord],
+    fields: Iterable[str],
+    *,
+    symbols: Iterable[str] | None,
+    max_symbols: int,
+) -> tuple[str, ...]:
+    if max_symbols <= 0:
+        return ()
+    if symbols is not None:
+        return tuple(_dedupe_texts(_normalize_symbol(symbol) for symbol in symbols if _normalize_symbol(symbol)))[:max_symbols]
+    scoped_keys = {_record_key(record) for record in scoped_rows if _record_key(record)}
+    candidate_rows = [record for record in all_rows if _record_key(record) in scoped_keys] if scoped_keys else list(scoped_rows)
+    result: list[str] = []
+    seen: set[str] = set()
+    for record in sorted(candidate_rows, key=lambda row: (_ask_screener_enrichment_priority(row), _normalize_symbol(row.symbol))):
+        symbol = _normalize_symbol(record.symbol)
+        if not symbol or symbol in seen:
+            continue
+        if not any(not _has_value(_ask_screener_field_value(record, field)) for field in fields):
+            continue
+        seen.add(symbol)
+        result.append(symbol)
+        if len(result) >= max_symbols:
+            break
+    return tuple(result)
+
+
+def _market_screener_provider_family_snapshot(
+    provider: Any,
+    family: str,
+    symbols: tuple[str, ...],
+    *,
+    force_refresh: bool,
+    max_symbols: int,
+) -> MarketQuoteFundamentalsSnapshot:
+    method = getattr(provider, family, None)
+    if family == MARKET_SCREENER_ENRICH_PROFILE_CLASSIFICATION:
+        method = getattr(provider, "profile_classification", None)
+    elif family == MARKET_SCREENER_ENRICH_QUOTE_TAPE:
+        method = getattr(provider, "quote_tape", None)
+    elif family == MARKET_SCREENER_ENRICH_FUNDAMENTALS:
+        method = getattr(provider, "fundamentals", None)
+    if callable(method):
+        return method(symbols, force_refresh=force_refresh, max_symbols=max_symbols)
+    return provider.quote_fundamentals(symbols, force_refresh=force_refresh, max_symbols=max_symbols)
+
+
+def _count_screener_rows_changed(
+    before: Iterable[MarketScreenerRecord],
+    after: Iterable[MarketScreenerRecord],
+    fields: Iterable[str],
+) -> int:
+    before_by_key = {_record_key(record): record for record in before if _record_key(record)}
+    changed = 0
+    for record in after:
+        key = _record_key(record)
+        old = before_by_key.get(key)
+        if old is None:
+            continue
+        if any(_ask_screener_field_value(old, field) != _ask_screener_field_value(record, field) for field in fields):
+            changed += 1
+    return changed
+
+
+def _market_screener_enrichment_report_status(report: MarketScreenerEnrichmentReport, fetched_at: str) -> MarketScreenerSourceStatus:
+    return MarketScreenerSourceStatus(
+        "Market Screener enrichment coverage",
+        "available",
+        fetched_at,
+        (
+            f"{report.mode}: total rows {report.total_rows}; profile/classification {report.rows_with_profile_classification}; "
+            f"price {report.rows_with_price}; volume {report.rows_with_volume}; avg volume {report.rows_with_avg_volume}; "
+            f"fundamentals {report.rows_with_fundamentals}; revenue growth {report.rows_with_revenue_growth}; float/shares {report.rows_with_float_or_shares}; "
+            f"missing price {report.rows_missing_price}; missing volume {report.rows_missing_volume}; missing avg volume {report.rows_missing_avg_volume}; "
+            f"missing fundamentals {report.rows_missing_fundamentals}; provider calls attempted {report.provider_calls_attempted}; "
+            f"rows updated {report.rows_updated}; cache hits {report.cache_hits}; warnings {report.warnings}."
+        ),
+    )
+
+
+def _record_has_profile_classification(record: MarketScreenerRecord) -> bool:
+    return bool(_has_value(record.company_name) and _has_value(record.exchange) and _has_value(record.sector) and _has_value(record.industry))
+
+
 def market_screener_record_has_market_data(record: MarketScreenerRecord) -> bool:
     return any(
         value is not None
@@ -1122,6 +1573,19 @@ def ask_screener_config_from_env(*, schwab_quote_configured: bool = False) -> As
     )
 
 
+def market_screener_backfill_config_from_env() -> MarketScreenerBackfillConfig:
+    return MarketScreenerBackfillConfig(
+        enabled=_env_flag(MARKET_SCREENER_PROVIDER_BACKFILL_ENABLED_ENV, default=DEFAULT_MARKET_SCREENER_PROVIDER_BACKFILL_ENABLED),
+        profile_limit=_env_int(MARKET_SCREENER_PROFILE_BACKFILL_LIMIT_ENV, DEFAULT_MARKET_SCREENER_PROFILE_BACKFILL_LIMIT, minimum=0, maximum=100_000),
+        quote_limit=_env_int(MARKET_SCREENER_QUOTE_BACKFILL_LIMIT_ENV, DEFAULT_MARKET_SCREENER_QUOTE_BACKFILL_LIMIT, minimum=0, maximum=100_000),
+        fundamental_limit=_env_int(MARKET_SCREENER_FUNDAMENTAL_BACKFILL_LIMIT_ENV, DEFAULT_MARKET_SCREENER_FUNDAMENTAL_BACKFILL_LIMIT, minimum=0, maximum=100_000),
+        databento_limit=_env_int(MARKET_SCREENER_DATABENTO_BACKFILL_LIMIT_ENV, DEFAULT_MARKET_SCREENER_DATABENTO_BACKFILL_LIMIT, minimum=0, maximum=100_000),
+        batch_size=_env_int(MARKET_SCREENER_BACKFILL_BATCH_SIZE_ENV, DEFAULT_MARKET_SCREENER_BACKFILL_BATCH_SIZE, minimum=1, maximum=500),
+        cache_ttl_seconds=_env_int(MARKET_SCREENER_BACKFILL_CACHE_TTL_SECONDS_ENV, DEFAULT_MARKET_SCREENER_BACKFILL_CACHE_TTL_SECONDS, minimum=0, maximum=604_800),
+        confirm_above=_env_int(MARKET_SCREENER_CONFIRM_BACKFILL_ABOVE_ENV, DEFAULT_MARKET_SCREENER_CONFIRM_BACKFILL_ABOVE, minimum=0, maximum=1_000_000),
+    )
+
+
 def analyze_ask_screener_field_coverage(
     records: Iterable[MarketScreenerRecord],
     fields: Iterable[str] = ASK_SCREENER_PROVIDER_AWARE_FIELDS,
@@ -1275,34 +1739,39 @@ def execute_provider_aware_ask_screener_plan(
             notes=_ask_screener_decision_notes(decision),
         )
 
-    active_provider = provider or configured_market_data_provider()
-    symbols_requested = decision.symbols_to_enrich
-    provider_snapshot: MarketQuoteFundamentalsSnapshot | None = None
+    active_provider = provider or configured_market_data_provider(
+        include_fallback_provider=True,
+        fmp_symbol_limit=max(config.profile_enrich_limit, config.quote_enrich_limit, config.fundamental_enrich_limit) if config else None,
+        databento_symbol_limit=config.databento_tape_enrich_limit if config else None,
+    )
+    requested_symbols = decision.symbols_to_enrich
+    enrichment_result: MarketScreenerEnrichmentResult | None = None
     provider_error: str | None = None
     enriched_rows = rows
     try:
-        provider_snapshot = active_provider.quote_fundamentals(
-            symbols_requested,
-            force_refresh=force_refresh,
-            max_symbols=max(0, decision.max_symbols or len(symbols_requested)),
-        )
-        enriched_rows = merge_market_data_records_into_screener_records(
+        enrichment_result = enrich_market_screener_records(
             rows,
-            provider_snapshot.records,
-            fetched_at=provider_snapshot.fetched_at,
+            MARKET_SCREENER_ENRICH_ASK_SCREENER_CANDIDATE_SET,
+            provider=active_provider,
+            config=_backfill_config_from_ask_screener_config(config),
+            symbols=requested_symbols,
+            required_fields=decision.required_fields,
+            force_refresh=force_refresh,
         )
+        enriched_rows = list(enrichment_result.records)
     except Exception as exc:
         provider_error = redact_symbol_chat_secrets(str(exc))
 
     result = execute_ask_screener_plan(enriched_rows, validated, today=today)
-    providers_used = _ask_screener_providers_used(provider_snapshot)
-    rows_updated = len(provider_snapshot.records) if provider_snapshot is not None else 0
+    providers_used = _ask_screener_enrichment_providers_used(enrichment_result)
+    rows_updated = enrichment_result.report.rows_updated if enrichment_result is not None else 0
+    symbols_requested_count = len(enrichment_result.requested_symbols) if enrichment_result is not None else len(requested_symbols)
     remaining_missing = _remaining_missing_required_fields(enriched_rows, validated.required_fields)
     more_help = bool(
         remaining_missing
         and (
-            decision.candidate_symbol_count > len(symbols_requested)
-            or rows_updated < len(symbols_requested)
+            decision.candidate_symbol_count > symbols_requested_count
+            or rows_updated < symbols_requested_count
             or any(count > 0 for count in remaining_missing.values())
         )
     )
@@ -1310,14 +1779,21 @@ def execute_provider_aware_ask_screener_plan(
     notes.extend(_ask_screener_decision_notes(decision))
     if provider_error:
         notes.append(f"Provider error was nonblocking and redacted: {provider_error}")
-    elif provider_snapshot is not None and provider_snapshot.errors:
-        notes.append("Provider warnings were nonblocking and redacted.")
+    elif enrichment_result is not None and enrichment_result.errors:
+        notes.append(f"Provider warnings were nonblocking and redacted: {enrichment_result.errors[0]}")
+    if enrichment_result is not None:
+        notes.append(
+            f"Coverage after {enrichment_result.mode}: price {enrichment_result.report.rows_with_price}/{enrichment_result.report.total_rows}, "
+            f"volume {enrichment_result.report.rows_with_volume}/{enrichment_result.report.total_rows}, "
+            f"fundamentals {enrichment_result.report.rows_with_fundamentals}/{enrichment_result.report.total_rows}; "
+            f"provider calls {enrichment_result.report.provider_calls_attempted}, cache hits {enrichment_result.report.cache_hits}, warnings {enrichment_result.report.warnings}."
+        )
     return _with_ask_screener_enrichment_status(
         result,
         decision=decision,
         enrichment_status="provider-enriched" if rows_updated else "provider-attempted",
         providers_used=providers_used,
-        symbols_requested=len(symbols_requested),
+        symbols_requested=symbols_requested_count,
         rows_updated=rows_updated,
         remaining_missing_fields=remaining_missing,
         more_enrichment_may_help=more_help,
@@ -1386,6 +1862,34 @@ def _ask_screener_providers_used(snapshot: MarketQuoteFundamentalsSnapshot | Non
         if status.source and str(status.status).lower() not in {"disabled", "unavailable"}
     )
     return tuple(_dedupe_texts(sources))
+
+
+def _ask_screener_enrichment_providers_used(result: MarketScreenerEnrichmentResult | None) -> tuple[str, ...]:
+    if result is None:
+        return ()
+    return tuple(
+        _dedupe_texts(
+            status.source
+            for status in result.statuses
+            if status.source and str(status.status).lower() not in {"disabled", "unavailable", "empty"}
+        )
+    )
+
+
+def _backfill_config_from_ask_screener_config(config: AskScreenerProviderConfig | None) -> MarketScreenerBackfillConfig:
+    base = market_screener_backfill_config_from_env()
+    if config is None:
+        return base
+    return MarketScreenerBackfillConfig(
+        enabled=config.auto_enrich,
+        profile_limit=config.profile_enrich_limit,
+        quote_limit=config.quote_enrich_limit,
+        fundamental_limit=config.fundamental_enrich_limit,
+        databento_limit=config.databento_tape_enrich_limit,
+        batch_size=base.batch_size,
+        cache_ttl_seconds=base.cache_ttl_seconds,
+        confirm_above=config.require_confirm_above,
+    )
 
 
 def _remaining_missing_required_fields(records: Iterable[MarketScreenerRecord], required_fields: Iterable[str]) -> dict[str, int]:
@@ -2897,6 +3401,12 @@ def market_screener_diagnostics_summary(diagnostics: MarketScreenerCoverageDiagn
         parts.insert(-2, f"fallback {diagnostics.rows_enriched_by_fallback_provider}")
     if diagnostics.rows_blocked_by_provider_plan_rate_auth_limit:
         parts.insert(-2, f"{diagnostics.rows_blocked_by_provider_plan_rate_auth_limit} blocked by provider auth/plan/rate")
+    if diagnostics.provider_calls_attempted:
+        parts.insert(-2, f"provider calls {diagnostics.provider_calls_attempted}")
+    if diagnostics.provider_cache_hits:
+        parts.insert(-2, f"provider cache hits {diagnostics.provider_cache_hits}")
+    if diagnostics.provider_warnings:
+        parts.insert(-2, f"provider warnings {diagnostics.provider_warnings}")
     return "; ".join(parts) + "."
 
 
@@ -2934,6 +3444,25 @@ def market_screener_diagnostics_detail_lines(diagnostics: MarketScreenerCoverage
         ("Rows provider returned with no usable data", diagnostics.rows_provider_returned_no_usable_data),
         ("Unresolved rows", diagnostics.unresolved_rows),
         ("Rows still missing exchange/sector/industry", diagnostics.rows_still_missing_exchange_sector_industry),
+        ("Rows with profile/classification", diagnostics.rows_with_profile_classification),
+        ("Rows with price", diagnostics.rows_with_price),
+        ("Rows missing price", diagnostics.rows_missing_price),
+        ("Rows with volume", diagnostics.rows_with_volume),
+        ("Rows missing volume", diagnostics.rows_missing_volume),
+        ("Rows with avg volume", diagnostics.rows_with_avg_volume),
+        ("Rows missing avg volume", diagnostics.rows_missing_avg_volume),
+        ("Rows with fundamentals", diagnostics.rows_with_fundamentals),
+        ("Rows with revenue growth", diagnostics.rows_with_revenue_growth),
+        ("Rows missing revenue growth", diagnostics.rows_missing_revenue_growth),
+        ("Rows with float/shares", diagnostics.rows_with_float_or_shares),
+        ("Rows missing float/shares", diagnostics.rows_missing_float_or_shares),
+        ("Provider calls attempted", diagnostics.provider_calls_attempted),
+        ("Provider rows requested", diagnostics.provider_rows_requested),
+        ("Provider rows returned", diagnostics.provider_rows_returned),
+        ("Provider rows parsed", diagnostics.provider_rows_parsed),
+        ("Provider rows updated", diagnostics.provider_rows_updated),
+        ("Provider cache hits", diagnostics.provider_cache_hits),
+        ("Provider warnings", diagnostics.provider_warnings),
         ("Rows still missing price/volume", diagnostics.rows_still_missing_price_volume),
         ("Rows still missing fundamentals", diagnostics.rows_still_missing_fundamentals),
     )
@@ -2956,6 +3485,13 @@ def _build_market_screener_diagnostics(
         _counter(provider_diagnostics, "rows_blocked_by_provider_plan_rate_auth_limit"),
         sum(1 for status in status_rows if _status_message_mentions_provider_limit(status)),
     )
+    rows_with_profile = sum(1 for record in rows if _record_has_profile_classification(record))
+    rows_with_price = sum(1 for record in rows if record.price is not None)
+    rows_with_volume = sum(1 for record in rows if record.volume is not None)
+    rows_with_avg_volume = sum(1 for record in rows if record.avg_volume is not None)
+    rows_with_fundamentals = sum(1 for record in rows if market_screener_record_has_fundamentals(record))
+    rows_with_revenue_growth = sum(1 for record in rows if record.revenue_growth is not None)
+    rows_with_float_or_shares = sum(1 for record in rows if record.shares_float is not None or record.shares_outstanding is not None)
     return MarketScreenerCoverageDiagnostics(
         total_rows=len(rows),
         rows_with_cik=sum(1 for record in rows if _normalize_cik(record.cik)),
@@ -3028,6 +3564,31 @@ def _build_market_screener_diagnostics(
         provider_unavailable=provider_unavailable,
         unresolved_rows=sum(1 for record in rows if not _normalize_symbol(record.symbol)),
         rows_still_missing_exchange_sector_industry=sum(1 for record in rows if not (record.exchange and record.sector and record.industry)),
+        rows_with_profile_classification=rows_with_profile,
+        rows_with_price=rows_with_price,
+        rows_missing_price=max(0, len(rows) - rows_with_price),
+        rows_with_volume=rows_with_volume,
+        rows_missing_volume=max(0, len(rows) - rows_with_volume),
+        rows_with_avg_volume=rows_with_avg_volume,
+        rows_missing_avg_volume=max(0, len(rows) - rows_with_avg_volume),
+        rows_with_fundamentals=rows_with_fundamentals,
+        rows_with_revenue_growth=rows_with_revenue_growth,
+        rows_missing_revenue_growth=max(0, len(rows) - rows_with_revenue_growth),
+        rows_with_float_or_shares=rows_with_float_or_shares,
+        rows_missing_float_or_shares=max(0, len(rows) - rows_with_float_or_shares),
+        provider_calls_attempted=_counter(provider_diagnostics, "provider_calls_attempted"),
+        provider_rows_requested=_counter(provider_diagnostics, "provider_rows_requested"),
+        provider_rows_returned=_counter(provider_diagnostics, "provider_rows_returned"),
+        provider_rows_parsed=_counter(provider_diagnostics, "provider_rows_parsed"),
+        provider_rows_updated=_counter(provider_diagnostics, "provider_rows_updated"),
+        provider_cache_hits=_counter(provider_diagnostics, "provider_cache_hits")
+        or _counter(provider_diagnostics, "fmp_cache_hits")
+        + _counter(provider_diagnostics, "databento_equities_cache_hits")
+        + _counter(provider_diagnostics, "databento_cme_cache_hits"),
+        provider_warnings=_counter(provider_diagnostics, "provider_warnings")
+        or _counter(provider_diagnostics, "databento_equities_provider_warnings")
+        + _counter(provider_diagnostics, "databento_dataset_mismatch_warnings")
+        + blocked,
         rows_still_missing_price_volume=sum(1 for record in rows if record.price is None or record.volume is None),
         rows_still_missing_fundamentals=sum(1 for record in rows if not market_screener_record_has_fundamentals(record)),
     )
@@ -3360,6 +3921,7 @@ def _record_from_market_data(record: MarketQuoteFundamentalsRecord, *, fetched_a
         signals.append("Mover")
     values = {
         "symbol": _normalize_symbol(record.symbol),
+        "company_name": getattr(record, "company_name", None),
         "cik": _normalize_cik(getattr(record, "cik", None)) or None,
         "exchange": record.exchange,
         "sector": record.sector,
@@ -3380,6 +3942,7 @@ def _record_from_market_data(record: MarketQuoteFundamentalsRecord, *, fetched_a
     record_fetched_at = record.fetched_at or fetched_at
     return MarketScreenerRecord(
         symbol=values["symbol"],
+        company_name=values["company_name"],
         exchange=record.exchange,
         sector=record.sector,
         industry=record.industry,

@@ -14,7 +14,9 @@ from app.analytics.market_screener import (
     AskScreenerProviderConfig,
     OpenAiAskScreenerPlannerClient,
     MARKET_SCREENER_AI_SYSTEM_PROMPT,
+    MARKET_SCREENER_ENRICH_ALL_MARKET_DATA,
     MARKET_SCREENER_SOURCE_MODE,
+    MarketScreenerBackfillConfig,
     MarketScreenerCoverageDiagnostics,
     MarketScreenerRecord,
     MarketScreenerSnapshot,
@@ -26,6 +28,7 @@ from app.analytics.market_screener import (
     build_market_screener_records,
     execute_ask_screener_plan,
     execute_provider_aware_ask_screener_plan,
+    enrich_market_screener_records,
     fetch_market_screener_snapshot,
     filter_market_screener_records,
     market_screener_ai_request_payload,
@@ -934,6 +937,76 @@ def test_fmp_provider_deeper_endpoints_fill_remaining_fundamentals_and_cache() -
     assert third.diagnostics["fmp_cache_hits"] == 0
 
 
+def test_fmp_staged_family_methods_batch_profile_filter_fields_and_report_cache() -> None:
+    def handler(url: str, params: dict[str, object]) -> _FakeFmpResponse:
+        if url.endswith("/profile"):
+            assert params["symbol"] == "ACME,BETA"
+            return _FakeFmpResponse(
+                200,
+                [
+                    {
+                        "symbol": "ACME",
+                        "companyName": "Acme Corp",
+                        "sector": "Technology",
+                        "industry": "Software",
+                        "exchangeShortName": "NASDAQ",
+                        "cik": "1",
+                        "price": 999.0,
+                    },
+                    {
+                        "symbol": "BETA",
+                        "companyName": "Beta Inc",
+                        "sector": "Industrials",
+                        "industry": "Machinery",
+                        "exchangeShortName": "NYSE",
+                        "cik": "2",
+                    },
+                ],
+            )
+        if url.endswith("/batch-quote-short"):
+            return _FakeFmpResponse(200, [{"symbol": "ACME", "price": 12.5, "volume": 1000, "marketCap": 9_999}])
+        if url.endswith("/key-metrics-ttm"):
+            return _FakeFmpResponse(200, [{"symbol": "ACME", "marketCapTTM": 2_500_000_000, "epsTTM": 0.67}])
+        if url.endswith("/ratios-ttm"):
+            return _FakeFmpResponse(200, [{"symbol": "ACME", "priceEarningsRatioTTM": 18.5}])
+        if url.endswith("/income-statement-growth"):
+            return _FakeFmpResponse(200, [{"symbol": "ACME", "growthRevenue": 0.124}])
+        if url.endswith("/shares-float"):
+            return _FakeFmpResponse(200, [{"symbol": "ACME", "floatShares": 120_000_000, "outstandingShares": 150_000_000}])
+        raise AssertionError(url)
+
+    session = _FakeFmpSession(handler)
+    provider = FmpQuoteFundamentalsProvider(api_key="secret", session=session, symbol_limit=2000, cache_ttl_seconds=600, batch_size=100)
+
+    profile = provider.profile_classification(["ACME", "BETA"], max_symbols=2000)
+    profile_again = provider.profile_classification(["ACME", "BETA"], max_symbols=2000)
+    quote = provider.quote_tape(["ACME"], max_symbols=2000)
+    fundamentals = provider.fundamentals(["ACME"], max_symbols=2000)
+
+    acme_profile = next(record for record in profile.records if record.symbol == "ACME")
+    assert acme_profile.company_name == "Acme Corp"
+    assert acme_profile.cik == "0000000001"
+    assert acme_profile.price is None
+    assert profile.diagnostics["provider_calls_attempted"] == 1
+    assert profile.diagnostics["provider_rows_returned"] == 2
+    assert profile_again.diagnostics["fmp_cache_hits"] == 2
+    assert len([call for call in session.calls if str(call["url"]).endswith("/profile")]) == 1
+
+    quote_record = quote.records[0]
+    assert quote_record.price == 12.5
+    assert quote_record.volume == 1000
+    assert quote_record.market_cap is None
+    assert quote.diagnostics["rows_enriched_by_fmp_quote"] == 1
+
+    fundamentals_record = fundamentals.records[0]
+    assert fundamentals_record.market_cap == 2_500_000_000
+    assert fundamentals_record.pe_ratio == 18.5
+    assert fundamentals_record.revenue_growth == 12.4
+    assert fundamentals_record.shares_float == 120_000_000
+    assert fundamentals_record.price is None
+    assert fundamentals.diagnostics["provider_calls_attempted"] == 4
+
+
 def test_fmp_missing_key_is_optional_and_does_not_call_network() -> None:
     session = _FakeFmpSession(lambda _url, _params: _FakeFmpResponse(200, []))
     provider = FmpQuoteFundamentalsProvider(api_key="", session=session)
@@ -1544,6 +1617,124 @@ def test_ask_screener_v2_capped_auto_enrichment_then_filters_locally() -> None:
     assert "symbols requested: 3" in result.summary
     assert "rows updated: 3" in result.summary
     assert "matches found: 2" in result.summary
+
+
+def test_market_screener_staged_enrichment_preserves_good_values_zeroes_and_provenance() -> None:
+    class _StagedProvider:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple[str, ...], int]] = []
+
+        def profile_classification(self, symbols, *, force_refresh: bool = False, max_symbols: int = 50):
+            requested = tuple(symbols)
+            self.calls.append(("profile_classification", requested, max_symbols))
+            return MarketQuoteFundamentalsSnapshot(
+                records=(
+                    MarketQuoteFundamentalsRecord("ACME", company_name="", sector="Technology", industry="Software", exchange="NASDAQ", source="FMP profile"),
+                    MarketQuoteFundamentalsRecord("BETA", company_name="Beta Inc", sector="Industrials", industry="Machinery", exchange="NYSE", source="FMP profile"),
+                ),
+                fetched_at="2026-06-14T10:00:00+00:00",
+                statuses=(MarketDataProviderStatus("FMP profile/classification", "available", "2026-06-14T10:00:00+00:00", "Loaded profiles."),),
+                diagnostics={"provider_calls_attempted": 1, "provider_rows_requested": len(requested), "provider_rows_returned": 2, "provider_rows_parsed": 2},
+            )
+
+        def quote_tape(self, symbols, *, force_refresh: bool = False, max_symbols: int = 50):
+            requested = tuple(symbols)
+            self.calls.append(("quote_tape", requested, max_symbols))
+            return MarketQuoteFundamentalsSnapshot(
+                records=(
+                    MarketQuoteFundamentalsRecord("ACME", price=None, volume=0, avg_volume=0, change_percent=0, source="Databento US Equities"),
+                    MarketQuoteFundamentalsRecord("BETA", price=5.0, volume=100, avg_volume=0, source="Databento US Equities"),
+                ),
+                fetched_at="2026-06-14T10:00:00+00:00",
+                statuses=(MarketDataProviderStatus("Databento US Equities", "available", "2026-06-14T10:00:00+00:00", "Loaded tape."),),
+                diagnostics={"provider_calls_attempted": 1, "provider_rows_requested": len(requested), "provider_rows_returned": 2, "provider_rows_parsed": 2},
+            )
+
+        def fundamentals(self, symbols, *, force_refresh: bool = False, max_symbols: int = 50):
+            requested = tuple(symbols)
+            self.calls.append(("fundamentals", requested, max_symbols))
+            return MarketQuoteFundamentalsSnapshot(
+                records=(
+                    MarketQuoteFundamentalsRecord("BETA", market_cap=0, pe_ratio=0, eps=0, revenue_growth=0, shares_outstanding=0, source="FMP key metrics TTM"),
+                ),
+                fetched_at="2026-06-14T10:00:00+00:00",
+                statuses=(MarketDataProviderStatus("FMP fundamentals", "available", "2026-06-14T10:00:00+00:00", "Loaded fundamentals."),),
+                diagnostics={"provider_calls_attempted": 1, "provider_rows_requested": len(requested), "provider_rows_returned": 1, "provider_rows_parsed": 1},
+            )
+
+    rows = [
+        MarketScreenerRecord("ACME", "Acme Corp", price=10.0),
+        MarketScreenerRecord("BETA"),
+    ]
+
+    result = enrich_market_screener_records(
+        rows,
+        MARKET_SCREENER_ENRICH_ALL_MARKET_DATA,
+        provider=_StagedProvider(),
+        config=MarketScreenerBackfillConfig(profile_limit=10, quote_limit=10, fundamental_limit=10, databento_limit=10),
+    )
+
+    acme = next(record for record in result.records if record.symbol == "ACME")
+    beta = next(record for record in result.records if record.symbol == "BETA")
+    assert acme.company_name == "Acme Corp"
+    assert acme.price == 10.0
+    assert acme.volume == 0
+    assert beta.company_name == "Beta Inc"
+    assert beta.market_cap == 0
+    assert beta.revenue_growth == 0
+    assert beta.shares_outstanding == 0
+    assert result.report.rows_with_volume == 2
+    assert result.report.rows_with_revenue_growth == 1
+    assert result.report.rows_with_float_or_shares == 1
+    assert result.report.provider_calls_attempted == 3
+    assert result.report.rows_updated == 2
+    assert ("volume", "Databento US Equities") in {(row.field, row.source) for row in acme.field_provenance}
+
+
+def test_ask_screener_candidate_set_uses_staged_profile_enrichment_only() -> None:
+    class _ProfileOnlyProvider:
+        def __init__(self) -> None:
+            self.profile_calls: list[tuple[str, ...]] = []
+            self.quote_calls: list[tuple[str, ...]] = []
+
+        def profile_classification(self, symbols, *, force_refresh: bool = False, max_symbols: int = 50):
+            requested = tuple(symbols)
+            self.profile_calls.append(requested)
+            return MarketQuoteFundamentalsSnapshot(
+                records=(
+                    MarketQuoteFundamentalsRecord("ACME", sector="Technology", industry="Software", exchange="NASDAQ", source="FMP profile"),
+                    MarketQuoteFundamentalsRecord("BETA", sector="Healthcare", industry="Devices", exchange="NYSE", source="FMP profile"),
+                ),
+                fetched_at="2026-06-14T10:00:00+00:00",
+                statuses=(MarketDataProviderStatus("FMP profile/classification", "available", "2026-06-14T10:00:00+00:00", "Loaded profiles."),),
+                diagnostics={"provider_calls_attempted": 1, "provider_rows_requested": len(requested), "provider_rows_returned": 2, "provider_rows_parsed": 2},
+            )
+
+        def quote_fundamentals(self, symbols, *, force_refresh: bool = False, max_symbols: int = 50):
+            self.quote_calls.append(tuple(symbols))
+            raise AssertionError("classification candidate-set enrichment should not call quote_fundamentals when profile_classification is available")
+
+    provider = _ProfileOnlyProvider()
+    rows = [MarketScreenerRecord("ACME", "Acme Corp"), MarketScreenerRecord("BETA", "Beta Inc")]
+    plan = validate_ask_screener_plan(
+        {
+            "filters": [{"field": "classification", "operator": "contains", "value": "technology"}],
+            "limit": 10,
+        }
+    )
+
+    result = execute_provider_aware_ask_screener_plan(
+        rows,
+        plan,
+        provider=provider,
+        config=AskScreenerProviderConfig(fmp_configured=True, profile_enrich_limit=10),
+    )
+
+    assert provider.profile_calls == [("ACME", "BETA")]
+    assert provider.quote_calls == []
+    assert [record.symbol for record in result.records] == ["ACME"]
+    assert result.enrichment_status == "provider-enriched"
+    assert "Coverage after ask_screener_candidate_set" in " ".join(result.notes)
 
 
 def test_ask_screener_v2_parser_interprets_requested_phrases() -> None:
