@@ -6,6 +6,9 @@ from types import SimpleNamespace
 
 from app.analytics.earnings_pipeline import EARNINGS_DROP_KIND, RecentEarningsRecord
 from app.analytics.market_screener import (
+    AskScreenerPlanValidationError,
+    AskScreenerPlannerError,
+    OpenAiAskScreenerPlannerClient,
     MARKET_SCREENER_AI_SYSTEM_PROMPT,
     MARKET_SCREENER_SOURCE_MODE,
     MarketScreenerCoverageDiagnostics,
@@ -13,7 +16,9 @@ from app.analytics.market_screener import (
     MarketScreenerSnapshot,
     MarketScreenerSourceStatus,
     OpenAiMarketScreenerClient,
+    ask_screener_planner_request_payload,
     build_market_screener_records,
+    execute_ask_screener_plan,
     fetch_market_screener_snapshot,
     filter_market_screener_records,
     market_screener_ai_request_payload,
@@ -23,7 +28,9 @@ from app.analytics.market_screener import (
     market_screener_is_my_holding,
     market_screener_record_has_quote_fields,
     merge_market_data_records_into_screener_records,
+    parse_ask_screener_fallback,
     sort_market_screener_records,
+    validate_ask_screener_plan,
 )
 from app.data.earnings_calendar import MISSING_API_KEY_MESSAGE, UpcomingEarningsRecord
 from app.data.market_data_provider import CompositeMarketDataProvider, FmpQuoteFundamentalsProvider, LocalMarketDataFileProvider, MarketDataProviderStatus, MarketQuoteFundamentalsRecord, MarketQuoteFundamentalsSnapshot
@@ -1256,6 +1263,196 @@ def test_market_screener_filters_and_sorting_cover_events_risks_windows_and_move
     assert market_screener_data_label(filing_only) == "Filing"
     assert market_screener_data_label(earnings_only) == "Earnings"
     assert market_screener_data_label(beta) == "Universe only"
+
+
+def test_ask_screener_plan_validation_sanitizes_and_rejects_unsupported_fields() -> None:
+    plan = validate_ask_screener_plan(
+        {
+            "intent": "Tech names above $10",
+            "filters": [
+                {"field": "sector", "operator": "contains", "value": "tech"},
+                {"field": "price", "operator": ">", "value": "$10"},
+                {"field": "holding", "operator": "true"},
+            ],
+            "sort": {"field": "price", "direction": "desc"},
+            "limit": "25",
+        }
+    )
+
+    assert plan.intent == "Tech names above $10"
+    assert [row.field for row in plan.filters] == ["sector", "price", "is_my_holding"]
+    assert [row.operator for row in plan.filters] == ["contains", "gt", "is_true"]
+    assert plan.filters[1].value == 10.0
+    assert plan.sort is not None
+    assert plan.sort.field == "price"
+    assert plan.sort.descending is True
+    assert plan.limit == 25
+
+    try:
+        validate_ask_screener_plan({"filters": [{"field": "api_key", "operator": "exists"}]})
+    except AskScreenerPlanValidationError as exc:
+        assert "Unsupported Ask Screener field" in str(exc)
+    else:
+        raise AssertionError("unsupported field should fail validation")
+
+
+def test_ask_screener_executor_handles_numeric_text_boolean_filters() -> None:
+    acme = MarketScreenerRecord(
+        "ACME",
+        "Acme Corp",
+        sector="Technology",
+        price=18.0,
+        revenue_growth=12.0,
+        eps=1.2,
+        signals=("Schwab holding",),
+        sources=("Local app holdings",),
+    )
+    beta = MarketScreenerRecord("BETA", "Beta Inc", sector="Technology", price=8.0, revenue_growth=20.0, eps=-0.4)
+    gamma = MarketScreenerRecord("GAMMA", "Gamma Inc", sector="Industrials", price=30.0, revenue_growth=None, eps=0.8)
+
+    result = execute_ask_screener_plan(
+        [acme, beta, gamma],
+        {
+            "intent": "Held tech above 10",
+            "filters": [
+                {"field": "sector", "operator": "eq", "value": "Technology"},
+                {"field": "price", "operator": "gt", "value": 10},
+                {"field": "is_my_holding", "operator": "is_true"},
+            ],
+        },
+    )
+
+    assert result.records == (acme,)
+    assert result.total_input_rows == 3
+    assert result.total_matched_rows == 1
+    assert "missing values were not inferred" in result.summary
+
+
+def test_ask_screener_executor_sorts_limits_and_summarizes_results() -> None:
+    records = [
+        MarketScreenerRecord("LOW", "Low Volume", volume=100_000),
+        MarketScreenerRecord("HIGH", "High Volume", volume=2_000_000),
+        MarketScreenerRecord("MID", "Mid Volume", volume=500_000),
+    ]
+
+    result = execute_ask_screener_plan(
+        records,
+        {
+            "intent": "Top volume",
+            "filters": [{"field": "volume", "operator": "exists"}],
+            "sort": {"field": "volume", "descending": True},
+            "limit": 2,
+        },
+    )
+
+    assert [record.symbol for record in result.records] == ["HIGH", "MID"]
+    assert result.limited is True
+    assert "matched 3 of 3 row(s)" in result.summary
+    assert "showing first 2" in result.summary
+    assert "sorted by volume descending" in result.summary
+
+
+def test_ask_screener_fallback_parser_covers_core_phrases_and_metadata_filters() -> None:
+    today = date(2026, 6, 16)
+    acme = MarketScreenerRecord(
+        "ACME",
+        "Acme Corp",
+        exchange="Nasdaq",
+        sector="Technology",
+        price=25.0,
+        next_earnings_date="2026-06-25",
+        recent_filing_date="2026-06-10",
+        volume=2_000_000,
+        avg_volume=1_000_000,
+        revenue_growth=15.0,
+        signals=("Schwab holding",),
+        sources=("Local app holdings",),
+    )
+    beta = MarketScreenerRecord("BETA", "Beta Inc", exchange="NYSE", sector="Industrials", price=None)
+    gamma = MarketScreenerRecord("GAMM", "Gamma Inc", exchange="NYSE", sector="Healthcare", price=3.0, eps=-0.2)
+    rows = [acme, beta, gamma]
+
+    cases = (
+        ("show my holdings", ["ACME"]),
+        ("quote enriched", ["ACME", "GAMM"]),
+        ("recent filings", ["ACME"]),
+        ("earnings soon", ["ACME"]),
+        ("high volume", ["ACME"]),
+        ("positive revenue growth", ["ACME"]),
+        ("negative EPS", ["GAMM"]),
+        ("technology sector on nasdaq", ["ACME"]),
+        ("missing price data", ["BETA"]),
+    )
+    for query, expected_symbols in cases:
+        plan = parse_ask_screener_fallback(query, records=rows)
+        assert plan is not None, query
+        result = execute_ask_screener_plan(rows, plan, today=today)
+        assert [record.symbol for record in result.records] == expected_symbols
+
+    clear_plan = parse_ask_screener_fallback("clear filters", records=rows)
+    assert clear_plan is not None
+    assert clear_plan.clear_filters is True
+
+
+def test_ask_screener_llm_malformed_json_fails_gracefully() -> None:
+    fake_openai = _FakeOpenAiClient(answer="not json")
+    client = OpenAiAskScreenerPlannerClient(openai_client=fake_openai, model="gpt-test", timeout_seconds=11)
+
+    try:
+        client.plan("Find tech rows", [MarketScreenerRecord("ACME", "Acme Corp", sector="Technology")])
+    except AskScreenerPlannerError as exc:
+        assert "could not use the model plan" in str(exc)
+        assert "valid JSON" in str(exc)
+    else:
+        raise AssertionError("malformed JSON should fail gracefully")
+
+    call = fake_openai.responses.calls[0]
+    request_payload = json.loads(call["input"][-1]["content"])
+    assert call["model"] == "gpt-test"
+    assert call["store"] is False
+    assert call["timeout"] == 11
+    assert request_payload["snapshot_metadata"]["total_rows"] == 1
+    assert "omitted_row_data" in request_payload["snapshot_metadata"]
+
+
+def test_ask_screener_llm_unsupported_plan_fails_validation() -> None:
+    fake_openai = _FakeOpenAiClient(answer=json.dumps({"filters": [{"field": "secret_token", "operator": "exists"}]}))
+    client = OpenAiAskScreenerPlannerClient(openai_client=fake_openai, model="gpt-test", timeout_seconds=11)
+
+    try:
+        client.plan("Find rows with secret token", [MarketScreenerRecord("ACME", "Acme Corp")])
+    except AskScreenerPlannerError as exc:
+        assert "Unsupported Ask Screener field" in str(exc)
+    else:
+        raise AssertionError("unsupported model plan should fail validation")
+
+
+def test_ask_screener_planner_payload_uses_metadata_and_redacts_secrets() -> None:
+    secret = "sk-testsecret123456"
+    rows = [
+        MarketScreenerRecord(
+            "SECR",
+            "Secret Corp",
+            sector=f"Technology {secret}",
+            exchange="Nasdaq",
+            source_links=(f"https://example.test/?apikey={secret}",),
+            source_excerpt=f"Do not leak {secret}",
+        )
+        for _index in range(5)
+    ]
+
+    payload = ask_screener_planner_request_payload("find technology", rows, timeout_seconds=33)
+    text = json.dumps(payload)
+
+    assert payload["snapshot_metadata"]["total_rows"] == 5
+    assert "Full screener rows" in payload["snapshot_metadata"]["omitted_row_data"]
+    assert "SECR" not in text
+    assert "Secret Corp" not in text
+    assert "source_excerpt" not in text
+    assert "source_links" not in text
+    assert secret not in text
+    assert "sk-[REDACTED]" in text
+    assert "No buy/sell/hold recommendations" in " ".join(payload["safety_rules"])
 
 
 def test_market_screener_ui_values_handle_missing_numeric_fields() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
@@ -30,6 +31,11 @@ LOGGER = logging.getLogger(__name__)
 
 MARKET_SCREENER_REQUEST_CHAR_LIMIT = SYMBOL_CHAT_REQUEST_CHAR_LIMIT
 MARKET_SCREENER_SOURCE_MODE = "market_screener_selected_row"
+ASK_SCREENER_SOURCE_MODE = "market_screener_ask_screener_plan"
+ASK_SCREENER_REQUEST_CHAR_LIMIT = 12_000
+ASK_SCREENER_DEFAULT_LIMIT = 250
+ASK_SCREENER_MAX_LIMIT = 500
+ASK_SCREENER_MAX_FILTERS = 12
 MISSING_TEXT = "--"
 
 MARKET_SCREENER_AI_SYSTEM_PROMPT = """You are a market intelligence analyst inside Portfolio Risk Cockpit.
@@ -66,6 +72,140 @@ MARKET_SCREENER_AI_QUICK_PROMPTS: dict[str, str] = {
         "Summarize risks and generate a focused diligence checklist using only the selected row, "
         "source links, signals, risk flags, and explicitly provided snippets."
     ),
+}
+
+ASK_SCREENER_PLANNER_SYSTEM_PROMPT = """You plan deterministic filters for Portfolio Risk Cockpit's Market Intelligence Screener.
+
+Return one JSON object only. Do not return markdown, prose, recommendations, trade actions, or analysis.
+Use only the allowed filter schema and compact snapshot metadata in the request.
+Do not ask for, include, infer, expose, or log credentials, API keys, account identifiers, source excerpts, source links, or secrets.
+Do not invent missing prices, volume, market cap, valuation, EPS, revenue growth, earnings dates, filings, or market data.
+The app will validate your JSON and execute it locally against the screener rows.
+"""
+
+ASK_SCREENER_TEXT_FIELDS = {
+    "symbol",
+    "company_name",
+    "cik",
+    "exchange",
+    "sector",
+    "industry",
+    "recent_filing_type",
+    "data_label",
+    "signals",
+    "risk_flags",
+    "sources",
+}
+ASK_SCREENER_NUMERIC_FIELDS = {
+    "price",
+    "market_cap",
+    "volume",
+    "avg_volume",
+    "change_percent",
+    "pe_ratio",
+    "eps",
+    "revenue_growth",
+    "shares_float",
+    "shares_outstanding",
+    "portfolio_quantity",
+    "portfolio_average_cost",
+    "portfolio_market_value",
+    "portfolio_unrealized_pnl",
+    "portfolio_weight",
+    "data_completeness_score",
+}
+ASK_SCREENER_DATE_FIELDS = {
+    "next_earnings_date",
+    "recent_filing_date",
+}
+ASK_SCREENER_BOOLEAN_FIELDS = {
+    "is_my_holding",
+    "has_market_data",
+    "has_quote",
+    "has_fundamentals",
+    "has_recent_filing",
+    "has_upcoming_earnings",
+    "high_volume_mover",
+    "missing_price_data",
+    "has_positive_revenue_growth",
+    "has_negative_eps",
+}
+ASK_SCREENER_ALLOWED_FIELDS = frozenset(
+    ASK_SCREENER_TEXT_FIELDS
+    | ASK_SCREENER_NUMERIC_FIELDS
+    | ASK_SCREENER_DATE_FIELDS
+    | ASK_SCREENER_BOOLEAN_FIELDS
+)
+ASK_SCREENER_TEXT_OPERATORS = {"eq", "neq", "contains", "not_contains", "in", "not_in", "exists", "missing"}
+ASK_SCREENER_NUMERIC_OPERATORS = {"eq", "neq", "gt", "gte", "lt", "lte", "exists", "missing"}
+ASK_SCREENER_DATE_OPERATORS = ASK_SCREENER_NUMERIC_OPERATORS | {"within_next_days"}
+ASK_SCREENER_BOOLEAN_OPERATORS = {"eq", "neq", "is_true", "is_false", "exists", "missing"}
+ASK_SCREENER_OPERATOR_ALIASES = {
+    "=": "eq",
+    "==": "eq",
+    "is": "eq",
+    "equals": "eq",
+    "!=": "neq",
+    "<>": "neq",
+    "not": "neq",
+    ">": "gt",
+    "above": "gt",
+    "greater_than": "gt",
+    ">=": "gte",
+    "at_least": "gte",
+    "<": "lt",
+    "below": "lt",
+    "less_than": "lt",
+    "<=": "lte",
+    "at_most": "lte",
+    "present": "exists",
+    "has": "exists",
+    "not_missing": "exists",
+    "absent": "missing",
+    "missing": "missing",
+    "is_true": "is_true",
+    "true": "is_true",
+    "is_false": "is_false",
+    "false": "is_false",
+}
+ASK_SCREENER_FIELD_ALIASES = {
+    "ticker": "symbol",
+    "name": "company_name",
+    "company": "company_name",
+    "rev_growth": "revenue_growth",
+    "revenue_growth_percent": "revenue_growth",
+    "growth": "revenue_growth",
+    "marketcap": "market_cap",
+    "market_capitalization": "market_cap",
+    "avg_vol": "avg_volume",
+    "average_volume": "avg_volume",
+    "change": "change_percent",
+    "percent_change": "change_percent",
+    "pe": "pe_ratio",
+    "p_e": "pe_ratio",
+    "float": "shares_float",
+    "outstanding_shares": "shares_outstanding",
+    "next_earnings": "next_earnings_date",
+    "earnings_date": "next_earnings_date",
+    "recent_filing": "recent_filing_date",
+    "filing_date": "recent_filing_date",
+    "filing_type": "recent_filing_type",
+    "completeness": "data_completeness_score",
+    "data_completeness": "data_completeness_score",
+    "holding": "is_my_holding",
+    "my_holding": "is_my_holding",
+    "holdings": "is_my_holding",
+    "quote_enriched": "has_market_data",
+    "has_price_data": "has_market_data",
+    "fundamentals": "has_fundamentals",
+    "recent_filings": "has_recent_filing",
+    "upcoming_earnings": "has_upcoming_earnings",
+    "earnings_soon": "has_upcoming_earnings",
+    "high_volume": "high_volume_mover",
+    "mover": "high_volume_mover",
+    "missing_price": "missing_price_data",
+    "positive_revenue_growth": "has_positive_revenue_growth",
+    "negative_eps": "has_negative_eps",
 }
 
 EVENT_TYPE_OPTIONS = (
@@ -228,8 +368,59 @@ class MarketScreenerAiResponse:
     source_debug: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class AskScreenerFilter:
+    field: str
+    operator: str
+    value: Any = None
+
+
+@dataclass(frozen=True)
+class AskScreenerSort:
+    field: str
+    descending: bool = False
+
+
+@dataclass(frozen=True)
+class AskScreenerPlan:
+    filters: tuple[AskScreenerFilter, ...] = ()
+    sort: AskScreenerSort | None = None
+    limit: int = ASK_SCREENER_DEFAULT_LIMIT
+    intent: str = ""
+    clear_filters: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "filters": [asdict(row) for row in self.filters],
+            "sort": asdict(self.sort) if self.sort is not None else None,
+            "limit": self.limit,
+            "intent": self.intent,
+            "clear_filters": self.clear_filters,
+        }
+
+
+@dataclass(frozen=True)
+class AskScreenerExecutionResult:
+    plan: AskScreenerPlan
+    records: tuple[MarketScreenerRecord, ...]
+    total_input_rows: int
+    total_matched_rows: int
+    limited: bool
+    summary: str
+    notes: tuple[str, ...] = ()
+    source_mode: str = ASK_SCREENER_SOURCE_MODE
+
+
 class OpenAiMarketScreenerError(RuntimeError):
     """Raised for row-grounded Market Screener OpenAI failures with secrets redacted."""
+
+
+class AskScreenerPlanValidationError(ValueError):
+    """Raised when an Ask Screener filter plan is unsupported or unsafe to execute."""
+
+
+class AskScreenerPlannerError(RuntimeError):
+    """Raised for Ask Screener planner failures with secrets redacted."""
 
 
 class OpenAiMarketScreenerClient:
@@ -334,6 +525,104 @@ class OpenAiMarketScreenerClient:
             source_mode=MARKET_SCREENER_SOURCE_MODE,
             source_debug=tuple(_source_debug_lines(request_payload, diagnostics)),
         )
+
+
+class OpenAiAskScreenerPlannerClient:
+    def __init__(
+        self,
+        *,
+        openai_client: Any | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        timeout_seconds: float | None = None,
+    ) -> None:
+        self._symbol_chat_client = OpenAiSymbolChatClient(
+            openai_client=openai_client,
+            api_key=api_key,
+            model=model,
+            timeout_seconds=timeout_seconds,
+        )
+
+    @property
+    def model(self) -> str:
+        return self._symbol_chat_client.model
+
+    @property
+    def timeout_seconds(self) -> float:
+        return self._symbol_chat_client.timeout_seconds
+
+    def plan(
+        self,
+        question: str,
+        records: Iterable[MarketScreenerRecord],
+        *,
+        progress_callback: ProgressCallback | None = None,
+    ) -> AskScreenerPlan:
+        started_at = time.perf_counter()
+        clean_question = _clean_prompt(question)
+        if not clean_question:
+            raise AskScreenerPlannerError("Enter an Ask Screener question before sending.")
+
+        _notify_progress(progress_callback, "Preparing compact screener schema and snapshot metadata...")
+        request_payload = ask_screener_planner_request_payload(
+            clean_question,
+            records,
+            timeout_seconds=self.timeout_seconds,
+        )
+        payload_text = _serialize_request_payload(request_payload)
+        diagnostics = {
+            "request_payload_chars": len(payload_text),
+            "request_payload_approx_tokens": _approx_token_count(len(payload_text)),
+            "request_payload_char_limit": ASK_SCREENER_REQUEST_CHAR_LIMIT,
+            "openai_timeout_seconds": self.timeout_seconds,
+        }
+        input_messages = [
+            {"role": "system", "content": ASK_SCREENER_PLANNER_SYSTEM_PROMPT},
+            {"role": "user", "content": payload_text},
+        ]
+        try:
+            _notify_progress(progress_callback, f"Calling OpenAI for filter plan (timeout {self.timeout_seconds:g}s)...")
+            openai_started = time.perf_counter()
+            response = self._symbol_chat_client._client().responses.create(
+                model=self.model,
+                input=input_messages,
+                store=False,
+                timeout=self.timeout_seconds,
+            )
+        except Exception as exc:
+            if _is_timeout_exception(exc):
+                message = (
+                    f"OpenAI Ask Screener planner timed out after {self.timeout_seconds:g} seconds. "
+                    "Try a more direct filter request or use one of the local Ask Screener phrases."
+                )
+            else:
+                message = f"OpenAI Ask Screener planner failed: {exc}"
+            message = _redact_api_key(message, self._symbol_chat_client._current_api_key())
+            message = redact_symbol_chat_secrets(message)
+            LOGGER.warning(
+                "Ask Screener planner request failed elapsed=%.3fs error=%s",
+                time.perf_counter() - started_at,
+                message,
+            )
+            raise AskScreenerPlannerError(message) from None
+
+        diagnostics["openai_seconds"] = round(time.perf_counter() - openai_started, 3)
+        diagnostics["total_seconds"] = round(time.perf_counter() - started_at, 3)
+        _notify_progress(progress_callback, "OpenAI filter plan received.")
+        output_text = redact_symbol_chat_secrets(str(_response_output_text(response) or "").strip())
+        try:
+            payload = _parse_json_object(output_text)
+            plan = validate_ask_screener_plan(payload)
+        except Exception as exc:
+            message = redact_symbol_chat_secrets(str(exc))
+            LOGGER.warning(
+                "Ask Screener planner returned malformed or unsupported JSON elapsed=%.3fs diagnostics=%s error=%s",
+                time.perf_counter() - started_at,
+                diagnostics,
+                message,
+            )
+            raise AskScreenerPlannerError(f"Ask Screener could not use the model plan: {message}") from None
+        return plan
 
 
 def fetch_market_screener_snapshot(
@@ -680,6 +969,601 @@ def sort_market_screener_records(
 
 def market_screener_has_ai_signal(record: MarketScreenerRecord) -> bool:
     return bool(record.signals or record.risk_flags or record.next_earnings_date or record.recent_filing_date)
+
+
+def validate_ask_screener_plan(payload: Mapping[str, Any] | AskScreenerPlan) -> AskScreenerPlan:
+    if isinstance(payload, AskScreenerPlan):
+        payload = payload.to_dict()
+    if not isinstance(payload, Mapping):
+        raise AskScreenerPlanValidationError("Ask Screener plan must be a JSON object.")
+
+    clear_filters = _coerce_bool(payload.get("clear_filters"), default=False)
+    raw_filters = payload.get("filters", ())
+    if raw_filters in (None, ""):
+        raw_filters = ()
+    if not isinstance(raw_filters, (list, tuple)):
+        raise AskScreenerPlanValidationError("Ask Screener filters must be a list.")
+    if len(raw_filters) > ASK_SCREENER_MAX_FILTERS:
+        raise AskScreenerPlanValidationError(f"Ask Screener supports at most {ASK_SCREENER_MAX_FILTERS} filters.")
+
+    filters = tuple(_validate_ask_screener_filter(item) for item in raw_filters)
+    sort = _validate_ask_screener_sort(payload.get("sort") or payload.get("order_by"))
+    limit = _validate_ask_screener_limit(payload.get("limit"))
+    intent = _shorten(_clean_prompt(str(payload.get("intent") or payload.get("description") or "")), 180)
+
+    if not clear_filters and not filters and sort is None:
+        raise AskScreenerPlanValidationError("Ask Screener plan must include filters, sorting, or clear_filters=true.")
+    return AskScreenerPlan(
+        filters=filters,
+        sort=sort,
+        limit=limit,
+        intent=intent,
+        clear_filters=clear_filters,
+    )
+
+
+def execute_ask_screener_plan(
+    records: Iterable[MarketScreenerRecord],
+    plan: Mapping[str, Any] | AskScreenerPlan,
+    *,
+    today: date | None = None,
+) -> AskScreenerExecutionResult:
+    validated = validate_ask_screener_plan(plan)
+    today = today or datetime.now().date()
+    rows = list(records)
+    if validated.clear_filters:
+        matched = rows
+    else:
+        matched = [record for record in rows if all(_ask_screener_filter_matches(record, row, today=today) for row in validated.filters)]
+    ordered = _sort_ask_screener_records(matched, validated.sort) if validated.sort is not None else matched
+    effective_limit = len(ordered) if validated.clear_filters else validated.limit
+    limited = len(ordered) > effective_limit
+    result_rows = tuple(ordered[:effective_limit])
+    notes = ("Missing market/fundamental values were not inferred; filters only used loaded Market Screener fields.",)
+    summary = ask_screener_result_summary(
+        validated,
+        total_input_rows=len(rows),
+        total_matched_rows=len(matched),
+        total_output_rows=len(result_rows),
+        limited=limited,
+    )
+    return AskScreenerExecutionResult(
+        plan=validated,
+        records=result_rows,
+        total_input_rows=len(rows),
+        total_matched_rows=len(matched),
+        limited=limited,
+        summary=summary,
+        notes=notes,
+    )
+
+
+def ask_screener_result_summary(
+    plan: AskScreenerPlan,
+    *,
+    total_input_rows: int,
+    total_matched_rows: int,
+    total_output_rows: int,
+    limited: bool,
+) -> str:
+    if plan.clear_filters:
+        return redact_symbol_chat_secrets(f"Ask Screener cleared filters. Showing {total_output_rows} of {total_input_rows} row(s).")
+    label = plan.intent or "Ask Screener"
+    parts = [f"{label}: matched {total_matched_rows} of {total_input_rows} row(s)"]
+    if limited:
+        parts.append(f"showing first {total_output_rows} by the validated plan limit")
+    else:
+        parts.append(f"showing {total_output_rows}")
+    if plan.filters:
+        parts.append("filters: " + "; ".join(_ask_screener_filter_label(row) for row in plan.filters))
+    if plan.sort is not None:
+        direction = "descending" if plan.sort.descending else "ascending"
+        parts.append(f"sorted by {plan.sort.field} {direction}")
+    parts.append("missing values were not inferred")
+    return redact_symbol_chat_secrets(". ".join(parts) + ".")
+
+
+def parse_ask_screener_fallback(
+    question: str,
+    *,
+    records: Iterable[MarketScreenerRecord] = (),
+) -> AskScreenerPlan | None:
+    clean = _clean_prompt(question)
+    lower = clean.lower()
+    if not lower:
+        return None
+    if any(phrase in lower for phrase in ("clear filters", "reset filters", "remove filters", "show all", "clear screener")):
+        return AskScreenerPlan(intent="Clear filters", clear_filters=True, limit=ASK_SCREENER_MAX_LIMIT)
+
+    filters: list[AskScreenerFilter] = []
+    sort: AskScreenerSort | None = None
+    intent = _shorten(clean, 180)
+    limit = _parse_ask_screener_limit(lower) or ASK_SCREENER_DEFAULT_LIMIT
+
+    if any(phrase in lower for phrase in ("my holdings", "my holding", "holdings", "watchlist")):
+        filters.append(AskScreenerFilter("is_my_holding", "is_true"))
+    if any(phrase in lower for phrase in ("quote enriched", "quote-enriched", "quote data", "with quotes", "market data")):
+        filters.append(AskScreenerFilter("has_market_data", "is_true"))
+    if "fundamental" in lower:
+        filters.append(AskScreenerFilter("has_fundamentals", "is_true"))
+    if any(phrase in lower for phrase in ("recent filing", "recent filings", "sec filing", "sec filings", "filings")):
+        filters.append(AskScreenerFilter("has_recent_filing", "is_true"))
+        sort = AskScreenerSort("recent_filing_date", descending=True)
+    if "earning" in lower and any(phrase in lower for phrase in ("soon", "upcoming", "next", "calendar")):
+        filters.append(AskScreenerFilter("next_earnings_date", "within_next_days", 30))
+        sort = AskScreenerSort("next_earnings_date", descending=False)
+    if any(phrase in lower for phrase in ("high volume", "volume mover", "mover", "big volume")):
+        filters.append(AskScreenerFilter("high_volume_mover", "is_true"))
+        sort = AskScreenerSort("volume", descending=True)
+    if any(phrase in lower for phrase in ("missing price", "missing prices", "no price", "without price", "blank price")):
+        filters.append(AskScreenerFilter("price", "missing"))
+    if any(phrase in lower for phrase in ("positive revenue growth", "revenue growth positive", "growing revenue")):
+        filters.append(AskScreenerFilter("revenue_growth", "gt", 0))
+        sort = AskScreenerSort("revenue_growth", descending=True)
+    if any(phrase in lower for phrase in ("negative eps", "eps negative", "loss-making", "loss making")):
+        filters.append(AskScreenerFilter("eps", "lt", 0))
+        sort = AskScreenerSort("eps", descending=False)
+
+    filters.extend(_ask_screener_sector_exchange_filters(lower, records))
+    if not filters and sort is None:
+        return None
+    try:
+        return validate_ask_screener_plan(AskScreenerPlan(filters=tuple(filters), sort=sort, limit=limit, intent=intent))
+    except AskScreenerPlanValidationError:
+        return None
+
+
+def ask_screener_planner_request_payload(
+    question: str,
+    records: Iterable[MarketScreenerRecord],
+    *,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    payload = {
+        "question": _clean_prompt(question),
+        "response_contract": {
+            "json_only": True,
+            "shape": {
+                "intent": "short description",
+                "filters": [{"field": "allowed_field", "operator": "allowed_operator", "value": "operator-specific value"}],
+                "sort": {"field": "allowed_field", "descending": True},
+                "limit": ASK_SCREENER_DEFAULT_LIMIT,
+                "clear_filters": False,
+            },
+        },
+        "schema": _ask_screener_schema_payload(),
+        "snapshot_metadata": ask_screener_snapshot_metadata(records),
+        "safety_rules": [
+            "Return JSON only.",
+            "Do not include source excerpts, source links, API keys, credentials, account identifiers, or secrets.",
+            "Do not request or emit all screener rows.",
+            "Do not infer missing market data; use missing/exists filters when data is absent.",
+            "No buy/sell/hold recommendations and no trade actions.",
+        ],
+        "request_budget": {
+            "request_payload_char_limit": ASK_SCREENER_REQUEST_CHAR_LIMIT,
+            "openai_timeout_seconds": timeout_seconds,
+        },
+    }
+    return _enforce_ask_screener_planner_budget(_json_safe(payload))
+
+
+def ask_screener_snapshot_metadata(records: Iterable[MarketScreenerRecord]) -> dict[str, Any]:
+    rows = list(records)
+    return {
+        "total_rows": len(rows),
+        "categorical_counts": {
+            "sector": _top_counts(record.sector or MISSING_TEXT for record in rows),
+            "exchange": _top_counts(record.exchange or MISSING_TEXT for record in rows),
+            "data_label": _top_counts(market_screener_data_label(record) for record in rows),
+            "signals": _top_counts(signal for record in rows for signal in record.signals),
+            "risk_flags": _top_counts(flag for record in rows for flag in record.risk_flags),
+        },
+        "boolean_counts": {
+            field: {
+                "true": sum(1 for record in rows if bool(_ask_screener_field_value(record, field))),
+                "false": sum(1 for record in rows if not bool(_ask_screener_field_value(record, field))),
+            }
+            for field in sorted(ASK_SCREENER_BOOLEAN_FIELDS)
+        },
+        "numeric_ranges": {
+            field: _numeric_metadata(rows, field)
+            for field in sorted(ASK_SCREENER_NUMERIC_FIELDS)
+        },
+        "date_ranges": {
+            field: _date_metadata(rows, field)
+            for field in sorted(ASK_SCREENER_DATE_FIELDS)
+        },
+        "omitted_row_data": "Full screener rows, symbols, company names, source excerpts, and source links are intentionally not included.",
+    }
+
+
+def _validate_ask_screener_filter(payload: Any) -> AskScreenerFilter:
+    if isinstance(payload, AskScreenerFilter):
+        payload = asdict(payload)
+    if not isinstance(payload, Mapping):
+        raise AskScreenerPlanValidationError("Each Ask Screener filter must be an object.")
+    field = _normalize_ask_screener_field(payload.get("field"))
+    operator = _normalize_ask_screener_operator(payload.get("operator") or payload.get("op"))
+    _validate_ask_screener_operator(field, operator)
+    value = _sanitize_ask_screener_value(field, operator, payload.get("value"))
+    return AskScreenerFilter(field=field, operator=operator, value=value)
+
+
+def _validate_ask_screener_sort(payload: Any) -> AskScreenerSort | None:
+    if payload in (None, "", False):
+        return None
+    if isinstance(payload, AskScreenerSort):
+        payload = asdict(payload)
+    if isinstance(payload, str):
+        return AskScreenerSort(_normalize_ask_screener_field(payload), descending=False)
+    if not isinstance(payload, Mapping):
+        raise AskScreenerPlanValidationError("Ask Screener sort must be an object or field name.")
+    field = _normalize_ask_screener_field(payload.get("field"))
+    raw_direction = str(payload.get("direction") or "").strip().lower()
+    descending = _coerce_bool(payload.get("descending"), default=raw_direction in {"desc", "descending", "down"})
+    return AskScreenerSort(field=field, descending=descending)
+
+
+def _validate_ask_screener_limit(value: Any) -> int:
+    if value in (None, ""):
+        return ASK_SCREENER_DEFAULT_LIMIT
+    try:
+        parsed = int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        raise AskScreenerPlanValidationError("Ask Screener limit must be a number.") from None
+    return max(1, min(ASK_SCREENER_MAX_LIMIT, parsed))
+
+
+def _normalize_ask_screener_field(value: Any) -> str:
+    field = str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+    field = ASK_SCREENER_FIELD_ALIASES.get(field, field)
+    if field not in ASK_SCREENER_ALLOWED_FIELDS:
+        raise AskScreenerPlanValidationError(f"Unsupported Ask Screener field: {field or '(blank)'}.")
+    return field
+
+
+def _normalize_ask_screener_operator(value: Any) -> str:
+    operator = str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+    operator = ASK_SCREENER_OPERATOR_ALIASES.get(operator, operator)
+    if not operator:
+        raise AskScreenerPlanValidationError("Ask Screener filter operator is required.")
+    return operator
+
+
+def _validate_ask_screener_operator(field: str, operator: str) -> None:
+    allowed = _allowed_ask_screener_operators(field)
+    if operator not in allowed:
+        raise AskScreenerPlanValidationError(f"Unsupported operator {operator!r} for Ask Screener field {field!r}.")
+
+
+def _allowed_ask_screener_operators(field: str) -> set[str]:
+    if field in ASK_SCREENER_TEXT_FIELDS:
+        return ASK_SCREENER_TEXT_OPERATORS
+    if field in ASK_SCREENER_NUMERIC_FIELDS:
+        return ASK_SCREENER_NUMERIC_OPERATORS
+    if field in ASK_SCREENER_DATE_FIELDS:
+        return ASK_SCREENER_DATE_OPERATORS
+    if field in ASK_SCREENER_BOOLEAN_FIELDS:
+        return ASK_SCREENER_BOOLEAN_OPERATORS
+    return set()
+
+
+def _sanitize_ask_screener_value(field: str, operator: str, value: Any) -> Any:
+    if operator in {"exists", "missing", "is_true", "is_false"}:
+        return None
+    if operator in {"in", "not_in"}:
+        if not isinstance(value, (list, tuple, set)):
+            value = [value]
+        values = [_sanitize_ask_screener_scalar_value(field, operator, item) for item in value]
+        return tuple(item for item in values[:20] if item not in (None, ""))
+    return _sanitize_ask_screener_scalar_value(field, operator, value)
+
+
+def _sanitize_ask_screener_scalar_value(field: str, operator: str, value: Any) -> Any:
+    if field in ASK_SCREENER_NUMERIC_FIELDS:
+        number = _float_or_none(value)
+        if number is None:
+            raise AskScreenerPlanValidationError(f"Ask Screener field {field!r} requires a numeric value.")
+        return number
+    if field in ASK_SCREENER_DATE_FIELDS:
+        if operator == "within_next_days":
+            number = _float_or_none(value)
+            if number is None:
+                raise AskScreenerPlanValidationError("within_next_days requires a numeric day count.")
+            return max(0, min(365, int(number)))
+        text = _clean_prompt(str(value or ""))[:40]
+        if _parse_date(text) is None:
+            raise AskScreenerPlanValidationError(f"Ask Screener field {field!r} requires a YYYY-MM-DD date value.")
+        return text[:10]
+    if field in ASK_SCREENER_BOOLEAN_FIELDS:
+        parsed = _bool_or_none(value)
+        if parsed is None:
+            raise AskScreenerPlanValidationError(f"Ask Screener field {field!r} requires a boolean value.")
+        return parsed
+    return _shorten(_clean_prompt(str(value or "")), 120)
+
+
+def _ask_screener_filter_matches(record: MarketScreenerRecord, filter_row: AskScreenerFilter, *, today: date) -> bool:
+    value = _ask_screener_field_value(record, filter_row.field)
+    operator = filter_row.operator
+    if operator == "exists":
+        return _has_value(value)
+    if operator == "missing":
+        return not _has_value(value)
+    if operator == "is_true":
+        return bool(value)
+    if operator == "is_false":
+        return not bool(value)
+    if filter_row.field in ASK_SCREENER_NUMERIC_FIELDS:
+        return _numeric_filter_matches(value, operator, filter_row.value)
+    if filter_row.field in ASK_SCREENER_DATE_FIELDS:
+        return _date_filter_matches(value, operator, filter_row.value, today=today)
+    if filter_row.field in ASK_SCREENER_BOOLEAN_FIELDS:
+        return _boolean_filter_matches(value, operator, filter_row.value)
+    return _text_filter_matches(value, operator, filter_row.value)
+
+
+def _ask_screener_field_value(record: MarketScreenerRecord, field: str) -> Any:
+    if field == "data_label":
+        return market_screener_data_label(record)
+    if field == "data_completeness_score":
+        return market_screener_data_completeness_score(record)
+    if field == "is_my_holding":
+        return market_screener_is_my_holding(record)
+    if field == "has_market_data":
+        return market_screener_record_has_market_data(record)
+    if field == "has_quote":
+        return market_screener_record_has_quote_fields(record)
+    if field == "has_fundamentals":
+        return market_screener_record_has_fundamentals(record)
+    if field == "has_recent_filing":
+        return bool(record.recent_filing_date)
+    if field == "has_upcoming_earnings":
+        return bool(record.next_earnings_date)
+    if field == "high_volume_mover":
+        return _event_type_matches(record, "High volume / mover")
+    if field == "missing_price_data":
+        return record.price is None
+    if field == "has_positive_revenue_growth":
+        return record.revenue_growth is not None and record.revenue_growth > 0
+    if field == "has_negative_eps":
+        return record.eps is not None and record.eps < 0
+    return getattr(record, field, None)
+
+
+def _numeric_filter_matches(value: Any, operator: str, target: Any) -> bool:
+    number = _float_or_none(value)
+    target_number = _float_or_none(target)
+    if number is None or target_number is None:
+        return False
+    if operator == "eq":
+        return number == target_number
+    if operator == "neq":
+        return number != target_number
+    if operator == "gt":
+        return number > target_number
+    if operator == "gte":
+        return number >= target_number
+    if operator == "lt":
+        return number < target_number
+    if operator == "lte":
+        return number <= target_number
+    return False
+
+
+def _date_filter_matches(value: Any, operator: str, target: Any, *, today: date) -> bool:
+    event_date = _parse_date(str(value or ""))
+    if event_date is None:
+        return False
+    if operator == "within_next_days":
+        days = int(target or 0)
+        delta = (event_date - today).days
+        return 0 <= delta <= days
+    target_date = _parse_date(str(target or ""))
+    if target_date is None:
+        return False
+    if operator == "eq":
+        return event_date == target_date
+    if operator == "neq":
+        return event_date != target_date
+    if operator == "gt":
+        return event_date > target_date
+    if operator == "gte":
+        return event_date >= target_date
+    if operator == "lt":
+        return event_date < target_date
+    if operator == "lte":
+        return event_date <= target_date
+    return False
+
+
+def _boolean_filter_matches(value: Any, operator: str, target: Any) -> bool:
+    actual = bool(value)
+    expected = bool(target)
+    if operator == "eq":
+        return actual == expected
+    if operator == "neq":
+        return actual != expected
+    return False
+
+
+def _text_filter_matches(value: Any, operator: str, target: Any) -> bool:
+    values = _ask_screener_text_values(value)
+    targets = tuple(_ask_screener_text_values(target if isinstance(target, (list, tuple, set)) else (target,)))
+    if not targets:
+        return False
+    if operator == "eq":
+        return any(value_text == targets[0] for value_text in values)
+    if operator == "neq":
+        return all(value_text != targets[0] for value_text in values)
+    if operator == "contains":
+        return any(targets[0] in value_text for value_text in values)
+    if operator == "not_contains":
+        return all(targets[0] not in value_text for value_text in values)
+    if operator == "in":
+        return any(value_text in targets for value_text in values)
+    if operator == "not_in":
+        return all(value_text not in targets for value_text in values)
+    return False
+
+
+def _ask_screener_text_values(value: Any) -> tuple[str, ...]:
+    if isinstance(value, (list, tuple, set)):
+        return tuple(_clean_prompt(str(item or "")).lower() for item in value if _clean_prompt(str(item or "")))
+    text = _clean_prompt(str(value or "")).lower()
+    return (text,) if text else ()
+
+
+def _sort_ask_screener_records(records: Iterable[MarketScreenerRecord], sort: AskScreenerSort | None) -> list[MarketScreenerRecord]:
+    rows = list(records)
+    if sort is None:
+        return rows
+
+    def sort_value(record: MarketScreenerRecord) -> Any:
+        value = _ask_screener_field_value(record, sort.field)
+        if isinstance(value, (list, tuple, set)):
+            return len(value)
+        if sort.field in ASK_SCREENER_TEXT_FIELDS:
+            text_values = _ask_screener_text_values(value)
+            return text_values[0] if text_values else None
+        if sort.field in ASK_SCREENER_DATE_FIELDS:
+            return _parse_date(str(value or ""))
+        return value
+
+    present = [record for record in rows if _has_value(sort_value(record))]
+    missing = [record for record in rows if not _has_value(sort_value(record))]
+    present.sort(key=sort_value, reverse=sort.descending)
+    return present + missing
+
+
+def _ask_screener_filter_label(filter_row: AskScreenerFilter) -> str:
+    if filter_row.operator in {"exists", "missing", "is_true", "is_false"}:
+        return f"{filter_row.field} {filter_row.operator}"
+    return f"{filter_row.field} {filter_row.operator} {filter_row.value}"
+
+
+def _parse_ask_screener_limit(lower: str) -> int | None:
+    match = re.search(r"\b(?:top|first|limit|show)\s+(\d{1,4})\b", lower)
+    if not match:
+        return None
+    return _validate_ask_screener_limit(match.group(1))
+
+
+def _ask_screener_sector_exchange_filters(lower: str, records: Iterable[MarketScreenerRecord]) -> tuple[AskScreenerFilter, ...]:
+    rows = list(records)
+    filters: list[AskScreenerFilter] = []
+    sectors = _metadata_labels(record.sector for record in rows)
+    exchanges = _metadata_labels(record.exchange for record in rows)
+    common_exchanges = {"nasdaq": "NASDAQ", "nyse": "NYSE", "amex": "AMEX", "arca": "NYSE Arca"}
+    for label in sorted(sectors, key=len, reverse=True):
+        label_lower = label.lower()
+        if label_lower != MISSING_TEXT.lower() and (f"sector {label_lower}" in lower or f"{label_lower} sector" in lower or f"in {label_lower}" in lower):
+            filters.append(AskScreenerFilter("sector", "eq", label))
+            break
+    for label in sorted((*exchanges, *common_exchanges.values()), key=len, reverse=True):
+        label_lower = label.lower()
+        alias_hit = any(alias in lower for alias, value in common_exchanges.items() if value.lower() == label_lower)
+        if label_lower != MISSING_TEXT.lower() and (alias_hit or f"exchange {label_lower}" in lower or f"on {label_lower}" in lower):
+            filters.append(AskScreenerFilter("exchange", "eq", label))
+            break
+    return tuple(filters)
+
+
+def _metadata_labels(values: Iterable[Any]) -> tuple[str, ...]:
+    labels = []
+    for value in values:
+        text = _clean_prompt(str(value or ""))
+        if text:
+            labels.append(text)
+    return tuple(dict.fromkeys(labels))
+
+
+def _ask_screener_schema_payload() -> dict[str, Any]:
+    return {
+        "fields": {
+            "text": sorted(ASK_SCREENER_TEXT_FIELDS),
+            "numeric": sorted(ASK_SCREENER_NUMERIC_FIELDS),
+            "date": sorted(ASK_SCREENER_DATE_FIELDS),
+            "boolean": sorted(ASK_SCREENER_BOOLEAN_FIELDS),
+        },
+        "operators": {
+            "text": sorted(ASK_SCREENER_TEXT_OPERATORS),
+            "numeric": sorted(ASK_SCREENER_NUMERIC_OPERATORS),
+            "date": sorted(ASK_SCREENER_DATE_OPERATORS),
+            "boolean": sorted(ASK_SCREENER_BOOLEAN_OPERATORS),
+        },
+        "max_filters": ASK_SCREENER_MAX_FILTERS,
+        "max_limit": ASK_SCREENER_MAX_LIMIT,
+    }
+
+
+def _top_counts(values: Iterable[Any], *, limit: int = 30) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for value in values:
+        text = _shorten(_clean_prompt(str(value or "")), 80)
+        if not text:
+            continue
+        counts[text] = counts.get(text, 0) + 1
+    return [
+        {"value": label, "count": count}
+        for label, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    ]
+
+
+def _numeric_metadata(records: Iterable[MarketScreenerRecord], field: str) -> dict[str, Any]:
+    rows = list(records)
+    values = [_float_or_none(_ask_screener_field_value(record, field)) for record in rows]
+    present = [value for value in values if value is not None]
+    payload: dict[str, Any] = {"available_count": len(present), "missing_count": len(rows) - len(present)}
+    if present:
+        payload["min"] = min(present)
+        payload["max"] = max(present)
+    return payload
+
+
+def _date_metadata(records: Iterable[MarketScreenerRecord], field: str) -> dict[str, Any]:
+    rows = list(records)
+    values = [_parse_date(str(_ask_screener_field_value(record, field) or "")) for record in rows]
+    present = [value for value in values if value is not None]
+    payload: dict[str, Any] = {"available_count": len(present), "missing_count": len(rows) - len(present)}
+    if present:
+        payload["min"] = min(present).isoformat()
+        payload["max"] = max(present).isoformat()
+    return payload
+
+
+def _enforce_ask_screener_planner_budget(payload: dict[str, Any]) -> dict[str, Any]:
+    if len(_serialize_request_payload(payload)) <= ASK_SCREENER_REQUEST_CHAR_LIMIT:
+        return payload
+    metadata = payload.get("snapshot_metadata")
+    if isinstance(metadata, dict):
+        categorical = metadata.get("categorical_counts")
+        if isinstance(categorical, dict):
+            for key, rows in list(categorical.items()):
+                if isinstance(rows, list):
+                    categorical[key] = rows[:12]
+        payload["snapshot_metadata"] = metadata
+    if len(_serialize_request_payload(payload)) > ASK_SCREENER_REQUEST_CHAR_LIMIT and isinstance(metadata, dict):
+        metadata["numeric_ranges"] = {}
+        metadata["date_ranges"] = {}
+    payload["request_budget"]["budget_trimmed"] = True
+    payload["request_budget"]["final_payload_chars"] = len(_serialize_request_payload(payload))
+    return payload
+
+
+def _parse_json_object(value: str) -> Mapping[str, Any]:
+    text = str(value or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text).strip()
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise AskScreenerPlanValidationError(f"Model did not return valid JSON: {exc.msg}.") from None
+    if not isinstance(payload, Mapping):
+        raise AskScreenerPlanValidationError("Model JSON must be an object.")
+    return payload
 
 
 def market_screener_ai_request_payload(
@@ -2446,6 +3330,33 @@ def _is_secret_key(key: str) -> bool:
 
 def _approx_token_count(chars: int) -> int:
     return max(1, int(chars / SYMBOL_CHAT_APPROX_CHARS_PER_TOKEN))
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(str(value).replace("$", "").replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value in (None, ""):
+        return None
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return None
+
+
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    parsed = _bool_or_none(value)
+    return default if parsed is None else parsed
 
 
 def _prefer_number(primary: float | None, fallback: float | None) -> float | None:
