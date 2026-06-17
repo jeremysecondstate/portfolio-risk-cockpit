@@ -437,9 +437,16 @@ class FmpQuoteFundamentalsProvider:
         status = "available" if records else "empty"
         if warnings:
             status = "partial" if records else "warning"
+        no_usable_rows = max(0, len(requested) - len(records))
+        paid_mode_text = (
+            "paid/high-cap FMP mode is active"
+            if self.symbol_limit >= DEFAULT_FMP_MARKET_DATA_SYMBOL_LIMIT
+            else "bounded FMP mode is active"
+        )
         message = (
-            f"FMP enrichment: {len(records)} rows updated; {skipped_limited} skipped/limited; cache used for {cache_hits}. "
-            f"FMP cap is {self.symbol_limit} symbol(s) via {FMP_MARKET_DATA_SYMBOL_LIMIT_ENV}; page/selected-row enrichment keeps free-plan usage bounded."
+            f"FMP enrichment: {len(records)} rows updated; quote rows {quote_rows}; profile rows {profile_rows}; "
+            f"profile-by-CIK rows 0; cache used for {cache_hits}; {skipped_limited} skipped/limited; {no_usable_rows} no usable data. "
+            f"FMP cap is {self.symbol_limit} symbol(s) via {FMP_MARKET_DATA_SYMBOL_LIMIT_ENV}; {paid_mode_text}."
         )
         if warnings:
             message += f" Provider warning: {_short_warning(warnings[0], self.api_key)} Schwab/local providers remain available."
@@ -452,9 +459,10 @@ class FmpQuoteFundamentalsProvider:
             diagnostics={
                 "rows_enriched_by_fmp_quote": quote_rows,
                 "rows_enriched_by_fmp_profile": profile_rows,
+                "fmp_cache_hits": cache_hits,
                 "rows_blocked_by_provider_plan_rate_auth_limit": 1 if any(_is_fmp_limit_warning(warning) for warning in warnings) else 0,
                 "rows_skipped_by_configured_symbol_cap": skipped_limited,
-                "rows_provider_returned_no_usable_data": max(0, len(requested) - len(records)),
+                "rows_provider_returned_no_usable_data": no_usable_rows,
             },
         )
 
@@ -532,8 +540,9 @@ class FmpQuoteFundamentalsProvider:
         status = "available" if records else "empty"
         if warnings:
             status = "partial" if records else "warning"
+        no_usable_rows = max(0, len(requested) - len(records))
         message = (
-            f"FMP profile-by-CIK: {len(records)} rows updated; {skipped_limited} skipped/limited; cache used for {cache_hits}. "
+            f"FMP profile-by-CIK: {len(records)} rows updated; cache used for {cache_hits}; {skipped_limited} skipped/limited; {no_usable_rows} no usable data. "
             "CIK lookups are only requested for capped filing rows that still need trusted identity/profile data."
         )
         if warnings:
@@ -546,9 +555,10 @@ class FmpQuoteFundamentalsProvider:
             errors=tuple(_redact_fmp_secret(warning, self.api_key) for warning in warnings[:4]),
             diagnostics={
                 "rows_enriched_by_fmp_profile_by_cik": len(records),
+                "fmp_cache_hits": cache_hits,
                 "rows_blocked_by_provider_plan_rate_auth_limit": 1 if any(_is_fmp_limit_warning(warning) for warning in warnings) else 0,
                 "rows_skipped_by_configured_symbol_cap": skipped_limited,
-                "rows_provider_returned_no_usable_data": max(0, len(requested) - len(records)),
+                "rows_provider_returned_no_usable_data": no_usable_rows,
             },
         )
 
@@ -982,6 +992,9 @@ def configured_market_data_provider(
     providers: list[MarketQuoteFundamentalsProvider] = [LocalMarketDataFileProvider(local_path)]
     if schwab_session is not None:
         providers.append(SchwabQuoteFundamentalsProvider(schwab_session))
+    from app.data.databento_provider import configured_databento_equities_provider
+
+    providers.append(configured_databento_equities_provider())
     providers.append(FmpQuoteFundamentalsProvider())
     if include_fallback_provider:
         fallback_provider = configured_fallback_market_data_provider()

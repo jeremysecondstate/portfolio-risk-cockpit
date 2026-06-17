@@ -39,6 +39,7 @@ Do not invent missing prices, volume, market cap, valuation, EPS, revenue growth
 When a field is absent, say "Not available in the selected Market Intelligence Screener row."
 Treat signals and risk flags as deterministic app/provider observations, not audited conclusions.
 Treat source snippets as selected-row excerpts only when they are provided.
+Treat cross-asset Databento CME/futures/options context, when present, as macro context only; never use it to fill selected-equity market-data or fundamental fields.
 
 Keep the response research-only. Do not place trades. Do not tell the user to buy, sell, or hold.
 You may explain what looks interesting, what is uncertain, and what diligence should come next.
@@ -110,10 +111,16 @@ class MarketScreenerCoverageDiagnostics:
     rows_resolved_by_sec_submissions_metadata: int = 0
     rows_enriched_by_local_file: int = 0
     rows_enriched_by_schwab_quote: int = 0
+    rows_enriched_by_databento_equities: int = 0
     rows_enriched_by_fmp_quote: int = 0
     rows_enriched_by_fmp_profile: int = 0
     rows_enriched_by_fmp_profile_by_cik: int = 0
     rows_enriched_by_fallback_provider: int = 0
+    fmp_cache_hits: int = 0
+    databento_equities_cache_hits: int = 0
+    databento_cme_context_rows: int = 0
+    databento_cme_cache_hits: int = 0
+    databento_dataset_mismatch_warnings: int = 0
     rows_blocked_by_provider_plan_rate_auth_limit: int = 0
     rows_skipped_by_configured_symbol_cap: int = 0
     rows_provider_returned_no_usable_data: int = 0
@@ -406,6 +413,13 @@ def fetch_market_screener_snapshot(
         market_data_symbol_limit,
         provider_diagnostics,
     )
+    _load_databento_cme_context_statuses(
+        statuses,
+        errors,
+        fetched_at,
+        force_refresh,
+        provider_diagnostics,
+    )
     all_market_data = (*market_data, *cik_market_data)
     provider_diagnostics["rows_skipped_by_configured_symbol_cap"] = provider_diagnostics.get("rows_skipped_by_configured_symbol_cap", 0) + max(
         0,
@@ -666,6 +680,7 @@ def market_screener_ai_request_payload(
     prompt: str,
     *,
     source_snippets: Iterable[str] | None = None,
+    cross_asset_context: Any | None = None,
     timeout_seconds: float,
 ) -> dict[str, Any]:
     selected = market_screener_record_context(record)
@@ -681,6 +696,7 @@ def market_screener_ai_request_payload(
             "Treat signals and risk flags as deterministic app/provider observations, not audited conclusions.",
             "Use source_links as pointers only; do not claim to have opened them unless source_snippets contain text.",
             "Use field_provenance to label where selected-row fields came from; do not use it to infer missing values.",
+            "Use cross_asset_context only as separate CME/futures/options or macro context when it is explicitly present; do not treat it as selected-equity facts.",
             "Keep the answer research-only. Do not place trades, submit orders, automate broker actions, or tell the user to buy, sell, or hold.",
             "Separate confirmed selected-row facts from assumptions, caveats, missing data, and diligence questions.",
         ],
@@ -689,7 +705,30 @@ def market_screener_ai_request_payload(
             "openai_timeout_seconds": timeout_seconds,
         },
     }
+    if cross_asset_context:
+        payload["cross_asset_context"] = _cross_asset_context_payload(cross_asset_context)
     return _enforce_request_payload_budget(payload)
+
+
+def _cross_asset_context_payload(value: Any) -> Any:
+    if hasattr(value, "records") and not isinstance(value, Mapping):
+        records = getattr(value, "records", ()) or ()
+        payload = {
+            "scope": "cross_asset_context_only",
+            "use_policy": "CME/futures/options or macro context only; not selected-equity market data.",
+            "records": [_json_safe(_object_to_mapping(record)) for record in records],
+        }
+        statuses = getattr(value, "statuses", ()) or ()
+        if statuses:
+            payload["statuses"] = [_json_safe(_object_to_mapping(status)) for status in statuses]
+        return _redact_context_payload(payload)
+    if isinstance(value, Mapping):
+        payload = dict(value)
+    elif isinstance(value, (list, tuple)):
+        payload = list(value)
+    else:
+        payload = _object_to_mapping(value)
+    return _redact_context_payload(_json_safe(payload))
 
 
 def market_screener_record_context(record: MarketScreenerRecord) -> dict[str, Any]:
@@ -764,9 +803,9 @@ def market_screener_record_missing_reason_lines(record: MarketScreenerRecord) ->
         reasons.append(f"missing identity/profile fields: {missing}; requires SEC submissions, local file, FMP profile/profile-by-CIK, or configured fallback data.")
     if record.price is None or record.volume is None:
         missing = ", ".join(field for field, value in (("price", record.price), ("volume", record.volume)) if value is None)
-        reasons.append(f"missing price/volume fields: {missing}; requires Schwab quote, local file, FMP quote, or configured fallback quote data.")
+        reasons.append(f"missing price/volume fields: {missing}; requires Schwab quote, Databento US Equities, local file, FMP quote, or configured fallback quote data.")
     if not market_screener_record_has_fundamentals(record):
-        reasons.append("missing fundamentals: market cap, P/E, EPS, and revenue growth are absent unless a local file, FMP profile/quote, SEC filing parse, or configured fallback supplies them.")
+        reasons.append("missing fundamentals: market cap, P/E, EPS, and revenue growth are absent unless a local file, FMP profile/quote, SEC filing parse, or configured fallback supplies them; Databento CME context is not used for selected-equity fundamentals.")
     return reasons
 
 
@@ -1109,6 +1148,45 @@ def _load_market_data_records_by_cik(
     return tuple(snapshot.records)
 
 
+def _load_databento_cme_context_statuses(
+    statuses: list[MarketScreenerSourceStatus],
+    errors: list[str],
+    fetched_at: str,
+    force_refresh: bool,
+    provider_diagnostics: dict[str, int],
+) -> None:
+    try:
+        from app.data.databento_provider import configured_databento_cme_context_provider
+    except Exception as exc:
+        statuses.append(
+            MarketScreenerSourceStatus(
+                "Databento CME context",
+                "unavailable",
+                fetched_at,
+                f"Databento CME context provider could not be loaded: {exc}",
+            )
+        )
+        provider_diagnostics["provider_unavailable"] = provider_diagnostics.get("provider_unavailable", 0) + 1
+        return
+    try:
+        snapshot = configured_databento_cme_context_provider().context(force_refresh=force_refresh)
+    except Exception as exc:
+        errors.append(f"Databento CME context: {exc}")
+        statuses.append(
+            MarketScreenerSourceStatus(
+                "Databento CME context",
+                "error",
+                fetched_at,
+                f"Databento CME context failed: {exc}",
+            )
+        )
+        provider_diagnostics["provider_unavailable"] = provider_diagnostics.get("provider_unavailable", 0) + 1
+        return
+    statuses.extend(MarketScreenerSourceStatus(status.source, status.status, status.fetched_at, status.message) for status in snapshot.statuses)
+    errors.extend(snapshot.errors)
+    _merge_counter_mapping(provider_diagnostics, snapshot.diagnostics)
+
+
 def _market_data_coverage_status(
     records: Iterable[MarketScreenerRecord],
     market_data_records: Iterable[MarketQuoteFundamentalsRecord],
@@ -1171,6 +1249,10 @@ def market_screener_diagnostics_summary(diagnostics: MarketScreenerCoverageDiagn
         parts.insert(2, f"local {diagnostics.rows_enriched_by_local_file}")
     if diagnostics.rows_enriched_by_fmp_quote:
         parts.insert(-2, f"FMP quotes {diagnostics.rows_enriched_by_fmp_quote}")
+    if diagnostics.rows_enriched_by_databento_equities:
+        parts.insert(-2, f"Databento equities {diagnostics.rows_enriched_by_databento_equities}")
+    if diagnostics.databento_cme_context_rows:
+        parts.insert(-2, f"Databento CME context {diagnostics.databento_cme_context_rows}")
     if diagnostics.rows_enriched_by_fallback_provider:
         parts.insert(-2, f"fallback {diagnostics.rows_enriched_by_fallback_provider}")
     if diagnostics.rows_blocked_by_provider_plan_rate_auth_limit:
@@ -1189,10 +1271,16 @@ def market_screener_diagnostics_detail_lines(diagnostics: MarketScreenerCoverage
         ("Rows resolved by SEC submissions metadata", diagnostics.rows_resolved_by_sec_submissions_metadata),
         ("Rows enriched by local file", diagnostics.rows_enriched_by_local_file),
         ("Rows enriched by Schwab quote", diagnostics.rows_enriched_by_schwab_quote),
+        ("Rows enriched by Databento US Equities", diagnostics.rows_enriched_by_databento_equities),
         ("Rows enriched by FMP quote", diagnostics.rows_enriched_by_fmp_quote),
         ("Rows enriched by FMP profile", diagnostics.rows_enriched_by_fmp_profile),
         ("Rows enriched by FMP profile-by-CIK", diagnostics.rows_enriched_by_fmp_profile_by_cik),
         ("Rows enriched by fallback provider", diagnostics.rows_enriched_by_fallback_provider),
+        ("FMP cache hits", diagnostics.fmp_cache_hits),
+        ("Databento US Equities cache hits", diagnostics.databento_equities_cache_hits),
+        ("Databento CME context rows", diagnostics.databento_cme_context_rows),
+        ("Databento CME cache hits", diagnostics.databento_cme_cache_hits),
+        ("Databento dataset mismatch warnings", diagnostics.databento_dataset_mismatch_warnings),
         ("Rows blocked by provider plan/rate/auth limit", diagnostics.rows_blocked_by_provider_plan_rate_auth_limit),
         ("Provider unavailable count", diagnostics.provider_unavailable),
         ("Rows skipped by configured symbol cap", diagnostics.rows_skipped_by_configured_symbol_cap),
@@ -1243,6 +1331,10 @@ def _build_market_screener_diagnostics(
             _counter(provider_diagnostics, "rows_enriched_by_schwab_quote"),
             _count_rows_with_source(rows, "Schwab quote"),
         ),
+        rows_enriched_by_databento_equities=max(
+            _counter(provider_diagnostics, "rows_enriched_by_databento_equities"),
+            _count_rows_with_source(rows, "Databento US Equities"),
+        ),
         rows_enriched_by_fmp_quote=max(
             _counter(provider_diagnostics, "rows_enriched_by_fmp_quote"),
             _count_rows_with_source(rows, "FMP quote"),
@@ -1259,6 +1351,11 @@ def _build_market_screener_diagnostics(
             _counter(provider_diagnostics, "rows_enriched_by_fallback_provider"),
             _count_rows_with_source(rows, "Fallback Alpha Vantage"),
         ),
+        fmp_cache_hits=_counter(provider_diagnostics, "fmp_cache_hits"),
+        databento_equities_cache_hits=_counter(provider_diagnostics, "databento_equities_cache_hits"),
+        databento_cme_context_rows=_counter(provider_diagnostics, "databento_cme_context_rows"),
+        databento_cme_cache_hits=_counter(provider_diagnostics, "databento_cme_cache_hits"),
+        databento_dataset_mismatch_warnings=_counter(provider_diagnostics, "databento_dataset_mismatch_warnings"),
         rows_blocked_by_provider_plan_rate_auth_limit=blocked,
         rows_skipped_by_configured_symbol_cap=_counter(provider_diagnostics, "rows_skipped_by_configured_symbol_cap"),
         rows_provider_returned_no_usable_data=_counter(provider_diagnostics, "rows_provider_returned_no_usable_data"),
@@ -1283,7 +1380,7 @@ def _count_rows_with_source(records: Iterable[MarketScreenerRecord], needle: str
 
 def _status_is_provider_related(status: MarketScreenerSourceStatus) -> bool:
     source = status.source.lower()
-    return any(term in source for term in ("market", "quote", "fmp", "schwab", "fallback", "alpha vantage", "local"))
+    return any(term in source for term in ("market", "quote", "fmp", "schwab", "fallback", "alpha vantage", "local", "databento"))
 
 
 def _status_message_mentions_provider_limit(status: MarketScreenerSourceStatus) -> bool:
@@ -2213,6 +2310,26 @@ def _not_available(reason: str = "Not available in the selected Market Intellige
 
 def _serialize_request_payload(payload: Mapping[str, Any]) -> str:
     return json.dumps(_json_safe(payload), ensure_ascii=True, sort_keys=True, indent=2)
+
+
+def _object_to_mapping(value: Any) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        try:
+            payload = to_dict()
+        except Exception:
+            payload = {}
+        if isinstance(payload, Mapping):
+            return payload
+    if hasattr(value, "__dict__"):
+        return {key: item for key, item in vars(value).items() if not key.startswith("_")}
+    return {"value": value}
+
+
+def _redact_context_payload(value: Any) -> Any:
+    return _json_safe(value)
 
 
 def _json_safe(value: Any) -> Any:

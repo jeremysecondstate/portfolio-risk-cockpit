@@ -361,6 +361,7 @@ def _build_screener_filters(self: tk.Tk, parent: ttk.Frame) -> None:
     actions.grid(row=3, column=0, columnspan=8, sticky="ew", pady=(8, 0))
     ttk.Button(actions, text="Refresh Screener", command=lambda: _refresh_screener(self, force_refresh=True), style="Accent.TButton").pack(side=tk.LEFT)
     ttk.Button(actions, text="Enrich Visible Page", command=lambda: _request_visible_page_market_data_enrichment(self, force_refresh=False)).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(actions, text="Re-enrich Visible Page", command=lambda: _request_visible_page_market_data_enrichment(self, force_refresh=True)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Open Source", command=lambda: _open_screener_source(self)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Open Symbol Chat", command=lambda: _open_screener_symbol_chat(self)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Source Diagnostics / Why blanks?", command=lambda app=self: _open_screener_diagnostics_popout(app)).pack(side=tk.LEFT, padx=(8, 0))
@@ -506,6 +507,7 @@ def _open_screener_diagnostics_popout(self: tk.Tk) -> None:
         actions.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 10))
         ttk.Button(actions, text="Refresh Screener", command=lambda app=self: _refresh_screener(app, force_refresh=True), style="Accent.TButton").pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(actions, text="Enrich Visible Page", command=lambda app=self: _request_visible_page_market_data_enrichment(app, force_refresh=False)).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(actions, text="Re-enrich Visible Page", command=lambda app=self: _request_visible_page_market_data_enrichment(app, force_refresh=True)).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(actions, text="Open Selected Context + AI", command=lambda app=self: _open_screener_context_popout(app)).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(actions, text="Clear Filters", command=lambda app=self: _clear_screener_filters(app)).pack(side=tk.LEFT)
         self.market_screener_diagnostics_text = _readonly_scrolled_text(
@@ -867,10 +869,10 @@ def _screener_filter_empty_state_text(self: tk.Tk, filtered: Iterable[MarketScre
         has_ai_signal=self.market_screener_has_ai_signal_var.get(),
         has_price_volume_data=self.market_screener_has_price_volume_data_var.get(),
     )
-    return _high_volume_mover_empty_state_text(candidate_records)
+    return _high_volume_mover_empty_state_text(candidate_records, diagnostics=getattr(getattr(self, "market_screener_last_snapshot", None), "diagnostics", None))
 
 
-def _high_volume_mover_empty_state_text(records: Iterable[MarketScreenerRecord]) -> str:
+def _high_volume_mover_empty_state_text(records: Iterable[MarketScreenerRecord], *, diagnostics: Any | None = None) -> str:
     rows = list(records)
     if not rows:
         return "High Volume / Mover has no candidates after the active non-mover filters. Clear filters or refresh the screener before applying the mover filter."
@@ -885,10 +887,24 @@ def _high_volume_mover_empty_state_text(records: Iterable[MarketScreenerRecord])
             f"{missing_change} of {len(rows)} candidate row(s) are missing change %, "
             f"{missing_volume} are missing current volume, and {missing_avg_volume} are missing avg volume. "
             f"Only {evaluable_change} row(s) can be checked for +/-5% moves and {evaluable_volume} row(s) can be checked for volume >= 1.5x average. "
-            "Missing values are not treated as zero. Clear the mover filter, enrich a visible page or selected row, or configure local market data, FMP quote/profile, Schwab, or fallback before reapplying."
+            "Missing values are not treated as zero. Clear the mover filter, click Enrich Visible Page, click Re-enrich Visible Page after fixing an API key/plan, or use Refresh Screener to force provider retry. "
+            f"{_high_volume_mover_cap_guidance(diagnostics)}"
         )
     return (
         f"High Volume / Mover found 0 rows among {len(rows)} candidate row(s): no change % reached +/-5% and no volume reached 1.5x average volume."
+    )
+
+
+def _high_volume_mover_cap_guidance(diagnostics: Any | None) -> str:
+    skipped = int(getattr(diagnostics, "rows_skipped_by_configured_symbol_cap", 0) or 0) if diagnostics is not None else 0
+    if skipped:
+        return (
+            f"Source Diagnostics shows {skipped} row(s) skipped by cap; paid FMP users can raise "
+            "MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT and FMP_MARKET_DATA_SYMBOL_LIMIT up to 100, then Re-enrich Visible Page or Refresh Screener."
+        )
+    return (
+        "If Source Diagnostics shows skipped rows, increase MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT and FMP_MARKET_DATA_SYMBOL_LIMIT up to 100 for paid FMP; "
+        "otherwise configure Schwab, Databento US Equities, FMP quote/profile, local market data, or fallback quote data before reapplying."
     )
 
 
@@ -978,6 +994,8 @@ def _open_screener_source(self: tk.Tk) -> None:
 
 def _request_visible_page_market_data_enrichment(self: tk.Tk, *, force_refresh: bool = False) -> None:
     rows = list(getattr(self, "market_screener_row_map", {}).values())
+    if force_refresh:
+        _clear_market_data_attempted_symbols(self, _dedupe_market_data_symbols(record.symbol for record in rows))
     symbols = _symbols_needing_market_data_enrichment(self, rows, require_price_or_volume=False)
     if not symbols:
         return
@@ -1020,6 +1038,9 @@ def _request_market_data_enrichment(
     attempted_symbols = getattr(self, "market_screener_market_data_attempted_symbols", set())
     if not isinstance(running_symbols, set) or not isinstance(attempted_symbols, set):
         return
+    if force_refresh:
+        attempted_symbols.difference_update(requested)
+        running_symbols.difference_update(requested)
     running_symbols.update(requested)
     provider = configured_market_data_provider(schwab_session=getattr(self, "schwab_session", None), include_fallback_provider=True)
     self.market_screener_status_var.set(f"Enriching {reason} market data for {len(requested)} symbol(s)...")
@@ -1102,10 +1123,21 @@ def _symbols_needing_market_data_enrichment(
         if require_price_or_volume:
             needs_data = record.price is None or record.volume is None
         else:
-            needs_data = not market_screener_record_has_quote_fields(record)
+            needs_data = (
+                not market_screener_record_has_quote_fields(record)
+                or record.change_percent is None
+                or record.volume is None
+                or record.avg_volume is None
+            )
         if needs_data:
             symbols.append(symbol)
     return _dedupe_market_data_symbols(symbols)
+
+
+def _clear_market_data_attempted_symbols(self: tk.Tk, symbols: Iterable[str]) -> None:
+    attempted_symbols = getattr(self, "market_screener_market_data_attempted_symbols", set())
+    if isinstance(attempted_symbols, set):
+        attempted_symbols.difference_update(_dedupe_market_data_symbols(symbols))
 
 
 def _reset_screener_market_data_enrichment_state(self: tk.Tk) -> None:
@@ -2099,7 +2131,7 @@ def _selected_screener_missing_reason_lines(
         if diagnostics.rows_blocked_by_provider_plan_rate_auth_limit:
             reasons.append(
                 "provider auth/plan/rate limit: "
-                f"{diagnostics.rows_blocked_by_provider_plan_rate_auth_limit} provider attempt(s) were blocked; paid FMP would help only when the blocked source is FMP quote/profile/profile-by-CIK."
+                f"{diagnostics.rows_blocked_by_provider_plan_rate_auth_limit} provider attempt(s) were blocked; paid FMP helps FMP quote/profile/profile-by-CIK limits, while Databento limits require Databento dataset/schema/entitlement fixes."
             )
         for status in snapshot.statuses:
             if _screener_status_mentions_auth_plan_rate(status):
@@ -2138,7 +2170,7 @@ def _screener_status_is_provider_empty(status: Any) -> bool:
 
 
 def _source_name_is_market_data_provider(source: str) -> bool:
-    return any(token in source for token in ("market data", "schwab", "fmp", "fallback", "alpha vantage", "local market"))
+    return any(token in source for token in ("market data", "schwab", "fmp", "fallback", "alpha vantage", "local market", "databento"))
 
 
 def _snapshot_mentions_text(snapshot: MarketScreenerSnapshot, needle: str) -> bool:
@@ -2250,8 +2282,9 @@ def _screener_diagnostics_popout_text(
     lines.extend(
         [
             "- Yes, if FMP quote, profile, or profile-by-CIK is configured but blocked by auth, plan, quota, or rate limit, or if the free plan does not expose needed profile/fundamental fields.",
-            "- No, if the row lacks a trusted CIK/symbol, a provider returned no usable data for that symbol, Schwab/local data is the desired source, or rows were skipped by this app's configured cap.",
-            "- Paid FMP still will not justify guessing tickers from company names; identity must come from SEC CIK/ticker data, SEC submissions, local seed data, Schwab, FMP, or a configured fallback.",
+            "- No, if the row lacks a trusted CIK/symbol, a provider returned no usable data for that symbol, Schwab/Databento/local data is the desired tape source, or rows were skipped by this app's configured cap.",
+            "- Paid FMP still will not justify guessing tickers from company names; identity must come from SEC CIK/ticker data, SEC submissions, local seed data, Schwab, FMP, Databento US Equities, or a configured fallback.",
+            "- Databento CME Globex context is futures/options macro context only; it is not used to fill selected-equity quote or fundamental fields.",
         ]
     )
     lines.append("")
@@ -2294,8 +2327,10 @@ def _screener_source_ladder_lines() -> list[str]:
         "- 2. SEC CIK/ticker identity resolution",
         "- 3. SEC submissions metadata",
         "- 4. Schwab quote",
-        "- 5. FMP quote/profile/profile-by-CIK",
-        "- 6. Optional fallback provider, only when configured, and only for visible-page or selected-row enrichment",
+        "- 5. Databento US Equities, when enabled/configured, for equity tape price/volume fields",
+        "- 6. FMP quote/profile/profile-by-CIK for equity quote, profile, and fundamentals",
+        "- 7. Optional fallback provider, only when configured, and only for visible-page or selected-row enrichment",
+        "- Separate. Databento CME context, when enabled/configured, is cross-asset futures/options context and is not merged into equity rows.",
     ]
 
 
@@ -2304,8 +2339,8 @@ def _screener_blank_explanation_lines() -> list[str]:
         "Why blanks happen",
         "- SEC company_tickers supplies symbol, company name, and CIK only. It does not supply exchange, sector, industry, price, avg volume, change %, market cap, P/E, EPS, or revenue growth.",
         "- Exchange, sector, and industry require SEC submissions metadata, local seed data, FMP profile/profile-by-CIK, a local market-data file, or a configured fallback profile.",
-        "- Price, volume, change %, and avg volume require a local market-data file/cache, Schwab quote, FMP quote, or configured fallback quote.",
-        "- Fundamentals require local market-data/fundamental seed data, parsed SEC filing rows, FMP quote/profile fields, or a configured fallback profile. Missing values are left blank and are not inferred.",
+        "- Price, volume, change %, and avg volume require a local market-data file/cache, Schwab quote, Databento US Equities, FMP quote, or configured fallback quote.",
+        "- Fundamentals require local market-data/fundamental seed data, parsed SEC filing rows, FMP quote/profile fields, or a configured fallback profile. Databento CME context is not selected-equity fundamentals. Missing values are left blank and are not inferred.",
     ]
 
 

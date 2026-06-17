@@ -572,6 +572,46 @@ def test_market_screener_selected_row_enrichment_requests_only_selected_symbol(m
     assert calls == [(("BETA",), {"reason": "selected row", "force_refresh": False, "max_symbols": 1})]
 
 
+def test_market_screener_visible_page_force_reenrichment_clears_attempted_symbols(monkeypatch) -> None:
+    app = SimpleNamespace(
+        market_screener_row_map={
+            "row_beta": MarketScreenerRecord("BETA", "Beta Inc", price=22.0, volume=2_000, avg_volume=None, change_percent=None)
+        },
+        market_screener_market_data_running_symbols=set(),
+        market_screener_market_data_attempted_symbols={"BETA"},
+    )
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def fake_request(_app, symbols, **kwargs) -> None:
+        calls.append((tuple(symbols), kwargs))
+
+    monkeypatch.setattr(earnings_radar_extension, "_request_market_data_enrichment", fake_request)
+
+    earnings_radar_extension._request_visible_page_market_data_enrichment(app, force_refresh=False)
+    assert calls == []
+
+    earnings_radar_extension._request_visible_page_market_data_enrichment(app, force_refresh=True)
+
+    assert calls == [(("BETA",), {"reason": "visible page", "force_refresh": True, "max_symbols": earnings_radar_extension.MARKET_DATA_PAGE_ENRICHMENT_CAP})]
+    assert app.market_screener_market_data_attempted_symbols == set()
+
+
+def test_market_screener_visible_page_enrichment_retries_partial_mover_rows_once(monkeypatch) -> None:
+    app = SimpleNamespace(
+        market_screener_row_map={
+            "row_beta": MarketScreenerRecord("BETA", "Beta Inc", price=22.0, volume=2_000, avg_volume=None, change_percent=None)
+        },
+        market_screener_market_data_running_symbols=set(),
+        market_screener_market_data_attempted_symbols=set(),
+    )
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(earnings_radar_extension, "_request_market_data_enrichment", lambda _app, symbols, **_kwargs: calls.append(tuple(symbols)))
+
+    earnings_radar_extension._request_visible_page_market_data_enrichment(app, force_refresh=False)
+
+    assert calls == [("BETA",)]
+
+
 def test_market_screener_selection_change_refreshes_popout_context(monkeypatch) -> None:
     tree = _FakeTree()
     acme = MarketScreenerRecord("ACME", "Acme Corp", signals=("Upcoming earnings",), sources=("Alpha Vantage",))
@@ -681,6 +721,11 @@ def test_fmp_provider_maps_quote_and_profile_fields_without_key_in_status() -> N
     assert record.shares_outstanding == 150_000_000
     assert record.source == "FMP quote, FMP profile"
     status_text = " ".join(status.message for status in snapshot.statuses) + " " + " ".join(snapshot.errors)
+    assert "quote rows 1" in status_text
+    assert "profile rows 1" in status_text
+    assert snapshot.diagnostics["rows_enriched_by_fmp_quote"] == 1
+    assert snapshot.diagnostics["rows_enriched_by_fmp_profile"] == 1
+    assert snapshot.diagnostics["rows_provider_returned_no_usable_data"] == 0
     assert api_key not in status_text
     assert all(api_key not in str(call["url"]) for call in session.calls)
     assert all("apikey" not in call["params"] for call in session.calls)
@@ -816,6 +861,40 @@ def test_market_data_source_ladder_preserves_precedence_and_field_provenance() -
     provenance = {row.field: row.source for row in record.field_provenance}
     assert provenance["price"] == "Local market data file"
     assert provenance["volume"] == "Schwab quote"
+    assert provenance["market_cap"] == "FMP quote, FMP profile"
+
+
+def test_market_data_source_ladder_places_databento_before_fmp_for_tape_fields() -> None:
+    local_provider = _FakeMarketDataProvider(
+        {"ACME": MarketQuoteFundamentalsRecord("ACME", price=10.0, source="Local market data file")}
+    )
+    schwab_provider = _FakeMarketDataProvider({})
+    databento_provider = _FakeMarketDataProvider(
+        {"ACME": MarketQuoteFundamentalsRecord("ACME", price=12.0, volume=4_000, source="Databento US Equities")}
+    )
+    fmp_provider = _FakeMarketDataProvider(
+        {
+            "ACME": MarketQuoteFundamentalsRecord(
+                "ACME",
+                price=13.0,
+                volume=5_000,
+                market_cap=5_000_000_000,
+                sector="Technology",
+                source="FMP quote, FMP profile",
+            )
+        }
+    )
+    composite = CompositeMarketDataProvider([local_provider, schwab_provider, databento_provider, fmp_provider])
+
+    snapshot = composite.quote_fundamentals(["ACME"], max_symbols=5)
+
+    record = snapshot.records[0]
+    assert record.price == 10.0
+    assert record.volume == 4_000
+    assert record.market_cap == 5_000_000_000
+    provenance = {row.field: row.source for row in record.field_provenance}
+    assert provenance["price"] == "Local market data file"
+    assert provenance["volume"] == "Databento US Equities"
     assert provenance["market_cap"] == "FMP quote, FMP profile"
 
 
@@ -1086,7 +1165,8 @@ def test_high_volume_mover_empty_state_explains_missing_fields() -> None:
     assert "missing change %" in text
     assert "missing avg volume" in text
     assert "Missing values are not treated as zero" in text
-    assert "enrich a visible page or selected row" in text
+    assert "Enrich Visible Page" in text
+    assert "Re-enrich Visible Page" in text
 
     threshold_text = earnings_radar_extension._high_volume_mover_empty_state_text(
         [MarketScreenerRecord("GAMMA", "Gamma Inc", change_percent=1.2, volume=100_000, avg_volume=100_000)]
@@ -1094,6 +1174,13 @@ def test_high_volume_mover_empty_state_explains_missing_fields() -> None:
 
     assert "no change % reached +/-5%" in threshold_text
     assert "no volume reached 1.5x average volume" in threshold_text
+
+    cap_text = earnings_radar_extension._high_volume_mover_empty_state_text(
+        [MarketScreenerRecord("ZETA", "Zeta Inc")],
+        diagnostics=SimpleNamespace(rows_skipped_by_configured_symbol_cap=7),
+    )
+    assert "7 row(s) skipped by cap" in cap_text
+    assert "FMP_MARKET_DATA_SYMBOL_LIMIT up to 100" in cap_text
 
 
 def test_screener_source_diagnostics_popout_shows_full_counters_and_company_tickers_limits() -> None:
@@ -1225,6 +1312,34 @@ def test_market_screener_ai_payload_is_grounded_in_selected_row_and_marks_missin
     assert "buy, sell, or hold" in " ".join(payload["grounding_rules"])
     assert "sk-[REDACTED]" in payload["source_snippets"][0]["text"]
     assert "sk-testsecret" not in json.dumps(payload)
+
+
+def test_market_screener_ai_payload_keeps_cross_asset_context_separate() -> None:
+    record = MarketScreenerRecord("ACME", "Acme Corp", price=12.5, volume=1_000, sources=("Databento US Equities",))
+
+    payload = market_screener_ai_request_payload(
+        record,
+        "Explain the row with macro context.",
+        cross_asset_context={
+            "records": [
+                {
+                    "symbol": "ES.FUT",
+                    "price": 5500.25,
+                    "volume": 12500,
+                    "dataset": "GLBX.MDP3",
+                    "schema": "ohlcv-1m",
+                    "source": "Databento CME context",
+                }
+            ]
+        },
+        timeout_seconds=44,
+    )
+
+    assert payload["selected_market_screener_record"]["symbol"] == "ACME"
+    assert payload["selected_market_screener_record"]["market_data"]["price"] == 12.5
+    assert payload["cross_asset_context"]["records"][0]["symbol"] == "ES.FUT"
+    assert "ES.FUT" not in json.dumps(payload["selected_market_screener_record"])
+    assert "cross_asset_context only as separate CME/futures/options" in " ".join(payload["grounding_rules"])
 
 
 def test_market_screener_ai_client_uses_responses_api_store_false_and_timeout() -> None:
