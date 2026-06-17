@@ -6,8 +6,12 @@ from types import SimpleNamespace
 
 from app.analytics.earnings_pipeline import EARNINGS_DROP_KIND, RecentEarningsRecord
 from app.analytics.market_screener import (
+    ASK_SCREENER_PROVIDER_ACTION_CONFIRM_LARGE_ENRICHMENT,
+    ASK_SCREENER_PROVIDER_ACTION_ENRICH_THEN_EXECUTE,
+    ASK_SCREENER_PROVIDER_ACTION_MISSING_CONFIG,
     AskScreenerPlanValidationError,
     AskScreenerPlannerError,
+    AskScreenerProviderConfig,
     OpenAiAskScreenerPlannerClient,
     MARKET_SCREENER_AI_SYSTEM_PROMPT,
     MARKET_SCREENER_SOURCE_MODE,
@@ -16,9 +20,12 @@ from app.analytics.market_screener import (
     MarketScreenerSnapshot,
     MarketScreenerSourceStatus,
     OpenAiMarketScreenerClient,
+    analyze_ask_screener_field_coverage,
+    ask_screener_enrichment_decision,
     ask_screener_planner_request_payload,
     build_market_screener_records,
     execute_ask_screener_plan,
+    execute_provider_aware_ask_screener_plan,
     fetch_market_screener_snapshot,
     filter_market_screener_records,
     market_screener_ai_request_payload,
@@ -1453,6 +1460,192 @@ def test_ask_screener_planner_payload_uses_metadata_and_redacts_secrets() -> Non
     assert secret not in text
     assert "sk-[REDACTED]" in text
     assert "No buy/sell/hold recommendations" in " ".join(payload["safety_rules"])
+    assert "field_coverage" in payload["snapshot_metadata"]
+
+
+def test_ask_screener_v2_field_coverage_analysis_counts_required_fields() -> None:
+    rows = [
+        MarketScreenerRecord("ACME", "Acme Corp", sector="Technology", industry="Software", volume=1000),
+        MarketScreenerRecord("BETA", "Beta Inc", sector=None, industry="", volume=None),
+    ]
+
+    coverage = {row.field: row for row in analyze_ask_screener_field_coverage(rows)}
+
+    assert coverage["sector"].available_count == 1
+    assert coverage["sector"].missing_count == 1
+    assert coverage["industry"].coverage_ratio == 0.5
+    assert coverage["volume"].available_count == 1
+    assert coverage["market_cap"].missing_count == 2
+
+
+def test_ask_screener_v2_enrichment_decision_logic_handles_caps_confirm_and_missing_config() -> None:
+    rows = [MarketScreenerRecord(f"SYM{index}", f"Symbol {index}") for index in range(3)]
+    plan = validate_ask_screener_plan(
+        {
+            "intent": "Technology electronics",
+            "filters": [{"field": "classification", "operator": "contains_any", "value": ["technology", "electronic"]}],
+            "limit": 100,
+        }
+    )
+
+    missing = ask_screener_enrichment_decision(
+        rows,
+        plan,
+        config=AskScreenerProviderConfig(fmp_configured=False, databento_equities_configured=False),
+    )
+    assert missing.action == ASK_SCREENER_PROVIDER_ACTION_MISSING_CONFIG
+    assert "FMP_API_KEY" in " ".join(missing.missing_provider_config)
+
+    enrich = ask_screener_enrichment_decision(
+        rows,
+        plan,
+        config=AskScreenerProviderConfig(fmp_configured=True, profile_enrich_limit=2, require_confirm_above=100),
+    )
+    assert enrich.action == ASK_SCREENER_PROVIDER_ACTION_ENRICH_THEN_EXECUTE
+    assert enrich.symbols_to_enrich == ("SYM0", "SYM1")
+    assert enrich.candidate_symbol_count == 3
+
+    confirm = ask_screener_enrichment_decision(
+        rows,
+        plan,
+        config=AskScreenerProviderConfig(fmp_configured=True, profile_enrich_limit=2, require_confirm_above=1),
+    )
+    assert confirm.action == ASK_SCREENER_PROVIDER_ACTION_CONFIRM_LARGE_ENRICHMENT
+
+
+def test_ask_screener_v2_capped_auto_enrichment_then_filters_locally() -> None:
+    rows = [MarketScreenerRecord(symbol, f"{symbol} Corp") for symbol in ("ACME", "BETA", "GAMMA", "DELTA")]
+    provider = _FakeMarketDataProvider(
+        {
+            "ACME": MarketQuoteFundamentalsRecord("ACME", sector="Technology", industry="Software", source="FMP profile"),
+            "BETA": MarketQuoteFundamentalsRecord("BETA", sector="Consumer Cyclical", industry="Electronic Components", source="FMP profile"),
+            "GAMMA": MarketQuoteFundamentalsRecord("GAMMA", sector="Healthcare", industry="Devices", source="FMP profile"),
+            "DELTA": MarketQuoteFundamentalsRecord("DELTA", sector="Healthcare", industry="Devices", source="FMP profile"),
+        }
+    )
+    plan = parse_ask_screener_fallback("Can you filter for up to 100 symbols in the Technology / Electronics sectors?", records=rows)
+
+    assert plan is not None
+    result = execute_provider_aware_ask_screener_plan(
+        rows,
+        plan,
+        provider=provider,
+        config=AskScreenerProviderConfig(fmp_configured=True, profile_enrich_limit=3, require_confirm_above=100),
+    )
+
+    assert provider.calls == [(("ACME", "BETA", "DELTA"), 3, False)]
+    assert [record.symbol for record in result.records] == ["ACME", "BETA"]
+    assert result.enrichment_status == "provider-enriched"
+    assert result.symbols_requested == 3
+    assert result.rows_updated == 3
+    assert result.total_matched_rows == 2
+    assert result.more_enrichment_may_help is True
+    assert "status: provider-enriched" in result.summary
+    assert "symbols requested: 3" in result.summary
+    assert "rows updated: 3" in result.summary
+    assert "matches found: 2" in result.summary
+
+
+def test_ask_screener_v2_parser_interprets_requested_phrases() -> None:
+    rows = [
+        MarketScreenerRecord(
+            "ACME",
+            "Acme Corp",
+            sector="Technology",
+            industry="Software",
+            price=12.0,
+            change_percent=4.5,
+            volume=2_000,
+            avg_volume=1_000,
+            recent_filing_date="2026-06-10",
+            signals=("Guidance mentioned",),
+        ),
+        MarketScreenerRecord(
+            "ELEC",
+            "Electronics Inc",
+            sector="Consumer Cyclical",
+            industry="Electronic Components",
+            price=4.0,
+            change_percent=-1.0,
+            volume=3_000,
+            avg_volume=4_000,
+        ),
+        MarketScreenerRecord("MISS", "Missing Data Inc"),
+    ]
+
+    tech_plan = parse_ask_screener_fallback("up to 100 Technology / Electronics sectors", records=rows)
+    assert tech_plan is not None
+    assert tech_plan.limit == 100
+    assert tech_plan.filters[0].field == "classification"
+    assert set(tech_plan.filters[0].value) >= {"technology", "electronic"}
+    assert [record.symbol for record in execute_ask_screener_plan(rows, tech_plan).records] == ["ACME", "ELEC"]
+
+    volume_plan = parse_ask_screener_fallback("highest volume today", records=rows)
+    assert volume_plan is not None
+    assert volume_plan.sort is not None
+    assert volume_plan.sort.field == "volume"
+    assert volume_plan.sort.descending is True
+    assert {"price", "volume"}.issubset(set(volume_plan.required_fields))
+
+    momentum_plan = parse_ask_screener_fallback("show momentum stocks", records=rows)
+    assert momentum_plan is not None
+    assert momentum_plan.filters[0].field == "momentum_proxy"
+    assert [record.symbol for record in execute_ask_screener_plan(rows, momentum_plan).records] == ["ACME"]
+
+    catalyst_plan = parse_ask_screener_fallback("recent catalysts", records=rows)
+    assert catalyst_plan is not None
+    assert catalyst_plan.filters[0].field == "recent_catalyst"
+    assert [record.symbol for record in execute_ask_screener_plan(rows, catalyst_plan).records] == ["ACME"]
+
+    missing_plan = parse_ask_screener_fallback("missing data", records=rows)
+    assert missing_plan is not None
+    assert missing_plan.filters[0].field == "has_missing_data"
+    assert "MISS" in [record.symbol for record in execute_ask_screener_plan(rows, missing_plan).records]
+
+
+def test_ask_screener_v2_missing_provider_config_returns_diagnostic_summary() -> None:
+    rows = [MarketScreenerRecord("ACME", "Acme Corp")]
+    plan = parse_ask_screener_fallback("Technology / Electronics sectors", records=rows)
+
+    assert plan is not None
+    result = execute_provider_aware_ask_screener_plan(
+        rows,
+        plan,
+        config=AskScreenerProviderConfig(fmp_configured=False, databento_equities_configured=False),
+    )
+
+    assert result.enrichment_status == "missing-provider-config"
+    assert result.rows_updated == 0
+    assert result.enrichment_decision is not None
+    assert result.enrichment_decision.action == ASK_SCREENER_PROVIDER_ACTION_MISSING_CONFIG
+    assert "Missing provider config" in " ".join(result.notes)
+    assert "status: missing-provider-config" in result.summary
+    assert "more enrichment may help: no" in result.summary
+
+
+def test_ask_screener_v2_provider_errors_are_nonblocking_and_redacted() -> None:
+    class _FailingProvider:
+        def quote_fundamentals(self, symbols, *, force_refresh: bool = False, max_symbols: int = 50):
+            raise RuntimeError("provider failed with sk-testsecret123456")
+
+    rows = [MarketScreenerRecord("ACME", "Acme Corp")]
+    plan = parse_ask_screener_fallback("highest volume today", records=rows)
+
+    assert plan is not None
+    result = execute_provider_aware_ask_screener_plan(
+        rows,
+        plan,
+        provider=_FailingProvider(),
+        config=AskScreenerProviderConfig(databento_equities_configured=True, fmp_configured=False),
+        provider_configured=True,
+    )
+
+    note_text = " ".join(result.notes)
+    assert result.enrichment_status == "provider-attempted"
+    assert result.records == ()
+    assert "sk-testsecret" not in note_text
+    assert "sk-[REDACTED]" in note_text
+    assert "sk-testsecret" not in result.summary
 
 
 def test_market_screener_ui_values_handle_missing_numeric_fields() -> None:

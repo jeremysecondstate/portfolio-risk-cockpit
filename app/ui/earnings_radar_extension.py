@@ -34,8 +34,12 @@ from app.analytics.market_screener import (
     EARNINGS_WINDOW_OPTIONS,
     EVENT_TYPE_OPTIONS,
     AskScreenerExecutionResult,
+    AskScreenerEnrichmentDecision,
     AskScreenerPlan,
     AskScreenerPlannerError,
+    ASK_SCREENER_PROVIDER_ACTION_CONFIRM_LARGE_ENRICHMENT,
+    ASK_SCREENER_PROVIDER_ACTION_ENRICH_THEN_EXECUTE,
+    ASK_SCREENER_PROVIDER_ACTION_MISSING_CONFIG,
     MARKET_SCREENER_AI_ANALYZE_PROMPT,
     MARKET_SCREENER_AI_QUICK_PROMPTS,
     MarketScreenerAiResponse,
@@ -43,7 +47,10 @@ from app.analytics.market_screener import (
     MarketScreenerSnapshot,
     OpenAiAskScreenerPlannerClient,
     OpenAiMarketScreenerClient,
+    ask_screener_config_from_env,
+    ask_screener_enrichment_decision,
     execute_ask_screener_plan,
+    execute_provider_aware_ask_screener_plan,
     fetch_market_screener_snapshot,
     filter_market_screener_records,
     market_screener_data_completeness,
@@ -927,18 +934,107 @@ def _apply_ask_screener_plan(self: tk.Tk, plan: AskScreenerPlan, *, source_label
         self.market_screener_ask_summary_var.set("Ask Screener cleared filters.")
         self.market_screener_status_var.set("Ask Screener cleared filters.")
         return
+    records = list(getattr(self, "market_screener_records", ()) or ())
+    config = ask_screener_config_from_env(schwab_quote_configured=callable(getattr(getattr(self, "schwab_session", None), "get_quote", None)))
+    decision = ask_screener_enrichment_decision(records, plan, config=config)
+    if decision.action == ASK_SCREENER_PROVIDER_ACTION_MISSING_CONFIG:
+        result = execute_provider_aware_ask_screener_plan(records, plan, config=config)
+        _apply_ask_screener_plan_local(self, result.plan, source_label=source_label, precomputed_result=result)
+        return
+    if decision.action == ASK_SCREENER_PROVIDER_ACTION_CONFIRM_LARGE_ENRICHMENT:
+        if not _confirm_ask_screener_large_enrichment(decision):
+            result = execute_provider_aware_ask_screener_plan(records, plan, config=config)
+            _apply_ask_screener_plan_local(self, result.plan, source_label=source_label, precomputed_result=result)
+            return
+    if decision.action == ASK_SCREENER_PROVIDER_ACTION_ENRICH_THEN_EXECUTE or (
+        decision.action == ASK_SCREENER_PROVIDER_ACTION_CONFIRM_LARGE_ENRICHMENT
+    ):
+        _request_ask_screener_provider_enrichment(self, plan, source_label=source_label, config=config, allow_large_enrichment=True)
+        return
+    _apply_ask_screener_plan_local(self, plan, source_label=source_label)
+
+
+def _apply_ask_screener_plan_local(
+    self: tk.Tk,
+    plan: AskScreenerPlan,
+    *,
+    source_label: str,
+    precomputed_result: AskScreenerExecutionResult | None = None,
+) -> None:
     self.market_screener_ask_plan = plan
-    self.market_screener_ask_result = None
+    self.market_screener_ask_result = precomputed_result
     if plan.sort is not None:
         self.market_screener_sort_column = _ask_sort_field_to_screener_column(plan.sort.field)
         self.market_screener_sort_desc = plan.sort.descending
     self.market_screener_page = 0
-    _apply_screener_filters(self)
-    result = getattr(self, "market_screener_ask_result", None)
+    if precomputed_result is None:
+        _apply_screener_filters(self)
+        result = getattr(self, "market_screener_ask_result", None)
+    else:
+        filtered = list(precomputed_result.records)
+        self.market_screener_filtered_records = sort_market_screener_records(filtered, self.market_screener_sort_column, descending=self.market_screener_sort_desc)
+        self.market_screener_page = min(self.market_screener_page, _max_page(self.market_screener_filtered_records, _screener_page_size(self)))
+        _populate_screener_table(self)
+        _draw_screener_chart(self)
+        result = precomputed_result
     summary = result.summary if result is not None else "Ask Screener applied the validated plan."
     message = f"{summary} Source: {source_label}."
     self.market_screener_ask_summary_var.set(message)
     self.market_screener_status_var.set(message)
+
+
+def _confirm_ask_screener_large_enrichment(decision: AskScreenerEnrichmentDecision) -> bool:
+    message = (
+        f"Ask Screener needs provider enrichment for {decision.candidate_symbol_count} symbol(s), "
+        f"capped to {len(decision.symbols_to_enrich)} this run.\n\nContinue?"
+    )
+    try:
+        return bool(messagebox.askyesno("Ask Screener provider enrichment", message))
+    except tk.TclError:
+        return False
+
+
+def _request_ask_screener_provider_enrichment(
+    self: tk.Tk,
+    plan: AskScreenerPlan,
+    *,
+    source_label: str,
+    config: Any,
+    allow_large_enrichment: bool,
+) -> None:
+    if getattr(self, "_market_screener_ask_running", False):
+        self.market_screener_ask_summary_var.set("Ask Screener is already enriching a query.")
+        return
+    self._market_screener_ask_running = True
+    _set_ask_screener_actions_enabled(self, False)
+    self.market_screener_ask_summary_var.set("Ask Screener is enriching required provider fields, then filtering locally...")
+    provider = configured_market_data_provider(schwab_session=getattr(self, "schwab_session", None), include_fallback_provider=True)
+    records = list(getattr(self, "market_screener_records", ()) or ())
+
+    def worker() -> None:
+        try:
+            result = execute_provider_aware_ask_screener_plan(
+                records,
+                plan,
+                provider=provider,
+                config=config,
+                force_refresh=False,
+                allow_large_enrichment=allow_large_enrichment,
+            )
+        except Exception as exc:
+            _post_to_earnings_ui(self, lambda error=exc: _finish_ask_screener_error(self, error))
+            return
+        _post_to_earnings_ui(self, lambda loaded=result: _finish_ask_screener_enrichment_success(self, loaded, source_label=source_label))
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _finish_ask_screener_enrichment_success(self: tk.Tk, result: AskScreenerExecutionResult, *, source_label: str) -> None:
+    self._market_screener_ask_running = False
+    _set_ask_screener_actions_enabled(self, True)
+    if result.all_records:
+        self.market_screener_records = list(result.all_records)
+    _apply_ask_screener_plan_local(self, result.plan, source_label=source_label, precomputed_result=result)
 
 
 def _clear_ask_screener(self: tk.Tk) -> None:

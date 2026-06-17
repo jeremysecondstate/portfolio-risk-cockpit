@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timezone
 from typing import Any, Callable, Iterable, Mapping
 
@@ -21,6 +22,7 @@ from app.data.earnings_calendar import AlphaVantageEarningsCalendarClient, Upcom
 from app.data.market_data_provider import (
     DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
     MarketQuoteFundamentalsRecord,
+    MarketQuoteFundamentalsSnapshot,
     configured_market_data_provider,
 )
 from app.data.market_universe import MarketUniverseEntry, MarketUniverseSnapshot, fetch_market_universe_snapshot
@@ -37,6 +39,27 @@ ASK_SCREENER_DEFAULT_LIMIT = 250
 ASK_SCREENER_MAX_LIMIT = 500
 ASK_SCREENER_MAX_FILTERS = 12
 MISSING_TEXT = "--"
+ASK_SCREENER_AUTO_ENRICH_ENV = "ASK_SCREENER_AUTO_ENRICH"
+ASK_SCREENER_PROFILE_ENRICH_LIMIT_ENV = "ASK_SCREENER_PROFILE_ENRICH_LIMIT"
+ASK_SCREENER_QUOTE_ENRICH_LIMIT_ENV = "ASK_SCREENER_QUOTE_ENRICH_LIMIT"
+ASK_SCREENER_FUNDAMENTAL_ENRICH_LIMIT_ENV = "ASK_SCREENER_FUNDAMENTAL_ENRICH_LIMIT"
+ASK_SCREENER_DATABENTO_TAPE_ENRICH_LIMIT_ENV = "ASK_SCREENER_DATABENTO_TAPE_ENRICH_LIMIT"
+ASK_SCREENER_REQUIRE_CONFIRM_ABOVE_ENV = "ASK_SCREENER_REQUIRE_CONFIRM_ABOVE"
+ASK_SCREENER_SMALL_CAP_MAX_MARKET_CAP_ENV = "ASK_SCREENER_SMALL_CAP_MAX_MARKET_CAP"
+ASK_SCREENER_PENNY_STOCK_MAX_PRICE_ENV = "ASK_SCREENER_PENNY_STOCK_MAX_PRICE"
+ASK_SCREENER_ENV_NAME_DATABENTO_ENABLED = "MARKET_SCREENER_ENABLE_DATABENTO_EQUITIES"
+DEFAULT_ASK_SCREENER_AUTO_ENRICH = True
+DEFAULT_ASK_SCREENER_PROFILE_ENRICH_LIMIT = 500
+DEFAULT_ASK_SCREENER_QUOTE_ENRICH_LIMIT = 500
+DEFAULT_ASK_SCREENER_FUNDAMENTAL_ENRICH_LIMIT = 200
+DEFAULT_ASK_SCREENER_DATABENTO_TAPE_ENRICH_LIMIT = 500
+DEFAULT_ASK_SCREENER_REQUIRE_CONFIRM_ABOVE = 1000
+DEFAULT_ASK_SCREENER_SMALL_CAP_MAX_MARKET_CAP = 2_000_000_000.0
+DEFAULT_ASK_SCREENER_PENNY_STOCK_MAX_PRICE = 5.0
+ASK_SCREENER_PROVIDER_ACTION_EXECUTE_LOCAL_ONLY = "execute_local_only"
+ASK_SCREENER_PROVIDER_ACTION_ENRICH_THEN_EXECUTE = "enrich_then_execute"
+ASK_SCREENER_PROVIDER_ACTION_CONFIRM_LARGE_ENRICHMENT = "ask_for_confirmation_before_large_enrichment"
+ASK_SCREENER_PROVIDER_ACTION_MISSING_CONFIG = "cannot_execute_missing_provider_config"
 
 MARKET_SCREENER_AI_SYSTEM_PROMPT = """You are a market intelligence analyst inside Portfolio Risk Cockpit.
 
@@ -90,6 +113,7 @@ ASK_SCREENER_TEXT_FIELDS = {
     "exchange",
     "sector",
     "industry",
+    "classification",
     "recent_filing_type",
     "data_label",
     "signals",
@@ -126,17 +150,45 @@ ASK_SCREENER_BOOLEAN_FIELDS = {
     "has_recent_filing",
     "has_upcoming_earnings",
     "high_volume_mover",
+    "momentum_proxy",
+    "recent_catalyst",
     "missing_price_data",
     "has_positive_revenue_growth",
     "has_negative_eps",
+    "has_missing_data",
 }
+ASK_SCREENER_PROVIDER_AWARE_FIELDS = frozenset(
+    {
+        "sector",
+        "industry",
+        "exchange",
+        "price",
+        "change_percent",
+        "volume",
+        "avg_volume",
+        "market_cap",
+        "pe_ratio",
+        "eps",
+        "revenue_growth",
+        "shares_float",
+        "shares_outstanding",
+        "recent_filing_date",
+        "next_earnings_date",
+    }
+)
+ASK_SCREENER_CLASSIFICATION_FIELDS = frozenset({"sector", "industry", "exchange"})
+ASK_SCREENER_TAPE_FIELDS = frozenset({"price", "change_percent", "volume", "avg_volume"})
+ASK_SCREENER_FUNDAMENTAL_FIELDS = frozenset(
+    {"market_cap", "pe_ratio", "eps", "revenue_growth", "shares_float", "shares_outstanding"}
+)
+ASK_SCREENER_EVENT_FIELDS = frozenset({"recent_filing_date", "next_earnings_date"})
 ASK_SCREENER_ALLOWED_FIELDS = frozenset(
     ASK_SCREENER_TEXT_FIELDS
     | ASK_SCREENER_NUMERIC_FIELDS
     | ASK_SCREENER_DATE_FIELDS
     | ASK_SCREENER_BOOLEAN_FIELDS
 )
-ASK_SCREENER_TEXT_OPERATORS = {"eq", "neq", "contains", "not_contains", "in", "not_in", "exists", "missing"}
+ASK_SCREENER_TEXT_OPERATORS = {"eq", "neq", "contains", "not_contains", "contains_any", "in", "not_in", "exists", "missing"}
 ASK_SCREENER_NUMERIC_OPERATORS = {"eq", "neq", "gt", "gte", "lt", "lte", "exists", "missing"}
 ASK_SCREENER_DATE_OPERATORS = ASK_SCREENER_NUMERIC_OPERATORS | {"within_next_days"}
 ASK_SCREENER_BOOLEAN_OPERATORS = {"eq", "neq", "is_true", "is_false", "exists", "missing"}
@@ -172,6 +224,10 @@ ASK_SCREENER_FIELD_ALIASES = {
     "ticker": "symbol",
     "name": "company_name",
     "company": "company_name",
+    "profile": "classification",
+    "classification_text": "classification",
+    "sector_industry": "classification",
+    "industry_classification": "classification",
     "rev_growth": "revenue_growth",
     "revenue_growth_percent": "revenue_growth",
     "growth": "revenue_growth",
@@ -203,7 +259,14 @@ ASK_SCREENER_FIELD_ALIASES = {
     "earnings_soon": "has_upcoming_earnings",
     "high_volume": "high_volume_mover",
     "mover": "high_volume_mover",
+    "momentum": "momentum_proxy",
+    "momentum_stock": "momentum_proxy",
+    "recent_catalysts": "recent_catalyst",
+    "catalysts": "recent_catalyst",
+    "catalyst": "recent_catalyst",
     "missing_price": "missing_price_data",
+    "missing_data": "has_missing_data",
+    "blank_data": "has_missing_data",
     "positive_revenue_growth": "has_positive_revenue_growth",
     "negative_eps": "has_negative_eps",
 }
@@ -388,6 +451,8 @@ class AskScreenerPlan:
     limit: int = ASK_SCREENER_DEFAULT_LIMIT
     intent: str = ""
     clear_filters: bool = False
+    required_fields: tuple[str, ...] = ()
+    provider_enrichment_needed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -396,7 +461,61 @@ class AskScreenerPlan:
             "limit": self.limit,
             "intent": self.intent,
             "clear_filters": self.clear_filters,
+            "required_fields": list(self.required_fields),
+            "provider_enrichment_needed": self.provider_enrichment_needed,
         }
+
+
+@dataclass(frozen=True)
+class AskScreenerFieldCoverage:
+    field: str
+    available_count: int
+    missing_count: int
+    total_rows: int
+    coverage_ratio: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class AskScreenerProviderConfig:
+    auto_enrich: bool = DEFAULT_ASK_SCREENER_AUTO_ENRICH
+    profile_enrich_limit: int = DEFAULT_ASK_SCREENER_PROFILE_ENRICH_LIMIT
+    quote_enrich_limit: int = DEFAULT_ASK_SCREENER_QUOTE_ENRICH_LIMIT
+    fundamental_enrich_limit: int = DEFAULT_ASK_SCREENER_FUNDAMENTAL_ENRICH_LIMIT
+    databento_tape_enrich_limit: int = DEFAULT_ASK_SCREENER_DATABENTO_TAPE_ENRICH_LIMIT
+    require_confirm_above: int = DEFAULT_ASK_SCREENER_REQUIRE_CONFIRM_ABOVE
+    fmp_configured: bool = False
+    databento_equities_configured: bool = False
+    local_market_data_configured: bool = False
+    schwab_quote_configured: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class AskScreenerEnrichmentDecision:
+    action: str
+    required_fields: tuple[str, ...]
+    missing_fields: tuple[str, ...]
+    candidate_symbol_count: int
+    symbols_to_enrich: tuple[str, ...] = ()
+    provider_groups: tuple[str, ...] = ()
+    reason: str = ""
+    missing_provider_config: tuple[str, ...] = ()
+    max_symbols: int = 0
+
+    @property
+    def needs_provider_enrichment(self) -> bool:
+        return self.action in {
+            ASK_SCREENER_PROVIDER_ACTION_ENRICH_THEN_EXECUTE,
+            ASK_SCREENER_PROVIDER_ACTION_CONFIRM_LARGE_ENRICHMENT,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -407,8 +526,16 @@ class AskScreenerExecutionResult:
     total_matched_rows: int
     limited: bool
     summary: str
+    all_records: tuple[MarketScreenerRecord, ...] = ()
     notes: tuple[str, ...] = ()
     source_mode: str = ASK_SCREENER_SOURCE_MODE
+    enrichment_status: str = "local-only"
+    providers_used: tuple[str, ...] = ()
+    symbols_requested: int = 0
+    rows_updated: int = 0
+    remaining_missing_fields: Mapping[str, int] = field(default_factory=dict)
+    more_enrichment_may_help: bool = False
+    enrichment_decision: AskScreenerEnrichmentDecision | None = None
 
 
 class OpenAiMarketScreenerError(RuntimeError):
@@ -971,6 +1098,474 @@ def market_screener_has_ai_signal(record: MarketScreenerRecord) -> bool:
     return bool(record.signals or record.risk_flags or record.next_earnings_date or record.recent_filing_date)
 
 
+def ask_screener_config_from_env(*, schwab_quote_configured: bool = False) -> AskScreenerProviderConfig:
+    local_path = str(os.getenv("MARKET_SCREENER_MARKET_DATA_PATH", "") or "").strip()
+    databento_enabled = _env_flag(ASK_SCREENER_ENV_NAME_DATABENTO_ENABLED, default=False)
+    databento_dataset = str(os.getenv("DATABENTO_EQUITIES_DATASET", "") or "").strip()
+    databento_schema = str(os.getenv("DATABENTO_EQUITIES_SCHEMA", "") or "").strip()
+    return AskScreenerProviderConfig(
+        auto_enrich=_env_flag(ASK_SCREENER_AUTO_ENRICH_ENV, default=DEFAULT_ASK_SCREENER_AUTO_ENRICH),
+        profile_enrich_limit=_env_int(ASK_SCREENER_PROFILE_ENRICH_LIMIT_ENV, DEFAULT_ASK_SCREENER_PROFILE_ENRICH_LIMIT, minimum=0, maximum=10_000),
+        quote_enrich_limit=_env_int(ASK_SCREENER_QUOTE_ENRICH_LIMIT_ENV, DEFAULT_ASK_SCREENER_QUOTE_ENRICH_LIMIT, minimum=0, maximum=10_000),
+        fundamental_enrich_limit=_env_int(ASK_SCREENER_FUNDAMENTAL_ENRICH_LIMIT_ENV, DEFAULT_ASK_SCREENER_FUNDAMENTAL_ENRICH_LIMIT, minimum=0, maximum=10_000),
+        databento_tape_enrich_limit=_env_int(ASK_SCREENER_DATABENTO_TAPE_ENRICH_LIMIT_ENV, DEFAULT_ASK_SCREENER_DATABENTO_TAPE_ENRICH_LIMIT, minimum=0, maximum=10_000),
+        require_confirm_above=_env_int(ASK_SCREENER_REQUIRE_CONFIRM_ABOVE_ENV, DEFAULT_ASK_SCREENER_REQUIRE_CONFIRM_ABOVE, minimum=0, maximum=100_000),
+        fmp_configured=_secret_configured(os.getenv("FMP_API_KEY", "")),
+        databento_equities_configured=bool(
+            databento_enabled
+            and _secret_configured(os.getenv("DATABENTO_API_KEY", ""))
+            and databento_dataset
+            and databento_schema
+        ),
+        local_market_data_configured=bool(local_path and os.path.exists(local_path)),
+        schwab_quote_configured=bool(schwab_quote_configured),
+    )
+
+
+def analyze_ask_screener_field_coverage(
+    records: Iterable[MarketScreenerRecord],
+    fields: Iterable[str] = ASK_SCREENER_PROVIDER_AWARE_FIELDS,
+) -> tuple[AskScreenerFieldCoverage, ...]:
+    rows = list(records)
+    total = len(rows)
+    coverage: list[AskScreenerFieldCoverage] = []
+    for field in _normalize_required_fields(fields, include_provider_only=True):
+        available = sum(1 for record in rows if _has_value(_ask_screener_field_value(record, field)))
+        missing = max(0, total - available)
+        coverage.append(
+            AskScreenerFieldCoverage(
+                field=field,
+                available_count=available,
+                missing_count=missing,
+                total_rows=total,
+                coverage_ratio=(available / total) if total else 0.0,
+            )
+        )
+    return tuple(coverage)
+
+
+def ask_screener_required_fields(plan: Mapping[str, Any] | AskScreenerPlan) -> tuple[str, ...]:
+    validated = validate_ask_screener_plan(plan)
+    return validated.required_fields
+
+
+def ask_screener_enrichment_decision(
+    records: Iterable[MarketScreenerRecord],
+    plan: Mapping[str, Any] | AskScreenerPlan,
+    *,
+    config: AskScreenerProviderConfig | None = None,
+    provider_configured: bool | None = None,
+) -> AskScreenerEnrichmentDecision:
+    validated = validate_ask_screener_plan(plan)
+    config = config or ask_screener_config_from_env()
+    rows = list(records)
+    required_fields = validated.required_fields
+    provider_fields = tuple(field for field in required_fields if field in ASK_SCREENER_PROVIDER_AWARE_FIELDS)
+    if validated.clear_filters or not provider_fields:
+        return AskScreenerEnrichmentDecision(
+            action=ASK_SCREENER_PROVIDER_ACTION_EXECUTE_LOCAL_ONLY,
+            required_fields=required_fields,
+            missing_fields=(),
+            candidate_symbol_count=0,
+            reason="The validated Ask Screener plan does not require provider-enrichable fields.",
+        )
+
+    coverage_by_field = {row.field: row for row in analyze_ask_screener_field_coverage(rows, provider_fields)}
+    missing_fields = tuple(field for field, row in coverage_by_field.items() if row.missing_count > 0)
+    if not missing_fields:
+        return AskScreenerEnrichmentDecision(
+            action=ASK_SCREENER_PROVIDER_ACTION_EXECUTE_LOCAL_ONLY,
+            required_fields=required_fields,
+            missing_fields=(),
+            candidate_symbol_count=0,
+            reason="Required fields are already populated locally.",
+        )
+    if not config.auto_enrich:
+        return AskScreenerEnrichmentDecision(
+            action=ASK_SCREENER_PROVIDER_ACTION_EXECUTE_LOCAL_ONLY,
+            required_fields=required_fields,
+            missing_fields=missing_fields,
+            candidate_symbol_count=0,
+            reason=f"{ASK_SCREENER_AUTO_ENRICH_ENV}=false, so Ask Screener will execute against local fields only.",
+        )
+
+    provider_groups = _ask_screener_provider_groups_for_fields(provider_fields)
+    missing_provider_config = () if provider_configured else _missing_ask_screener_provider_config(provider_groups, config)
+    if missing_provider_config and provider_configured is not True:
+        return AskScreenerEnrichmentDecision(
+            action=ASK_SCREENER_PROVIDER_ACTION_MISSING_CONFIG,
+            required_fields=required_fields,
+            missing_fields=missing_fields,
+            candidate_symbol_count=0,
+            provider_groups=provider_groups,
+            reason="Provider enrichment is required, but the relevant provider configuration is missing or disabled.",
+            missing_provider_config=missing_provider_config,
+        )
+
+    max_symbols = _ask_screener_enrichment_cap(provider_fields, config)
+    candidate_symbols = _ask_screener_enrichment_candidate_symbols(rows, required_fields=provider_fields)
+    symbols_to_enrich = candidate_symbols[:max_symbols]
+    if not symbols_to_enrich:
+        return AskScreenerEnrichmentDecision(
+            action=ASK_SCREENER_PROVIDER_ACTION_EXECUTE_LOCAL_ONLY,
+            required_fields=required_fields,
+            missing_fields=missing_fields,
+            candidate_symbol_count=0,
+            provider_groups=provider_groups,
+            reason="No symbol-bearing rows require provider enrichment for the requested fields.",
+            max_symbols=max_symbols,
+        )
+
+    action = ASK_SCREENER_PROVIDER_ACTION_ENRICH_THEN_EXECUTE
+    reason = f"Provider enrichment can fill missing fields before executing the local filter plan; capped at {max_symbols} symbol(s)."
+    if config.require_confirm_above > 0 and len(candidate_symbols) > config.require_confirm_above:
+        action = ASK_SCREENER_PROVIDER_ACTION_CONFIRM_LARGE_ENRICHMENT
+        reason = (
+            f"{len(candidate_symbols)} symbol(s) have missing required fields, above "
+            f"{ASK_SCREENER_REQUIRE_CONFIRM_ABOVE_ENV}={config.require_confirm_above}; confirmation is required before enrichment."
+        )
+    return AskScreenerEnrichmentDecision(
+        action=action,
+        required_fields=required_fields,
+        missing_fields=missing_fields,
+        candidate_symbol_count=len(candidate_symbols),
+        symbols_to_enrich=symbols_to_enrich,
+        provider_groups=provider_groups,
+        reason=reason,
+        max_symbols=max_symbols,
+    )
+
+
+def execute_provider_aware_ask_screener_plan(
+    records: Iterable[MarketScreenerRecord],
+    plan: Mapping[str, Any] | AskScreenerPlan,
+    *,
+    provider: Any | None = None,
+    config: AskScreenerProviderConfig | None = None,
+    provider_configured: bool | None = None,
+    force_refresh: bool = False,
+    today: date | None = None,
+    allow_large_enrichment: bool = False,
+) -> AskScreenerExecutionResult:
+    validated = validate_ask_screener_plan(plan)
+    rows = list(records)
+    decision = ask_screener_enrichment_decision(rows, validated, config=config, provider_configured=provider_configured)
+    if decision.action == ASK_SCREENER_PROVIDER_ACTION_CONFIRM_LARGE_ENRICHMENT and allow_large_enrichment:
+        decision = replace(decision, action=ASK_SCREENER_PROVIDER_ACTION_ENRICH_THEN_EXECUTE)
+
+    if decision.action != ASK_SCREENER_PROVIDER_ACTION_ENRICH_THEN_EXECUTE:
+        result = execute_ask_screener_plan(rows, validated, today=today)
+        status = "local-only"
+        more_help = bool(decision.missing_fields and decision.action != ASK_SCREENER_PROVIDER_ACTION_MISSING_CONFIG)
+        if decision.action == ASK_SCREENER_PROVIDER_ACTION_MISSING_CONFIG:
+            status = "missing-provider-config"
+            more_help = False
+        elif decision.action == ASK_SCREENER_PROVIDER_ACTION_CONFIRM_LARGE_ENRICHMENT:
+            status = "confirmation-required"
+            more_help = True
+        return _with_ask_screener_enrichment_status(
+            result,
+            decision=decision,
+            enrichment_status=status,
+            providers_used=(),
+            symbols_requested=0,
+            rows_updated=0,
+            remaining_missing_fields=_remaining_missing_required_fields(rows, validated.required_fields),
+            more_enrichment_may_help=more_help,
+            notes=_ask_screener_decision_notes(decision),
+        )
+
+    active_provider = provider or configured_market_data_provider()
+    symbols_requested = decision.symbols_to_enrich
+    provider_snapshot: MarketQuoteFundamentalsSnapshot | None = None
+    provider_error: str | None = None
+    enriched_rows = rows
+    try:
+        provider_snapshot = active_provider.quote_fundamentals(
+            symbols_requested,
+            force_refresh=force_refresh,
+            max_symbols=max(0, decision.max_symbols or len(symbols_requested)),
+        )
+        enriched_rows = merge_market_data_records_into_screener_records(
+            rows,
+            provider_snapshot.records,
+            fetched_at=provider_snapshot.fetched_at,
+        )
+    except Exception as exc:
+        provider_error = redact_symbol_chat_secrets(str(exc))
+
+    result = execute_ask_screener_plan(enriched_rows, validated, today=today)
+    providers_used = _ask_screener_providers_used(provider_snapshot)
+    rows_updated = len(provider_snapshot.records) if provider_snapshot is not None else 0
+    remaining_missing = _remaining_missing_required_fields(enriched_rows, validated.required_fields)
+    more_help = bool(
+        remaining_missing
+        and (
+            decision.candidate_symbol_count > len(symbols_requested)
+            or rows_updated < len(symbols_requested)
+            or any(count > 0 for count in remaining_missing.values())
+        )
+    )
+    notes = list(result.notes)
+    notes.extend(_ask_screener_decision_notes(decision))
+    if provider_error:
+        notes.append(f"Provider error was nonblocking and redacted: {provider_error}")
+    elif provider_snapshot is not None and provider_snapshot.errors:
+        notes.append("Provider warnings were nonblocking and redacted.")
+    return _with_ask_screener_enrichment_status(
+        result,
+        decision=decision,
+        enrichment_status="provider-enriched" if rows_updated else "provider-attempted",
+        providers_used=providers_used,
+        symbols_requested=len(symbols_requested),
+        rows_updated=rows_updated,
+        remaining_missing_fields=remaining_missing,
+        more_enrichment_may_help=more_help,
+        notes=tuple(notes),
+    )
+
+
+def _with_ask_screener_enrichment_status(
+    result: AskScreenerExecutionResult,
+    *,
+    decision: AskScreenerEnrichmentDecision,
+    enrichment_status: str,
+    providers_used: Iterable[str],
+    symbols_requested: int,
+    rows_updated: int,
+    remaining_missing_fields: Mapping[str, int],
+    more_enrichment_may_help: bool,
+    notes: Iterable[str] = (),
+) -> AskScreenerExecutionResult:
+    clean_providers = tuple(_dedupe_texts(providers_used))
+    clean_remaining = {field: int(count) for field, count in remaining_missing_fields.items() if int(count) > 0}
+    summary = ask_screener_result_summary(
+        result.plan,
+        total_input_rows=result.total_input_rows,
+        total_matched_rows=result.total_matched_rows,
+        total_output_rows=len(result.records),
+        limited=result.limited,
+        enrichment_status=enrichment_status,
+        providers_used=clean_providers,
+        symbols_requested=symbols_requested,
+        rows_updated=rows_updated,
+        remaining_missing_fields=clean_remaining,
+        more_enrichment_may_help=more_enrichment_may_help,
+    )
+    merged_notes = tuple(_dedupe_texts((*result.notes, *notes)))
+    return replace(
+        result,
+        summary=summary,
+        notes=merged_notes,
+        enrichment_status=enrichment_status,
+        providers_used=clean_providers,
+        symbols_requested=max(0, int(symbols_requested)),
+        rows_updated=max(0, int(rows_updated)),
+        remaining_missing_fields=clean_remaining,
+        more_enrichment_may_help=bool(more_enrichment_may_help),
+        enrichment_decision=decision,
+    )
+
+
+def _ask_screener_decision_notes(decision: AskScreenerEnrichmentDecision) -> tuple[str, ...]:
+    notes = [decision.reason] if decision.reason else []
+    if decision.missing_provider_config:
+        notes.append("Missing provider config: " + ", ".join(decision.missing_provider_config))
+    if decision.missing_fields:
+        notes.append("Required fields with missing local coverage: " + ", ".join(decision.missing_fields))
+    return tuple(redact_symbol_chat_secrets(note) for note in notes if note)
+
+
+def _ask_screener_providers_used(snapshot: MarketQuoteFundamentalsSnapshot | None) -> tuple[str, ...]:
+    if snapshot is None:
+        return ()
+    sources = [record.source for record in snapshot.records if record.source]
+    sources.extend(
+        status.source
+        for status in snapshot.statuses
+        if status.source and str(status.status).lower() not in {"disabled", "unavailable"}
+    )
+    return tuple(_dedupe_texts(sources))
+
+
+def _remaining_missing_required_fields(records: Iterable[MarketScreenerRecord], required_fields: Iterable[str]) -> dict[str, int]:
+    rows = list(records)
+    remaining: dict[str, int] = {}
+    for field in _normalize_required_fields(required_fields, include_provider_only=True):
+        missing = sum(1 for record in rows if not _has_value(_ask_screener_field_value(record, field)))
+        if missing:
+            remaining[field] = missing
+    return remaining
+
+
+def _ask_screener_enrichment_candidate_symbols(
+    records: Iterable[MarketScreenerRecord],
+    *,
+    required_fields: Iterable[str],
+) -> tuple[str, ...]:
+    fields = _normalize_required_fields(required_fields, include_provider_only=True)
+    seen: set[str] = set()
+    prioritized: list[tuple[int, str]] = []
+    for record in records:
+        symbol = _normalize_symbol(record.symbol)
+        if not symbol or symbol in seen:
+            continue
+        if not any(not _has_value(_ask_screener_field_value(record, field)) for field in fields):
+            continue
+        seen.add(symbol)
+        prioritized.append((_ask_screener_enrichment_priority(record), symbol))
+    return tuple(symbol for _rank, symbol in sorted(prioritized, key=lambda row: (row[0], row[1])))
+
+
+def _ask_screener_enrichment_priority(record: MarketScreenerRecord) -> int:
+    if market_screener_is_my_holding(record):
+        return 0
+    if record.recent_filing_date or record.next_earnings_date or record.risk_flags or record.signals:
+        return 1
+    return 2
+
+
+def _ask_screener_enrichment_cap(fields: Iterable[str], config: AskScreenerProviderConfig) -> int:
+    provider_fields = set(_normalize_required_fields(fields, include_provider_only=True))
+    caps: list[int] = []
+    if provider_fields & ASK_SCREENER_CLASSIFICATION_FIELDS:
+        caps.append(config.profile_enrich_limit)
+    if provider_fields & ASK_SCREENER_TAPE_FIELDS:
+        caps.append(min(config.quote_enrich_limit, config.databento_tape_enrich_limit))
+    if provider_fields & ASK_SCREENER_FUNDAMENTAL_FIELDS:
+        caps.append(min(config.quote_enrich_limit, config.fundamental_enrich_limit))
+    if not caps:
+        return 0
+    return max(0, min(caps))
+
+
+def _ask_screener_provider_groups_for_fields(fields: Iterable[str]) -> tuple[str, ...]:
+    provider_fields = set(_normalize_required_fields(fields, include_provider_only=True))
+    groups: list[str] = []
+    if provider_fields & ASK_SCREENER_CLASSIFICATION_FIELDS:
+        groups.append("fmp_profile")
+    if provider_fields & ASK_SCREENER_TAPE_FIELDS:
+        groups.append("databento_tape")
+    if provider_fields & ASK_SCREENER_FUNDAMENTAL_FIELDS:
+        groups.append("fmp_fundamentals")
+    return tuple(groups)
+
+
+def _missing_ask_screener_provider_config(
+    provider_groups: Iterable[str],
+    config: AskScreenerProviderConfig,
+) -> tuple[str, ...]:
+    missing: list[str] = []
+    groups = set(provider_groups)
+    local_can_fill = config.local_market_data_configured
+    if "fmp_profile" in groups and not (config.fmp_configured or local_can_fill):
+        missing.append("FMP_API_KEY for FMP profile/classification enrichment")
+    if "fmp_fundamentals" in groups and not (config.fmp_configured or local_can_fill):
+        missing.append("FMP_API_KEY for FMP quote/fundamental enrichment")
+    if "databento_tape" in groups and not (
+        config.databento_equities_configured
+        or config.fmp_configured
+        or config.local_market_data_configured
+        or config.schwab_quote_configured
+    ):
+        missing.append("DATABENTO_API_KEY plus enabled US equities dataset/schema for Databento tape enrichment")
+    return tuple(missing)
+
+
+def _normalize_required_fields(fields: Iterable[Any], *, include_provider_only: bool = False) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for value in fields:
+        try:
+            field = _normalize_ask_screener_field(value)
+        except AskScreenerPlanValidationError:
+            continue
+        normalized.extend(_ask_screener_underlying_fields(field))
+    allowed = ASK_SCREENER_PROVIDER_AWARE_FIELDS if include_provider_only else ASK_SCREENER_ALLOWED_FIELDS
+    return tuple(field for field in _dedupe_texts(normalized) if field in allowed)
+
+
+def _derive_ask_screener_required_fields(
+    filters: Iterable[AskScreenerFilter],
+    sort: AskScreenerSort | None,
+    explicit_fields: Iterable[Any] = (),
+) -> tuple[str, ...]:
+    fields: list[str] = []
+    fields.extend(_normalize_required_fields(explicit_fields))
+    for filter_row in filters:
+        fields.extend(_ask_screener_underlying_fields(filter_row.field))
+    if sort is not None:
+        fields.extend(_ask_screener_underlying_fields(sort.field))
+    return tuple(_dedupe_texts(field for field in fields if field in ASK_SCREENER_ALLOWED_FIELDS))
+
+
+def _ask_screener_underlying_fields(field: str) -> tuple[str, ...]:
+    if field == "classification":
+        return ("sector", "industry", "exchange")
+    if field == "high_volume_mover":
+        return ("change_percent", "volume", "avg_volume")
+    if field == "momentum_proxy":
+        return ("change_percent", "volume", "avg_volume")
+    if field == "recent_catalyst":
+        return ("recent_filing_date", "next_earnings_date", "signals", "risk_flags")
+    if field == "has_market_data" or field == "has_quote":
+        return ("price", "volume", "change_percent", "avg_volume", "market_cap")
+    if field == "has_fundamentals":
+        return tuple(sorted(ASK_SCREENER_FUNDAMENTAL_FIELDS))
+    if field == "has_recent_filing":
+        return ("recent_filing_date",)
+    if field == "has_upcoming_earnings":
+        return ("next_earnings_date",)
+    if field == "missing_price_data":
+        return ("price",)
+    if field == "has_positive_revenue_growth":
+        return ("revenue_growth",)
+    if field == "has_negative_eps":
+        return ("eps",)
+    if field == "has_missing_data":
+        return tuple(sorted(ASK_SCREENER_PROVIDER_AWARE_FIELDS))
+    return (field,)
+
+
+def _env_flag(name: str, *, default: bool) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "y", "on"}:
+        return True
+    if raw in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = str(os.getenv(name, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = int(float(raw))
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def _env_float(name: str, default: float, *, minimum: float, maximum: float) -> float:
+    raw = str(os.getenv(name, "") or "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = float(raw.replace("$", "").replace(",", ""))
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def _secret_configured(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    return text.upper() not in {"THIS IS NOT A KEY", "NOT_A_KEY", "CHANGEME", "CHANGE_ME", "YOUR_API_KEY"}
+
+
 def validate_ask_screener_plan(payload: Mapping[str, Any] | AskScreenerPlan) -> AskScreenerPlan:
     if isinstance(payload, AskScreenerPlan):
         payload = payload.to_dict()
@@ -990,6 +1585,16 @@ def validate_ask_screener_plan(payload: Mapping[str, Any] | AskScreenerPlan) -> 
     sort = _validate_ask_screener_sort(payload.get("sort") or payload.get("order_by"))
     limit = _validate_ask_screener_limit(payload.get("limit"))
     intent = _shorten(_clean_prompt(str(payload.get("intent") or payload.get("description") or "")), 180)
+    raw_required_fields = payload.get("required_fields") or payload.get("required_screener_fields") or ()
+    if isinstance(raw_required_fields, str):
+        raw_required_fields = re.split(r"[,;\s]+", raw_required_fields)
+    if not isinstance(raw_required_fields, (list, tuple, set)):
+        raw_required_fields = ()
+    required_fields = _derive_ask_screener_required_fields(filters, sort, raw_required_fields)
+    provider_enrichment_needed = _coerce_bool(
+        payload.get("provider_enrichment_needed", payload.get("needs_provider_enrichment")),
+        default=bool(set(required_fields) & ASK_SCREENER_PROVIDER_AWARE_FIELDS),
+    )
 
     if not clear_filters and not filters and sort is None:
         raise AskScreenerPlanValidationError("Ask Screener plan must include filters, sorting, or clear_filters=true.")
@@ -999,6 +1604,8 @@ def validate_ask_screener_plan(payload: Mapping[str, Any] | AskScreenerPlan) -> 
         limit=limit,
         intent=intent,
         clear_filters=clear_filters,
+        required_fields=required_fields,
+        provider_enrichment_needed=provider_enrichment_needed,
     )
 
 
@@ -1026,6 +1633,12 @@ def execute_ask_screener_plan(
         total_matched_rows=len(matched),
         total_output_rows=len(result_rows),
         limited=limited,
+        enrichment_status="local-only",
+        providers_used=(),
+        symbols_requested=0,
+        rows_updated=0,
+        remaining_missing_fields=_remaining_missing_required_fields(rows, validated.required_fields),
+        more_enrichment_may_help=False,
     )
     return AskScreenerExecutionResult(
         plan=validated,
@@ -1034,7 +1647,10 @@ def execute_ask_screener_plan(
         total_matched_rows=len(matched),
         limited=limited,
         summary=summary,
+        all_records=tuple(rows),
         notes=notes,
+        enrichment_status="local-only",
+        remaining_missing_fields=_remaining_missing_required_fields(rows, validated.required_fields),
     )
 
 
@@ -1045,6 +1661,12 @@ def ask_screener_result_summary(
     total_matched_rows: int,
     total_output_rows: int,
     limited: bool,
+    enrichment_status: str = "local-only",
+    providers_used: Iterable[str] = (),
+    symbols_requested: int = 0,
+    rows_updated: int = 0,
+    remaining_missing_fields: Mapping[str, int] | None = None,
+    more_enrichment_may_help: bool = False,
 ) -> str:
     if plan.clear_filters:
         return redact_symbol_chat_secrets(f"Ask Screener cleared filters. Showing {total_output_rows} of {total_input_rows} row(s).")
@@ -1060,6 +1682,21 @@ def ask_screener_result_summary(
         direction = "descending" if plan.sort.descending else "ascending"
         parts.append(f"sorted by {plan.sort.field} {direction}")
     parts.append("missing values were not inferred")
+    parts.append(f"status: {enrichment_status}")
+    clean_providers = tuple(_dedupe_texts(providers_used))
+    if clean_providers:
+        parts.append("providers used: " + ", ".join(clean_providers))
+    parts.append(f"symbols requested: {max(0, int(symbols_requested))}")
+    parts.append(f"rows updated: {max(0, int(rows_updated))}")
+    parts.append(f"matches found: {total_matched_rows}")
+    remaining = {field: int(count) for field, count in (remaining_missing_fields or {}).items() if int(count) > 0}
+    if remaining:
+        preview = ", ".join(f"{field}={count}" for field, count in sorted(remaining.items())[:6])
+        extra = len(remaining) - 6
+        parts.append("remaining missing fields: " + (f"{preview}, +{extra} more" if extra > 0 else preview))
+    else:
+        parts.append("remaining missing fields: none")
+    parts.append(f"more enrichment may help: {'yes' if more_enrichment_may_help else 'no'}")
     return redact_symbol_chat_secrets(". ".join(parts) + ".")
 
 
@@ -1079,6 +1716,7 @@ def parse_ask_screener_fallback(
     sort: AskScreenerSort | None = None
     intent = _shorten(clean, 180)
     limit = _parse_ask_screener_limit(lower) or ASK_SCREENER_DEFAULT_LIMIT
+    explicit_required_fields: list[str] = []
 
     if any(phrase in lower for phrase in ("my holdings", "my holding", "holdings", "watchlist")):
         filters.append(AskScreenerFilter("is_my_holding", "is_true"))
@@ -1092,11 +1730,31 @@ def parse_ask_screener_fallback(
     if "earning" in lower and any(phrase in lower for phrase in ("soon", "upcoming", "next", "calendar")):
         filters.append(AskScreenerFilter("next_earnings_date", "within_next_days", 30))
         sort = AskScreenerSort("next_earnings_date", descending=False)
+    if any(phrase in lower for phrase in ("highest volume", "highest-volume", "top volume", "most volume", "largest volume", "volume today")):
+        filters.append(AskScreenerFilter("volume", "exists"))
+        sort = AskScreenerSort("volume", descending=True)
+        explicit_required_fields.extend(("price", "volume"))
     if any(phrase in lower for phrase in ("high volume", "volume mover", "mover", "big volume")):
         filters.append(AskScreenerFilter("high_volume_mover", "is_true"))
         sort = AskScreenerSort("volume", descending=True)
+    if "momentum" in lower:
+        filters.append(AskScreenerFilter("momentum_proxy", "is_true"))
+        sort = AskScreenerSort("change_percent", descending=True)
+        explicit_required_fields.extend(("change_percent", "volume", "avg_volume"))
+    if any(phrase in lower for phrase in ("recent catalyst", "recent catalysts", "catalyst", "catalysts", "ai-worthy", "ai worthy")):
+        filters.append(AskScreenerFilter("recent_catalyst", "is_true"))
+        sort = sort or AskScreenerSort("recent_filing_date", descending=True)
+        explicit_required_fields.extend(("recent_filing_date", "next_earnings_date"))
+    if "small cap" in lower or "small-cap" in lower:
+        filters.append(AskScreenerFilter("market_cap", "lt", _env_float(ASK_SCREENER_SMALL_CAP_MAX_MARKET_CAP_ENV, DEFAULT_ASK_SCREENER_SMALL_CAP_MAX_MARKET_CAP, minimum=1.0, maximum=1_000_000_000_000.0)))
+        sort = sort or AskScreenerSort("market_cap", descending=False)
+    if "penny stock" in lower or "penny stocks" in lower:
+        filters.append(AskScreenerFilter("price", "lt", _env_float(ASK_SCREENER_PENNY_STOCK_MAX_PRICE_ENV, DEFAULT_ASK_SCREENER_PENNY_STOCK_MAX_PRICE, minimum=0.01, maximum=100.0)))
+        sort = sort or AskScreenerSort("price", descending=False)
     if any(phrase in lower for phrase in ("missing price", "missing prices", "no price", "without price", "blank price")):
         filters.append(AskScreenerFilter("price", "missing"))
+    elif any(phrase in lower for phrase in ("missing data", "blank data", "missing fields", "blank fields", "incomplete data")):
+        filters.append(AskScreenerFilter("has_missing_data", "is_true"))
     if any(phrase in lower for phrase in ("positive revenue growth", "revenue growth positive", "growing revenue")):
         filters.append(AskScreenerFilter("revenue_growth", "gt", 0))
         sort = AskScreenerSort("revenue_growth", descending=True)
@@ -1108,7 +1766,15 @@ def parse_ask_screener_fallback(
     if not filters and sort is None:
         return None
     try:
-        return validate_ask_screener_plan(AskScreenerPlan(filters=tuple(filters), sort=sort, limit=limit, intent=intent))
+        return validate_ask_screener_plan(
+            AskScreenerPlan(
+                filters=tuple(filters),
+                sort=sort,
+                limit=limit,
+                intent=intent,
+                required_fields=tuple(explicit_required_fields),
+            )
+        )
     except AskScreenerPlanValidationError:
         return None
 
@@ -1129,6 +1795,8 @@ def ask_screener_planner_request_payload(
                 "sort": {"field": "allowed_field", "descending": True},
                 "limit": ASK_SCREENER_DEFAULT_LIMIT,
                 "clear_filters": False,
+                "required_fields": ["fields needed to execute filters/sort"],
+                "provider_enrichment_needed": True,
             },
         },
         "schema": _ask_screener_schema_payload(),
@@ -1138,6 +1806,11 @@ def ask_screener_planner_request_payload(
             "Do not include source excerpts, source links, API keys, credentials, account identifiers, or secrets.",
             "Do not request or emit all screener rows.",
             "Do not infer missing market data; use missing/exists filters when data is absent.",
+            "'up to N' means limit=N.",
+            "'Technology / Electronics' means classification contains any of technology/electronic across sector, industry, or profile classification text.",
+            "'highest volume today' means sort by volume descending and require price/volume data.",
+            "'momentum' means positive change_percent, volume present, and volume above avg_volume when avg_volume is available.",
+            "'recent catalysts' means recent filing, upcoming earnings, guidance, risk flags, or AI-worthy deterministic signals.",
             "No buy/sell/hold recommendations and no trade actions.",
         ],
         "request_budget": {
@@ -1173,6 +1846,14 @@ def ask_screener_snapshot_metadata(records: Iterable[MarketScreenerRecord]) -> d
         "date_ranges": {
             field: _date_metadata(rows, field)
             for field in sorted(ASK_SCREENER_DATE_FIELDS)
+        },
+        "field_coverage": {
+            row.field: {
+                "available_count": row.available_count,
+                "missing_count": row.missing_count,
+                "coverage_ratio": round(row.coverage_ratio, 4),
+            }
+            for row in analyze_ask_screener_field_coverage(rows)
         },
         "omitted_row_data": "Full screener rows, symbols, company names, source excerpts, and source links are intentionally not included.",
     }
@@ -1252,7 +1933,7 @@ def _allowed_ask_screener_operators(field: str) -> set[str]:
 def _sanitize_ask_screener_value(field: str, operator: str, value: Any) -> Any:
     if operator in {"exists", "missing", "is_true", "is_false"}:
         return None
-    if operator in {"in", "not_in"}:
+    if operator in {"in", "not_in", "contains_any"}:
         if not isinstance(value, (list, tuple, set)):
             value = [value]
         values = [_sanitize_ask_screener_scalar_value(field, operator, item) for item in value]
@@ -1305,6 +1986,8 @@ def _ask_screener_filter_matches(record: MarketScreenerRecord, filter_row: AskSc
 
 
 def _ask_screener_field_value(record: MarketScreenerRecord, field: str) -> Any:
+    if field == "classification":
+        return tuple(value for value in (record.sector, record.industry, record.exchange, record.recent_filing_type) if value)
     if field == "data_label":
         return market_screener_data_label(record)
     if field == "data_completeness_score":
@@ -1323,12 +2006,29 @@ def _ask_screener_field_value(record: MarketScreenerRecord, field: str) -> Any:
         return bool(record.next_earnings_date)
     if field == "high_volume_mover":
         return _event_type_matches(record, "High volume / mover")
+    if field == "momentum_proxy":
+        if record.change_percent is None or record.change_percent <= 0 or record.volume is None:
+            return False
+        if record.avg_volume in (None, 0):
+            return True
+        return record.volume > record.avg_volume
+    if field == "recent_catalyst":
+        signal_text = " ".join(record.signals).lower()
+        return bool(
+            record.recent_filing_date
+            or record.next_earnings_date
+            or record.risk_flags
+            or record.signals
+            or "guidance" in signal_text
+        )
     if field == "missing_price_data":
         return record.price is None
     if field == "has_positive_revenue_growth":
         return record.revenue_growth is not None and record.revenue_growth > 0
     if field == "has_negative_eps":
         return record.eps is not None and record.eps < 0
+    if field == "has_missing_data":
+        return any(not _has_value(_ask_screener_field_value(record, item)) for item in ASK_SCREENER_PROVIDER_AWARE_FIELDS)
     return getattr(record, field, None)
 
 
@@ -1397,10 +2097,10 @@ def _text_filter_matches(value: Any, operator: str, target: Any) -> bool:
         return any(value_text == targets[0] for value_text in values)
     if operator == "neq":
         return all(value_text != targets[0] for value_text in values)
-    if operator == "contains":
-        return any(targets[0] in value_text for value_text in values)
+    if operator in {"contains", "contains_any"}:
+        return any(target in value_text for value_text in values for target in targets)
     if operator == "not_contains":
-        return all(targets[0] not in value_text for value_text in values)
+        return all(target not in value_text for value_text in values for target in targets)
     if operator == "in":
         return any(value_text in targets for value_text in values)
     if operator == "not_in":
@@ -1444,7 +2144,7 @@ def _ask_screener_filter_label(filter_row: AskScreenerFilter) -> str:
 
 
 def _parse_ask_screener_limit(lower: str) -> int | None:
-    match = re.search(r"\b(?:top|first|limit|show)\s+(\d{1,4})\b", lower)
+    match = re.search(r"\b(?:top|first|limit|show|up to|upto)\s+(\d{1,4})\b", lower)
     if not match:
         return None
     return _validate_ask_screener_limit(match.group(1))
@@ -1454,8 +2154,13 @@ def _ask_screener_sector_exchange_filters(lower: str, records: Iterable[MarketSc
     rows = list(records)
     filters: list[AskScreenerFilter] = []
     sectors = _metadata_labels(record.sector for record in rows)
+    industries = _metadata_labels(record.industry for record in rows)
     exchanges = _metadata_labels(record.exchange for record in rows)
     common_exchanges = {"nasdaq": "NASDAQ", "nyse": "NYSE", "amex": "AMEX", "arca": "NYSE Arca"}
+    classification_terms = _ask_screener_classification_terms(lower, (*sectors, *industries))
+    if classification_terms:
+        filters.append(AskScreenerFilter("classification", "contains_any", classification_terms))
+        return tuple(filters)
     for label in sorted(sectors, key=len, reverse=True):
         label_lower = label.lower()
         if label_lower != MISSING_TEXT.lower() and (f"sector {label_lower}" in lower or f"{label_lower} sector" in lower or f"in {label_lower}" in lower):
@@ -1468,6 +2173,19 @@ def _ask_screener_sector_exchange_filters(lower: str, records: Iterable[MarketSc
             filters.append(AskScreenerFilter("exchange", "eq", label))
             break
     return tuple(filters)
+
+
+def _ask_screener_classification_terms(lower: str, labels: Iterable[str]) -> tuple[str, ...]:
+    terms: list[str] = []
+    if "technology" in lower or "tech " in f"{lower} " or " tech" in lower:
+        terms.append("technology")
+    if "electronics" in lower or "electronic" in lower:
+        terms.append("electronic")
+    for label in labels:
+        clean = _clean_prompt(label)
+        if clean and clean.lower() in lower:
+            terms.append(clean)
+    return tuple(_dedupe_texts(term.lower() for term in terms if term))
 
 
 def _metadata_labels(values: Iterable[Any]) -> tuple[str, ...]:
@@ -1492,6 +2210,13 @@ def _ask_screener_schema_payload() -> dict[str, Any]:
             "numeric": sorted(ASK_SCREENER_NUMERIC_OPERATORS),
             "date": sorted(ASK_SCREENER_DATE_OPERATORS),
             "boolean": sorted(ASK_SCREENER_BOOLEAN_OPERATORS),
+        },
+        "provider_aware_fields": sorted(ASK_SCREENER_PROVIDER_AWARE_FIELDS),
+        "derived_fields": {
+            "classification": "OR text over sector, industry, exchange, and profile classification text",
+            "momentum_proxy": "change_percent > 0, volume present, and volume > avg_volume when avg_volume is available",
+            "recent_catalyst": "recent filing, upcoming earnings, guidance, risk flags, or deterministic AI-worthy signals",
+            "has_missing_data": "one or more provider-aware fields is blank",
         },
         "max_filters": ASK_SCREENER_MAX_FILTERS,
         "max_limit": ASK_SCREENER_MAX_LIMIT,
