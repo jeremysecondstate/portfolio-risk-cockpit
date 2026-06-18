@@ -326,6 +326,55 @@ DATA_COMPLETENESS_OPTIONS = (
     "Has field provenance",
 )
 
+MAJOR_US_LARGE_CAP_SYMBOLS = (
+    "MSFT",
+    "AAPL",
+    "NVDA",
+    "GOOG",
+    "GOOGL",
+    "AMZN",
+    "META",
+    "BRK.B",
+    "LLY",
+    "AVGO",
+    "TSLA",
+    "JPM",
+    "V",
+)
+US_PRIMARY_EXCHANGES = {
+    "NASDAQ",
+    "NASD",
+    "XNAS",
+    "NYSE",
+    "XNYS",
+    "NYSE AMERICAN",
+    "NYSEAMERICAN",
+    "AMEX",
+    "ARCX",
+    "NYSE ARCA",
+    "BATS",
+    "CBOE",
+    "IEX",
+}
+OTC_EXCHANGE_MARKERS = ("OTC", "PINK", "PINX", "GREY", "GREY MARKET", "EXPERT")
+KNOWN_FOREIGN_ADR_SYMBOLS = {
+    "SONY",
+    "HMC",
+    "BCH",
+    "TM",
+    "NVO",
+    "ASML",
+    "BABA",
+    "TSM",
+    "SHOP",
+    "SAP",
+    "SNY",
+    "BP",
+    "SHEL",
+    "AZN",
+    "RIO",
+}
+
 ProgressCallback = Callable[[str], None]
 
 
@@ -379,6 +428,15 @@ class MarketScreenerCoverageDiagnostics:
     rows_with_avg_volume: int = 0
     rows_missing_avg_volume: int = 0
     rows_with_fundamentals: int = 0
+    rows_with_trusted_usd_market_cap: int = 0
+    rows_with_trusted_primary_market_cap: int = 0
+    rows_with_trusted_non_primary_market_cap: int = 0
+    rows_with_untrusted_market_cap: int = 0
+    rows_with_non_usd_market_cap: int = 0
+    rows_with_ambiguous_market_cap: int = 0
+    rows_missing_market_cap: int = 0
+    major_us_large_caps_present: int = 0
+    major_us_large_caps_absent: int = 0
     rows_with_revenue_growth: int = 0
     rows_missing_revenue_growth: int = 0
     rows_with_float_or_shares: int = 0
@@ -417,6 +475,20 @@ class MarketScreenerFieldProvenance:
 
 
 @dataclass(frozen=True)
+class MarketScreenerMarketCapRank:
+    display_market_cap: float | None
+    ranking_market_cap: float | None
+    currency: str
+    category: str
+    trusted: bool
+    used_for_ranking: bool
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class MarketScreenerRecord:
     symbol: str
     company_name: str | None = None
@@ -449,6 +521,17 @@ class MarketScreenerRecord:
     portfolio_unrealized_pnl: float | None = None
     portfolio_weight: float | None = None
     field_provenance: tuple[MarketScreenerFieldProvenance, ...] = ()
+    market_cap_currency: str | None = None
+    market_cap_rank_value: float | None = None
+    market_cap_rank_currency: str | None = None
+    market_cap_rank_trusted: bool | None = None
+    market_cap_rank_reason: str | None = None
+    instrument_type: str | None = None
+    country: str | None = None
+    is_adr: bool | None = None
+    is_etf: bool | None = None
+    is_fund: bool | None = None
+    is_otc: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -462,6 +545,10 @@ class MarketScreenerRecord:
         values["sources"] = tuple(values.get("sources") or ())
         values["source_links"] = tuple(values.get("source_links") or ())
         values["field_provenance"] = _field_provenance_from_payload(values.get("field_provenance"))
+        for key in ("market_cap_currency", "market_cap_rank_currency"):
+            values[key] = _normalize_currency_code(values.get(key)) or None
+        for key in ("is_adr", "is_etf", "is_fund", "is_otc", "market_cap_rank_trusted"):
+            values[key] = _bool_or_none(values.get(key))
         return cls(**values)
 
 
@@ -572,6 +659,15 @@ class MarketScreenerEnrichmentReport:
     rows_with_volume: int
     rows_with_avg_volume: int
     rows_with_fundamentals: int
+    rows_with_trusted_usd_market_cap: int
+    rows_with_trusted_primary_market_cap: int
+    rows_with_trusted_non_primary_market_cap: int
+    rows_with_untrusted_market_cap: int
+    rows_with_non_usd_market_cap: int
+    rows_with_ambiguous_market_cap: int
+    rows_missing_market_cap: int
+    major_us_large_caps_present: int
+    major_us_large_caps_absent: int
     rows_with_revenue_growth: int
     rows_with_float_or_shares: int
     rows_missing_profile_classification: int
@@ -1187,6 +1283,8 @@ def market_screener_enrichment_report(
     rows_with_volume = sum(1 for record in rows if record.volume is not None)
     rows_with_avg_volume = sum(1 for record in rows if record.avg_volume is not None)
     rows_with_fundamentals = sum(1 for record in rows if market_screener_record_has_fundamentals(record))
+    market_cap_ranks = [market_screener_market_cap_rank(record) for record in rows]
+    major_present = sum(1 for symbol in MAJOR_US_LARGE_CAP_SYMBOLS if any(_normalize_symbol(record.symbol) == symbol for record in rows))
     rows_with_revenue_growth = sum(1 for record in rows if record.revenue_growth is not None)
     rows_with_float_or_shares = sum(1 for record in rows if record.shares_float is not None or record.shares_outstanding is not None)
     return MarketScreenerEnrichmentReport(
@@ -1197,6 +1295,15 @@ def market_screener_enrichment_report(
         rows_with_volume=rows_with_volume,
         rows_with_avg_volume=rows_with_avg_volume,
         rows_with_fundamentals=rows_with_fundamentals,
+        rows_with_trusted_usd_market_cap=sum(1 for rank in market_cap_ranks if rank.trusted and rank.currency == "USD"),
+        rows_with_trusted_primary_market_cap=sum(1 for rank in market_cap_ranks if rank.category == "us_primary_common"),
+        rows_with_trusted_non_primary_market_cap=sum(1 for rank in market_cap_ranks if rank.category == "trusted_non_primary"),
+        rows_with_untrusted_market_cap=sum(1 for rank in market_cap_ranks if rank.ranking_market_cap is not None and not rank.trusted),
+        rows_with_non_usd_market_cap=sum(1 for rank in market_cap_ranks if rank.ranking_market_cap is not None and rank.currency not in {"", "USD", "unknown"}),
+        rows_with_ambiguous_market_cap=sum(1 for rank in market_cap_ranks if rank.category == "untrusted_ambiguous"),
+        rows_missing_market_cap=sum(1 for rank in market_cap_ranks if rank.ranking_market_cap is None),
+        major_us_large_caps_present=major_present,
+        major_us_large_caps_absent=max(0, len(MAJOR_US_LARGE_CAP_SYMBOLS) - major_present),
         rows_with_revenue_growth=rows_with_revenue_growth,
         rows_with_float_or_shares=rows_with_float_or_shares,
         rows_missing_profile_classification=max(0, total - rows_with_profile),
@@ -1545,6 +1652,135 @@ def sort_market_screener_records(
     missing = [record for record in rows if _sort_value(record, column) is None]
     present.sort(key=lambda record: _sort_value(record, column), reverse=descending)
     return present + missing
+
+
+def market_screener_market_cap_rank(record: MarketScreenerRecord) -> MarketScreenerMarketCapRank:
+    display_cap = _float_or_none(record.market_cap)
+    explicit_rank = _float_or_none(record.market_cap_rank_value)
+    raw_rank = explicit_rank if explicit_rank is not None else display_cap
+    currency = _normalize_currency_code(record.market_cap_rank_currency or record.market_cap_currency)
+    explicit_trust = record.market_cap_rank_trusted
+    if raw_rank is None or raw_rank < 0:
+        return MarketScreenerMarketCapRank(
+            display_market_cap=display_cap,
+            ranking_market_cap=None,
+            currency=currency or "unknown",
+            category="missing_or_invalid",
+            trusted=False,
+            used_for_ranking=False,
+            reason="missing or invalid market cap; sorted below rows with usable caps",
+        )
+
+    non_primary_reason = _non_primary_market_cap_reason(record)
+    if explicit_trust is False:
+        return MarketScreenerMarketCapRank(
+            display_market_cap=display_cap,
+            ranking_market_cap=raw_rank,
+            currency=currency or "unknown",
+            category="untrusted_explicit",
+            trusted=False,
+            used_for_ranking=False,
+            reason=record.market_cap_rank_reason or "provider marked market cap as untrusted for ranking",
+        )
+
+    if currency and currency != "USD":
+        return MarketScreenerMarketCapRank(
+            display_market_cap=display_cap,
+            ranking_market_cap=raw_rank,
+            currency=currency,
+            category="untrusted_non_usd",
+            trusted=False,
+            used_for_ranking=False,
+            reason=f"market cap currency is {currency}, not USD; raw display cap is not used ahead of trusted USD caps",
+        )
+
+    if explicit_rank is not None and (currency in {"", "USD"} or not currency) and explicit_trust is not False:
+        trusted = explicit_trust is True or currency == "USD" or _is_us_primary_common_equity(record)
+        if trusted:
+            category = "trusted_non_primary" if non_primary_reason else "us_primary_common"
+            reason = record.market_cap_rank_reason or (
+                f"provider supplied normalized USD ranking market cap; {non_primary_reason}"
+                if non_primary_reason
+                else "provider supplied normalized USD ranking market cap"
+            )
+            return MarketScreenerMarketCapRank(
+                display_market_cap=display_cap,
+                ranking_market_cap=raw_rank,
+                currency="USD",
+                category=category,
+                trusted=True,
+                used_for_ranking=True,
+                reason=reason,
+            )
+
+    if non_primary_reason:
+        if currency == "USD":
+            return MarketScreenerMarketCapRank(
+                display_market_cap=display_cap,
+                ranking_market_cap=raw_rank,
+                currency="USD",
+                category="trusted_non_primary",
+                trusted=True,
+                used_for_ranking=True,
+                reason=f"USD market cap is usable but demoted below U.S. primary/common equities because {non_primary_reason}",
+            )
+        return MarketScreenerMarketCapRank(
+            display_market_cap=display_cap,
+            ranking_market_cap=raw_rank,
+            currency=currency or "unknown",
+            category="untrusted_non_primary",
+            trusted=False,
+            used_for_ranking=False,
+            reason=f"{non_primary_reason}; currency/source is ambiguous, so raw cap is sorted below trusted USD caps",
+        )
+
+    if currency == "USD" or _is_us_primary_common_equity(record):
+        return MarketScreenerMarketCapRank(
+            display_market_cap=display_cap,
+            ranking_market_cap=raw_rank,
+            currency="USD",
+            category="us_primary_common",
+            trusted=True,
+            used_for_ranking=True,
+            reason="trusted USD market cap for a U.S. primary/common equity row",
+        )
+
+    return MarketScreenerMarketCapRank(
+        display_market_cap=display_cap,
+        ranking_market_cap=raw_rank,
+        currency=currency or "unknown",
+        category="untrusted_ambiguous",
+        trusted=False,
+        used_for_ranking=False,
+        reason="market cap currency, listing country, or instrument type is ambiguous; raw cap is sorted below trusted USD caps",
+    )
+
+
+def market_screener_major_cap_diagnostic_lines(
+    records: Iterable[MarketScreenerRecord],
+    diagnostics: MarketScreenerCoverageDiagnostics | None = None,
+) -> list[str]:
+    rows_by_symbol = {_normalize_symbol(record.symbol): record for record in records if _normalize_symbol(record.symbol)}
+    lines: list[str] = []
+    for symbol in MAJOR_US_LARGE_CAP_SYMBOLS:
+        record = rows_by_symbol.get(symbol)
+        if record is None:
+            cap_detail = ""
+            if diagnostics is not None and diagnostics.rows_skipped_by_configured_symbol_cap:
+                cap_detail = f" {diagnostics.rows_skipped_by_configured_symbol_cap} row(s) were skipped by configured provider caps during enrichment."
+            lines.append(
+                f"{symbol} absent: no row with this symbol is present in the loaded screener set. "
+                f"It may be outside the loaded universe, filtered out before this view, blocked by provider caps, or returned with no usable provider identity.{cap_detail}"
+            )
+            continue
+        rank = market_screener_market_cap_rank(record)
+        if rank.trusted and rank.category == "us_primary_common":
+            lines.append(f"{symbol} present: trusted USD market-cap rank is available.")
+        elif record.market_cap is None:
+            lines.append(f"{symbol} present but not ranked by market cap: market cap is missing.")
+        else:
+            lines.append(f"{symbol} present but market-cap rank is not primary trusted: {rank.reason}")
+    return lines
 
 
 def market_screener_has_ai_signal(record: MarketScreenerRecord) -> bool:
@@ -2881,6 +3117,8 @@ def market_screener_record_context(record: MarketScreenerRecord) -> dict[str, An
         "market_data": {
             "price": _number_or_missing(record.price, "price"),
             "market_cap": _number_or_missing(record.market_cap, "market_cap"),
+            "market_cap_currency": _text_or_missing(record.market_cap_currency, "market_cap_currency"),
+            "market_cap_ranking": market_screener_market_cap_rank(record).to_dict(),
             "volume": _number_or_missing(record.volume, "volume"),
             "avg_volume": _number_or_missing(record.avg_volume, "avg_volume"),
             "change_percent": _number_or_missing(record.change_percent, "change_percent"),
@@ -2938,6 +3176,11 @@ def market_screener_record_missing_reason_lines(record: MarketScreenerRecord) ->
             f"missing FMP/profile fundamental fields: {', '.join(fundamental_missing)}; requires local seed data, parsed SEC filing rows, FMP quote/profile/key-metrics/ratios/income-growth/shares-float endpoints, or configured fallback profile data. "
             "Databento equities and CME context are unsupported for selected-equity fundamentals."
         )
+    rank = market_screener_market_cap_rank(record)
+    if record.market_cap is not None and not rank.trusted:
+        reasons.append(f"market cap ranking not trusted: {rank.reason}")
+    elif record.market_cap is not None and rank.category != "us_primary_common":
+        reasons.append(f"market cap ranking demoted: {rank.reason}")
     return reasons
 
 
@@ -3378,6 +3621,8 @@ def market_screener_diagnostics_summary(diagnostics: MarketScreenerCoverageDiagn
         f"SEC submissions {diagnostics.rows_resolved_by_sec_submissions_metadata}",
         f"Schwab quotes {diagnostics.rows_enriched_by_schwab_quote}",
         f"FMP profiles {diagnostics.rows_enriched_by_fmp_profile + diagnostics.rows_enriched_by_fmp_profile_by_cik}",
+        f"trusted USD caps {diagnostics.rows_with_trusted_usd_market_cap}",
+        f"untrusted caps {diagnostics.rows_with_untrusted_market_cap}",
         f"{diagnostics.rows_skipped_by_configured_symbol_cap} skipped by cap",
         f"{diagnostics.unresolved_rows} unresolved",
     ]
@@ -3454,6 +3699,15 @@ def market_screener_diagnostics_detail_lines(diagnostics: MarketScreenerCoverage
         ("Rows with avg volume", diagnostics.rows_with_avg_volume),
         ("Rows missing avg volume", diagnostics.rows_missing_avg_volume),
         ("Rows with fundamentals", diagnostics.rows_with_fundamentals),
+        ("Rows with trusted USD market cap", diagnostics.rows_with_trusted_usd_market_cap),
+        ("Rows with trusted primary market cap rank", diagnostics.rows_with_trusted_primary_market_cap),
+        ("Rows with trusted non-primary market cap rank", diagnostics.rows_with_trusted_non_primary_market_cap),
+        ("Rows with untrusted market cap", diagnostics.rows_with_untrusted_market_cap),
+        ("Rows with non-USD market cap", diagnostics.rows_with_non_usd_market_cap),
+        ("Rows with ambiguous market cap", diagnostics.rows_with_ambiguous_market_cap),
+        ("Rows missing market cap", diagnostics.rows_missing_market_cap),
+        ("Major U.S. large-cap symbols present", diagnostics.major_us_large_caps_present),
+        ("Major U.S. large-cap symbols absent", diagnostics.major_us_large_caps_absent),
         ("Rows with revenue growth", diagnostics.rows_with_revenue_growth),
         ("Rows missing revenue growth", diagnostics.rows_missing_revenue_growth),
         ("Rows with float/shares", diagnostics.rows_with_float_or_shares),
@@ -3938,6 +4192,17 @@ def _record_from_market_data(record: MarketQuoteFundamentalsRecord, *, fetched_a
         "revenue_growth": record.revenue_growth,
         "shares_float": record.shares_float,
         "shares_outstanding": record.shares_outstanding,
+        "market_cap_currency": _normalize_currency_code(getattr(record, "market_cap_currency", None)) or None,
+        "market_cap_rank_value": getattr(record, "market_cap_rank_value", None),
+        "market_cap_rank_currency": _normalize_currency_code(getattr(record, "market_cap_rank_currency", None)) or None,
+        "market_cap_rank_trusted": getattr(record, "market_cap_rank_trusted", None),
+        "market_cap_rank_reason": getattr(record, "market_cap_rank_reason", None),
+        "instrument_type": getattr(record, "instrument_type", None),
+        "country": getattr(record, "country", None),
+        "is_adr": getattr(record, "is_adr", None),
+        "is_etf": getattr(record, "is_etf", None),
+        "is_fund": getattr(record, "is_fund", None),
+        "is_otc": getattr(record, "is_otc", None),
         "signals": tuple(signals),
     }
     source = record.source or "Market quote/fundamental provider"
@@ -3958,6 +4223,17 @@ def _record_from_market_data(record: MarketQuoteFundamentalsRecord, *, fetched_a
         revenue_growth=record.revenue_growth,
         shares_float=record.shares_float,
         shares_outstanding=record.shares_outstanding,
+        market_cap_currency=values["market_cap_currency"],
+        market_cap_rank_value=values["market_cap_rank_value"],
+        market_cap_rank_currency=values["market_cap_rank_currency"],
+        market_cap_rank_trusted=values["market_cap_rank_trusted"],
+        market_cap_rank_reason=values["market_cap_rank_reason"],
+        instrument_type=values["instrument_type"],
+        country=values["country"],
+        is_adr=values["is_adr"],
+        is_etf=values["is_etf"],
+        is_fund=values["is_fund"],
+        is_otc=values["is_otc"],
         signals=tuple(signals),
         sources=(source,),
         source_links=source_links,
@@ -4000,6 +4276,17 @@ def _normalize_record(record: MarketScreenerRecord, *, fetched_at: str) -> Marke
         portfolio_unrealized_pnl=record.portfolio_unrealized_pnl,
         portfolio_weight=record.portfolio_weight,
         field_provenance=_field_provenance_from_payload(record.field_provenance) or _provenance_for_existing_record(record, fetched_at=fetched_at),
+        market_cap_currency=_normalize_currency_code(record.market_cap_currency) or None,
+        market_cap_rank_value=record.market_cap_rank_value,
+        market_cap_rank_currency=_normalize_currency_code(record.market_cap_rank_currency) or None,
+        market_cap_rank_trusted=record.market_cap_rank_trusted,
+        market_cap_rank_reason=record.market_cap_rank_reason,
+        instrument_type=record.instrument_type,
+        country=record.country,
+        is_adr=record.is_adr,
+        is_etf=record.is_etf,
+        is_fund=record.is_fund,
+        is_otc=record.is_otc,
     )
 
 
@@ -4054,6 +4341,17 @@ def merge_market_screener_record(existing: MarketScreenerRecord, incoming: Marke
         portfolio_unrealized_pnl=_prefer_number(incoming.portfolio_unrealized_pnl, existing.portfolio_unrealized_pnl),
         portfolio_weight=_prefer_number(incoming.portfolio_weight, existing.portfolio_weight),
         field_provenance=_merge_screener_field_provenance(existing, incoming),
+        market_cap_currency=_prefer_market_cap_metadata(incoming.market_cap_currency, existing.market_cap_currency, incoming),
+        market_cap_rank_value=_prefer_number(incoming.market_cap_rank_value, existing.market_cap_rank_value),
+        market_cap_rank_currency=_prefer_market_cap_metadata(incoming.market_cap_rank_currency, existing.market_cap_rank_currency, incoming),
+        market_cap_rank_trusted=_prefer_market_cap_metadata(incoming.market_cap_rank_trusted, existing.market_cap_rank_trusted, incoming),
+        market_cap_rank_reason=_prefer_market_cap_metadata(incoming.market_cap_rank_reason, existing.market_cap_rank_reason, incoming),
+        instrument_type=_prefer_market_cap_metadata(incoming.instrument_type, existing.instrument_type, incoming),
+        country=_prefer_market_cap_metadata(incoming.country, existing.country, incoming),
+        is_adr=_prefer_market_cap_metadata(incoming.is_adr, existing.is_adr, incoming),
+        is_etf=_prefer_market_cap_metadata(incoming.is_etf, existing.is_etf, incoming),
+        is_fund=_prefer_market_cap_metadata(incoming.is_fund, existing.is_fund, incoming),
+        is_otc=_prefer_market_cap_metadata(incoming.is_otc, existing.is_otc, incoming),
     )
 
 
@@ -4158,10 +4456,95 @@ def _sort_value(record: MarketScreenerRecord, column: str) -> Any:
     }.get(column)
 
 
+def _is_us_primary_common_equity(record: MarketScreenerRecord) -> bool:
+    exchange = _clean_exchange(record.exchange)
+    if not exchange or exchange not in US_PRIMARY_EXCHANGES:
+        return False
+    if _is_otc_record(record) or _is_adr_record(record) or _is_fund_or_etf_record(record):
+        return False
+    country = _clean_country(record.country)
+    return not country or country in {"US", "USA", "UNITED STATES", "UNITED STATES OF AMERICA"}
+
+
+def _non_primary_market_cap_reason(record: MarketScreenerRecord) -> str:
+    reasons: list[str] = []
+    if _is_adr_record(record):
+        reasons.append("the row appears to be an ADR/foreign depositary receipt")
+    country = _clean_country(record.country)
+    if country and country not in {"US", "USA", "UNITED STATES", "UNITED STATES OF AMERICA"}:
+        reasons.append(f"listing/company country is {record.country}")
+    if _is_fund_or_etf_record(record):
+        reasons.append("the instrument appears to be an ETF/fund/trust rather than primary common equity")
+    if _is_otc_record(record):
+        reasons.append("the listing appears to be OTC or pink-sheet")
+    return "; ".join(dict.fromkeys(reasons))
+
+
+def _is_adr_record(record: MarketScreenerRecord) -> bool:
+    if record.is_adr is True:
+        return True
+    symbol = _normalize_symbol(record.symbol)
+    if symbol in KNOWN_FOREIGN_ADR_SYMBOLS:
+        return True
+    text = " ".join(str(value or "") for value in (record.instrument_type, record.company_name, *record.sources)).upper()
+    return bool(re.search(r"\b(ADR|ADS|DEPOSITARY|FOREIGN ORDINARY|SPONSORED ADR)\b", text))
+
+
+def _is_fund_or_etf_record(record: MarketScreenerRecord) -> bool:
+    if record.is_etf is True or record.is_fund is True:
+        return True
+    text = " ".join(str(value or "") for value in (record.instrument_type, record.company_name, record.industry)).upper()
+    return any(token in text for token in ("ETF", "ETN", "FUND", "INDEX"))
+
+
+def _is_otc_record(record: MarketScreenerRecord) -> bool:
+    if record.is_otc is True:
+        return True
+    exchange = _clean_exchange(record.exchange)
+    return any(marker in exchange for marker in OTC_EXCHANGE_MARKERS)
+
+
+def _clean_exchange(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().upper())
+
+
+def _clean_country(value: Any) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip().upper())
+    aliases = {"UNITED STATES OF AMERICA": "UNITED STATES", "U.S.": "US", "U.S.A.": "USA"}
+    return aliases.get(text, text)
+
+
+def _normalize_currency_code(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        return ""
+    aliases = {
+        "$": "USD",
+        "US$": "USD",
+        "U.S. DOLLAR": "USD",
+        "US DOLLAR": "USD",
+        "UNITED STATES DOLLAR": "USD",
+        "USDOLLAR": "USD",
+    }
+    if text in aliases:
+        return aliases[text]
+    return text[:3] if len(text) > 3 and text[:3].isalpha() else text
+
+
 def _market_cap_sort_key(record: MarketScreenerRecord, *, descending: bool) -> tuple[Any, ...]:
-    market_cap = _float_or_none(record.market_cap)
+    rank = market_screener_market_cap_rank(record)
+    market_cap = _float_or_none(rank.ranking_market_cap)
+    group = {
+        "us_primary_common": 0,
+        "trusted_non_primary": 1,
+        "untrusted_non_primary": 2,
+        "untrusted_non_usd": 2,
+        "untrusted_explicit": 2,
+        "untrusted_ambiguous": 2,
+        "missing_or_invalid": 3,
+    }.get(rank.category, 2)
     return (
-        1 if market_cap is None else 0,
+        group,
         0.0 if market_cap is None else (-market_cap if descending else market_cap),
         *_market_cap_fallback_sort_key(record),
     )
@@ -4229,6 +4612,17 @@ def _missing_fields(record: MarketScreenerRecord) -> list[str]:
         "portfolio_market_value": record.portfolio_market_value,
         "portfolio_unrealized_pnl": record.portfolio_unrealized_pnl,
         "portfolio_weight": record.portfolio_weight,
+        "market_cap_currency": record.market_cap_currency,
+        "market_cap_rank_value": record.market_cap_rank_value,
+        "market_cap_rank_currency": record.market_cap_rank_currency,
+        "market_cap_rank_trusted": record.market_cap_rank_trusted,
+        "market_cap_rank_reason": record.market_cap_rank_reason,
+        "instrument_type": record.instrument_type,
+        "country": record.country,
+        "is_adr": record.is_adr,
+        "is_etf": record.is_etf,
+        "is_fund": record.is_fund,
+        "is_otc": record.is_otc,
         "field_provenance": record.field_provenance,
     }
     return [field for field, value in checks.items() if value in (None, "", ())]
@@ -4296,6 +4690,17 @@ _SCREENER_SINGLE_VALUE_FIELDS = (
     "portfolio_market_value",
     "portfolio_unrealized_pnl",
     "portfolio_weight",
+    "market_cap_currency",
+    "market_cap_rank_value",
+    "market_cap_rank_currency",
+    "market_cap_rank_trusted",
+    "market_cap_rank_reason",
+    "instrument_type",
+    "country",
+    "is_adr",
+    "is_etf",
+    "is_fund",
+    "is_otc",
 )
 _INCOMING_NUMERIC_FIELDS = {
     "price",
@@ -4313,6 +4718,20 @@ _INCOMING_NUMERIC_FIELDS = {
     "portfolio_market_value",
     "portfolio_unrealized_pnl",
     "portfolio_weight",
+    "market_cap_rank_value",
+}
+_MARKET_CAP_METADATA_FIELDS = {
+    "market_cap_currency",
+    "market_cap_rank_value",
+    "market_cap_rank_currency",
+    "market_cap_rank_trusted",
+    "market_cap_rank_reason",
+    "instrument_type",
+    "country",
+    "is_adr",
+    "is_etf",
+    "is_fund",
+    "is_otc",
 }
 
 
@@ -4337,6 +4756,8 @@ def _merge_screener_field_provenance(
 def _screener_field_selected_from_incoming(existing: MarketScreenerRecord, incoming: MarketScreenerRecord, field: str) -> bool:
     incoming_value = getattr(incoming, field)
     existing_value = getattr(existing, field)
+    if field in _MARKET_CAP_METADATA_FIELDS and field != "market_cap_rank_value":
+        return _has_value(incoming_value) and (incoming.market_cap is not None or not _has_value(existing_value))
     if field in _INCOMING_NUMERIC_FIELDS:
         return incoming_value is not None
     if field == "next_earnings_date":
@@ -4381,6 +4802,10 @@ def _market_data_provenance(
             row_detail = str(getattr(item, "source_detail", "") or "market data enrichment").strip()
             row_fetched_at = str(getattr(item, "fetched_at", "") or fetched_at).strip()
         if field and _has_value(values.get(field)):
+            if field == "market_cap":
+                market_cap_detail = _market_cap_source_detail(record)
+                if market_cap_detail:
+                    row_detail = f"{row_detail}; {market_cap_detail}" if row_detail else market_cap_detail
             rows.append(
                 MarketScreenerFieldProvenance(
                     field=field,
@@ -4395,7 +4820,44 @@ def _market_data_provenance(
     covered_fields = {row.field for row in rows}
     fallback_values = {field: value for field, value in values.items() if field not in covered_fields}
     fallback_rows = _provenance_for_values(fallback_values, source=source, source_link=source_link, fetched_at=fetched_at, source_detail="market data enrichment")
-    return _dedupe_field_provenance((*rows, *fallback_rows))
+    return _dedupe_field_provenance((*rows, *(_market_cap_provenance_with_detail(row, record) for row in fallback_rows)))
+
+
+def _market_cap_provenance_with_detail(
+    row: MarketScreenerFieldProvenance,
+    record: MarketQuoteFundamentalsRecord,
+) -> MarketScreenerFieldProvenance:
+    if row.field != "market_cap":
+        return row
+    detail = _market_cap_source_detail(record)
+    if not detail:
+        return row
+    source_detail = f"{row.source_detail}; {detail}" if row.source_detail else detail
+    return MarketScreenerFieldProvenance(row.field, row.source, source_detail, row.source_link, row.fetched_at)
+
+
+def _market_cap_source_detail(record: MarketQuoteFundamentalsRecord) -> str:
+    parts: list[str] = []
+    currency = _normalize_currency_code(getattr(record, "market_cap_rank_currency", None) or getattr(record, "market_cap_currency", None))
+    if currency:
+        parts.append(f"market cap currency={currency}")
+    if getattr(record, "market_cap_rank_value", None) is not None:
+        parts.append("provider supplied normalized ranking cap")
+    if getattr(record, "market_cap_rank_trusted", None) is not None:
+        parts.append(f"provider trusted rank={'yes' if record.market_cap_rank_trusted else 'no'}")
+    instrument = str(getattr(record, "instrument_type", "") or "").strip()
+    if instrument:
+        parts.append(f"instrument={instrument}")
+    country = str(getattr(record, "country", "") or "").strip()
+    if country:
+        parts.append(f"country={country}")
+    flags = [name for name in ("is_adr", "is_etf", "is_fund", "is_otc") if getattr(record, name, None) is True]
+    if flags:
+        parts.append("flags=" + ",".join(flags))
+    reason = str(getattr(record, "market_cap_rank_reason", "") or "").strip()
+    if reason:
+        parts.append(f"rank reason={reason}")
+    return "; ".join(parts)
 
 
 def _provenance_for_existing_record(record: MarketScreenerRecord, *, fetched_at: str) -> tuple[MarketScreenerFieldProvenance, ...]:
@@ -4430,6 +4892,17 @@ def _provenance_for_existing_record(record: MarketScreenerRecord, *, fetched_at:
         "portfolio_market_value": record.portfolio_market_value,
         "portfolio_unrealized_pnl": record.portfolio_unrealized_pnl,
         "portfolio_weight": record.portfolio_weight,
+        "market_cap_currency": record.market_cap_currency,
+        "market_cap_rank_value": record.market_cap_rank_value,
+        "market_cap_rank_currency": record.market_cap_rank_currency,
+        "market_cap_rank_trusted": record.market_cap_rank_trusted,
+        "market_cap_rank_reason": record.market_cap_rank_reason,
+        "instrument_type": record.instrument_type,
+        "country": record.country,
+        "is_adr": record.is_adr,
+        "is_etf": record.is_etf,
+        "is_fund": record.is_fund,
+        "is_otc": record.is_otc,
     }
     return _provenance_for_values(values, source=source, source_link=source_link, fetched_at=record.fetched_at or fetched_at)
 
@@ -4675,6 +5148,14 @@ def _coerce_bool(value: Any, *, default: bool) -> bool:
 
 def _prefer_number(primary: float | None, fallback: float | None) -> float | None:
     return primary if primary is not None else fallback
+
+
+def _prefer_market_cap_metadata(primary: Any, fallback: Any, incoming: MarketScreenerRecord) -> Any:
+    if _has_value(primary):
+        return primary
+    if incoming.market_cap is not None and primary is not None:
+        return primary
+    return fallback
 
 
 def _earlier_date(left: str | None, right: str | None) -> str | None:

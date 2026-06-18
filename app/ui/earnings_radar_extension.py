@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import math
 import threading
 import webbrowser
@@ -67,6 +68,8 @@ from app.analytics.market_screener import (
     market_screener_record_missing_reason_lines,
     market_screener_record_has_fundamentals,
     market_screener_has_ai_signal,
+    market_screener_major_cap_diagnostic_lines,
+    market_screener_market_cap_rank,
     merge_market_data_records_into_screener_records,
     parse_ask_screener_fallback,
     sort_market_screener_records,
@@ -270,8 +273,13 @@ def _ensure_state(self: tk.Tk) -> None:
     self._market_screener_ask_running = False
     self.market_screener_source_status_base_text = "Source/status: Market Intelligence Screener has not loaded yet."
     self.market_screener_market_data_status_lines: list[str] = []
+    self.market_screener_last_enrichment_symbols: tuple[str, ...] = ()
+    self.market_screener_last_enrichment_reason = ""
     self.market_screener_market_data_attempted_symbols: set[str] = set()
     self.market_screener_market_data_running_symbols: set[str] = set()
+    self.market_screener_open_source_button = None
+    self.market_screener_open_symbol_chat_button = None
+    self.market_screener_context_button = None
 
     self.earnings_recent_records: list[RecentEarningsRecord] = []
     self.earnings_recent_filtered_records: list[RecentEarningsRecord] = []
@@ -406,17 +414,20 @@ def _build_screener_filters(self: tk.Tk, parent: ttk.Frame) -> None:
     actions = ttk.Frame(box, style="Panel.TFrame")
     actions.grid(row=4, column=0, columnspan=8, sticky="ew", pady=(8, 0))
     ttk.Button(actions, text="Refresh", command=lambda: _refresh_screener(self, force_refresh=True), style="Accent.TButton").pack(side=tk.LEFT)
-    ttk.Button(actions, text="Enrich Visible Page", command=lambda: _request_visible_page_market_data_enrichment(self, force_refresh=False)).pack(side=tk.LEFT, padx=(8, 0))
-    ttk.Button(actions, text="Re-enrich Visible Page", command=lambda: _request_visible_page_market_data_enrichment(self, force_refresh=True)).pack(side=tk.LEFT, padx=(8, 0))
-    ttk.Button(actions, text="Open Source", command=lambda: _open_screener_source(self)).pack(side=tk.LEFT, padx=(8, 0))
-    ttk.Button(actions, text="Open Symbol Chat", command=lambda: _open_screener_symbol_chat(self)).pack(side=tk.LEFT, padx=(8, 0))
-    ttk.Button(actions, text="Source Diagnostics / Why blanks?", command=lambda app=self: _open_screener_diagnostics_popout(app)).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(actions, text="Enrich Current Page", command=lambda: _request_visible_page_market_data_enrichment(self, force_refresh=False)).pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(actions, text="Re-enrich Current Page", command=lambda: _request_visible_page_market_data_enrichment(self, force_refresh=True)).pack(side=tk.LEFT, padx=(8, 0))
+    self.market_screener_open_source_button = ttk.Button(actions, text="Open Source", command=lambda: _open_screener_source(self))
+    self.market_screener_open_source_button.pack(side=tk.LEFT, padx=(8, 0))
+    self.market_screener_open_symbol_chat_button = ttk.Button(actions, text="Open Symbol Chat", command=lambda: _open_screener_symbol_chat(self))
+    self.market_screener_open_symbol_chat_button.pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(actions, text="Loading / Source Diagnostics", command=lambda app=self: _open_screener_diagnostics_popout(app)).pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(actions, text="Clear Filters", command=lambda: _clear_screener_filters(self)).pack(side=tk.LEFT, padx=(8, 0))
     self.market_screener_context_button = ttk.Button(actions, text="Open Selected Context + AI", command=lambda app=self: _open_screener_context_popout(app))
     self.market_screener_context_button.pack(side=tk.LEFT, padx=(8, 0))
     ttk.Label(actions, textvariable=self.market_screener_selected_summary_var, style="Chip.TLabel", width=48).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(12, 0))
     self.market_screener_ai_quick_buttons: list[ttk.Button] = []
     _set_screener_ai_actions_enabled(self, False)
+    _update_screener_row_action_states(self, None)
 
 
 def _configure_market_screener_tree_style(parent: tk.Widget) -> None:
@@ -444,6 +455,12 @@ def _configure_market_screener_tree_style(parent: tk.Widget) -> None:
 
 
 def _open_screener_context_popout(self: tk.Tk) -> None:
+    record = _selected_screener_record(self, show_message=False)
+    action_state = _update_screener_row_action_states(self, record)
+    if not action_state.get("context_enabled"):
+        _set_var_if_present(self, "market_screener_selected_summary_var", str(action_state.get("context_reason") or "Selected context is unavailable."))
+        messagebox.showinfo("Open Selected Context + AI", str(action_state.get("context_reason") or "Select a screener row first."))
+        return
     window = getattr(self, "market_screener_context_window", None)
     if not _widget_exists(window):
         parent = getattr(self, "earnings_radar_window", None)
@@ -541,7 +558,7 @@ def _open_screener_diagnostics_popout(self: tk.Tk) -> None:
         parent = getattr(self, "earnings_radar_window", None)
         window = tk.Toplevel(parent if _widget_exists(parent) else self)
         polished_theme.configure_toplevel(window)
-        window.title("Source Diagnostics / Why blanks?")
+        window.title("Loading / Source Diagnostics / Why blanks?")
         window.geometry("1040x760")
         window.minsize(780, 520)
         window.columnconfigure(0, weight=1)
@@ -552,8 +569,8 @@ def _open_screener_diagnostics_popout(self: tk.Tk) -> None:
         actions = ttk.Frame(window, style="Panel.TFrame")
         actions.grid(row=1, column=0, sticky="ew", padx=14, pady=(0, 10))
         ttk.Button(actions, text="Refresh Screener", command=lambda app=self: _refresh_screener(app, force_refresh=True), style="Accent.TButton").pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(actions, text="Enrich Visible Page", command=lambda app=self: _request_visible_page_market_data_enrichment(app, force_refresh=False)).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(actions, text="Re-enrich Visible Page", command=lambda app=self: _request_visible_page_market_data_enrichment(app, force_refresh=True)).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(actions, text="Enrich Current Page", command=lambda app=self: _request_visible_page_market_data_enrichment(app, force_refresh=False)).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(actions, text="Re-enrich Current Page", command=lambda app=self: _request_visible_page_market_data_enrichment(app, force_refresh=True)).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(actions, text="Open Selected Context + AI", command=lambda app=self: _open_screener_context_popout(app)).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(actions, text="Clear Filters", command=lambda app=self: _clear_screener_filters(app)).pack(side=tk.LEFT)
         self.market_screener_diagnostics_text = _readonly_scrolled_text(
@@ -811,6 +828,13 @@ def _refresh_screener(self: tk.Tk, *, force_refresh: bool) -> None:
     self._market_screener_refresh_pending = False
     self._market_screener_refresh_pending_force = False
     self.market_screener_status_var.set("Loading market intelligence screener...")
+    _append_screener_market_data_status(
+        self,
+        (
+            f"Screener refresh started: force_refresh={bool(force_refresh)}; "
+            f"initial provider symbol cap={configured_market_data_symbol_limit()}."
+        ),
+    )
     recent_records = list(getattr(self, "earnings_recent_records", []) or [])
     upcoming_records = list(getattr(self, "earnings_upcoming_records", []) or [])
     supplemental_records = _market_screener_holdings_records(self)
@@ -843,12 +867,17 @@ def _finish_screener_success(self: tk.Tk, snapshot: MarketScreenerSnapshot) -> N
     warnings = f" ({len(snapshot.errors)} nonblocking warning(s))" if snapshot.errors else ""
     source_status = market_screener_diagnostics_summary(snapshot.diagnostics)
     self.market_screener_status_var.set(f"Loaded {len(snapshot.records)} screener rows; {holdings} My Holdings; {signals} with AI-worthy signals. {source_status} Fetched {snapshot.fetched_at}.{warnings}")
+    _append_screener_market_data_status(
+        self,
+        f"Screener refresh finished: rows={len(snapshot.records)}; statuses={len(snapshot.statuses)}; warnings={len(snapshot.errors)}; fetched_at={snapshot.fetched_at}.",
+    )
     _run_pending_screener_refresh(self)
 
 
 def _finish_screener_error(self: tk.Tk, error: Exception) -> None:
     self._market_screener_refreshing = False
     self.market_screener_status_var.set(f"Screener refresh failed: {error}")
+    _append_screener_market_data_status(self, f"Screener refresh failed: {redact_symbol_chat_secrets(str(error))}")
     _run_pending_screener_refresh(self)
 
 
@@ -1146,7 +1175,7 @@ def _high_volume_mover_empty_state_text(records: Iterable[MarketScreenerRecord],
             f"{missing_change} of {len(rows)} candidate row(s) are missing change %, "
             f"{missing_volume} are missing current volume, and {missing_avg_volume} are missing avg volume. "
             f"Only {evaluable_change} row(s) can be checked for +/-5% moves and {evaluable_volume} row(s) can be checked for volume >= 1.5x average. "
-            "Missing values are not treated as zero. Clear the mover filter, click Enrich Visible Page, click Re-enrich Visible Page after fixing an API key/plan, or use Refresh Screener to force provider retry. "
+            "Missing values are not treated as zero. Clear the mover filter, click Enrich Current Page, click Re-enrich Current Page after fixing an API key/plan, or use Refresh Screener to force provider retry. "
             f"{_high_volume_mover_cap_guidance(diagnostics)}"
         )
     return (
@@ -1159,7 +1188,7 @@ def _high_volume_mover_cap_guidance(diagnostics: Any | None) -> str:
     if skipped:
         return (
             f"Source Diagnostics shows {skipped} row(s) skipped by cap; paid FMP users can raise "
-            "MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT up to 1000 for Databento batching and FMP_MARKET_DATA_SYMBOL_LIMIT up to 100 for FMP, then Re-enrich Visible Page or Refresh Screener."
+            "MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT up to 1000 for Databento batching and FMP_MARKET_DATA_SYMBOL_LIMIT up to 100 for FMP, then Re-enrich Current Page or Refresh Screener."
         )
     return (
         "If Source Diagnostics shows skipped rows, increase MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT for page scope, DATABENTO_EQUITIES_SYMBOL_LIMIT for Databento batches, and FMP_MARKET_DATA_SYMBOL_LIMIT up to 100 for paid FMP; "
@@ -1248,29 +1277,56 @@ def _open_screener_source(self: tk.Tk) -> None:
     record = _selected_screener_record(self, show_message=True, title="Open Source")
     if record is None:
         return
+    action_state = _update_screener_row_action_states(self, record)
+    if not action_state.get("open_source_enabled"):
+        reason = str(action_state.get("source_reason") or "The selected screener row does not have a source URL.")
+        _set_var_if_present(self, "market_screener_selected_summary_var", reason)
+        messagebox.showinfo("Open Source", reason)
+        return
     _open_url(record.source_links[0] if record.source_links else None, "Open Source", "The selected screener row does not have a source URL.")
 
 
 def _request_visible_page_market_data_enrichment(self: tk.Tk, *, force_refresh: bool = False) -> None:
     rows = list(getattr(self, "market_screener_row_map", {}).values())
+    page_symbols = _dedupe_market_data_symbols(record.symbol for record in rows)
+    self.market_screener_last_enrichment_symbols = page_symbols
+    self.market_screener_last_enrichment_reason = "current page"
     if force_refresh:
-        _clear_market_data_attempted_symbols(self, _dedupe_market_data_symbols(record.symbol for record in rows))
+        _clear_market_data_attempted_symbols(self, page_symbols)
     symbols = _symbols_needing_market_data_enrichment(self, rows, require_price_or_volume=False)
     if not symbols:
+        if page_symbols:
+            _append_screener_market_data_status(
+                self,
+                (
+                    f"Market data current page: no provider request needed for {_symbol_list_text(page_symbols)}; "
+                    "rows were already complete, cached/attempted this session, running, or lacked provider-usable symbols."
+                ),
+            )
         return
     cap = _visible_page_market_data_enrichment_cap(self)
+    requested = symbols[:cap]
+    skipped = tuple(symbol for symbol in page_symbols if symbol not in set(requested))
+    _append_screener_market_data_status(
+        self,
+        (
+            f"Market data current page snapshot: page_symbols={_symbol_list_text(page_symbols)}; "
+            f"requesting={_symbol_list_text(requested)}; skipped_or_deferred={_symbol_list_text(skipped)}. "
+            "Rows may move after enrichment because trusted market-cap ranking and the active sort are reapplied."
+        ),
+    )
     if len(symbols) > cap:
         _append_screener_market_data_status(
             self,
             (
-                f"Market data visible page: requesting {cap} of {len(symbols)} visible symbol(s); "
-                "remaining visible rows can be enriched after increasing MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT or changing pages."
+                f"Market data current page: requesting {cap} of {len(symbols)} current-page symbol(s); "
+                "remaining rows can be enriched after increasing MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT or changing pages."
             ),
         )
     _request_market_data_enrichment(
         self,
-        symbols[:cap],
-        reason="visible page",
+        requested,
+        reason="current page",
         force_refresh=force_refresh,
         max_symbols=cap,
     )
@@ -1351,6 +1407,7 @@ def _finish_screener_market_data_enrichment(
 ) -> None:
     _mark_market_data_enrichment_finished(self, requested_symbols)
     selected_symbol = _selected_screener_symbol(self)
+    before_order = _screener_symbol_order(getattr(self, "market_screener_filtered_records", ()) or ())
     if isinstance(result, MarketQuoteFundamentalsSnapshot):
         if result.records:
             self.market_screener_records = merge_market_data_records_into_screener_records(
@@ -1365,11 +1422,12 @@ def _finish_screener_market_data_enrichment(
             if selected_symbol:
                 _select_screener_symbol(self, selected_symbol)
                 _update_screener_detail_panel(self, _record_by_symbol(self.market_screener_records, selected_symbol))
+        resort_note = _post_enrichment_resort_note(self, before_order, requested_symbols)
         _append_screener_market_data_status(
             self,
             (
-                f"Market data {reason}: enriched {len(result.records)} of {len(requested_symbols)} requested symbol(s). "
-                f"{_market_data_provider_status_summary(result)} Missing fields are not inferred."
+                f"Market data {reason}: requested {len(requested_symbols)} symbol(s) {_symbol_list_text(requested_symbols)}; "
+                f"enriched {len(result.records)}. {_market_data_provider_status_summary(result)} {resort_note} Missing fields are not inferred."
             ),
         )
         signals = sum(1 for record in self.market_screener_records if market_screener_has_ai_signal(record))
@@ -1385,11 +1443,12 @@ def _finish_screener_market_data_enrichment(
         if selected_symbol:
             _select_screener_symbol(self, selected_symbol)
             _update_screener_detail_panel(self, _record_by_symbol(self.market_screener_records, selected_symbol))
+    resort_note = _post_enrichment_resort_note(self, before_order, requested_symbols)
     _append_screener_market_data_status(
         self,
         (
-            f"Market data {reason}: updated {result.report.rows_updated} row(s) from {len(result.requested_symbols)} requested symbol(s). "
-            f"{_market_data_enrichment_status_summary(result)} Missing fields are not inferred."
+            f"Market data {reason}: requested {len(result.requested_symbols)} symbol(s) {_symbol_list_text(result.requested_symbols)}; "
+            f"updated {result.report.rows_updated} row(s). {_market_data_enrichment_status_summary(result)} {resort_note} Missing fields are not inferred."
         ),
     )
     signals = sum(1 for record in self.market_screener_records if market_screener_has_ai_signal(record))
@@ -1437,7 +1496,13 @@ def _symbols_needing_market_data_enrichment(
 
 
 def _market_screener_record_needs_market_data_enrichment(record: MarketScreenerRecord) -> bool:
-    return bool(_market_screener_enrichment_missing_fields(record))
+    rank = market_screener_market_cap_rank(record)
+    cap_needs_trust_enrichment = record.market_cap is not None and rank.category in {
+        "untrusted_non_usd",
+        "untrusted_non_primary",
+        "untrusted_explicit",
+    }
+    return bool(_market_screener_enrichment_missing_fields(record) or cap_needs_trust_enrichment)
 
 
 def _market_screener_enrichment_missing_fields(record: MarketScreenerRecord) -> tuple[str, ...]:
@@ -1475,6 +1540,8 @@ def _visible_page_market_data_enrichment_cap(self: tk.Tk) -> int:
 
 def _reset_screener_market_data_enrichment_state(self: tk.Tk) -> None:
     self.market_screener_market_data_status_lines = []
+    self.market_screener_last_enrichment_symbols = ()
+    self.market_screener_last_enrichment_reason = ""
     self.market_screener_market_data_attempted_symbols = set()
     self.market_screener_market_data_running_symbols = set()
 
@@ -1487,6 +1554,39 @@ def _market_data_scope_records_for_symbols(self: tk.Tk, symbols: Iterable[str]) 
     wanted = set(_dedupe_market_data_symbols(symbols))
     rows = list(getattr(self, "market_screener_row_map", {}).values()) or list(getattr(self, "market_screener_records", ()) or ())
     return tuple(record for record in rows if _normalize_screener_symbol(record.symbol) in wanted)
+
+
+def _screener_symbol_order(records: Iterable[MarketScreenerRecord]) -> tuple[str, ...]:
+    return _dedupe_market_data_symbols(record.symbol for record in records)
+
+
+def _post_enrichment_resort_note(self: tk.Tk, before_order: Iterable[str], requested_symbols: Iterable[str]) -> str:
+    before = list(_dedupe_market_data_symbols(before_order))
+    after = list(_screener_symbol_order(getattr(self, "market_screener_filtered_records", ()) or ()))
+    requested = set(_dedupe_market_data_symbols(requested_symbols))
+    if not requested or not before or not after:
+        return "Rows may move after enrichment because the active sort is reapplied."
+    before_index = {symbol: index for index, symbol in enumerate(before)}
+    after_index = {symbol: index for index, symbol in enumerate(after)}
+    moved: list[str] = []
+    for symbol in sorted(requested):
+        if symbol in before_index and symbol in after_index and before_index[symbol] != after_index[symbol]:
+            moved.append(f"{symbol} {before_index[symbol] + 1}->{after_index[symbol] + 1}")
+    if moved:
+        return (
+            "Post-enrichment resort moved requested row(s): "
+            f"{', '.join(moved[:8])}. "
+            "Reason: trusted market-cap ranking and the active sort were reapplied."
+        )
+    return "Post-enrichment resort reapplied; requested rows kept their relative positions in the filtered list."
+
+
+def _symbol_list_text(symbols: Iterable[str], *, limit: int = 24) -> str:
+    rows = list(_dedupe_market_data_symbols(symbols))
+    if not rows:
+        return "[]"
+    suffix = f", ... +{len(rows) - limit}" if len(rows) > limit else ""
+    return "[" + ", ".join(rows[:limit]) + suffix + "]"
 
 
 def _dedupe_market_data_symbols(symbols: Iterable[str]) -> tuple[str, ...]:
@@ -1813,6 +1913,56 @@ def _open_recent_exhibit(self: tk.Tk) -> None:
         _open_url(record.exhibit_url, "Open Earnings Exhibit", "The selected row does not have an earnings exhibit URL.")
 
 
+def _screener_row_action_state(record: MarketScreenerRecord | None) -> dict[str, Any]:
+    if record is None:
+        return {
+            "open_source_enabled": False,
+            "open_symbol_chat_enabled": False,
+            "context_enabled": False,
+            "source_reason": "Select a screener row before opening a source URL.",
+            "symbol_chat_reason": "Select a screener row with a usable ticker before opening Symbol Chat.",
+            "context_reason": "Select a screener row before opening selected context and AI actions.",
+            "summary": "No screener row selected. Row actions are disabled.",
+        }
+    symbol = _normalize_screener_symbol(record.symbol)
+    has_source = bool(record.source_links and record.source_links[0])
+    has_symbol = bool(symbol and not symbol.startswith("CIK:"))
+    has_context = bool(symbol or record.cik or record.company_name or record.field_provenance or record.sources)
+    reasons: list[str] = []
+    if not has_source:
+        reasons.append("source URL unavailable")
+    if not has_symbol:
+        reasons.append("Symbol Chat unavailable: no usable ticker")
+    if not has_context:
+        reasons.append("selected context unavailable")
+    return {
+        "open_source_enabled": has_source,
+        "open_symbol_chat_enabled": has_symbol,
+        "context_enabled": has_context,
+        "source_reason": "The selected screener row does not have a source URL." if not has_source else "Source URL is available.",
+        "symbol_chat_reason": "The selected screener row does not have a usable stock ticker symbol." if not has_symbol else "Symbol Chat is available.",
+        "context_reason": "The selected screener row has no usable context fields." if not has_context else "Selected context is available.",
+        "summary": "; ".join(reasons) if reasons else "Row actions available.",
+    }
+
+
+def _update_screener_row_action_states(self: tk.Tk, record: MarketScreenerRecord | None) -> dict[str, Any]:
+    state = _screener_row_action_state(record)
+    for name, enabled_key in (
+        ("market_screener_open_source_button", "open_source_enabled"),
+        ("market_screener_open_symbol_chat_button", "open_symbol_chat_enabled"),
+        ("market_screener_context_button", "context_enabled"),
+    ):
+        button = getattr(self, name, None)
+        if button is None:
+            continue
+        try:
+            button.configure(state=tk.NORMAL if state[enabled_key] else tk.DISABLED)
+        except tk.TclError:
+            pass
+    return state
+
+
 def _selected_screener_record(self: tk.Tk, *, show_message: bool = False, title: str = "Market Screener") -> MarketScreenerRecord | None:
     table = getattr(self, "market_screener_table", None)
     row_map = getattr(self, "market_screener_row_map", {}) or {}
@@ -1837,7 +1987,8 @@ def _on_screener_selection_changed(self: tk.Tk) -> None:
     self.market_screener_selected_record = record
     _update_screener_detail_panel(self, record)
     _refresh_screener_diagnostics_text(self)
-    _set_screener_ai_actions_enabled(self, record is not None)
+    action_state = _update_screener_row_action_states(self, record)
+    _set_screener_ai_actions_enabled(self, bool(action_state.get("context_enabled")))
     if record is not None:
         _request_selected_row_market_data_enrichment(self, record)
 
@@ -1848,11 +1999,12 @@ def _update_screener_detail_panel(self: tk.Tk, record: MarketScreenerRecord | No
         _set_var_if_present(self, "market_screener_selected_summary_var", "No screener row selected.")
         _set_screener_detail_text(self, "No screener row selected.")
         return
+    action_state = _screener_row_action_state(record)
     symbol = record.symbol or record.cik or "selected row"
     signal = ", ".join(record.signals[:3]) if record.signals else "no screener signals"
     risk = f"{len(record.risk_flags)} risk flag(s)" if record.risk_flags else "no risk flags"
     self.market_screener_ai_status_var.set(f"Selected {symbol} - {market_screener_data_label(record)}; {market_screener_data_completeness_label(record)}; {signal}; {risk}.")
-    _set_var_if_present(self, "market_screener_selected_summary_var", f"{symbol} - {market_screener_data_label(record)}; {market_screener_data_completeness_label(record)}; {risk}.")
+    _set_var_if_present(self, "market_screener_selected_summary_var", f"{symbol} - {market_screener_data_label(record)}; {market_screener_data_completeness_label(record)}; {risk}; {action_state['summary']}.")
     _set_screener_detail_text(
         self,
         _screener_detail_text(
@@ -1923,7 +2075,7 @@ def _append_screener_market_data_status(self: tk.Tk, line: str) -> None:
                 summary_var.set(_truncate(clean, 240))
             except tk.TclError:
                 pass
-    self.market_screener_market_data_status_lines = lines[-6:]
+    self.market_screener_market_data_status_lines = lines[-80:]
     _refresh_screener_source_text(self)
 
 
@@ -1950,7 +2102,9 @@ def _refresh_screener_diagnostics_text(self: tk.Tk) -> None:
 
 def _set_screener_ai_actions_enabled(self: tk.Tk, enabled: bool) -> None:
     running = bool(getattr(self, "_market_screener_ai_running", False))
-    state = tk.NORMAL if enabled and not running else tk.DISABLED
+    action_state = _screener_row_action_state(getattr(self, "market_screener_selected_record", None))
+    base_enabled = bool(enabled and not running)
+    state = tk.NORMAL if base_enabled else tk.DISABLED
     for name in (
         "market_screener_ai_analyze_button",
         "market_screener_ai_why_button",
@@ -1960,7 +2114,8 @@ def _set_screener_ai_actions_enabled(self: tk.Tk, enabled: bool) -> None:
         button = getattr(self, name, None)
         if button is not None:
             try:
-                button.configure(state=state)
+                button_state = tk.DISABLED if name == "market_screener_ai_symbol_chat_button" and not action_state.get("open_symbol_chat_enabled") else state
+                button.configure(state=button_state)
             except tk.TclError:
                 pass
     for button in getattr(self, "market_screener_ai_quick_buttons", []) or []:
@@ -2073,6 +2228,12 @@ def _show_screener_ai_result(self: tk.Tk, record: MarketScreenerRecord, label: s
 def _open_screener_symbol_chat(self: tk.Tk) -> None:
     record = _selected_screener_record(self, show_message=True, title="Open Symbol Chat")
     if record is None:
+        return
+    action_state = _update_screener_row_action_states(self, record)
+    if not action_state.get("open_symbol_chat_enabled"):
+        reason = str(action_state.get("symbol_chat_reason") or "The selected screener row does not have a usable stock ticker symbol.")
+        _set_var_if_present(self, "market_screener_selected_summary_var", reason)
+        messagebox.showinfo("Open Symbol Chat", reason)
         return
     symbol = str(record.symbol or "").strip().upper()
     if not symbol or symbol.startswith("CIK:"):
@@ -2426,6 +2587,7 @@ def _screener_detail_text(
     session_lines: Iterable[str] = (),
 ) -> str:
     completeness = market_screener_data_completeness(record)
+    market_cap_rank = market_screener_market_cap_rank(record)
     lines = [
         f"{record.symbol or EMPTY_VALUE} | {display_optional_text(record.company_name)} | CIK {display_optional_text(record.cik)}",
         f"Data: {market_screener_data_label(record)} | Completeness: {completeness['score']}% {str(completeness['label']).lower()} | Provenance fields: {len(record.field_provenance)}",
@@ -2448,6 +2610,12 @@ def _screener_detail_text(
         f"Signals: {', '.join(record.signals) if record.signals else EMPTY_VALUE}",
         f"Risk flags: {', '.join(record.risk_flags) if record.risk_flags else EMPTY_VALUE}",
         f"Sources: {', '.join(record.sources) if record.sources else EMPTY_VALUE}",
+        (
+            "Market cap ranking: "
+            f"display {_display_market_money(market_cap_rank.display_market_cap)} | "
+            f"ranking {_display_market_money(market_cap_rank.ranking_market_cap)} {market_cap_rank.currency} | "
+            f"{'trusted' if market_cap_rank.trusted else 'untrusted'} | {market_cap_rank.reason}"
+        ),
     ]
     if market_screener_is_my_holding(record):
         lines.append(
@@ -2507,7 +2675,7 @@ def _selected_screener_missing_reason_lines(
             reasons.append(
                 "skipped by cap: "
                 f"{diagnostics.rows_skipped_by_configured_symbol_cap} row(s) were outside the configured provider symbol cap; "
-                "this selected row may require selected-row enrichment, a higher MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT, a higher DATABENTO_EQUITIES_SYMBOL_LIMIT, or the next visible page batch."
+                "this selected row may require selected-row enrichment, a higher MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT, a higher DATABENTO_EQUITIES_SYMBOL_LIMIT, or the next current-page batch."
             )
         if diagnostics.provider_unavailable:
             reasons.append(
@@ -2667,10 +2835,12 @@ def _screener_diagnostics_popout_text(
     session_lines: Iterable[str] = (),
 ) -> str:
     lines: list[str] = []
-    lines.append("SOURCE DIAGNOSTICS / WHY BLANKS?")
+    lines.append("LOADING / SOURCE DIAGNOSTICS / WHY BLANKS?")
     lines.append("")
     if snapshot is None:
         lines.append("No Market Screener snapshot has loaded yet. Refresh the screener to load source statuses and diagnostics counters.")
+        lines.append("")
+        lines.extend(_screener_provider_config_lines())
         lines.append("")
         lines.extend(_screener_source_ladder_lines())
         lines.append("")
@@ -2681,6 +2851,29 @@ def _screener_diagnostics_popout_text(
     lines.append(f"- {market_screener_diagnostics_summary(snapshot.diagnostics)}")
     lines.append(f"- Rows loaded: {len(snapshot.records)}")
     lines.append(f"- Fetched at: {snapshot.fetched_at}")
+    if getattr(snapshot.diagnostics, "major_us_large_caps_absent", 0):
+        lines.append(f"- Major U.S. large-cap symbols absent: {snapshot.diagnostics.major_us_large_caps_absent}")
+    lines.append("")
+    lines.extend(_screener_provider_config_lines())
+    lines.append("")
+    lines.append("Market cap ranking diagnostics")
+    lines.extend(
+        [
+            f"- Trusted USD market caps: {snapshot.diagnostics.rows_with_trusted_usd_market_cap}",
+            f"- Trusted U.S. primary/common rank rows: {snapshot.diagnostics.rows_with_trusted_primary_market_cap}",
+            f"- Trusted non-primary rank rows: {snapshot.diagnostics.rows_with_trusted_non_primary_market_cap}",
+            f"- Untrusted market caps: {snapshot.diagnostics.rows_with_untrusted_market_cap}",
+            f"- Non-USD market caps: {snapshot.diagnostics.rows_with_non_usd_market_cap}",
+            f"- Ambiguous market caps: {snapshot.diagnostics.rows_with_ambiguous_market_cap}",
+            f"- Missing market caps: {snapshot.diagnostics.rows_missing_market_cap}",
+        ]
+    )
+    lines.append("")
+    lines.append("Major-cap diagnostics")
+    major_lines = market_screener_major_cap_diagnostic_lines(snapshot.records, snapshot.diagnostics)
+    lines.extend(f"- {line}" for line in major_lines[:16])
+    if len(major_lines) > 16:
+        lines.append(f"- ... {len(major_lines) - 16} more major-cap diagnostic row(s).")
     lines.append("")
     lines.extend(_screener_source_ladder_lines())
     lines.append("")
@@ -2748,6 +2941,27 @@ def _screener_source_ladder_lines() -> list[str]:
         "- 6. FMP quote/profile/profile-by-CIK/key-metrics/ratios/income-growth/shares-float for equity quote, profile, and fundamentals",
         "- 7. Optional fallback provider, only when configured, and only for visible-page or selected-row enrichment",
         "- Separate. Databento CME context, when enabled/configured, is cross-asset futures/options context and is not merged into equity rows.",
+    ]
+
+
+def _screener_provider_config_lines() -> list[str]:
+    def _env_line(name: str, default: str = "") -> str:
+        raw = str(os.getenv(name, "") or "").strip()
+        value = raw if raw else f"<unset; default {default}>" if default else "<unset>"
+        return f"- {name}: {value}"
+
+    return [
+        "Provider config/caps",
+        _env_line("MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT", str(configured_market_data_symbol_limit())),
+        _env_line("FMP_MARKET_DATA_SYMBOL_LIMIT", "100"),
+        _env_line("MARKET_SCREENER_PROFILE_BACKFILL_LIMIT", "2000"),
+        _env_line("MARKET_SCREENER_QUOTE_BACKFILL_LIMIT", "2000"),
+        _env_line("MARKET_SCREENER_FUNDAMENTAL_BACKFILL_LIMIT", "2000"),
+        _env_line("MARKET_SCREENER_DATABENTO_BACKFILL_LIMIT", "1000"),
+        _env_line("DATABENTO_EQUITIES_SYMBOL_LIMIT", "5000"),
+        _env_line("FMP_CACHE_TTL_SECONDS", "900"),
+        _env_line("MARKET_SCREENER_BACKFILL_CACHE_TTL_SECONDS", "900"),
+        "- Secret status: API keys are intentionally not displayed; provider statuses below report configured/unavailable/auth/rate/plan outcomes without secrets.",
     ]
 
 

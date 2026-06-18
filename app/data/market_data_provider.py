@@ -90,6 +90,17 @@ class MarketQuoteFundamentalsRecord:
     shares_outstanding: float | None = None
     field_provenance: tuple[MarketDataFieldProvenance, ...] = ()
     cik: str | None = None
+    market_cap_currency: str | None = None
+    market_cap_rank_value: float | None = None
+    market_cap_rank_currency: str | None = None
+    market_cap_rank_trusted: bool | None = None
+    market_cap_rank_reason: str | None = None
+    instrument_type: str | None = None
+    country: str | None = None
+    is_adr: bool | None = None
+    is_etf: bool | None = None
+    is_fund: bool | None = None
+    is_otc: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -116,7 +127,27 @@ class MarketQuoteFundamentalsRecord:
             "shares_float": _optional_float(_first_present(payload, "shares_float", "float", "sharesFloat", "floatShares", "freeFloat")),
             "shares_outstanding": _optional_float(_first_present(payload, "shares_outstanding", "sharesOutstanding", "outstandingShares", "shares_outstanding", "weightedAverageShsOut", "weightedAverageShsOutTTM")),
             "cik": _normalize_cik(_first_present(payload, "cik", "cik_str", "CIK")) or None,
+            "market_cap_currency": _normalize_currency(_first_present(payload, "market_cap_currency", "marketCapCurrency", "market_cap_reported_currency", "reportedCurrency", "currency")),
+            "market_cap_rank_value": _optional_float(_first_present(payload, "market_cap_rank_value", "marketCapRankValue", "market_cap_usd", "marketCapUsd", "marketCapUSD", "marketCapUSDTTM")),
+            "market_cap_rank_currency": _normalize_currency(_first_present(payload, "market_cap_rank_currency", "marketCapRankCurrency", "market_cap_rank_currency_code")),
+            "market_cap_rank_trusted": _optional_bool(_first_present(payload, "market_cap_rank_trusted", "marketCapRankTrusted", "trusted_market_cap", "trustedMarketCap")),
+            "market_cap_rank_reason": _optional_string(_first_present(payload, "market_cap_rank_reason", "marketCapRankReason", "market_cap_reason")),
+            "instrument_type": _optional_string(_first_present(payload, "instrument_type", "instrumentType", "security_type", "securityType", "asset_type", "assetType", "type")),
+            "country": _optional_string(_first_present(payload, "country", "countryName", "domicile", "listing_country", "market_cap_country")),
+            "is_adr": _optional_bool(_first_present(payload, "is_adr", "isAdr", "isADR", "adr", "isDepositaryReceipt")),
+            "is_etf": _optional_bool(_first_present(payload, "is_etf", "isEtf", "isETF", "etf")),
+            "is_fund": _optional_bool(_first_present(payload, "is_fund", "isFund", "fund")),
+            "is_otc": _optional_bool(_first_present(payload, "is_otc", "isOtc", "isOTC", "otc")),
         }
+        if values["market_cap_rank_value"] is not None and not values["market_cap_rank_currency"]:
+            values["market_cap_rank_currency"] = "USD"
+        if not values["instrument_type"]:
+            if values["is_etf"]:
+                values["instrument_type"] = "ETF"
+            elif values["is_fund"]:
+                values["instrument_type"] = "Fund"
+            elif values["is_adr"]:
+                values["instrument_type"] = "ADR"
         provenance_payload = payload.get("field_provenance")
         field_provenance = _field_provenance_from_payload(provenance_payload)
         if not field_provenance:
@@ -1386,10 +1417,32 @@ def _record_needs_fmp_endpoint(record: MarketQuoteFundamentalsRecord, endpoint: 
 
 
 def _record_with_family_fields(record: MarketQuoteFundamentalsRecord, family: str) -> MarketQuoteFundamentalsRecord:
+    profile_metadata = {
+        "country",
+        "instrument_type",
+        "is_adr",
+        "is_etf",
+        "is_fund",
+        "is_otc",
+        "market_cap_currency",
+    }
+    market_cap_metadata = {
+        "market_cap_currency",
+        "market_cap_rank_value",
+        "market_cap_rank_currency",
+        "market_cap_rank_trusted",
+        "market_cap_rank_reason",
+        "country",
+        "instrument_type",
+        "is_adr",
+        "is_etf",
+        "is_fund",
+        "is_otc",
+    }
     fields_by_family = {
-        "profile_classification": {"company_name", "exchange", "sector", "industry", "cik"},
+        "profile_classification": {"company_name", "exchange", "sector", "industry", "cik", *profile_metadata},
         "quote_tape": {"price", "change_percent", "volume", "avg_volume"},
-        "fundamentals": {"market_cap", "pe_ratio", "eps", "revenue_growth", "shares_float", "shares_outstanding"},
+        "fundamentals": {"market_cap", "pe_ratio", "eps", "revenue_growth", "shares_float", "shares_outstanding", *market_cap_metadata},
     }
     allowed = fields_by_family.get(family)
     if not allowed:
@@ -1411,6 +1464,17 @@ def _record_with_family_fields(record: MarketQuoteFundamentalsRecord, family: st
         "shares_float",
         "shares_outstanding",
         "cik",
+        "market_cap_currency",
+        "market_cap_rank_value",
+        "market_cap_rank_currency",
+        "market_cap_rank_trusted",
+        "market_cap_rank_reason",
+        "instrument_type",
+        "country",
+        "is_adr",
+        "is_etf",
+        "is_fund",
+        "is_otc",
     ):
         if field not in allowed:
             values[field] = None
@@ -1429,9 +1493,25 @@ def _normalized_fmp_payload_fields(payload: Mapping[str, Any]) -> dict[str, Any]
         ("shares_outstanding", ("sharesOutstanding", "outstandingShares", "weightedAverageShsOut", "weightedAverageShsOutTTM")),
         ("exchange", ("exchangeShortName", "exchange")),
         ("cik", ("cik", "CIK", "cik_str")),
+        ("market_cap_currency", ("marketCapCurrency", "reportedCurrency", "currency")),
+        ("market_cap_rank_value", ("marketCapUSD", "marketCapUsd", "market_cap_usd", "marketCapUSDTTM")),
+        ("market_cap_rank_currency", ("marketCapRankCurrency", "market_cap_rank_currency")),
+        ("instrument_type", ("instrumentType", "securityType", "assetType", "type")),
+        ("country", ("country", "countryName", "domicile")),
+        ("market_cap_rank_reason", ("marketCapRankReason", "market_cap_rank_reason")),
     ):
         value = _first_present(payload, *keys)
         if value not in (None, ""):
+            normalized[target] = value
+    for target, keys in (
+        ("market_cap_rank_trusted", ("marketCapRankTrusted", "market_cap_rank_trusted", "trustedMarketCap", "trusted_market_cap")),
+        ("is_adr", ("isAdr", "isADR", "is_adr", "adr", "isDepositaryReceipt")),
+        ("is_etf", ("isEtf", "isETF", "is_etf", "etf")),
+        ("is_fund", ("isFund", "is_fund", "fund")),
+        ("is_otc", ("isOtc", "isOTC", "is_otc", "otc")),
+    ):
+        value = _optional_bool(_first_present(payload, *keys))
+        if value is not None:
             normalized[target] = value
     growth = _fmp_percent_value(_first_present(payload, "revenueGrowth", "revenueGrowthTTM", "growthRevenue", "QuarterlyRevenueGrowthYOY"))
     if growth is not None:
@@ -1713,6 +1793,17 @@ def _merge_quote_records(left: MarketQuoteFundamentalsRecord, right: MarketQuote
         fetched_at=left.fetched_at or right.fetched_at,
         field_provenance=field_provenance,
         cik=_prefer_ladder_field(left.cik, right.cik),
+        market_cap_currency=_prefer_ladder_field(left.market_cap_currency, right.market_cap_currency),
+        market_cap_rank_value=_prefer_ladder_field(left.market_cap_rank_value, right.market_cap_rank_value),
+        market_cap_rank_currency=_prefer_ladder_field(left.market_cap_rank_currency, right.market_cap_rank_currency),
+        market_cap_rank_trusted=_prefer_ladder_field(left.market_cap_rank_trusted, right.market_cap_rank_trusted),
+        market_cap_rank_reason=_prefer_ladder_field(left.market_cap_rank_reason, right.market_cap_rank_reason),
+        instrument_type=_prefer_ladder_field(left.instrument_type, right.instrument_type),
+        country=_prefer_ladder_field(left.country, right.country),
+        is_adr=_prefer_ladder_field(left.is_adr, right.is_adr),
+        is_etf=_prefer_ladder_field(left.is_etf, right.is_etf),
+        is_fund=_prefer_ladder_field(left.is_fund, right.is_fund),
+        is_otc=_prefer_ladder_field(left.is_otc, right.is_otc),
     )
 
 
@@ -1750,6 +1841,17 @@ def _quote_record_has_any_value(record: MarketQuoteFundamentalsRecord) -> bool:
             record.revenue_growth,
             record.shares_float,
             record.shares_outstanding,
+            record.market_cap_currency,
+            record.market_cap_rank_value,
+            record.market_cap_rank_currency,
+            record.market_cap_rank_trusted,
+            record.market_cap_rank_reason,
+            record.instrument_type,
+            record.country,
+            record.is_adr,
+            record.is_etf,
+            record.is_fund,
+            record.is_otc,
         )
     )
 
@@ -1770,6 +1872,17 @@ _QUOTE_VALUE_FIELDS = (
     "shares_float",
     "shares_outstanding",
     "cik",
+    "market_cap_currency",
+    "market_cap_rank_value",
+    "market_cap_rank_currency",
+    "market_cap_rank_trusted",
+    "market_cap_rank_reason",
+    "instrument_type",
+    "country",
+    "is_adr",
+    "is_etf",
+    "is_fund",
+    "is_otc",
 )
 
 
@@ -1935,6 +2048,35 @@ def _optional_float(value: Any) -> float | None:
         return float(text)
     except (TypeError, ValueError):
         return None
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "t", "yes", "y"}:
+        return True
+    if text in {"0", "false", "f", "no", "n"}:
+        return False
+    return None
+
+
+def _normalize_currency(value: Any) -> str | None:
+    text = _optional_string(value)
+    if not text:
+        return None
+    clean = text.strip().upper()
+    aliases = {
+        "$": "USD",
+        "US$": "USD",
+        "U.S. DOLLAR": "USD",
+        "US DOLLAR": "USD",
+        "UNITED STATES DOLLAR": "USD",
+        "USDOLLAR": "USD",
+    }
+    return aliases.get(clean, clean[:3] if len(clean) > 3 and clean[:3].isalpha() else clean)
 
 
 def _first_present(payload: Mapping[str, Any], *keys: str) -> Any:

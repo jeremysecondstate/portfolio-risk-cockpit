@@ -36,6 +36,8 @@ from app.analytics.market_screener import (
     market_screener_data_label,
     market_screener_diagnostics_summary,
     market_screener_is_my_holding,
+    market_screener_major_cap_diagnostic_lines,
+    market_screener_market_cap_rank,
     market_screener_record_has_quote_fields,
     merge_market_data_records_into_screener_records,
     parse_ask_screener_fallback,
@@ -199,6 +201,14 @@ class _FakeTextWidget:
 
     def insert(self, _index, text: str) -> None:
         self.content += text
+
+
+class _FakeButton:
+    def __init__(self) -> None:
+        self.options: dict[str, object] = {}
+
+    def configure(self, **kwargs) -> None:
+        self.options.update(kwargs)
 
 
 class _FakeTree:
@@ -709,7 +719,7 @@ def test_market_screener_visible_page_force_reenrichment_clears_attempted_symbol
 
     earnings_radar_extension._request_visible_page_market_data_enrichment(app, force_refresh=True)
 
-    assert calls == [(("BETA",), {"reason": "visible page", "force_refresh": True, "max_symbols": earnings_radar_extension.MARKET_DATA_PAGE_ENRICHMENT_CAP})]
+    assert calls == [(("BETA",), {"reason": "current page", "force_refresh": True, "max_symbols": earnings_radar_extension.MARKET_DATA_PAGE_ENRICHMENT_CAP})]
     assert app.market_screener_market_data_attempted_symbols == set()
 
 
@@ -740,7 +750,7 @@ def test_market_screener_visible_page_enrichment_uses_default_market_cap_rank(mo
 
     assert [record.symbol for record in app.market_screener_filtered_records[:4]] == ["MEGA", "MID", "AARD", "ZZZZ"]
     assert calls[0][0] == ("MEGA", "MID")
-    assert calls[0][1]["reason"] == "visible page"
+    assert calls[0][1]["reason"] == "current page"
 
 
 def test_market_screener_visible_page_enrichment_retries_partial_mover_rows_once(monkeypatch) -> None:
@@ -818,6 +828,60 @@ def test_market_screener_visible_page_enrichment_uses_page_size_above_100(monkey
     assert kwargs["max_symbols"] == 200
 
 
+def test_market_screener_current_page_enrichment_logs_exact_symbol_snapshot(monkeypatch) -> None:
+    app = SimpleNamespace(
+        market_screener_row_map={
+            "row_msft": MarketScreenerRecord("MSFT", "Microsoft Corp"),
+            "row_aapl": MarketScreenerRecord("AAPL", "Apple Inc"),
+            "row_sony": MarketScreenerRecord("SONY", "Sony ADR", market_cap=24_000_000_000_000, market_cap_currency="JPY", country="Japan", is_adr=True),
+        },
+        market_screener_market_data_running_symbols=set(),
+        market_screener_market_data_attempted_symbols=set(),
+        market_screener_page_size_var=_FakeTkVar("100"),
+    )
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+    lines: list[str] = []
+    monkeypatch.setattr(earnings_radar_extension, "_request_market_data_enrichment", lambda _app, symbols, **kwargs: calls.append((tuple(symbols), kwargs)))
+    monkeypatch.setattr(earnings_radar_extension, "_append_screener_market_data_status", lambda _app, line: lines.append(line))
+    monkeypatch.setattr(earnings_radar_extension, "configured_market_data_symbol_limit", lambda default=100: 100)
+
+    earnings_radar_extension._request_visible_page_market_data_enrichment(app, force_refresh=False)
+
+    assert app.market_screener_last_enrichment_symbols == ("MSFT", "AAPL", "SONY")
+    assert calls[0][0] == ("MSFT", "AAPL", "SONY")
+    assert calls[0][1]["reason"] == "current page"
+    assert "page_symbols=[MSFT, AAPL, SONY]" in lines[0]
+    assert "requesting=[MSFT, AAPL, SONY]" in lines[0]
+    assert "Rows may move after enrichment" in lines[0]
+
+
+def test_market_screener_enrichment_status_reports_post_enrichment_resort(monkeypatch) -> None:
+    app = _fake_screener_filter_app(
+        [
+            MarketScreenerRecord("ACME", "Acme Corp", market_cap=1_000_000_000, market_cap_currency="USD", exchange="NASDAQ"),
+            MarketScreenerRecord("BETA", "Beta Inc"),
+        ]
+    )
+    lines: list[str] = []
+    monkeypatch.setattr(earnings_radar_extension, "_populate_screener_table", lambda _app: None)
+    monkeypatch.setattr(earnings_radar_extension, "_draw_screener_chart", lambda _app: None)
+    monkeypatch.setattr(earnings_radar_extension, "_selected_screener_symbol", lambda _app: "")
+    monkeypatch.setattr(earnings_radar_extension, "_append_screener_market_data_status", lambda _app, line: lines.append(line))
+
+    earnings_radar_extension._apply_screener_filters(app)
+    snapshot = MarketQuoteFundamentalsSnapshot(
+        records=(MarketQuoteFundamentalsRecord("BETA", market_cap=2_000_000_000, market_cap_currency="USD", exchange="NASDAQ", source="FMP fundamentals"),),
+        fetched_at="2026-06-14T10:00:00+00:00",
+        statuses=(MarketDataProviderStatus("FMP fundamentals", "available", "2026-06-14T10:00:00+00:00", "Loaded fundamentals."),),
+    )
+
+    earnings_radar_extension._finish_screener_market_data_enrichment(app, ("BETA",), "current page", snapshot)
+
+    assert [record.symbol for record in app.market_screener_filtered_records] == ["BETA", "ACME"]
+    assert "requested 1 symbol(s) [BETA]" in lines[-1]
+    assert "Post-enrichment resort moved requested row(s): BETA 2->1" in lines[-1]
+
+
 def test_market_screener_selection_change_refreshes_popout_context(monkeypatch) -> None:
     tree = _FakeTree()
     acme = MarketScreenerRecord("ACME", "Acme Corp", signals=("Upcoming earnings",), sources=("Alpha Vantage",))
@@ -847,6 +911,40 @@ def test_market_screener_selection_change_refreshes_popout_context(monkeypatch) 
     assert "BETA | Beta Inc" in app.market_screener_detail_text.content
     assert "ACME | Acme Corp" not in app.market_screener_detail_text.content
     assert enrichment_requests == [acme, beta]
+
+
+def test_market_screener_row_action_states_disable_invalid_actions() -> None:
+    source_button = _FakeButton()
+    chat_button = _FakeButton()
+    context_button = _FakeButton()
+    app = SimpleNamespace(
+        market_screener_open_source_button=source_button,
+        market_screener_open_symbol_chat_button=chat_button,
+        market_screener_context_button=context_button,
+    )
+
+    empty = earnings_radar_extension._update_screener_row_action_states(app, None)
+    assert empty["open_source_enabled"] is False
+    assert source_button.options["state"] == earnings_radar_extension.tk.DISABLED
+    assert chat_button.options["state"] == earnings_radar_extension.tk.DISABLED
+    assert context_button.options["state"] == earnings_radar_extension.tk.DISABLED
+
+    no_source = MarketScreenerRecord("MSFT", "Microsoft Corp")
+    no_source_state = earnings_radar_extension._update_screener_row_action_states(app, no_source)
+    assert no_source_state["open_source_enabled"] is False
+    assert no_source_state["open_symbol_chat_enabled"] is True
+    assert no_source_state["context_enabled"] is True
+    assert "source URL unavailable" in no_source_state["summary"]
+    assert source_button.options["state"] == earnings_radar_extension.tk.DISABLED
+    assert chat_button.options["state"] == earnings_radar_extension.tk.NORMAL
+    assert context_button.options["state"] == earnings_radar_extension.tk.NORMAL
+
+    complete = MarketScreenerRecord("MSFT", "Microsoft Corp", source_links=("https://example.test/msft",))
+    complete_state = earnings_radar_extension._update_screener_row_action_states(app, complete)
+    assert complete_state["summary"] == "Row actions available."
+    assert source_button.options["state"] == earnings_radar_extension.tk.NORMAL
+    assert chat_button.options["state"] == earnings_radar_extension.tk.NORMAL
+    assert context_button.options["state"] == earnings_radar_extension.tk.NORMAL
 
 
 def test_local_market_data_file_provider_loads_capped_requested_symbols(tmp_path) -> None:
@@ -1503,6 +1601,83 @@ def test_market_screener_filters_and_sorting_cover_events_risks_windows_and_move
     assert market_screener_data_label(beta) == "Universe only"
 
 
+def test_market_screener_market_cap_sort_trusts_usd_primary_before_untrusted_foreign_caps() -> None:
+    msft = MarketScreenerRecord("MSFT", "Microsoft Corp", exchange="NASDAQ", country="United States", market_cap=2_900_000_000_000, market_cap_currency="USD")
+    sony = MarketScreenerRecord("SONY", "Sony Group Corp ADR", exchange="NYSE", country="Japan", market_cap=24_000_000_000_000, market_cap_currency="JPY", is_adr=True)
+    honda = MarketScreenerRecord("HMC", "Honda Motor Co ADR", exchange="NYSE", country="Japan", market_cap=10_000_000_000_000, market_cap_currency="USD", is_adr=True)
+    fund = MarketScreenerRecord("SPY", "SPDR S&P 500 ETF Trust", exchange="NYSE ARCA", market_cap=70_000_000_000_000, market_cap_currency="USD", is_etf=True)
+
+    ranked = sort_market_screener_records([sony, fund, honda, msft], "market_cap", descending=True)
+
+    assert [record.symbol for record in ranked] == ["MSFT", "SPY", "HMC", "SONY"]
+    assert market_screener_market_cap_rank(msft).category == "us_primary_common"
+    assert market_screener_market_cap_rank(sony).trusted is False
+    assert "JPY" in market_screener_market_cap_rank(sony).reason
+
+
+def test_market_screener_market_cap_uses_provider_normalized_usd_rank_when_trusted() -> None:
+    msft = MarketScreenerRecord("MSFT", "Microsoft Corp", exchange="NASDAQ", country="United States", market_cap=2_900_000_000_000, market_cap_currency="USD")
+    foreign = MarketScreenerRecord(
+        "FORE",
+        "Foreign Common",
+        exchange="NYSE",
+        country="Canada",
+        market_cap=5_000_000_000_000,
+        market_cap_currency="CAD",
+        market_cap_rank_value=40_000_000_000,
+        market_cap_rank_currency="USD",
+        market_cap_rank_trusted=True,
+    )
+
+    ranked = sort_market_screener_records([foreign, msft], "market_cap", descending=True)
+
+    assert [record.symbol for record in ranked] == ["MSFT", "FORE"]
+    rank = market_screener_market_cap_rank(foreign)
+    assert rank.trusted is True
+    assert rank.ranking_market_cap == 40_000_000_000
+    assert rank.category == "trusted_non_primary"
+
+
+def test_market_quote_record_marks_foreign_local_currency_cap_untrusted_for_screener_rank() -> None:
+    quote = MarketQuoteFundamentalsRecord.from_dict(
+        {
+            "symbol": "SONY",
+            "companyName": "Sony Group Corp ADR",
+            "exchangeShortName": "NYSE",
+            "marketCap": 24_000_000_000_000,
+            "currency": "JPY",
+            "country": "Japan",
+            "isAdr": True,
+            "source": "FMP profile",
+        }
+    )
+    record = build_market_screener_records(
+        [MarketUniverseEntry("SONY", "Sony Group Corp ADR", exchange="NYSE")],
+        market_data_records=[quote],
+        fetched_at="2026-06-18T12:00:00+00:00",
+    )[0]
+
+    rank = market_screener_market_cap_rank(record)
+
+    assert record.market_cap_currency == "JPY"
+    assert record.country == "Japan"
+    assert rank.trusted is False
+    assert rank.category == "untrusted_non_usd"
+    assert "market cap currency=JPY" in next(row.source_detail for row in record.field_provenance if row.field == "market_cap")
+
+
+def test_market_screener_major_cap_diagnostics_explain_msft_absence() -> None:
+    diagnostics = MarketScreenerCoverageDiagnostics(total_rows=1, rows_skipped_by_configured_symbol_cap=7)
+    lines = market_screener_major_cap_diagnostic_lines(
+        [MarketScreenerRecord("AAPL", "Apple Inc", exchange="NASDAQ", market_cap=3_000_000_000_000, market_cap_currency="USD")],
+        diagnostics,
+    )
+
+    msft_line = next(line for line in lines if line.startswith("MSFT absent:"))
+    assert "no row with this symbol is present" in msft_line
+    assert "7 row(s) were skipped by configured provider caps" in msft_line
+
+
 def test_ask_screener_plan_validation_sanitizes_and_rejects_unsupported_fields() -> None:
     plan = validate_ask_screener_plan(
         {
@@ -2146,8 +2321,8 @@ def test_high_volume_mover_empty_state_explains_missing_fields() -> None:
     assert "missing change %" in text
     assert "missing avg volume" in text
     assert "Missing values are not treated as zero" in text
-    assert "Enrich Visible Page" in text
-    assert "Re-enrich Visible Page" in text
+    assert "Enrich Current Page" in text
+    assert "Re-enrich Current Page" in text
 
     threshold_text = earnings_radar_extension._high_volume_mover_empty_state_text(
         [MarketScreenerRecord("GAMMA", "Gamma Inc", change_percent=1.2, volume=100_000, avg_volume=100_000)]
@@ -2201,6 +2376,66 @@ def test_screener_source_diagnostics_popout_shows_full_counters_and_company_tick
     assert "Would paid FMP help?" in text
     assert "Selected row why blanks?" in text
     assert "fallback disabled/not attempted" in text
+
+
+def test_screener_diagnostics_popout_shows_provider_and_market_cap_rank_monitor_output() -> None:
+    record = MarketScreenerRecord(
+        "SONY",
+        "Sony Group Corp ADR",
+        exchange="NYSE",
+        country="Japan",
+        market_cap=24_000_000_000_000,
+        market_cap_currency="JPY",
+        is_adr=True,
+        sources=("FMP profile",),
+    )
+    snapshot = MarketScreenerSnapshot(
+        records=(record,),
+        fetched_at="2026-06-18T12:00:00+00:00",
+        sources=("FMP profile",),
+        statuses=(
+            MarketScreenerSourceStatus(
+                "FMP quote/fundamentals",
+                "partial",
+                "2026-06-18T12:00:00+00:00",
+                "FMP enrichment: 1 rows updated; provider calls attempted 2; cache used for 3; 4 skipped/limited; 0 no usable data.",
+            ),
+        ),
+        diagnostics=MarketScreenerCoverageDiagnostics(
+            total_rows=1,
+            rows_with_symbol=1,
+            rows_with_untrusted_market_cap=1,
+            rows_with_non_usd_market_cap=1,
+            rows_missing_market_cap=0,
+            rows_skipped_by_configured_symbol_cap=4,
+            provider_cache_hits=3,
+            provider_warnings=2,
+            provider_rows_requested=5,
+            provider_rows_returned=1,
+            provider_rows_updated=1,
+            major_us_large_caps_absent=13,
+        ),
+        errors=("rate warning",),
+    )
+
+    text = earnings_radar_extension._screener_diagnostics_popout_text(
+        snapshot,
+        selected_record=record,
+        session_lines=("Market data current page snapshot: page_symbols=[MSFT, SONY]; requesting=[MSFT, SONY].",),
+    )
+
+    assert "Provider config/caps" in text
+    assert "MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT" in text
+    assert "Market cap ranking diagnostics" in text
+    assert "Untrusted market caps: 1" in text
+    assert "Non-USD market caps: 1" in text
+    assert "Major-cap diagnostics" in text
+    assert "MSFT absent:" in text
+    assert "Provider cache hits: 3" in text
+    assert "Provider warnings: 2" in text
+    assert "Rows skipped by configured symbol cap: 4" in text
+    assert "Market data current page snapshot: page_symbols=[MSFT, SONY]" in text
+    assert "rate warning" in text
 
 
 def test_screener_detail_text_includes_snapshot_provider_reasons_for_blanks() -> None:
