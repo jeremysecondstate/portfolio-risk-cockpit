@@ -4532,20 +4532,11 @@ def _normalize_currency_code(value: Any) -> str:
 
 
 def _market_cap_sort_key(record: MarketScreenerRecord, *, descending: bool) -> tuple[Any, ...]:
-    rank = market_screener_market_cap_rank(record)
-    market_cap = _float_or_none(rank.ranking_market_cap)
-    group = {
-        "us_primary_common": 0,
-        "trusted_non_primary": 1,
-        "untrusted_non_primary": 2,
-        "untrusted_non_usd": 2,
-        "untrusted_explicit": 2,
-        "untrusted_ambiguous": 2,
-        "missing_or_invalid": 3,
-    }.get(rank.category, 2)
+    market_cap = _float_or_none(record.market_cap)
+    has_market_cap = market_cap is not None and market_cap >= 0
     return (
-        group,
-        0.0 if market_cap is None else (-market_cap if descending else market_cap),
+        0 if has_market_cap else 1,
+        0.0 if not has_market_cap else (-market_cap if descending else market_cap),
         *_market_cap_fallback_sort_key(record),
     )
 

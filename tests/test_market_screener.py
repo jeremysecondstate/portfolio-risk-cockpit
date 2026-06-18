@@ -723,7 +723,7 @@ def test_market_screener_visible_page_force_reenrichment_clears_attempted_symbol
     assert app.market_screener_market_data_attempted_symbols == set()
 
 
-def test_market_screener_visible_page_enrichment_uses_default_market_cap_rank(monkeypatch) -> None:
+def test_market_screener_visible_page_enrichment_uses_default_market_cap_sort(monkeypatch) -> None:
     app = _fake_screener_filter_app(
         [
             MarketScreenerRecord("AARD", "Alphabetical First Corp"),
@@ -1700,7 +1700,7 @@ def test_market_screener_filters_and_sorting_cover_events_risks_windows_and_move
     assert market_screener_data_label(beta) == "Universe only"
 
 
-def test_market_screener_market_cap_sort_trusts_usd_primary_before_untrusted_foreign_caps() -> None:
+def test_market_screener_market_cap_sort_is_strict_numeric_descending() -> None:
     msft = MarketScreenerRecord("MSFT", "Microsoft Corp", exchange="NASDAQ", country="United States", market_cap=2_900_000_000_000, market_cap_currency="USD")
     sony = MarketScreenerRecord("SONY", "Sony Group Corp ADR", exchange="NYSE", country="Japan", market_cap=24_000_000_000_000, market_cap_currency="JPY", is_adr=True)
     honda = MarketScreenerRecord("HMC", "Honda Motor Co ADR", exchange="NYSE", country="Japan", market_cap=10_000_000_000_000, market_cap_currency="USD", is_adr=True)
@@ -1708,13 +1708,26 @@ def test_market_screener_market_cap_sort_trusts_usd_primary_before_untrusted_for
 
     ranked = sort_market_screener_records([sony, fund, honda, msft], "market_cap", descending=True)
 
-    assert [record.symbol for record in ranked] == ["MSFT", "SPY", "HMC", "SONY"]
+    assert [record.symbol for record in ranked] == ["SPY", "SONY", "HMC", "MSFT"]
     assert market_screener_market_cap_rank(msft).category == "us_primary_common"
     assert market_screener_market_cap_rank(sony).trusted is False
     assert "JPY" in market_screener_market_cap_rank(sony).reason
 
 
-def test_market_screener_market_cap_uses_provider_normalized_usd_rank_when_trusted() -> None:
+def test_market_screener_market_cap_sort_is_strict_numeric_ascending_with_missing_bottom() -> None:
+    rows = [
+        MarketScreenerRecord("MISS", "Missing Cap"),
+        MarketScreenerRecord("MID", "Mid Cap", market_cap=10_000_000_000),
+        MarketScreenerRecord("ZERO", "Zero Cap", market_cap=0),
+        MarketScreenerRecord("MEGA", "Mega Cap", market_cap=3_000_000_000_000),
+    ]
+
+    ranked = sort_market_screener_records(rows, "market_cap", descending=False)
+
+    assert [record.symbol for record in ranked] == ["ZERO", "MID", "MEGA", "MISS"]
+
+
+def test_market_screener_market_cap_sort_ignores_provider_rank_metadata() -> None:
     msft = MarketScreenerRecord("MSFT", "Microsoft Corp", exchange="NASDAQ", country="United States", market_cap=2_900_000_000_000, market_cap_currency="USD")
     foreign = MarketScreenerRecord(
         "FORE",
@@ -1730,11 +1743,30 @@ def test_market_screener_market_cap_uses_provider_normalized_usd_rank_when_trust
 
     ranked = sort_market_screener_records([foreign, msft], "market_cap", descending=True)
 
-    assert [record.symbol for record in ranked] == ["MSFT", "FORE"]
+    assert [record.symbol for record in ranked] == ["FORE", "MSFT"]
     rank = market_screener_market_cap_rank(foreign)
     assert rank.trusted is True
     assert rank.ranking_market_cap == 40_000_000_000
     assert rank.category == "trusted_non_primary"
+
+
+def test_market_screener_market_cap_sort_does_not_bucket_holdings_or_non_primary_rows() -> None:
+    holding = MarketScreenerRecord(
+        "HOLD",
+        "Held Small Cap",
+        market_cap=1_000_000_000,
+        signals=("Schwab holding",),
+        sources=("Local app holdings",),
+        portfolio_quantity=25,
+    )
+    etf = MarketScreenerRecord("VXUS", "Vanguard Total International Stock ETF", market_cap=655_200_000_000, is_etf=True)
+    foreign = MarketScreenerRecord("STX", "Seagate Technology", market_cap=239_900_000_000, country="Ireland")
+    primary = MarketScreenerRecord("ACN", "Accenture plc", market_cap=80_300_000_000, exchange="NYSE", market_cap_currency="USD")
+    missing = MarketScreenerRecord("MISS", "Missing Cap", signals=("Schwab holding",), portfolio_quantity=10)
+
+    ranked = sort_market_screener_records([holding, primary, missing, foreign, etf], "market_cap", descending=True)
+
+    assert [record.symbol for record in ranked] == ["VXUS", "STX", "ACN", "HOLD", "MISS"]
 
 
 def test_market_quote_record_marks_foreign_local_currency_cap_untrusted_for_screener_rank() -> None:
