@@ -80,6 +80,16 @@ class TimeframeSpec:
 
 
 @dataclass(frozen=True)
+class TimeframeSourceRead:
+    key: str
+    label: str
+    source: str
+    freshness: str
+    candle_count: int
+    reason: str
+
+
+@dataclass(frozen=True)
 class TechnicalLevel:
     kind: str
     low: float
@@ -323,6 +333,24 @@ class TimeframeTechnicalSnapshot:
     annualized_realized_vol_20: float | None = None
     intraday_range_percent: float | None = None
     vol_regime_percentile: float | None = None
+    source: str = "Schwab"
+    freshness: str = "fresh"
+    source_note: str = ""
+
+
+@dataclass(frozen=True)
+class MarketIntelligenceDecisionRead:
+    decision_lines: list[str]
+    source_conflicts: list[str]
+    warnings: list[str]
+    volume_score_adjustment: float = 0.0
+    volume_score_reason: str = ""
+    volatility_score_adjustment: float = 0.0
+    volatility_score_reason: str = ""
+    ticket_score_adjustment: float = 0.0
+    ticket_score_reason: str = ""
+    confidence_penalty: int = 0
+    market_intelligence_score: ScoreComponent | None = None
 
 
 @dataclass(frozen=True)
@@ -357,6 +385,8 @@ class TechnicalCommandCenterReport:
     )
     market_intelligence: Any | None = None
     market_intelligence_source_statuses: tuple[Any, ...] = ()
+    market_intelligence_decision: MarketIntelligenceDecisionRead | None = None
+    timeframe_source_labels: dict[str, TimeframeSourceRead] = field(default_factory=dict)
 
 
 DEFAULT_COMMAND_CENTER_TIMEFRAMES: tuple[TimeframeSpec, ...] = (
@@ -528,11 +558,27 @@ def build_technical_command_center_report(
     clean_symbol = symbol.strip().upper()
     snapshots: dict[str, TimeframeTechnicalSnapshot] = {}
     report_warnings = list(warnings or [])
+    selected_timeframe_candles, timeframe_source_labels = _select_decision_weighted_timeframe_candles(
+        clean_symbol,
+        timeframe_candles,
+        external_intelligence,
+    )
 
     spec_by_key = {spec.key: spec for spec in DEFAULT_COMMAND_CENTER_TIMEFRAMES}
-    for key, candles in timeframe_candles.items():
+    for key, candles in selected_timeframe_candles.items():
         spec = spec_by_key.get(key, TimeframeSpec(key, key, "", 0, "", 0, "custom"))
-        snapshot = build_timeframe_technical_snapshot(clean_symbol, spec, candles)
+        source_read = timeframe_source_labels.get(
+            key,
+            TimeframeSourceRead(key, spec.label, "Schwab", _timeframe_freshness(candles, spec), len(candles), "Schwab candles were used."),
+        )
+        snapshot = build_timeframe_technical_snapshot(
+            clean_symbol,
+            spec,
+            candles,
+            source=source_read.source,
+            freshness=source_read.freshness,
+            source_note=source_read.reason,
+        )
         snapshots[key] = snapshot
         if not candles:
             report_warnings.append(f"{spec.label}: no candles were available.")
@@ -543,7 +589,7 @@ def build_technical_command_center_report(
     benchmark_reads = build_relative_strength_reads(
         snapshots,
         benchmark_candles or {},
-        symbol_candles=_daily_candles_from_timeframes(timeframe_candles),
+        symbol_candles=_daily_candles_from_timeframes(selected_timeframe_candles),
     )
     if benchmark_candles is None or not benchmark_candles or not any(read.verdict != "unknown" for read in benchmark_reads):
         report_warnings.append("Benchmark relative-strength data unavailable; PRC excludes relative-strength adjustment.")
@@ -555,7 +601,7 @@ def build_technical_command_center_report(
     relative_strength_score = prc_relative_strength_score(benchmark_reads)
     prc_indexes = build_prc_index_prices(
         clean_symbol,
-        timeframe_candles,
+        selected_timeframe_candles,
         quote_snapshot=quote_snapshot,
         relative_strength_score=relative_strength_score,
         benchmark_data_available=any(read.verdict != "unknown" for read in benchmark_reads),
@@ -569,7 +615,17 @@ def build_technical_command_center_report(
         ticket=active_ticket,
         prc_indexes=prc_indexes,
     )
+    market_intelligence_decision = _build_market_intelligence_decision_read(
+        clean_symbol,
+        external_intelligence,
+        quote_snapshot=quote_snapshot,
+        timeframe_source_labels=timeframe_source_labels,
+        snapshots=snapshots,
+    )
+    if market_intelligence_decision is not None:
+        report_warnings.extend(market_intelligence_decision.warnings)
     scores = score_command_center(snapshots, benchmark_reads, ticket_check, capital_structure_indicator=capital_structure_indicator)
+    scores = _apply_market_intelligence_score_adjustments(scores, market_intelligence_decision)
     score_weights = {
         "Trend": 0.20,
         "Momentum": 0.16,
@@ -581,10 +637,24 @@ def build_technical_command_center_report(
     }
     if capital_structure_indicator is not None:
         score_weights["Capital Structure / Supply"] = 0.10
+    if market_intelligence_decision is not None and market_intelligence_decision.market_intelligence_score is not None:
+        score_weights["Market Intelligence"] = 0.10
     overall_score = _weighted_score(scores, score_weights)
     overall_read = _overall_read(overall_score, scores)
-    confidence = _confidence_label(snapshots, benchmark_reads, report_warnings, capital_structure_indicator=capital_structure_indicator)
-    best_action = _best_action(overall_read, snapshots, ticket_check, capital_structure_indicator=capital_structure_indicator)
+    confidence = _confidence_label(
+        snapshots,
+        benchmark_reads,
+        report_warnings,
+        capital_structure_indicator=capital_structure_indicator,
+        market_intelligence_decision=market_intelligence_decision,
+    )
+    best_action = _best_action(
+        overall_read,
+        snapshots,
+        ticket_check,
+        capital_structure_indicator=capital_structure_indicator,
+        market_intelligence_decision=market_intelligence_decision,
+    )
     key_triggers = _build_action_triggers(snapshots)
     plain_english_plan = _plain_english_plan(
         overall_read,
@@ -592,6 +662,7 @@ def build_technical_command_center_report(
         ticket_check,
         key_triggers,
         capital_structure_indicator=capital_structure_indicator,
+        market_intelligence_decision=market_intelligence_decision,
     )
 
     return TechnicalCommandCenterReport(
@@ -613,6 +684,8 @@ def build_technical_command_center_report(
         setup_classification=setup_classification,
         market_intelligence=external_intelligence,
         market_intelligence_source_statuses=_external_intelligence_source_statuses(external_intelligence),
+        market_intelligence_decision=market_intelligence_decision,
+        timeframe_source_labels=timeframe_source_labels,
     )
 
 
@@ -638,10 +711,159 @@ def _external_intelligence_warning_lines(external_intelligence: Any) -> list[str
     return _dedupe(warnings)
 
 
+def _select_decision_weighted_timeframe_candles(
+    symbol: str,
+    timeframe_candles: dict[str, list[Candle]],
+    external_intelligence: Any | None,
+) -> tuple[dict[str, list[Candle]], dict[str, TimeframeSourceRead]]:
+    selected: dict[str, list[Candle]] = {key: list(candles or []) for key, candles in timeframe_candles.items()}
+    source_reads: dict[str, TimeframeSourceRead] = {}
+    spec_by_key = {spec.key: spec for spec in DEFAULT_COMMAND_CENTER_TIMEFRAMES}
+    databento_base = _external_databento_base_candles(symbol, external_intelligence)
+    keys = list(selected)
+    if databento_base:
+        for spec in DEFAULT_COMMAND_CENTER_TIMEFRAMES:
+            if spec.key not in selected and _databento_timeframe_candles(databento_base, spec):
+                selected[spec.key] = []
+                keys.append(spec.key)
+
+    for key in keys:
+        spec = spec_by_key.get(key, TimeframeSpec(key, key, "", 0, "", 0, "custom"))
+        schwab_candles = list(timeframe_candles.get(key, []) or [])
+        schwab_freshness = _timeframe_freshness(schwab_candles, spec)
+        databento_candles = _databento_timeframe_candles(databento_base, spec) if spec.key in spec_by_key else []
+        databento_freshness = _timeframe_freshness(databento_candles, spec)
+        use_databento = bool(databento_candles) and (
+            not schwab_candles
+            or schwab_freshness == "stale" and databento_freshness != "stale"
+            or (len(schwab_candles) < 35 <= len(databento_candles))
+        )
+        if use_databento:
+            selected[key] = databento_candles
+            source = "Databento" if not schwab_candles else "Databento fallback"
+            reason = (
+                f"{spec.label}: Databento selected-symbol candles were used because "
+                + ("Schwab candles were unavailable." if not schwab_candles else f"Schwab candles were {schwab_freshness} or too sparse.")
+            )
+            source_reads[key] = TimeframeSourceRead(key, spec.label, source, databento_freshness, len(databento_candles), reason)
+        elif schwab_candles:
+            reason = f"{spec.label}: Schwab candles remain the primary technical-history source."
+            if databento_candles:
+                reason += " Databento was available but did not replace fresher Schwab history."
+            source_reads[key] = TimeframeSourceRead(key, spec.label, "Schwab", schwab_freshness, len(schwab_candles), reason)
+        else:
+            source_reads[key] = TimeframeSourceRead(key, spec.label, "unavailable", "unavailable", 0, f"{spec.label}: no Schwab or Databento candles were available.")
+
+    return selected, source_reads
+
+
+def _external_databento_base_candles(symbol: str, external_intelligence: Any | None) -> list[Candle]:
+    if external_intelligence is None:
+        return []
+    candles_by_symbol = getattr(external_intelligence, "databento_equity_candles", None)
+    if not isinstance(candles_by_symbol, Mapping):
+        return []
+    clean_symbol = symbol.strip().upper()
+    selected = None
+    for key, rows in candles_by_symbol.items():
+        if str(key or "").strip().upper() == clean_symbol:
+            selected = rows
+            break
+    if selected is None and len(candles_by_symbol) == 1:
+        selected = next(iter(candles_by_symbol.values()))
+    try:
+        candles = [row for row in selected or () if isinstance(row, Candle)]
+    except TypeError:
+        candles = []
+    return sorted(candles, key=lambda candle: candle.datetime_ms)
+
+
+def _databento_timeframe_candles(candles: list[Candle], spec: TimeframeSpec) -> list[Candle]:
+    if not candles:
+        return []
+    if spec.frequency_type == "minute":
+        if spec.frequency <= 1:
+            return list(candles)
+        return _aggregate_candles_by_interval(candles, interval_ms=spec.frequency * 60_000)
+    if spec.frequency_type == "daily":
+        return _aggregate_candles_by_utc_date(candles)
+    return []
+
+
+def _aggregate_candles_by_interval(candles: list[Candle], *, interval_ms: int) -> list[Candle]:
+    if interval_ms <= 0:
+        return list(candles)
+    groups: dict[int, list[Candle]] = {}
+    for candle in sorted(candles, key=lambda row: row.datetime_ms):
+        groups.setdefault(candle.datetime_ms // interval_ms, []).append(candle)
+    return [_aggregate_candle_group(rows) for _bucket, rows in sorted(groups.items()) if rows]
+
+
+def _aggregate_candles_by_utc_date(candles: list[Candle]) -> list[Candle]:
+    groups: dict[str, list[Candle]] = {}
+    for candle in sorted(candles, key=lambda row: row.datetime_ms):
+        parsed = _candle_datetime_utc(candle)
+        key = parsed.date().isoformat() if parsed is not None else str(candle.datetime_ms)
+        groups.setdefault(key, []).append(candle)
+    return [_aggregate_candle_group(rows) for _key, rows in sorted(groups.items()) if rows]
+
+
+def _aggregate_candle_group(rows: list[Candle]) -> Candle:
+    ordered = sorted(rows, key=lambda row: row.datetime_ms)
+    return Candle(
+        datetime_ms=ordered[0].datetime_ms,
+        open=ordered[0].open,
+        high=max(candle.high for candle in ordered),
+        low=min(candle.low for candle in ordered),
+        close=ordered[-1].close,
+        volume=sum(candle.volume for candle in ordered),
+    )
+
+
+def _timeframe_freshness(candles: list[Candle], spec: TimeframeSpec) -> str:
+    if not candles:
+        return "unavailable"
+    latest = _candle_datetime_utc(max(candles, key=lambda candle: candle.datetime_ms))
+    if latest is None:
+        return "fallback"
+    age = datetime.now(timezone.utc) - latest
+    if age < timedelta(days=-1):
+        return "fallback"
+    if age > _freshness_threshold(spec):
+        return "stale"
+    return "fresh"
+
+
+def _freshness_threshold(spec: TimeframeSpec) -> timedelta:
+    if spec.frequency_type == "minute":
+        minutes = max(1, spec.frequency)
+        if minutes <= 1:
+            return timedelta(minutes=20)
+        if minutes <= 5:
+            return timedelta(minutes=45)
+        return timedelta(hours=4)
+    if spec.frequency_type == "daily":
+        return timedelta(days=7)
+    return timedelta(days=1)
+
+
+def _candle_datetime_utc(candle: Candle) -> datetime | None:
+    if candle.datetime_ms < 946_684_800_000:
+        return None
+    try:
+        return datetime.fromtimestamp(candle.datetime_ms / 1000, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def build_timeframe_technical_snapshot(
     symbol: str,
     spec: TimeframeSpec,
     candles: list[Candle],
+    *,
+    source: str = "Schwab",
+    freshness: str = "fresh",
+    source_note: str = "",
 ) -> TimeframeTechnicalSnapshot:
     clean_candles = sorted(candles, key=lambda candle: candle.datetime_ms)
     if not clean_candles:
@@ -684,6 +906,9 @@ def build_timeframe_technical_snapshot(
             opening_range_low=None,
             lines=["No candles available for this timeframe."],
             scores={},
+            source=source,
+            freshness=freshness,
+            source_note=source_note,
         )
 
     closes = [candle.close for candle in clean_candles]
@@ -803,6 +1028,9 @@ def build_timeframe_technical_snapshot(
         annualized_realized_vol_20=annualized_realized_vol_20,
         intraday_range_percent=intraday_range_percent,
         vol_regime_percentile=vol_regime_percentile,
+        source=source,
+        freshness=freshness,
+        source_note=source_note,
     )
 
 
@@ -1483,6 +1711,285 @@ def score_command_center(
             _capital_structure_score_reason(capital_structure_indicator),
         )
     return scores
+
+
+def _build_market_intelligence_decision_read(
+    symbol: str,
+    external_intelligence: Any | None,
+    *,
+    quote_snapshot: QuoteSnapshot | None,
+    timeframe_source_labels: dict[str, TimeframeSourceRead],
+    snapshots: dict[str, TimeframeTechnicalSnapshot],
+) -> MarketIntelligenceDecisionRead | None:
+    if external_intelligence is None:
+        return None
+
+    decision_lines: list[str] = []
+    warnings: list[str] = []
+    confidence_penalty = 0
+    fmp_profile = _external_mapping(getattr(external_intelligence, "fmp_profile", None))
+    fmp_quote = _external_mapping(getattr(external_intelligence, "fmp_quote", None))
+    fmp_fundamentals = _external_mapping(getattr(external_intelligence, "fmp_fundamentals", None))
+    equity_tape = _external_mapping(getattr(external_intelligence, "databento_equity_tape", None))
+    source_conflicts = _quote_source_conflicts(symbol, quote_snapshot, equity_tape=equity_tape, fmp_quote=fmp_quote)
+    if source_conflicts:
+        warnings.extend(source_conflicts)
+        confidence_penalty += 1
+        decision_lines.append("Source conflict detected; Schwab remains account/position truth and confidence is demoted until quotes converge.")
+
+    databento_frames = [
+        read
+        for read in timeframe_source_labels.values()
+        if read.source.lower().startswith("databento") and read.candle_count > 0
+    ]
+    if databento_frames:
+        names = ", ".join(read.key for read in databento_frames[:4])
+        decision_lines.append(f"Databento selected-equity candles influenced VWAP, realized volatility, and volume reads for {names}.")
+
+    tape_fetched_at = _optional_text(equity_tape.get("fetched_at") or equity_tape.get("timestamp"))
+    if tape_fetched_at:
+        tape_age = _age_from_iso(tape_fetched_at)
+        if tape_age is not None and tape_age > timedelta(minutes=20):
+            warnings.append(f"Databento tape freshness is stale ({tape_fetched_at}); quote/tape confidence is lower.")
+            confidence_penalty += 1
+
+    volume_adjustment, volume_reason = _databento_volume_adjustment(equity_tape)
+    volatility_adjustment, volatility_reason = _databento_volatility_adjustment(databento_frames, snapshots)
+    ticket_adjustment, ticket_reason = _liquidity_ticket_adjustment(quote_snapshot, source_conflicts)
+    market_intelligence_score = _market_intelligence_score(fmp_profile, fmp_quote, fmp_fundamentals, equity_tape, source_conflicts)
+
+    if fmp_profile or fmp_fundamentals:
+        profile_bits = [field for field in ("company_name", "sector", "industry", "exchange", "cik") if _optional_text(fmp_profile.get(field))]
+        fundamental_bits = [field for field in ("market_cap", "pe_ratio", "eps", "revenue_growth", "shares_float", "shares_outstanding") if _optional_number(fmp_fundamentals.get(field)) is not None]
+        bits = []
+        if profile_bits:
+            bits.append("profile " + "/".join(profile_bits[:4]))
+        if fundamental_bits:
+            bits.append("fundamentals " + "/".join(fundamental_bits[:5]))
+        if bits:
+            decision_lines.append("FMP decision context loaded: " + "; ".join(bits) + ".")
+
+    if equity_tape:
+        tape_bits = []
+        tape_price = _optional_number(equity_tape.get("price"))
+        tape_volume = _optional_number(equity_tape.get("volume"))
+        tape_avg_volume = _optional_number(equity_tape.get("avg_volume"))
+        if tape_price is not None:
+            tape_bits.append(f"price {_money(tape_price)}")
+        if tape_volume is not None:
+            tape_bits.append(f"volume {_format_optional(tape_volume)}")
+        if tape_volume is not None and tape_avg_volume not in (None, 0):
+            tape_bits.append(f"relative volume {tape_volume / tape_avg_volume:.2f}x")
+        if tape_bits:
+            decision_lines.append("Databento tape influenced confirmation: " + ", ".join(tape_bits) + ".")
+
+    if not any((decision_lines, warnings, market_intelligence_score)):
+        return None
+    return MarketIntelligenceDecisionRead(
+        decision_lines=_dedupe(decision_lines),
+        source_conflicts=_dedupe(source_conflicts),
+        warnings=_dedupe(warnings),
+        volume_score_adjustment=volume_adjustment,
+        volume_score_reason=volume_reason,
+        volatility_score_adjustment=volatility_adjustment,
+        volatility_score_reason=volatility_reason,
+        ticket_score_adjustment=ticket_adjustment,
+        ticket_score_reason=ticket_reason,
+        confidence_penalty=confidence_penalty,
+        market_intelligence_score=market_intelligence_score,
+    )
+
+
+def _apply_market_intelligence_score_adjustments(
+    scores: dict[str, ScoreComponent],
+    decision: MarketIntelligenceDecisionRead | None,
+) -> dict[str, ScoreComponent]:
+    if decision is None:
+        return scores
+    adjusted = dict(scores)
+    if decision.volume_score_adjustment:
+        adjusted["Volume"] = _adjust_score_component(
+            adjusted.get("Volume", ScoreComponent("Volume", 50, "Volume confirmation is limited.")),
+            decision.volume_score_adjustment,
+            decision.volume_score_reason,
+        )
+    if decision.volatility_score_adjustment:
+        adjusted["Volatility/Risk"] = _adjust_score_component(
+            adjusted.get("Volatility/Risk", ScoreComponent("Volatility/Risk", 50, "Volatility evidence is limited.")),
+            decision.volatility_score_adjustment,
+            decision.volatility_score_reason,
+        )
+    if decision.ticket_score_adjustment:
+        adjusted["Ticket Quality"] = _adjust_score_component(
+            adjusted.get("Ticket Quality", ScoreComponent("Ticket Quality", 50, "Ticket evidence is limited.")),
+            decision.ticket_score_adjustment,
+            decision.ticket_score_reason,
+        )
+    if decision.market_intelligence_score is not None:
+        adjusted["Market Intelligence"] = decision.market_intelligence_score
+    return adjusted
+
+
+def _adjust_score_component(component: ScoreComponent, adjustment: float, reason: str) -> ScoreComponent:
+    clean_reason = reason.strip()
+    if not clean_reason:
+        clean_reason = f"market intelligence adjustment {adjustment:+.0f}"
+    return ScoreComponent(
+        component.name,
+        _clamp_score(component.score + adjustment),
+        f"{component.reason}; {clean_reason}",
+    )
+
+
+def _quote_source_conflicts(
+    symbol: str,
+    quote_snapshot: QuoteSnapshot | None,
+    *,
+    equity_tape: Mapping[str, Any],
+    fmp_quote: Mapping[str, Any],
+) -> list[str]:
+    points: list[tuple[str, float]] = []
+    schwab_price = _quote_snapshot_price(quote_snapshot)
+    if schwab_price is not None:
+        points.append(("Schwab quote", schwab_price))
+    databento_price = _optional_number(equity_tape.get("price"))
+    if databento_price is not None:
+        points.append(("Databento tape", databento_price))
+    fmp_price = _optional_number(fmp_quote.get("price"))
+    if fmp_price is not None:
+        points.append(("FMP quote", fmp_price))
+
+    conflicts: list[str] = []
+    for index, (left_source, left_price) in enumerate(points):
+        for right_source, right_price in points[index + 1:]:
+            if left_price <= 0 or right_price <= 0:
+                continue
+            midpoint = (left_price + right_price) / 2
+            diff_percent = abs(left_price - right_price) / midpoint * 100
+            if diff_percent >= 1.0 and abs(left_price - right_price) >= 0.03:
+                conflicts.append(
+                    f"Source conflict: {symbol.upper()} {left_source} {_money(left_price)} vs {right_source} {_money(right_price)} differ by {diff_percent:.2f}%."
+                )
+    return conflicts
+
+
+def _quote_snapshot_price(quote_snapshot: QuoteSnapshot | None) -> float | None:
+    if quote_snapshot is None:
+        return None
+    return quote_snapshot.last or quote_snapshot.mark
+
+
+def _databento_volume_adjustment(equity_tape: Mapping[str, Any]) -> tuple[float, str]:
+    volume = _optional_number(equity_tape.get("volume"))
+    avg_volume = _optional_number(equity_tape.get("avg_volume"))
+    if volume is None or avg_volume in (None, 0):
+        return 0.0, ""
+    relative = volume / avg_volume
+    if relative >= 1.5:
+        return 6.0, f"Databento relative volume confirms participation at {relative:.2f}x"
+    if relative <= 0.60:
+        return -5.0, f"Databento relative volume is light at {relative:.2f}x"
+    return 0.0, ""
+
+
+def _databento_volatility_adjustment(
+    databento_frames: list[TimeframeSourceRead],
+    snapshots: dict[str, TimeframeTechnicalSnapshot],
+) -> tuple[float, str]:
+    if not databento_frames:
+        return 0.0, ""
+    realized = [
+        snapshot.realized_vol_20
+        for read in databento_frames
+        if (snapshot := snapshots.get(read.key)) is not None and snapshot.realized_vol_20 is not None
+    ]
+    if not realized:
+        return 0.0, ""
+    max_realized = max(realized)
+    if max_realized >= 8.0:
+        return -4.0, f"Databento-derived realized volatility is elevated at {max_realized:.1f}%"
+    if max_realized <= 2.5:
+        return 2.0, f"Databento-derived realized volatility is contained at {max_realized:.1f}%"
+    return 0.0, ""
+
+
+def _liquidity_ticket_adjustment(
+    quote_snapshot: QuoteSnapshot | None,
+    source_conflicts: list[str],
+) -> tuple[float, str]:
+    if source_conflicts:
+        return -10.0, "source conflict raises slippage/quote-confidence risk"
+    spread = spread_percent(quote_snapshot)
+    if spread is None:
+        return 0.0, ""
+    if spread >= 1.0:
+        return -8.0, f"Schwab bid/ask spread is wide at {spread:.2f}%"
+    if spread <= 0.10:
+        return 3.0, f"Schwab bid/ask spread is tight at {spread:.2f}%"
+    return 0.0, ""
+
+
+def _market_intelligence_score(
+    fmp_profile: Mapping[str, Any],
+    fmp_quote: Mapping[str, Any],
+    fmp_fundamentals: Mapping[str, Any],
+    equity_tape: Mapping[str, Any],
+    source_conflicts: list[str],
+) -> ScoreComponent | None:
+    if not any((fmp_profile, fmp_quote, fmp_fundamentals, equity_tape, source_conflicts)):
+        return None
+    score = 50.0
+    reasons: list[str] = []
+    profile_fields = [field for field in ("company_name", "sector", "industry", "exchange", "cik") if _optional_text(fmp_profile.get(field))]
+    if profile_fields:
+        score += min(10.0, len(profile_fields) * 2.0)
+        reasons.append("FMP profile/company context loaded")
+    fundamental_fields = [
+        field
+        for field in ("market_cap", "pe_ratio", "eps", "revenue_growth", "shares_float", "shares_outstanding")
+        if _optional_number(fmp_fundamentals.get(field)) is not None
+    ]
+    if fundamental_fields:
+        score += min(12.0, len(fundamental_fields) * 2.0)
+        reasons.append("FMP valuation/growth/float fields loaded")
+    revenue_growth = _optional_number(fmp_fundamentals.get("revenue_growth"))
+    if revenue_growth is not None:
+        if revenue_growth >= 10:
+            score += 6.0
+            reasons.append(f"FMP revenue growth is strong at {revenue_growth:.1f}%")
+        elif revenue_growth < 0:
+            score -= 8.0
+            reasons.append(f"FMP revenue growth is negative at {revenue_growth:.1f}%")
+    pe_ratio = _optional_number(fmp_fundamentals.get("pe_ratio"))
+    if pe_ratio is not None and pe_ratio >= 80:
+        score -= 5.0
+        reasons.append(f"FMP P/E is extended at {pe_ratio:.1f}")
+    shares_float = _optional_number(fmp_fundamentals.get("shares_float"))
+    if shares_float is not None and shares_float < 20_000_000:
+        score -= 5.0
+        reasons.append("FMP float is below 20M shares")
+    if equity_tape:
+        score += 6.0
+        reasons.append("Databento selected-equity tape loaded")
+    if source_conflicts:
+        score -= 18.0
+        reasons.append("quote source conflict demotes confidence")
+    return ScoreComponent("Market Intelligence", _clamp_score(score), _reason(reasons, "External market intelligence was available."))
+
+
+def _age_from_iso(value: str) -> timedelta | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - parsed
 
 
 def build_capital_structure_indicator_read(
@@ -2644,8 +3151,10 @@ def format_technical_command_center_report(report: TechnicalCommandCenterReport)
         lines.append(f"- {name}: {component.score:.0f}/100 because {component.reason}.")
     lines.extend(["", "TIMEFRAME STACK"])
     for snapshot in report.snapshots.values():
-        lines.append(f"- {snapshot.label}: {_short_snapshot_read(snapshot)}")
+        source_suffix = f" Source: {snapshot.source} / {snapshot.freshness}." if snapshot.source else ""
+        lines.append(f"- {snapshot.label}: {_short_snapshot_read(snapshot)}{source_suffix}")
     lines.append(f"- Alignment: {report.scores['Alignment'].reason}.")
+    lines.extend(_format_timeframe_source_section(report))
 
     lines.extend(["", "KEY LEVELS"])
     level_snapshot = timing or setup or daily
@@ -2703,6 +3212,7 @@ def format_technical_command_center_report(report: TechnicalCommandCenterReport)
 def _format_market_intelligence_section(report: TechnicalCommandCenterReport) -> list[str]:
     intelligence = getattr(report, "market_intelligence", None)
     statuses = tuple(getattr(report, "market_intelligence_source_statuses", ()) or ())
+    decision = getattr(report, "market_intelligence_decision", None)
     if intelligence is None and not statuses:
         return []
 
@@ -2720,10 +3230,28 @@ def _format_market_intelligence_section(report: TechnicalCommandCenterReport) ->
     if intelligence is None:
         return lines
 
+    if decision is not None:
+        decision_lines = list(getattr(decision, "decision_lines", []) or [])
+        conflicts = list(getattr(decision, "source_conflicts", []) or [])
+        if decision_lines or conflicts:
+            lines.extend(["", "DECISION-WEIGHTED READ", "----------------------"])
+            lines.extend(f"- {line}" for line in decision_lines)
+            lines.extend(f"- {line}" for line in conflicts)
+
     context_lines = _format_market_intelligence_context(intelligence)
     if context_lines:
         lines.extend(["", "MARKET INTELLIGENCE CONTEXT", "---------------------------"])
         lines.extend(context_lines)
+    return lines
+
+
+def _format_timeframe_source_section(report: TechnicalCommandCenterReport) -> list[str]:
+    source_reads = getattr(report, "timeframe_source_labels", {}) or {}
+    if not source_reads:
+        return []
+    lines = ["", "TIMEFRAME DATA SOURCES", "----------------------"]
+    for key, read in source_reads.items():
+        lines.append(f"- {read.label} ({key}): {read.source}; {read.freshness}; {read.candle_count} candle(s). {read.reason}")
     return lines
 
 
@@ -3618,6 +4146,7 @@ def _confidence_label(
     warnings: list[str],
     *,
     capital_structure_indicator: CapitalStructureIndicatorRead | None = None,
+    market_intelligence_decision: MarketIntelligenceDecisionRead | None = None,
 ) -> str:
     usable_timeframes = sum(1 for snapshot in snapshots.values() if snapshot.candle_count >= 35)
     usable_benchmarks = sum(1 for read in benchmark_reads if read.verdict != "unknown")
@@ -3627,12 +4156,14 @@ def _confidence_label(
         confidence = "Medium"
     else:
         confidence = "Low"
-    if capital_structure_indicator is None:
-        return confidence
-    if capital_structure_indicator.foreign_issuer_confidence_modifier < 0 or capital_structure_indicator.technical_score < 45:
-        return _downgrade_confidence(confidence)
-    if capital_structure_indicator.chase_risk_score >= 75 and confidence == "High":
-        return "Medium"
+    if capital_structure_indicator is not None:
+        if capital_structure_indicator.foreign_issuer_confidence_modifier < 0 or capital_structure_indicator.technical_score < 45:
+            confidence = _downgrade_confidence(confidence)
+        elif capital_structure_indicator.chase_risk_score >= 75 and confidence == "High":
+            confidence = "Medium"
+    if market_intelligence_decision is not None:
+        for _index in range(max(0, market_intelligence_decision.confidence_penalty)):
+            confidence = _downgrade_confidence(confidence)
     return confidence
 
 
@@ -3648,8 +4179,11 @@ def _best_action(
     ticket_check: TicketCheck,
     *,
     capital_structure_indicator: CapitalStructureIndicatorRead | None = None,
+    market_intelligence_decision: MarketIntelligenceDecisionRead | None = None,
 ) -> str:
     timing = _preferred_snapshot(snapshots, "timing")
+    if market_intelligence_decision is not None and market_intelligence_decision.source_conflicts:
+        return "Wait for source confirmation"
     if "inside normal noise" in ticket_check.stop_quality:
         return "Wait / widen or relocate stop"
     if capital_structure_indicator is not None:
@@ -3696,6 +4230,7 @@ def _plain_english_plan(
     triggers: list[ActionTrigger],
     *,
     capital_structure_indicator: CapitalStructureIndicatorRead | None = None,
+    market_intelligence_decision: MarketIntelligenceDecisionRead | None = None,
 ) -> list[str]:
     breakout = next((trigger for trigger in triggers if trigger.label == "Breakout trigger"), None)
     invalidation = next((trigger for trigger in triggers if trigger.label == "Invalidation"), None)
@@ -3711,6 +4246,8 @@ def _plain_english_plan(
         plan.append(f"What would change the view: daily trend/EMA alignment changes, volume confirms the opposite direction, or price rejects the key trigger.")
     if capital_structure_indicator is not None:
         plan.extend(capital_structure_indicator.recommendation_lines)
+    if market_intelligence_decision is not None:
+        plan.extend(market_intelligence_decision.decision_lines[:3])
     plan.append(f"Ticket verdict: {ticket_check.verdict}")
     return plan
 
