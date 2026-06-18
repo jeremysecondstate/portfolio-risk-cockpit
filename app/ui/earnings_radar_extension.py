@@ -138,6 +138,8 @@ SCREENER_COLUMNS = (
 RECENT_NUMERIC_COLUMNS = {"revenue", "revenue_growth", "eps", "net_income"}
 UPCOMING_NUMERIC_COLUMNS = {"estimate"}
 SCREENER_NUMERIC_COLUMNS = {"price", "change_percent", "volume", "avg_volume", "market_cap", "pe_ratio", "eps", "revenue_growth", "float_shares", "data_completeness", "signals", "risk_flags", "sources"}
+DEFAULT_MARKET_SCREENER_SORT_COLUMN = "market_cap"
+DEFAULT_MARKET_SCREENER_SORT_DESC = True
 MARKET_DATA_PAGE_ENRICHMENT_CAP = 100
 MARKET_SCREENER_TABLE_STYLE = "MarketScreener.Treeview"
 MARKET_SCREENER_TABLE_HEIGHT = 18
@@ -234,8 +236,8 @@ def _ensure_state(self: tk.Tk) -> None:
     self.market_screener_records: list[MarketScreenerRecord] = []
     self.market_screener_filtered_records: list[MarketScreenerRecord] = []
     self.market_screener_row_map: dict[str, MarketScreenerRecord] = {}
-    self.market_screener_sort_column = "symbol"
-    self.market_screener_sort_desc = False
+    self.market_screener_sort_column = DEFAULT_MARKET_SCREENER_SORT_COLUMN
+    self.market_screener_sort_desc = DEFAULT_MARKET_SCREENER_SORT_DESC
     self.market_screener_page = 0
     self.market_screener_status_var = tk.StringVar(value="Ready.")
     self.market_screener_search_var = tk.StringVar(value="")

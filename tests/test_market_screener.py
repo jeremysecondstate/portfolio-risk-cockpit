@@ -151,6 +151,41 @@ class _FakeTkVar:
         return self.value
 
 
+def _fake_screener_filter_app(
+    records,
+    *,
+    sort_column: str | None = None,
+    sort_desc: bool | None = None,
+    page_size: str = "100",
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        market_screener_records=list(records),
+        market_screener_filtered_records=[],
+        market_screener_row_map={},
+        market_screener_sort_column=sort_column or earnings_radar_extension.DEFAULT_MARKET_SCREENER_SORT_COLUMN,
+        market_screener_sort_desc=earnings_radar_extension.DEFAULT_MARKET_SCREENER_SORT_DESC if sort_desc is None else sort_desc,
+        market_screener_page=0,
+        market_screener_search_var=_FakeTkVar(""),
+        market_screener_sector_var=_FakeTkVar("All"),
+        market_screener_exchange_var=_FakeTkVar("All"),
+        market_screener_event_type_var=_FakeTkVar("All"),
+        market_screener_risk_flag_var=_FakeTkVar("All"),
+        market_screener_earnings_window_var=_FakeTkVar("All"),
+        market_screener_data_completeness_var=_FakeTkVar("All"),
+        market_screener_has_ai_signal_var=_FakeTkVar(False),
+        market_screener_has_price_volume_data_var=_FakeTkVar(False),
+        market_screener_page_size_var=_FakeTkVar(page_size),
+        market_screener_ask_plan=None,
+        market_screener_ask_result=None,
+        market_screener_ask_summary_var=_FakeTkVar(),
+        market_screener_empty_state_text="",
+        market_screener_last_snapshot=None,
+        market_screener_market_data_running_symbols=set(),
+        market_screener_market_data_attempted_symbols=set(),
+        market_screener_status_var=_FakeTkVar(),
+    )
+
+
 class _FakeTextWidget:
     def __init__(self) -> None:
         self.content = ""
@@ -250,6 +285,17 @@ class _FakeFmpSession:
         call = {"url": url, "params": dict(params or {}), "headers": dict(headers or {}), "timeout": timeout}
         self.calls.append(call)
         return self.handler(url, call["params"])
+
+
+def test_market_screener_default_sort_initializes_to_market_cap_desc(monkeypatch) -> None:
+    monkeypatch.setattr(earnings_radar_extension.tk, "StringVar", _FakeTkVar)
+    monkeypatch.setattr(earnings_radar_extension.tk, "BooleanVar", _FakeTkVar)
+    app = SimpleNamespace()
+
+    earnings_radar_extension._ensure_state(app)
+
+    assert app.market_screener_sort_column == "market_cap"
+    assert app.market_screener_sort_desc is True
 
 
 def test_market_screener_merge_combines_universe_recent_and_upcoming_rows() -> None:
@@ -572,6 +618,60 @@ def test_market_screener_selected_row_enrichment_finish_updates_snapshot_and_det
     assert "selected row updated" in app.market_screener_status_var.value
 
 
+def test_market_screener_enrichment_resorts_default_market_cap_desc(monkeypatch) -> None:
+    app = _fake_screener_filter_app(
+        [
+            MarketScreenerRecord("ACME", "Acme Corp"),
+            MarketScreenerRecord("MISS", "Missing Cap Corp"),
+            MarketScreenerRecord("BETA", "Beta Inc"),
+        ]
+    )
+    monkeypatch.setattr(earnings_radar_extension, "_populate_screener_table", lambda _app: None)
+    monkeypatch.setattr(earnings_radar_extension, "_draw_screener_chart", lambda _app: None)
+    monkeypatch.setattr(earnings_radar_extension, "_selected_screener_symbol", lambda _app: "")
+    monkeypatch.setattr(earnings_radar_extension, "_append_screener_market_data_status", lambda _app, _line: None)
+    snapshot = MarketQuoteFundamentalsSnapshot(
+        records=(
+            MarketQuoteFundamentalsRecord("ACME", market_cap=1_000_000_000, source="FMP fundamentals"),
+            MarketQuoteFundamentalsRecord("BETA", market_cap=2_000_000_000, source="FMP fundamentals"),
+        ),
+        fetched_at="2026-06-14T10:00:00+00:00",
+        statuses=(MarketDataProviderStatus("FMP fundamentals", "available", "2026-06-14T10:00:00+00:00", "Loaded fundamentals."),),
+    )
+
+    earnings_radar_extension._finish_screener_market_data_enrichment(app, ("ACME", "BETA"), "visible page", snapshot)
+
+    assert app.market_screener_sort_column == "market_cap"
+    assert app.market_screener_sort_desc is True
+    assert [record.symbol for record in app.market_screener_filtered_records] == ["BETA", "ACME", "MISS"]
+
+
+def test_market_screener_enrichment_preserves_manual_symbol_sort(monkeypatch) -> None:
+    app = _fake_screener_filter_app(
+        [MarketScreenerRecord("BETA", "Beta Inc"), MarketScreenerRecord("ACME", "Acme Corp")],
+        sort_column="symbol",
+        sort_desc=False,
+    )
+    monkeypatch.setattr(earnings_radar_extension, "_populate_screener_table", lambda _app: None)
+    monkeypatch.setattr(earnings_radar_extension, "_draw_screener_chart", lambda _app: None)
+    monkeypatch.setattr(earnings_radar_extension, "_selected_screener_symbol", lambda _app: "")
+    monkeypatch.setattr(earnings_radar_extension, "_append_screener_market_data_status", lambda _app, _line: None)
+    snapshot = MarketQuoteFundamentalsSnapshot(
+        records=(
+            MarketQuoteFundamentalsRecord("BETA", market_cap=2_000_000_000, source="FMP fundamentals"),
+            MarketQuoteFundamentalsRecord("ACME", market_cap=1_000_000_000, source="FMP fundamentals"),
+        ),
+        fetched_at="2026-06-14T10:00:00+00:00",
+        statuses=(MarketDataProviderStatus("FMP fundamentals", "available", "2026-06-14T10:00:00+00:00", "Loaded fundamentals."),),
+    )
+
+    earnings_radar_extension._finish_screener_market_data_enrichment(app, ("BETA", "ACME"), "visible page", snapshot)
+
+    assert app.market_screener_sort_column == "symbol"
+    assert app.market_screener_sort_desc is False
+    assert [record.symbol for record in app.market_screener_filtered_records] == ["ACME", "BETA"]
+
+
 def test_market_screener_selected_row_enrichment_requests_only_selected_symbol(monkeypatch) -> None:
     app = SimpleNamespace(
         market_screener_market_data_running_symbols=set(),
@@ -611,6 +711,36 @@ def test_market_screener_visible_page_force_reenrichment_clears_attempted_symbol
 
     assert calls == [(("BETA",), {"reason": "visible page", "force_refresh": True, "max_symbols": earnings_radar_extension.MARKET_DATA_PAGE_ENRICHMENT_CAP})]
     assert app.market_screener_market_data_attempted_symbols == set()
+
+
+def test_market_screener_visible_page_enrichment_uses_default_market_cap_rank(monkeypatch) -> None:
+    app = _fake_screener_filter_app(
+        [
+            MarketScreenerRecord("AARD", "Alphabetical First Corp"),
+            MarketScreenerRecord("MEGA", "Mega Cap Corp", market_cap=3_000_000_000_000),
+            MarketScreenerRecord("MID", "Mid Cap Corp", market_cap=25_000_000_000),
+            MarketScreenerRecord("ZZZZ", "Alphabetical Last Corp"),
+        ],
+        page_size="2",
+    )
+    calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    def fake_populate(target) -> None:
+        target.market_screener_row_map = {
+            f"row_{index}": record
+            for index, record in enumerate(target.market_screener_filtered_records[:2])
+        }
+
+    monkeypatch.setattr(earnings_radar_extension, "_populate_screener_table", fake_populate)
+    monkeypatch.setattr(earnings_radar_extension, "_draw_screener_chart", lambda _app: None)
+    monkeypatch.setattr(earnings_radar_extension, "_request_market_data_enrichment", lambda _app, symbols, **kwargs: calls.append((tuple(symbols), kwargs)))
+
+    earnings_radar_extension._apply_screener_filters(app)
+    earnings_radar_extension._request_visible_page_market_data_enrichment(app, force_refresh=False)
+
+    assert [record.symbol for record in app.market_screener_filtered_records[:4]] == ["MEGA", "MID", "AARD", "ZZZZ"]
+    assert calls[0][0] == ("MEGA", "MID")
+    assert calls[0][1]["reason"] == "visible page"
 
 
 def test_market_screener_visible_page_enrichment_retries_partial_mover_rows_once(monkeypatch) -> None:
@@ -1338,6 +1468,34 @@ def test_market_screener_filters_and_sorting_cover_events_risks_windows_and_move
         "price",
         descending=True,
     ) == [MarketScreenerRecord("HIGH", price=30.0), MarketScreenerRecord("LOW", price=8.0), beta]
+    rich_missing_cap = MarketScreenerRecord(
+        "RICH",
+        "Rich Missing Cap",
+        exchange="Nasdaq",
+        sector="Technology",
+        industry="Software",
+        price=120.0,
+        volume=2_000_000,
+        avg_volume=1_500_000,
+        change_percent=2.5,
+        pe_ratio=31.0,
+        eps=1.2,
+        revenue_growth=14.0,
+        signals=("Schwab holding",),
+        sources=("Local app holdings",),
+    )
+    sorted_by_market_cap = sort_market_screener_records(
+        [
+            MarketScreenerRecord("MISS", "Missing Cap"),
+            rich_missing_cap,
+            MarketScreenerRecord("MEGA", "Mega Cap", market_cap=3_000_000_000_000),
+            MarketScreenerRecord("ZERO", "Zero Cap", market_cap=0),
+            MarketScreenerRecord("MID", "Mid Cap", market_cap=10_000_000_000),
+        ],
+        "market_cap",
+        descending=True,
+    )
+    assert [record.symbol for record in sorted_by_market_cap] == ["MEGA", "MID", "ZERO", "RICH", "MISS"]
     assert market_screener_data_label(acme) == "Quote + Filing + Earnings"
     assert market_screener_data_label(holding_only) == "Holding"
     assert market_screener_data_label(filing_only) == "Filing"
@@ -1430,6 +1588,32 @@ def test_ask_screener_executor_sorts_limits_and_summarizes_results() -> None:
     assert "matched 3 of 3 row(s)" in result.summary
     assert "showing first 2" in result.summary
     assert "sorted by volume descending" in result.summary
+
+
+def test_market_screener_ask_sort_overrides_default_market_cap_sort(monkeypatch) -> None:
+    app = _fake_screener_filter_app(
+        [
+            MarketScreenerRecord("MEGA", "Mega Cap", market_cap=3_000_000_000_000, volume=100_000),
+            MarketScreenerRecord("SMALL", "Small Cap", market_cap=500_000_000, volume=2_000_000),
+            MarketScreenerRecord("MISS", "Missing Volume", market_cap=1_000_000_000),
+        ]
+    )
+    monkeypatch.setattr(earnings_radar_extension, "_populate_screener_table", lambda _app: None)
+    monkeypatch.setattr(earnings_radar_extension, "_draw_screener_chart", lambda _app: None)
+    plan = validate_ask_screener_plan(
+        {
+            "intent": "Top volume",
+            "sort": {"field": "volume", "descending": True},
+            "limit": 10,
+        }
+    )
+
+    earnings_radar_extension._apply_ask_screener_plan_local(app, plan, source_label="local")
+
+    assert app.market_screener_sort_column == "volume"
+    assert app.market_screener_sort_desc is True
+    assert [record.symbol for record in app.market_screener_filtered_records] == ["SMALL", "MEGA", "MISS"]
+    assert "sorted by volume descending" in app.market_screener_ask_summary_var.value
 
 
 def test_ask_screener_fallback_parser_covers_core_phrases_and_metadata_filters() -> None:

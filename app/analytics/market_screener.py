@@ -1539,6 +1539,8 @@ def sort_market_screener_records(
     descending: bool = False,
 ) -> list[MarketScreenerRecord]:
     rows = list(records)
+    if column == "market_cap":
+        return sorted(rows, key=lambda record: _market_cap_sort_key(record, descending=descending))
     present = [record for record in rows if _sort_value(record, column) is not None]
     missing = [record for record in rows if _sort_value(record, column) is None]
     present.sort(key=lambda record: _sort_value(record, column), reverse=descending)
@@ -4154,6 +4156,30 @@ def _sort_value(record: MarketScreenerRecord, column: str) -> Any:
         "risk_flags": len(record.risk_flags),
         "sources": len(record.sources),
     }.get(column)
+
+
+def _market_cap_sort_key(record: MarketScreenerRecord, *, descending: bool) -> tuple[Any, ...]:
+    market_cap = _float_or_none(record.market_cap)
+    return (
+        1 if market_cap is None else 0,
+        0.0 if market_cap is None else (-market_cap if descending else market_cap),
+        *_market_cap_fallback_sort_key(record),
+    )
+
+
+def _market_cap_fallback_sort_key(record: MarketScreenerRecord) -> tuple[Any, ...]:
+    price_volume_fields = (record.price, record.volume, record.avg_volume, record.change_percent)
+    price_volume_count = sum(1 for value in price_volume_fields if value is not None)
+    symbol = (record.symbol or "ZZZZ").upper()
+    company = (record.company_name or "").lower()
+    return (
+        -market_screener_data_completeness_score(record),
+        -price_volume_count,
+        -int(market_screener_is_my_holding(record)),
+        -int(market_screener_has_ai_signal(record)),
+        symbol,
+        company,
+    )
 
 
 def _screener_search_text(record: MarketScreenerRecord) -> str:
