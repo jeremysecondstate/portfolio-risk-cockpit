@@ -28,6 +28,12 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(api[_ -]?key|token|secret|authorization|bearer)(\s*[=:]\s*)([A-Za-z0-9_\-./:+]{6,})"
 )
 _PLACEHOLDER_SECRETS = {"", "THIS IS NOT A KEY", "NOT_A_KEY", "CHANGEME", "CHANGE_ME"}
+TECHNICAL_TIMEFRAME_LOOKBACK_MINUTES: dict[str, int] = {
+    "timing_1m": 24 * 60,
+    "timing_5m": 14 * 24 * 60,
+    "setup_30m": 14 * 24 * 60,
+    "daily_1y": 370 * 24 * 60,
+}
 
 
 @dataclass(frozen=True)
@@ -36,8 +42,10 @@ class ExternalMarketIntelligence:
     fmp_profile: dict[str, Any] = field(default_factory=dict)
     fmp_quote: dict[str, Any] = field(default_factory=dict)
     fmp_fundamentals: dict[str, Any] = field(default_factory=dict)
+    fmp_filing_metadata: tuple[dict[str, Any], ...] = ()
     databento_equity_tape: dict[str, Any] = field(default_factory=dict)
     databento_equity_candles: dict[str, tuple[Candle, ...]] = field(default_factory=dict)
+    databento_technical_candles: dict[str, tuple[Candle, ...]] = field(default_factory=dict)
     databento_futures_context: dict[str, Any] = field(default_factory=dict)
     source_statuses: tuple[MarketDataProviderStatus, ...] = ()
     warnings: tuple[str, ...] = ()
@@ -107,8 +115,24 @@ def build_external_market_intelligence(
         warnings=warnings,
         secret_values=secret_values,
     )
+    fmp_filing_metadata = _fmp_filing_metadata_context(
+        active_fmp_provider,
+        clean_symbol,
+        force_refresh=force_refresh,
+        statuses=source_statuses,
+        warnings=warnings,
+        secret_values=secret_values,
+    )
 
     databento_equity_tape, databento_equity_candles = _databento_equity_context(
+        active_equities_provider,
+        clean_symbol,
+        force_refresh=force_refresh,
+        statuses=source_statuses,
+        warnings=warnings,
+        secret_values=secret_values,
+    )
+    databento_technical_candles, databento_technical_diagnostics = _databento_technical_history_context(
         active_equities_provider,
         clean_symbol,
         force_refresh=force_refresh,
@@ -129,11 +153,21 @@ def build_external_market_intelligence(
             "fmp_profile": _field_provenance(fmp_profile),
             "fmp_quote": _field_provenance(fmp_quote),
             "fmp_fundamentals": _field_provenance(fmp_fundamentals),
+            "fmp_filing_metadata": fmp_filing_metadata,
             "databento_equity_tape": _field_provenance(databento_equity_tape),
             "databento_equity_candles": {
                 key: {"rows": len(value), "source": "Databento US Equities"}
                 for key, value in databento_equity_candles.items()
             },
+            "databento_technical_candles": {
+                key: {
+                    "rows": len(value),
+                    "source": "Databento technical history",
+                    **dict(databento_technical_diagnostics.get(key, {})),
+                }
+                for key, value in databento_technical_candles.items()
+            },
+            "databento_technical_history": databento_technical_diagnostics,
             "databento_futures_context": {
                 key: _field_provenance(value if isinstance(value, Mapping) else {})
                 for key, value in databento_futures_context.items()
@@ -146,8 +180,10 @@ def build_external_market_intelligence(
         fmp_profile=fmp_profile,
         fmp_quote=fmp_quote,
         fmp_fundamentals=fmp_fundamentals,
+        fmp_filing_metadata=tuple(fmp_filing_metadata),
         databento_equity_tape=databento_equity_tape,
         databento_equity_candles=databento_equity_candles,
+        databento_technical_candles=databento_technical_candles,
         databento_futures_context=databento_futures_context,
         source_statuses=tuple(source_statuses),
         warnings=tuple(_dedupe(_redact_text(warning, secret_values) for warning in warnings if warning)),
@@ -194,6 +230,67 @@ def _market_snapshot_payload(
         return {}
     _append_snapshot_status(snapshot, statuses, warnings, secret_values)
     return _record_payload_from_snapshot(snapshot, symbol, secret_values)
+
+
+def _fmp_filing_metadata_context(
+    provider: Any,
+    symbol: str,
+    *,
+    force_refresh: bool,
+    statuses: list[MarketDataProviderStatus],
+    warnings: list[str],
+    secret_values: tuple[str, ...],
+) -> tuple[dict[str, Any], ...]:
+    method = None
+    method_name = ""
+    for candidate in ("filing_metadata", "sec_filings", "filings"):
+        candidate_method = getattr(provider, candidate, None)
+        if callable(candidate_method):
+            method = candidate_method
+            method_name = candidate
+            break
+    if method is None:
+        statuses.append(
+            MarketDataProviderStatus(
+                "FMP filing metadata",
+                "unavailable",
+                _now(),
+                "Configured FMP provider does not expose filing metadata prefiltering; SEC recent-filings scan remains fallback.",
+            )
+        )
+        return ()
+    try:
+        try:
+            payload = method(symbol, force_refresh=force_refresh, limit=12)
+        except TypeError:
+            payload = method(symbol, limit=12)
+    except Exception as exc:
+        message = _redact_text(f"FMP filing metadata failed: {exc}", secret_values)
+        statuses.append(MarketDataProviderStatus("FMP filing metadata", "error", _now(), message))
+        warnings.append(message)
+        return ()
+    rows = _coerce_metadata_rows(payload)
+    statuses.append(
+        MarketDataProviderStatus(
+            "FMP filing metadata",
+            "available" if rows else "empty",
+            _now(),
+            f"Loaded {len(rows)} FMP filing metadata row(s) via {method_name}; SEC text remains source of record for clauses/excerpts.",
+        )
+    )
+    return tuple(_sanitize_payload(dict(row), secret_values) for row in rows[:12])
+
+
+def _coerce_metadata_rows(payload: Any) -> list[Mapping[str, Any]]:
+    if isinstance(payload, Mapping):
+        for key in ("filings", "records", "data", "results"):
+            rows = payload.get(key)
+            if isinstance(rows, list):
+                return [row for row in rows if isinstance(row, Mapping)]
+        return [payload]
+    if isinstance(payload, (list, tuple)):
+        return [row for row in payload if isinstance(row, Mapping)]
+    return []
 
 
 def _call_symbol_snapshot(method: Any, symbol: str, *, force_refresh: bool) -> MarketQuoteFundamentalsSnapshot:
@@ -269,6 +366,67 @@ def _databento_equity_snapshot_fallback(
         return {}, {}
     _append_snapshot_status(snapshot, statuses, warnings, secret_values)
     return _record_payload_from_snapshot(snapshot, symbol, secret_values), {}
+
+
+def _databento_technical_history_context(
+    provider: Any,
+    symbol: str,
+    *,
+    force_refresh: bool,
+    statuses: list[MarketDataProviderStatus],
+    warnings: list[str],
+    secret_values: tuple[str, ...],
+) -> tuple[dict[str, tuple[Candle, ...]], dict[str, Mapping[str, Any]]]:
+    method = getattr(provider, "technical_history", None)
+    if not callable(method):
+        fetched_at = _now()
+        statuses.append(
+            MarketDataProviderStatus(
+                "Databento technical history",
+                "unavailable",
+                fetched_at,
+                "Configured Databento equities provider does not expose timeframe-aware technical history.",
+            )
+        )
+        return {}, {
+            key: {
+                "status": "skipped",
+                "reason": "technical_history method unavailable",
+                "requested_lookback_minutes": lookback,
+            }
+            for key, lookback in TECHNICAL_TIMEFRAME_LOOKBACK_MINUTES.items()
+        }
+    try:
+        snapshot = method(
+            [symbol],
+            timeframes=TECHNICAL_TIMEFRAME_LOOKBACK_MINUTES,
+            force_refresh=force_refresh,
+            max_symbols=1,
+        )
+    except TypeError:
+        snapshot = method([symbol], force_refresh=force_refresh, max_symbols=1)
+    except Exception as exc:
+        fetched_at = _now()
+        message = _redact_text(f"Databento technical history failed: {exc}", secret_values)
+        statuses.append(MarketDataProviderStatus("Databento technical history", "error", fetched_at, message))
+        warnings.append(message)
+        return {}, {}
+    _append_snapshot_status(snapshot, statuses, warnings, secret_values)
+    rows_by_timeframe = getattr(snapshot, "rows_by_timeframe", {}) or {}
+    candles_by_timeframe: dict[str, tuple[Candle, ...]] = {}
+    for timeframe_key, rows_by_symbol in rows_by_timeframe.items():
+        if not isinstance(rows_by_symbol, Mapping):
+            continue
+        row = _row_for_symbol(rows_by_symbol, symbol)
+        candles = _candles_from_databento_row(row)
+        if candles:
+            candles_by_timeframe[str(timeframe_key)] = tuple(candles)
+    diagnostics = getattr(snapshot, "timeframe_diagnostics", {}) or {}
+    clean_diagnostics = {
+        str(key): _sanitize_payload(value if isinstance(value, Mapping) else {}, secret_values)
+        for key, value in diagnostics.items()
+    }
+    return candles_by_timeframe, clean_diagnostics
 
 
 def _databento_cme_context(

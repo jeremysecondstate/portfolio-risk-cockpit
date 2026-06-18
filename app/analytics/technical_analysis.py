@@ -13,6 +13,7 @@ from app.analytics.capital_structure_pressure import (
     capital_structure_technical_modifier,
     format_capital_structure_pressure_section,
 )
+from app.data.technical_source_routing import SourceDecision, TechnicalAnalysisDataPlan
 
 
 try:
@@ -387,6 +388,7 @@ class TechnicalCommandCenterReport:
     market_intelligence_source_statuses: tuple[Any, ...] = ()
     market_intelligence_decision: MarketIntelligenceDecisionRead | None = None
     timeframe_source_labels: dict[str, TimeframeSourceRead] = field(default_factory=dict)
+    data_plan: TechnicalAnalysisDataPlan | None = None
 
 
 DEFAULT_COMMAND_CENTER_TIMEFRAMES: tuple[TimeframeSpec, ...] = (
@@ -664,6 +666,13 @@ def build_technical_command_center_report(
         capital_structure_indicator=capital_structure_indicator,
         market_intelligence_decision=market_intelligence_decision,
     )
+    data_plan = _build_technical_analysis_data_plan(
+        clean_symbol,
+        timeframe_source_labels=timeframe_source_labels,
+        quote_snapshot=quote_snapshot,
+        external_intelligence=external_intelligence,
+        capital_structure_pressure=capital_structure_pressure,
+    )
 
     return TechnicalCommandCenterReport(
         symbol=clean_symbol,
@@ -686,6 +695,7 @@ def build_technical_command_center_report(
         market_intelligence_source_statuses=_external_intelligence_source_statuses(external_intelligence),
         market_intelligence_decision=market_intelligence_decision,
         timeframe_source_labels=timeframe_source_labels,
+        data_plan=data_plan,
     )
 
 
@@ -711,6 +721,193 @@ def _external_intelligence_warning_lines(external_intelligence: Any) -> list[str
     return _dedupe(warnings)
 
 
+def _build_technical_analysis_data_plan(
+    symbol: str,
+    *,
+    timeframe_source_labels: Mapping[str, TimeframeSourceRead],
+    quote_snapshot: QuoteSnapshot | None,
+    external_intelligence: Any | None,
+    capital_structure_pressure: CapitalStructurePressureReport | None,
+) -> TechnicalAnalysisDataPlan:
+    decisions: list[SourceDecision] = [
+        SourceDecision(
+            "account_holdings_orders",
+            "Schwab",
+            status="authoritative",
+            reason="Schwab remains account, holdings, position, preview, cancel, and order truth.",
+        )
+    ]
+    fmp_profile = _external_mapping(getattr(external_intelligence, "fmp_profile", None))
+    fmp_quote = _external_mapping(getattr(external_intelligence, "fmp_quote", None))
+    fmp_fundamentals = _external_mapping(getattr(external_intelligence, "fmp_fundamentals", None))
+    equity_tape = _external_mapping(getattr(external_intelligence, "databento_equity_tape", None))
+    futures_context = getattr(external_intelligence, "databento_futures_context", None)
+    futures_count = len(futures_context) if isinstance(futures_context, Mapping) else 0
+    source_conflicts = _quote_source_conflicts(symbol, quote_snapshot, equity_tape=equity_tape, fmp_quote=fmp_quote)
+
+    quote_sources = []
+    if equity_tape:
+        quote_sources.append("Databento")
+    if quote_snapshot is not None:
+        quote_sources.append("Schwab quote")
+    if fmp_quote:
+        quote_sources.append("FMP quote")
+    decisions.append(
+        SourceDecision(
+            "selected_equity_quote_tape",
+            " + ".join(quote_sources[:2]) if quote_sources else "unavailable",
+            fallback_sources=tuple(source for source in ("FMP quote", "Schwab quote") if source in quote_sources[1:]),
+            status="conflicting" if source_conflicts else "used" if quote_sources else "unavailable",
+            reason=(
+                "Databento and Schwab quote are reconciled for selected-equity tape; FMP quote remains fallback/context."
+                if quote_sources
+                else "No provider supplied selected-equity quote/tape context."
+            ),
+            diagnostics={
+                "conflicts": tuple(source_conflicts),
+                "databento_price": equity_tape.get("price"),
+                "schwab_last": quote_snapshot.last if quote_snapshot is not None else None,
+                "fmp_price": fmp_quote.get("price"),
+            },
+        )
+    )
+
+    for key, source_read in timeframe_source_labels.items():
+        status = "fallback" if "fallback" in source_read.source.lower() else "used"
+        if source_read.source == "unavailable":
+            status = "skipped"
+        elif source_read.freshness == "stale":
+            status = "stale"
+        decisions.append(
+            SourceDecision(
+                f"technical_history:{key}",
+                source_read.source,
+                fallback_sources=("Schwab price history", "Databento technical history"),
+                status=status,
+                reason=source_read.reason,
+                diagnostics={
+                    "label": source_read.label,
+                    "freshness": source_read.freshness,
+                    "candle_count": source_read.candle_count,
+                    **_timeframe_plan_diagnostics(key, external_intelligence),
+                },
+            )
+        )
+
+    decisions.append(
+        SourceDecision(
+            "company_profile",
+            "FMP profile" if fmp_profile else "SEC ticker map fallback",
+            fallback_sources=("SEC ticker map",),
+            status="used" if fmp_profile else "fallback",
+            reason=(
+                "FMP supplied clean company/profile metadata for UI context."
+                if fmp_profile
+                else "FMP profile was unavailable; SEC identity/ticker mapping remains the fallback."
+            ),
+            diagnostics={
+                field: fmp_profile.get(field)
+                for field in ("company_name", "exchange", "sector", "industry", "cik")
+                if fmp_profile.get(field) not in (None, "")
+            },
+        )
+    )
+
+    sufficient_fmp_fundamentals = _fmp_fundamentals_sufficient(fmp_fundamentals)
+    decisions.append(
+        SourceDecision(
+            "fundamentals",
+            "FMP fundamentals" if sufficient_fmp_fundamentals else "SEC companyfacts fallback",
+            fallback_sources=("SEC companyfacts",),
+            status="used" if sufficient_fmp_fundamentals else "fallback",
+            reason=(
+                "FMP supplied enough clean profile/fundamental fields for UI cards; SEC companyfacts remains verification/fallback."
+                if sufficient_fmp_fundamentals
+                else "FMP fundamentals were missing or incomplete; SEC companyfacts remains the fallback for standardized facts."
+            ),
+            diagnostics={
+                field: fmp_fundamentals.get(field)
+                for field in ("market_cap", "pe_ratio", "eps", "revenue_growth", "shares_float", "shares_outstanding")
+                if fmp_fundamentals.get(field) not in (None, "")
+            },
+        )
+    )
+
+    source_label = str(getattr(capital_structure_pressure, "source_label", "") or "")
+    decisions.append(
+        SourceDecision(
+            "capital_structure_terms",
+            source_label or ("SEC filing text" if capital_structure_pressure is not None else "SEC filing text unavailable"),
+            fallback_sources=("SEC recent filings scan",),
+            status="used" if capital_structure_pressure is not None and capital_structure_pressure.read != "Unknown" else "fallback",
+            reason=(
+                "SEC source text remains the source of record for warrants, convertibles, preferreds, offerings, resale language, and source excerpts."
+                if capital_structure_pressure is not None
+                else "Capital-structure filing text was unavailable."
+            ),
+            diagnostics={
+                "filings_analyzed": getattr(capital_structure_pressure, "filings_analyzed", 0),
+                "source_diagnostics": getattr(capital_structure_pressure, "source_diagnostics", {}),
+            },
+        )
+    )
+
+    decisions.append(
+        SourceDecision(
+            "macro",
+            "Official macro sources",
+            fallback_sources=("cached official-source fallback",),
+            status="official",
+            reason="BLS, BEA, Treasury, Census, Federal Reserve, and EIA remain official macro sources.",
+        )
+    )
+    decisions.append(
+        SourceDecision(
+            "futures_cross_asset",
+            "Databento CME context" if futures_count else "Databento CME context skipped",
+            status="used" if futures_count else "skipped",
+            reason="Databento CME/futures context is kept separate from selected-equity quote and fundamental fields.",
+            diagnostics={"context_rows": futures_count},
+        )
+    )
+
+    provider_statuses = _external_intelligence_source_statuses(external_intelligence)
+    if provider_statuses:
+        decisions.append(
+            SourceDecision(
+                "provider_diagnostics",
+                "provider status log",
+                status="diagnostic",
+                reason="Provider calls, cache use, skipped providers, stale/fallback statuses, and warnings are surfaced in the status log.",
+                diagnostics={
+                    "statuses": tuple(
+                        f"{getattr(status, 'source', '')}: {getattr(status, 'status', '')}; {getattr(status, 'message', '')}"
+                        for status in provider_statuses
+                    )
+                },
+            )
+        )
+
+    warnings = tuple(_dedupe(source_conflicts))
+    return TechnicalAnalysisDataPlan(symbol=symbol.upper(), decisions=tuple(decisions), warnings=warnings)
+
+
+def _timeframe_plan_diagnostics(key: str, external_intelligence: Any | None) -> dict[str, Any]:
+    diagnostics = _external_databento_timeframe_diagnostics(external_intelligence).get(key, {})
+    if not isinstance(diagnostics, Mapping):
+        return {}
+    return {
+        f"databento_{name}": value
+        for name, value in diagnostics.items()
+        if value not in (None, "", (), [], {})
+    }
+
+
+def _fmp_fundamentals_sufficient(fundamentals: Mapping[str, Any]) -> bool:
+    required_any = ("market_cap", "shares_float", "shares_outstanding", "pe_ratio", "eps", "revenue_growth")
+    return sum(1 for field in required_any if _optional_number(fundamentals.get(field)) is not None) >= 2
+
+
 def _select_decision_weighted_timeframe_candles(
     symbol: str,
     timeframe_candles: dict[str, list[Candle]],
@@ -719,11 +916,21 @@ def _select_decision_weighted_timeframe_candles(
     selected: dict[str, list[Candle]] = {key: list(candles or []) for key, candles in timeframe_candles.items()}
     source_reads: dict[str, TimeframeSourceRead] = {}
     spec_by_key = {spec.key: spec for spec in DEFAULT_COMMAND_CENTER_TIMEFRAMES}
+    databento_timeframe_candles = _external_databento_timeframe_candles(symbol, external_intelligence)
+    databento_diagnostics = _external_databento_timeframe_diagnostics(external_intelligence)
     databento_base = _external_databento_base_candles(symbol, external_intelligence)
     keys = list(selected)
+    for spec in DEFAULT_COMMAND_CENTER_TIMEFRAMES:
+        has_explicit_history = bool(databento_timeframe_candles.get(spec.key))
+        has_tape_derived_intraday = spec.frequency_type == "minute" and bool(_databento_timeframe_candles(databento_base, spec))
+        if spec.key not in selected and (has_explicit_history or has_tape_derived_intraday):
+            selected[spec.key] = []
+            keys.append(spec.key)
     if databento_base:
         for spec in DEFAULT_COMMAND_CENTER_TIMEFRAMES:
-            if spec.key not in selected and _databento_timeframe_candles(databento_base, spec):
+            if spec.frequency_type != "daily":
+                continue
+            if spec.key not in selected:
                 selected[spec.key] = []
                 keys.append(spec.key)
 
@@ -731,7 +938,16 @@ def _select_decision_weighted_timeframe_candles(
         spec = spec_by_key.get(key, TimeframeSpec(key, key, "", 0, "", 0, "custom"))
         schwab_candles = list(timeframe_candles.get(key, []) or [])
         schwab_freshness = _timeframe_freshness(schwab_candles, spec)
-        databento_candles = _databento_timeframe_candles(databento_base, spec) if spec.key in spec_by_key else []
+        explicit_databento_candles = list(databento_timeframe_candles.get(key, ()) or [])
+        if explicit_databento_candles:
+            databento_candles = explicit_databento_candles
+            databento_reason = "Databento timeframe-aware technical history was available."
+        elif spec.key in spec_by_key and spec.frequency_type == "minute":
+            databento_candles = _databento_timeframe_candles(databento_base, spec)
+            databento_reason = "Databento short tape/context candles were used only for intraday timing."
+        else:
+            databento_candles = []
+            databento_reason = "Databento short tape/context candles were skipped for daily/regime history."
         databento_freshness = _timeframe_freshness(databento_candles, spec)
         use_databento = bool(databento_candles) and (
             not schwab_candles
@@ -745,16 +961,55 @@ def _select_decision_weighted_timeframe_candles(
                 f"{spec.label}: Databento selected-symbol candles were used because "
                 + ("Schwab candles were unavailable." if not schwab_candles else f"Schwab candles were {schwab_freshness} or too sparse.")
             )
+            reason += f" {databento_reason}"
+            tf_diag = databento_diagnostics.get(key, {})
+            lookback = tf_diag.get("requested_lookback_minutes") if isinstance(tf_diag, Mapping) else None
+            if lookback:
+                reason += f" Requested Databento lookback: {lookback} minute(s)."
             source_reads[key] = TimeframeSourceRead(key, spec.label, source, databento_freshness, len(databento_candles), reason)
         elif schwab_candles:
             reason = f"{spec.label}: Schwab candles remain the primary technical-history source."
             if databento_candles:
                 reason += " Databento was available but did not replace fresher Schwab history."
+            elif spec.frequency_type == "daily" and databento_base:
+                reason += " Databento short tape context was not used as daily/regime history."
             source_reads[key] = TimeframeSourceRead(key, spec.label, "Schwab", schwab_freshness, len(schwab_candles), reason)
         else:
-            source_reads[key] = TimeframeSourceRead(key, spec.label, "unavailable", "unavailable", 0, f"{spec.label}: no Schwab or Databento candles were available.")
+            reason = f"{spec.label}: no Schwab or timeframe-appropriate Databento candles were available."
+            if spec.frequency_type == "daily" and databento_base:
+                reason += " Databento short tape context was skipped so it cannot masquerade as daily/regime history."
+            source_reads[key] = TimeframeSourceRead(key, spec.label, "unavailable", "unavailable", 0, reason)
 
     return selected, source_reads
+
+
+def _external_databento_timeframe_candles(symbol: str, external_intelligence: Any | None) -> dict[str, tuple[Candle, ...]]:
+    if external_intelligence is None:
+        return {}
+    raw = getattr(external_intelligence, "databento_technical_candles", None)
+    if not isinstance(raw, Mapping):
+        return {}
+    result: dict[str, tuple[Candle, ...]] = {}
+    for key, rows in raw.items():
+        try:
+            candles = tuple(sorted((row for row in rows or () if isinstance(row, Candle)), key=lambda candle: candle.datetime_ms))
+        except TypeError:
+            candles = ()
+        if candles:
+            result[str(key)] = candles
+    return result
+
+
+def _external_databento_timeframe_diagnostics(external_intelligence: Any | None) -> dict[str, Mapping[str, Any]]:
+    if external_intelligence is None:
+        return {}
+    provenance = getattr(external_intelligence, "provenance", None)
+    if not isinstance(provenance, Mapping):
+        return {}
+    diagnostics = provenance.get("databento_technical_history")
+    if not isinstance(diagnostics, Mapping):
+        return {}
+    return {str(key): value for key, value in diagnostics.items() if isinstance(value, Mapping)}
 
 
 def _external_databento_base_candles(symbol: str, external_intelligence: Any | None) -> list[Candle]:
@@ -3155,6 +3410,7 @@ def format_technical_command_center_report(report: TechnicalCommandCenterReport)
         lines.append(f"- {snapshot.label}: {_short_snapshot_read(snapshot)}{source_suffix}")
     lines.append(f"- Alignment: {report.scores['Alignment'].reason}.")
     lines.extend(_format_timeframe_source_section(report))
+    lines.extend(_format_source_routing_plan_section(report))
 
     lines.extend(["", "KEY LEVELS"])
     level_snapshot = timing or setup or daily
@@ -3255,6 +3511,54 @@ def _format_timeframe_source_section(report: TechnicalCommandCenterReport) -> li
     return lines
 
 
+def _format_source_routing_plan_section(report: TechnicalCommandCenterReport) -> list[str]:
+    data_plan = getattr(report, "data_plan", None)
+    decisions = tuple(getattr(data_plan, "decisions", ()) or ())
+    if not decisions:
+        return []
+    lines = ["", "SOURCE ROUTING PLAN", "-------------------"]
+    for decision in decisions:
+        if decision.domain == "provider_diagnostics":
+            status_rows = tuple((decision.diagnostics or {}).get("statuses", ()) or ())
+            if status_rows:
+                lines.append(f"- Provider diagnostics: {len(status_rows)} status row(s) captured; showing first 8.")
+                lines.extend(f"  - {row}" for row in status_rows[:8])
+            continue
+        fallback = f"; fallback: {', '.join(decision.fallback_sources)}" if decision.fallback_sources else ""
+        reason = f" {decision.reason}" if decision.reason else ""
+        lines.append(
+            f"- {decision.domain.replace('_', ' ').replace(':', ' / ')}: "
+            f"{decision.selected_source}; status {decision.status}{fallback}.{reason}"
+        )
+        diag_text = _short_decision_diagnostics(decision.diagnostics)
+        if diag_text:
+            lines.append(f"  - Diagnostics: {diag_text}")
+    return lines
+
+
+def _short_decision_diagnostics(diagnostics: Mapping[str, Any]) -> str:
+    if not diagnostics:
+        return ""
+    parts: list[str] = []
+    for key, value in diagnostics.items():
+        if value in (None, "", (), [], {}):
+            continue
+        if key == "conflicts" and value:
+            parts.append(f"conflicts={len(value)}")
+            continue
+        if isinstance(value, Mapping):
+            nested = ",".join(str(nested_key) for nested_key in list(value)[:4])
+            parts.append(f"{key}={nested or 'present'}")
+            continue
+        if isinstance(value, (tuple, list)):
+            parts.append(f"{key}={len(value)}")
+            continue
+        parts.append(f"{key}={value}")
+        if len(parts) >= 5:
+            break
+    return "; ".join(parts)
+
+
 def _format_market_intelligence_context(intelligence: Any) -> list[str]:
     lines: list[str] = []
     fmp_profile = _external_mapping(getattr(intelligence, "fmp_profile", None))
@@ -3263,6 +3567,7 @@ def _format_market_intelligence_context(intelligence: Any) -> list[str]:
     equity_tape = _external_mapping(getattr(intelligence, "databento_equity_tape", None))
     futures_context = _external_mapping(getattr(intelligence, "databento_futures_context", None))
     equity_candles = getattr(intelligence, "databento_equity_candles", None)
+    technical_candles = getattr(intelligence, "databento_technical_candles", None)
 
     profile_bits = [
         _optional_text(fmp_profile.get("company_name")),
@@ -3304,6 +3609,10 @@ def _format_market_intelligence_context(intelligence: Any) -> list[str]:
         equity_bits.append(f"{candle_count} Databento candle row(s)")
     if any(equity_bits):
         lines.append(f"- Databento US equities tape/candles: {', '.join(bit for bit in equity_bits if bit)}.")
+    technical_rows = _external_timeframe_candle_counts(technical_candles)
+    if technical_rows:
+        rows_text = ", ".join(f"{key} {count}" for key, count in technical_rows.items())
+        lines.append(f"- Databento timeframe-aware technical history: {rows_text} candle row(s).")
 
     futures_lines = _format_futures_context_lines(futures_context)
     if futures_lines:
@@ -3340,6 +3649,20 @@ def _external_candle_count(candles_by_symbol: Any) -> int:
         except TypeError:
             continue
     return count
+
+
+def _external_timeframe_candle_counts(candles_by_timeframe: Any) -> dict[str, int]:
+    if not isinstance(candles_by_timeframe, Mapping):
+        return {}
+    result: dict[str, int] = {}
+    for key, rows in candles_by_timeframe.items():
+        try:
+            count = len(rows)
+        except TypeError:
+            count = 0
+        if count:
+            result[str(key)] = count
+    return result
 
 
 def _external_mapping(value: Any) -> Mapping[str, Any]:

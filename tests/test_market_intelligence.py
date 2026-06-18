@@ -240,7 +240,9 @@ def test_command_center_report_surfaces_external_intelligence_statuses_and_conte
 
     assert "External source warning." in report.warnings
     assert "MARKET INTELLIGENCE SOURCES" in text
+    assert "SOURCE ROUTING PLAN" in text
     assert "FMP profile/classification" in text
+    assert "fundamentals: FMP fundamentals" in text
     assert "Databento CME/futures cross-asset context is kept separate" in text
     assert "ES.FUT" in text
 
@@ -313,6 +315,56 @@ def test_command_center_uses_databento_candles_when_schwab_timeframe_missing() -
     assert report.snapshots["timing_5m"].source == "Databento"
     assert "TIMEFRAME DATA SOURCES" in text
     assert "Databento selected-equity candles influenced VWAP" in text
+
+
+def test_command_center_does_not_use_short_databento_tape_as_daily_regime_history() -> None:
+    intelligence = ExternalMarketIntelligence(
+        symbol="ACME",
+        databento_equity_tape={"price": 22.0, "volume": 2_000, "fetched_at": datetime.now(timezone.utc).isoformat()},
+        databento_equity_candles={"ACME": tuple(_fresh_minute_candles(60, start=20.0, step=0.04))},
+    )
+
+    report = build_technical_command_center_report(
+        "ACME",
+        {"daily_1y": []},
+        external_intelligence=intelligence,
+    )
+    text = format_technical_command_center_report(report)
+
+    daily_source = report.timeframe_source_labels["daily_1y"]
+    assert daily_source.source == "unavailable"
+    assert report.snapshots["daily_1y"].candle_count == 0
+    assert "short tape context was skipped" in daily_source.reason
+    assert "short tape context was skipped" in text
+
+
+def test_command_center_uses_explicit_databento_timeframe_history_for_missing_daily() -> None:
+    intelligence = ExternalMarketIntelligence(
+        symbol="ACME",
+        databento_technical_candles={"daily_1y": tuple(_candles(90, start=50.0, step=0.10))},
+        provenance={
+            "databento_technical_history": {
+                "daily_1y": {
+                    "status": "available",
+                    "requested_lookback_minutes": 370 * 24 * 60,
+                    "rows_returned": 1,
+                }
+            }
+        },
+    )
+
+    report = build_technical_command_center_report(
+        "ACME",
+        {"daily_1y": []},
+        external_intelligence=intelligence,
+    )
+
+    daily_source = report.timeframe_source_labels["daily_1y"]
+    assert daily_source.source == "Databento"
+    assert report.snapshots["daily_1y"].candle_count == 90
+    assert "Requested Databento lookback" in daily_source.reason
+    assert report.data_plan is not None
+    assert any(decision.domain == "technical_history:daily_1y" and decision.selected_source == "Databento" for decision in report.data_plan.decisions)
 
 
 def test_command_center_demotes_confidence_on_external_quote_conflict() -> None:

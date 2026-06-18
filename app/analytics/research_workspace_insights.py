@@ -2087,7 +2087,13 @@ _FUNDAMENTAL_SECTION_KEYS = {
 
 def _structured_fundamental_metrics(text: str) -> FundamentalTrendMetrics:
     lower = text.lower()
-    companyfacts_source = "companyfacts" in lower or "quarterly trend table" in lower or "latest reported fundamentals" in lower
+    companyfacts_source = (
+        "companyfacts" in lower
+        or "quarterly trend table" in lower
+        or "latest reported fundamentals" in lower
+        or "fmp profile/fundamentals" in lower
+        or "source: fmp fundamentals" in lower
+    )
     values: dict[str, float | None] = {
         "revenue_yoy": None,
         "net_income_yoy": None,
@@ -2219,9 +2225,9 @@ def _fundamental_verdict_from_score(
     if structured is not None and structured.risk_flags:
         risk_suffix = " Offsetting risk flags: " + ", ".join(structured.risk_flags[:3]) + "."
     if score >= 70 and not material_risk:
-        return "Strong", "Supports owning", "Investment read: favorable from standardized companyfacts trends. Fundamentals look strong enough to support owning this."
+        return "Strong", "Supports owning", "Investment read: favorable from structured fundamental trends. Fundamentals look strong enough to support owning this."
     if score >= 45 and not material_risk:
-        return "Good", "Supports adding on pullbacks", "Investment read: favorable from standardized companyfacts trends, but add only when price and risk confirm."
+        return "Good", "Supports adding on pullbacks", "Investment read: favorable from structured fundamental trends, but add only when price and risk confirm."
     if score >= -15:
         return "Mixed", "Supports watch only", "Investment read: mixed. Structured data has offsets and does not justify aggressive new risk by itself." + risk_suffix
     if score <= -35:
@@ -2249,23 +2255,23 @@ def _fundamental_change_triggers(
 
 def _fundamental_change_badge(title: str, value: float | None, detail: str) -> BadgeReadout:
     if value is None:
-        return BadgeReadout(title, "Unavailable", "info", 0, f"No {detail} was parsed from companyfacts text.")
+        return BadgeReadout(title, "Unavailable", "info", 0, f"No {detail} was parsed from structured fundamentals text.")
     status = "good" if value > 0 else "bad" if value < 0 else "mixed"
     label = _format_signed_pct(value)
     score = max(-100.0, min(100.0, value * 2.0))
-    return BadgeReadout(title, label, status, score, f"Structured companyfacts metric: {detail}.")
+    return BadgeReadout(title, label, status, score, f"Structured fundamental metric: {detail}.")
 
 
 def _balance_sheet_badge(metrics: FundamentalTrendMetrics) -> BadgeReadout:
     if metrics.cash_to_liabilities is not None:
         value = metrics.cash_to_liabilities
         status = "good" if value >= 25 else "bad" if value < 10 else "mixed"
-        return BadgeReadout("Balance Sheet", f"Cash {value:.1f}% of liabilities", status, value, "Structured companyfacts balance-sheet ratio from cockpit interpretation.")
+        return BadgeReadout("Balance Sheet", f"Cash {value:.1f}% of liabilities", status, value, "Structured fundamental balance-sheet ratio from cockpit interpretation.")
     if metrics.liabilities_to_assets is not None:
         value = metrics.liabilities_to_assets
         status = "good" if value <= 50 else "bad" if value >= 75 else "mixed"
-        return BadgeReadout("Balance Sheet", f"Liabilities {value:.1f}% of assets", status, 100 - value, "Structured companyfacts balance-sheet ratio from cockpit interpretation.")
-    return BadgeReadout("Balance Sheet", "Limited", "info", 0, "No structured cash/liability ratio was parsed from companyfacts text.")
+        return BadgeReadout("Balance Sheet", f"Liabilities {value:.1f}% of assets", status, 100 - value, "Structured fundamental balance-sheet ratio from cockpit interpretation.")
+    return BadgeReadout("Balance Sheet", "Limited", "info", 0, "No structured cash/liability ratio was parsed from structured fundamentals text.")
 
 
 def _format_signed_pct(value: float) -> str:

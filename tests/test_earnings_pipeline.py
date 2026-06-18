@@ -475,6 +475,75 @@ class EarningsPipelineTests(unittest.TestCase):
         self.assertTrue(any(line.startswith("10-Q filed 2026-05-28") for line in filings_lines))
         self.assertTrue(any(status.source == "Recent EDGAR earnings" and status.status == "fallback" for status in statuses))
 
+    def test_schwab_fundamentals_use_fmp_cards_before_sec_companyfacts_when_sufficient(self) -> None:
+        from app.analytics.research_workspace_insights import build_fundamental_metric_cards
+        from app.analytics.stock_research import DataSourceStatus
+        from app.data.market_data_provider import MarketDataProviderStatus, MarketQuoteFundamentalsRecord, MarketQuoteFundamentalsSnapshot
+        from app.ui import schwab_research_workspace_extension as workspace
+
+        class _FakeFmpProvider:
+            def profile_classification(self, symbols, *, force_refresh: bool = False, max_symbols: int = 1):
+                return MarketQuoteFundamentalsSnapshot(
+                    records=(MarketQuoteFundamentalsRecord("NVDA", company_name="NVIDIA Corp", exchange="NASDAQ", sector="Technology", industry="Semiconductors", cik="0001045810", source="FMP profile"),),
+                    fetched_at="2026-06-17T10:00:00+00:00",
+                    statuses=(MarketDataProviderStatus("FMP profile/classification", "available", "2026-06-17T10:00:00+00:00", "Loaded profile."),),
+                )
+
+            def fundamentals(self, symbols, *, force_refresh: bool = False, max_symbols: int = 1):
+                return MarketQuoteFundamentalsSnapshot(
+                    records=(
+                        MarketQuoteFundamentalsRecord(
+                            "NVDA",
+                            market_cap=3_000_000_000_000,
+                            pe_ratio=42.0,
+                            eps=2.4,
+                            revenue_growth=30.0,
+                            shares_float=2_400_000_000,
+                            shares_outstanding=2_450_000_000,
+                            source="FMP fundamentals",
+                        ),
+                    ),
+                    fetched_at="2026-06-17T10:00:00+00:00",
+                    statuses=(MarketDataProviderStatus("FMP fundamentals", "available", "2026-06-17T10:00:00+00:00", "Loaded fundamentals."),),
+                )
+
+        report = _sec_10q_report()
+        fake_client = _No8KFakeSecClient(report)
+        calendar_status = DataSourceStatus("Upcoming earnings calendar", "no upcoming event", "2026-06-07 12:00 UTC", "No upcoming event in deterministic test.")
+
+        with patch.object(workspace, "_upcoming_earnings_calendar_status", return_value=calendar_status), patch.object(workspace, "fetch_earnings_calendar_event", return_value=None):
+            _earnings_text, fundamentals_text, _filings_lines, statuses = workspace._fetch_us_domestic_sec_layers("NVDA", fake_client, fmp_provider=_FakeFmpProvider())
+
+        self.assertIn("Source: FMP profile/fundamentals", fundamentals_text)
+        self.assertTrue(any(status.source == "SEC companyfacts" and status.status == "skipped" for status in statuses))
+        cards = {card.title: card for card in build_fundamental_metric_cards(fundamentals_text)}
+        self.assertEqual(cards["Revenue Trend"].label, "+30.0%")
+        self.assertEqual(cards["Revenue Trend"].status, "good")
+
+    def test_incomplete_fmp_fundamentals_do_not_block_sec_companyfacts_fallback(self) -> None:
+        from app.data.market_data_provider import MarketDataProviderStatus, MarketQuoteFundamentalsRecord, MarketQuoteFundamentalsSnapshot
+        from app.ui import schwab_research_workspace_extension as workspace
+
+        class _IncompleteFmpProvider:
+            def profile_classification(self, symbols, *, force_refresh: bool = False, max_symbols: int = 1):
+                return MarketQuoteFundamentalsSnapshot(
+                    records=(MarketQuoteFundamentalsRecord("NVDA", company_name="NVIDIA Corp", source="FMP profile"),),
+                    fetched_at="2026-06-17T10:00:00+00:00",
+                    statuses=(MarketDataProviderStatus("FMP profile/classification", "available", "2026-06-17T10:00:00+00:00", "Loaded profile."),),
+                )
+
+            def fundamentals(self, symbols, *, force_refresh: bool = False, max_symbols: int = 1):
+                return MarketQuoteFundamentalsSnapshot(
+                    records=(),
+                    fetched_at="2026-06-17T10:00:00+00:00",
+                    statuses=(MarketDataProviderStatus("FMP fundamentals", "empty", "2026-06-17T10:00:00+00:00", "No fundamentals."),),
+                )
+
+        text, statuses = workspace._fetch_fmp_fundamentals_text("NVDA", fmp_provider=_IncompleteFmpProvider())
+
+        self.assertIsNone(text)
+        self.assertTrue(any(status.source == "FMP profile/fundamentals" and status.status == "fallback" for status in statuses))
+
     def test_cache_read_write_round_trip(self) -> None:
         recent = _recent_record()
         upcoming = UpcomingEarningsRecord("ACME", "Acme Corp", "2026-07-21", "2026-06-30", 1.25, "USD", "Alpha Vantage")

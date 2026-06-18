@@ -148,6 +148,7 @@ from app.analytics.trade_evidence import (
     format_trade_evidence_report,
 )
 from app.data.earnings_calendar import AlphaVantageEarningsCalendarClient, MISSING_API_KEY_MESSAGE
+from app.data.market_data_provider import FmpQuoteFundamentalsProvider
 from app.data.sec_edgar import SecEdgarClient, normalize_ticker
 from app.macro.analysis import format_macro_report
 from app.macro.models import MacroSnapshot
@@ -2604,6 +2605,7 @@ def _fetch_company_layers(
 def _fetch_us_domestic_sec_layers(
     symbol: str,
     client: SecEdgarClient | None = None,
+    fmp_provider: Any | None = None,
 ) -> tuple[str, str, list[str], list[DataSourceStatus]]:
     statuses: list[DataSourceStatus] = []
     earnings_text = "Earnings / News\n\nOfficial SEC earnings-release layer unavailable."
@@ -2681,6 +2683,13 @@ def _fetch_us_domestic_sec_layers(
         statuses.append(DataSourceStatus("SEC filings/earnings", "error", _now(), str(exc)))
         filings_lines = [f"SEC filings unavailable/error: {exc}"]
 
+    fmp_text, fmp_statuses = _fetch_fmp_fundamentals_text(symbol, fmp_provider=fmp_provider)
+    statuses.extend(fmp_statuses)
+    if fmp_text:
+        fundamentals_text = fmp_text
+        statuses.append(DataSourceStatus("SEC companyfacts", "skipped", _now(), "FMP profile/fundamentals supplied enough clean UI-card fields; SEC companyfacts remains fallback/verification."))
+        return earnings_text, fundamentals_text, filings_lines, statuses
+
     try:
         active_client = client or SecEdgarClient(timeout_seconds=12)
         company, payload = active_client.get_companyfacts(symbol)
@@ -2690,6 +2699,126 @@ def _fetch_us_domestic_sec_layers(
         statuses.append(DataSourceStatus("SEC companyfacts", "error", _now(), str(exc)))
         fundamentals_text = f"Fundamentals\n\nSEC companyfacts unavailable/error: {exc}\n\nFor ETFs, issuer holdings, expense ratio, AUM, and sector exposure remain a future provider hook."
     return earnings_text, fundamentals_text, filings_lines, statuses
+
+
+def _fetch_fmp_fundamentals_text(
+    symbol: str,
+    *,
+    fmp_provider: Any | None = None,
+) -> tuple[str | None, list[DataSourceStatus]]:
+    provider = fmp_provider if fmp_provider is not None else FmpQuoteFundamentalsProvider()
+    statuses: list[DataSourceStatus] = []
+    try:
+        profile_snapshot = provider.profile_classification([symbol], force_refresh=False, max_symbols=1)
+        fundamentals_snapshot = provider.fundamentals([symbol], force_refresh=False, max_symbols=1)
+    except Exception as exc:
+        return None, [DataSourceStatus("FMP profile/fundamentals", "error", _now(), f"FMP fundamentals fetch failed: {exc}")]
+    statuses.extend(_market_statuses_as_data_source(profile_snapshot))
+    statuses.extend(_market_statuses_as_data_source(fundamentals_snapshot))
+    profile = _market_snapshot_record_payload(profile_snapshot, symbol)
+    fundamentals = _market_snapshot_record_payload(fundamentals_snapshot, symbol)
+    if not _fmp_fundamentals_are_sufficient(profile, fundamentals):
+        statuses.append(DataSourceStatus("FMP profile/fundamentals", "fallback", _now(), "FMP profile/fundamentals missing clean UI-card fields; SEC companyfacts fallback required."))
+        return None, statuses
+    return _format_fmp_fundamentals_text(symbol, profile, fundamentals), statuses
+
+
+def _market_statuses_as_data_source(snapshot: Any) -> list[DataSourceStatus]:
+    rows: list[DataSourceStatus] = []
+    for status in getattr(snapshot, "statuses", ()) or ():
+        rows.append(
+            DataSourceStatus(
+                str(getattr(status, "source", "") or "Market data provider"),
+                str(getattr(status, "status", "") or "unknown"),
+                str(getattr(status, "fetched_at", "") or _now()),
+                str(getattr(status, "message", "") or ""),
+            )
+        )
+    return rows
+
+
+def _market_snapshot_record_payload(snapshot: Any, symbol: str) -> dict[str, Any]:
+    clean = str(symbol or "").strip().upper()
+    for record in getattr(snapshot, "records", ()) or ():
+        record_symbol = str(getattr(record, "symbol", "") or "").strip().upper()
+        if record_symbol and record_symbol != clean:
+            continue
+        if hasattr(record, "to_dict"):
+            payload = record.to_dict()
+        else:
+            payload = {name: getattr(record, name, None) for name in ("symbol", "company_name", "exchange", "sector", "industry", "market_cap", "pe_ratio", "eps", "revenue_growth", "shares_float", "shares_outstanding", "cik", "source")}
+        return {key: value for key, value in payload.items() if value not in (None, "", [], (), {})}
+    return {}
+
+
+def _fmp_fundamentals_are_sufficient(profile: dict[str, Any], fundamentals: dict[str, Any]) -> bool:
+    profile_fields = ("company_name", "exchange", "sector", "industry", "cik")
+    fundamental_fields = ("market_cap", "pe_ratio", "eps", "revenue_growth", "shares_float", "shares_outstanding")
+    profile_count = sum(1 for field in profile_fields if profile.get(field) not in (None, ""))
+    fundamental_count = sum(1 for field in fundamental_fields if _to_float(fundamentals.get(field)) is not None)
+    return profile_count >= 2 and fundamental_count >= 2
+
+
+def _format_fmp_fundamentals_text(symbol: str, profile: dict[str, Any], fundamentals: dict[str, Any]) -> str:
+    clean_symbol = symbol.strip().upper()
+    company_name = str(profile.get("company_name") or profile.get("companyName") or clean_symbol)
+    revenue_growth = _to_float(fundamentals.get("revenue_growth"))
+    lines = [
+        f"FUNDAMENTAL ANALYSIS - {clean_symbol}",
+        "",
+        f"Company: {company_name}",
+        f"Exchange: {profile.get('exchange') or '--'}",
+        f"Sector / industry: {_slash_join(str(profile.get('sector') or ''), str(profile.get('industry') or '')) or '--'}",
+        f"CIK: {profile.get('cik') or '--'}",
+        "",
+        "Latest reported fundamentals:",
+        f"- Market cap: {_money(_to_float(fundamentals.get('market_cap')))}",
+        f"- P/E: {_format_optional_number(_to_float(fundamentals.get('pe_ratio')))}",
+        f"- EPS: {_format_optional_number(_to_float(fundamentals.get('eps')))}",
+        f"- Revenue: FMP revenue growth YoY {_format_signed_percent(revenue_growth)}.",
+        f"- Float: {_format_plain_count(_to_float(fundamentals.get('shares_float')))}",
+        f"- Shares outstanding: {_format_plain_count(_to_float(fundamentals.get('shares_outstanding')))}",
+        "",
+        "Cockpit interpretation:",
+        _fmp_revenue_interpretation(revenue_growth),
+        "- FMP is used for clean profile/fundamental UI cards when sufficient; SEC companyfacts remains the fallback and verification layer.",
+        "- SEC filing text is still required for warrants, convertibles, preferred terms, offerings, resale language, and source-backed clauses.",
+        "",
+        "Source: FMP profile/fundamentals. SEC companyfacts skipped for this UI-card hydration pass; source-of-record filing text remains SEC.",
+        "This is analysis, not a trade recommendation.",
+    ]
+    return "\n".join(lines)
+
+
+def _fmp_revenue_interpretation(revenue_growth: float | None) -> str:
+    if revenue_growth is None:
+        return "- Revenue trend is not available from FMP fundamentals."
+    if revenue_growth > 10:
+        return f"- Revenue growth is strong on the latest FMP snapshot ({_format_signed_percent(revenue_growth)} YoY)."
+    if revenue_growth > 0:
+        return f"- Revenue is growing on the latest FMP snapshot ({_format_signed_percent(revenue_growth)} YoY)."
+    return f"- Revenue is contracting on the latest FMP snapshot ({_format_signed_percent(revenue_growth)} YoY)."
+
+
+def _format_signed_percent(value: float | None) -> str:
+    if value is None:
+        return "--"
+    sign = "+" if value > 0 else ""
+    return f"{sign}{value:.1f}%"
+
+
+def _format_plain_count(value: float | None) -> str:
+    if value is None:
+        return "--"
+    return f"{value:,.0f}"
+
+
+def _slash_join(left: str, right: str) -> str:
+    left = left.strip()
+    right = right.strip()
+    if left and right:
+        return f"{left}/{right}"
+    return left or right
 
 
 def _upcoming_earnings_calendar_status(symbol: str) -> DataSourceStatus:
