@@ -13,7 +13,7 @@ from app.analytics.research_workspace_insights import (
     build_technical_at_glance_read,
 )
 from app.analytics.stock_research import AdvancedIndicatorSnapshot, PortfolioSymbolContext
-from app.macro.models import MacroRelease, MacroSnapshot
+from app.macro.models import MacroRelease, MacroSnapshot, MacroSourceStatus
 
 
 def _indicators(*, trend: str = "bullish", momentum: str = "improving") -> AdvancedIndicatorSnapshot:
@@ -348,6 +348,46 @@ class ResearchWorkspaceInsightTests(unittest.TestCase):
         self.assertTrue(any(row.group == "Energy" and row.source == "Databento market proxy" for row in proxy_rows))
         self.assertTrue(any(row.group == "Growth / Consumer" and row.source == "FMP provider fallback" for row in proxy_rows))
         self.assertIn("provider proxy context shown separately", by_group["Overall Macro Backdrop"].interpretation)
+
+    def test_macro_cards_show_missing_source_diagnostics_and_labeled_proxies(self) -> None:
+        snapshot = MacroSnapshot(
+            fetched_at="2026-06-18T12:00:00+00:00",
+            releases=[],
+            source_statuses=[
+                MacroSourceStatus("Census.gov", "unavailable", "2026-06-18T12:00:00+00:00", "census", "missing CENSUS_API_KEY"),
+                MacroSourceStatus("BEA.gov", "unavailable", "2026-06-18T12:00:00+00:00", "bea", "fixture unavailable"),
+                MacroSourceStatus("EIA.gov", "unavailable", "2026-06-18T12:00:00+00:00", "eia", "missing EIA_API_KEY"),
+            ],
+        )
+        provider_context = SimpleNamespace(
+            databento_futures_context={
+                "CL": {
+                    "symbol": "CL",
+                    "name": "WTI crude oil futures",
+                    "price": 75.0,
+                    "prior": 72.0,
+                    "timestamp": "2026-06-18T12:00:00+00:00",
+                }
+            },
+            fmp_macro_context={
+                "RetailSales": {
+                    "metric": "Retail sales provider proxy",
+                    "value": 731_200.0,
+                    "prior": 725_000.0,
+                    "date": "2026-05",
+                }
+            },
+        )
+
+        readouts = build_macro_metric_cards(snapshot, provider_context=provider_context)
+        unavailable_energy = next(row for row in readouts if row.group == "Energy" and row.metric == "Unavailable")
+        proxy_sources = {(row.group, row.source, row.simple_read) for row in readouts}
+        overall = next(row for row in readouts if row.group == "Overall Macro Backdrop")
+
+        self.assertIn("missing EIA_API_KEY", unavailable_energy.interpretation)
+        self.assertIn(("Energy", "Databento market proxy", "Proxy Context"), proxy_sources)
+        self.assertIn(("Growth / Consumer", "FMP provider fallback", "Proxy Context"), proxy_sources)
+        self.assertIn("provider proxy context shown separately", overall.interpretation)
 
     def test_fundamental_combined_read_calls_out_macro_trade_conflict(self) -> None:
         verdict = build_fundamental_verdict(_structured_fundamentals(), _indicators(), "Headwind")

@@ -56,6 +56,29 @@ class CapitalStructureLevel:
     source: str
     explanation: str
     level_type: str
+    source_form: str = ""
+    source_date: str = ""
+    source_url: str = ""
+
+
+CapitalStructureLevelRelevanceStatus = Literal[
+    "actionable",
+    "watchlist",
+    "out_of_band",
+    "stale_needs_verification",
+    "split_adjustment_needed",
+    "rejected_incidental_amount",
+]
+
+
+@dataclass(frozen=True)
+class CapitalStructureLevelRelevance:
+    level: CapitalStructureLevel
+    status: CapitalStructureLevelRelevanceStatus
+    active_for_supply: bool
+    distance_percent: float | None
+    recency_days: int | None
+    reason: str
 
 
 @dataclass(frozen=True)
@@ -1013,6 +1036,9 @@ def _extract_price_levels(text: str, filing: CapitalStructureFilingText) -> list
                     source=f"{filing.form} filed {filing.filing_date or '--'}",
                     explanation="Extracted from a nearby filing phrase; treat as a possible non-chart supply/resistance zone.",
                     level_type=level_type,
+                    source_form=filing.form,
+                    source_date=filing.filing_date,
+                    source_url=filing.source_url,
                 )
             )
     return levels
@@ -1398,6 +1424,9 @@ def _levels_from_parsed_terms(parsed_terms: CapitalStructureTermsReport) -> list
                 source=_source_label(warrant.source_form, warrant.source_date),
                 explanation="Source-backed warrant exercise price; treat as possible non-chart supply context, not a prediction.",
                 level_type="warrant_strike",
+                source_form=warrant.source_form,
+                source_date=warrant.source_date,
+                source_url=warrant.source_url,
             )
         )
     for preferred in parsed_terms.preferred_series:
@@ -1410,6 +1439,9 @@ def _levels_from_parsed_terms(parsed_terms: CapitalStructureTermsReport) -> list
                 source=_source_label(preferred.source_form, preferred.source_date),
                 explanation="Source-backed preferred conversion price; treat as possible non-chart supply context, not a prediction.",
                 level_type="conversion_price",
+                source_form=preferred.source_form,
+                source_date=preferred.source_date,
+                source_url=preferred.source_url,
             )
         )
     for convertible in parsed_terms.convertibles:
@@ -1422,6 +1454,9 @@ def _levels_from_parsed_terms(parsed_terms: CapitalStructureTermsReport) -> list
                 source=_source_label(convertible.source_form, convertible.source_date),
                 explanation="Source-backed convertible conversion price; treat as possible non-chart supply context, not a prediction.",
                 level_type="conversion_price",
+                source_form=convertible.source_form,
+                source_date=convertible.source_date,
+                source_url=convertible.source_url,
             )
         )
     for offering in parsed_terms.offering_programs:
@@ -1434,9 +1469,112 @@ def _levels_from_parsed_terms(parsed_terms: CapitalStructureTermsReport) -> list
                 source=_source_label(offering.source_form, offering.source_date),
                 explanation="Source-backed offering or resale price; treat as a filing reference level, not guaranteed support or resistance.",
                 level_type="offering_price",
+                source_form=offering.source_form,
+                source_date=offering.source_date,
+                source_url=offering.source_url,
             )
         )
     return levels
+
+
+def classify_capital_structure_level_relevance(
+    level: CapitalStructureLevel,
+    *,
+    current_price: float | None,
+    atr_percent: float | None = None,
+    as_of: date | None = None,
+    split_adjustment_verified: bool = False,
+) -> CapitalStructureLevelRelevance:
+    effective_as_of = as_of or datetime.now(timezone.utc).date()
+    recency_days = _level_recency_days(level, effective_as_of)
+    price = _parse_price(str(level.price))
+    latest = _parse_price(str(current_price)) if current_price is not None else None
+    if price is None or latest is None or latest <= 0:
+        return CapitalStructureLevelRelevance(
+            level=level,
+            status="rejected_incidental_amount",
+            active_for_supply=False,
+            distance_percent=None,
+            recency_days=recency_days,
+            reason=f"{level.label} cannot be tested for active supply because the parsed price or current quote is unavailable.",
+        )
+
+    distance = ((price - latest) / latest) * 100.0
+    absolute_distance = abs(distance)
+    atr = max(float(atr_percent or 0.0), 0.0)
+    actionable_band = max(5.0, min(12.0, atr * 2.0 if atr > 0 else 5.0))
+    watch_band = max(18.0, min(35.0, atr * 5.0 if atr > 0 else 18.0))
+    recency_text = f"; filed {recency_days} day(s) ago" if recency_days is not None else "; filing date unavailable"
+
+    if recency_days is not None and recency_days > 1095:
+        return CapitalStructureLevelRelevance(
+            level=level,
+            status="stale_needs_verification",
+            active_for_supply=False,
+            distance_percent=distance,
+            recency_days=recency_days,
+            reason=(
+                f"Historical filing price level parsed at ${price:,.2f}, {absolute_distance:.0f}% from current price{recency_text}; "
+                "not treated as active supply until the instrument is verified as still outstanding."
+            ),
+        )
+    if absolute_distance >= 60.0 and not split_adjustment_verified:
+        return CapitalStructureLevelRelevance(
+            level=level,
+            status="split_adjustment_needed",
+            active_for_supply=False,
+            distance_percent=distance,
+            recency_days=recency_days,
+            reason=(
+                f"Historical filing price level parsed at ${price:,.2f}, but it is {absolute_distance:.0f}% "
+                "from current price and is not treated as active supply without split/corporate-action validation."
+            ),
+        )
+    if absolute_distance <= actionable_band and (recency_days is None or recency_days <= 730):
+        return CapitalStructureLevelRelevance(
+            level=level,
+            status="actionable",
+            active_for_supply=True,
+            distance_percent=distance,
+            recency_days=recency_days,
+            reason=(
+                f"{level.label} at ${price:,.2f} is within {absolute_distance:.1f}% of current price "
+                f"(active band {actionable_band:.1f}%{recency_text}) and can influence active supply context."
+            ),
+        )
+    if absolute_distance <= watch_band and (recency_days is None or recency_days <= 730):
+        return CapitalStructureLevelRelevance(
+            level=level,
+            status="watchlist",
+            active_for_supply=True,
+            distance_percent=distance,
+            recency_days=recency_days,
+            reason=(
+                f"{level.label} at ${price:,.2f} is {absolute_distance:.1f}% from current price "
+                f"(watch band {watch_band:.1f}%{recency_text}); watchlist context only unless price approaches it."
+            ),
+        )
+    return CapitalStructureLevelRelevance(
+        level=level,
+        status="out_of_band",
+        active_for_supply=False,
+        distance_percent=distance,
+        recency_days=recency_days,
+        reason=(
+            f"{level.label} at ${price:,.2f} is {absolute_distance:.1f}% from current price{recency_text}; "
+            "classified as historical/out-of-band and excluded from active supply scoring."
+        ),
+    )
+
+
+def _level_recency_days(level: CapitalStructureLevel, as_of: date) -> int | None:
+    parsed = _parse_date(level.source_date)
+    if parsed is None:
+        match = re.search(r"\b(20[0-9]{2}-[0-9]{2}-[0-9]{2})\b", level.source or "")
+        parsed = _parse_date(match.group(1)) if match else None
+    if parsed is None:
+        return None
+    return max(0, (as_of - parsed).days)
 
 
 def _technical_impact_lines_from_terms(parsed_terms: CapitalStructureTermsReport) -> list[str]:

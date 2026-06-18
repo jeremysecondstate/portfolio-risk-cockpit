@@ -381,6 +381,51 @@ class OptionScenarioMathTests(unittest.TestCase):
         self.assertTrue(any("high iv" in warning.lower() for warning in call.practical_warnings))
         self.assertLess(call.score, 50.0)
 
+    def test_option_candidate_score_breakdown_exposes_required_dimensions(self) -> None:
+        model_position = GeneratedStockPosition(
+            quantity=10.0,
+            entry_price=10.0,
+            stop_price=9.0,
+            risk_dollars=10.0,
+            notional=100.0,
+            portfolio_weight=0.001,
+            per_share_risk=1.0,
+            basis="test model target",
+        )
+        candidates = suggest_option_candidates(
+            [_chain_row(strike=10.5, premium=0.5)],
+            _indicators(),
+            _context(quantity=0, is_held=False),
+            macro_label="Tailwind",
+            risk_budget=100.0,
+            stock_plan=model_position,
+            capital_structure_indicator=SimpleNamespace(
+                read="clean",
+                technical_score=82.0,
+                chase_risk_score=12.0,
+                supply_overhang_score=8.0,
+            ),
+        )
+
+        call = next(candidate for candidate in candidates if candidate.option_type == "call")
+        breakdown = "\n".join(call.score_breakdown).lower()
+
+        for phrase in (
+            "technical fit",
+            "liquidity",
+            "greeks",
+            "volatility fit",
+            "risk-budget fit",
+            "portfolio fit",
+            "event risk",
+            "capital-structure fit",
+        ):
+            self.assertIn(phrase, breakdown)
+        self.assertGreater(call.volatility_fit_score, 0)
+        self.assertGreater(call.portfolio_fit_score, 0)
+        self.assertGreater(call.event_risk_score, 0)
+        self.assertGreater(call.capital_structure_fit_score, 0)
+
     def test_normalized_candidate_bar_rows_preserve_signs(self) -> None:
         rows = [
             SimpleNamespace(move_label="-5%", combined_pnl=-50.0),

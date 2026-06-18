@@ -190,7 +190,7 @@ TAB_PANE_MIN = 440
 DETACH_DRAG_PIXELS = 42
 PRC_PRESSURE_LINE_NOTICE = "PRC Pressure Line is a synthetic internal indicator, not an official price target or exchange price."
 CAPITAL_STRUCTURE_LEVEL_DISCLAIMER = "Filing-derived levels are risk/context modifiers, not support, resistance, targets, or price predictions."
-RECOMMENDATION_ENGINE_ADVICE_BOUNDARY = "This is research support and scenario math, not financial advice, a guarantee, or a forecast."
+RECOMMENDATION_ENGINE_ADVICE_BOUNDARY = "Scenario inputs are provisional: confirm entry, invalidation, target, and source freshness before acting."
 
 
 @dataclass(frozen=True)
@@ -3617,8 +3617,8 @@ def _recommendation_engine_cards(read: RecommendationEngineRead | None) -> list[
             _synthetic_badge("Confidence", "No Read", "mixed", "The workspace can still render while the read is missing."),
             _synthetic_badge("Evidence Score", "--", "info", "Evidence score is unavailable."),
             _synthetic_badge("Data Confidence", "--", "info", "Data confidence is unavailable."),
-            _synthetic_badge("Reward/Risk / EV", "Not Defined", "info", RECOMMENDATION_ENGINE_ADVICE_BOUNDARY),
-            _synthetic_badge("Position Sizing", "Planning Only", "info", "Position-sizing notes are unavailable; no broker/order behavior changes."),
+            _synthetic_badge("Reward/Risk / EV", "Needs Inputs", "info", "Next input: attach a recommendation-engine read with current quote, invalidation, and target context."),
+            _synthetic_badge("Position Sizing", "Needs Inputs", "info", "Next input: attach portfolio context, risk budget, and current technical invalidation."),
         ]
 
     data_confidence = _recommendation_get(read, "data_confidence")
@@ -3637,7 +3637,7 @@ def _recommendation_engine_cards(read: RecommendationEngineRead | None) -> list[
         _synthetic_badge("Evidence Score", _recommendation_score_text(evidence_score), _recommendation_evidence_status(evidence_score), f"Evidence vote {_recommendation_signed_number(_recommendation_get(read, 'evidence_vote'))}."),
         _synthetic_badge("Data Confidence", f"{data_grade} ({_recommendation_score_text(data_score)})", _recommendation_data_status(data_grade, data_score), str(_recommendation_get(data_confidence, "reason", "Data confidence unavailable."))),
         _synthetic_badge("Reward/Risk / EV", reward_label, _recommendation_reward_status(reward_risk), reward_summary),
-        _synthetic_badge("Position Sizing", _recommendation_position_sizing_label(read), _recommendation_position_sizing_status(sizing_notes), _first_nonempty(sizing_notes, "Planning context only; no broker/order behavior changes.")),
+        _synthetic_badge("Position Sizing", _recommendation_position_sizing_label(read), _recommendation_position_sizing_status(sizing_notes), _first_nonempty(sizing_notes, "Next input: load portfolio context and technical invalidation for sizing.")),
     ]
     cards.extend(_empirical_recommendation_cards(read))
     return cards
@@ -3775,10 +3775,10 @@ def _recommendation_contradiction_lines(read: Any | None, *, limit: int = 5) -> 
 
 def _recommendation_reward_risk_lines(read: Any | None) -> list[str]:
     if read is None:
-        return [RECOMMENDATION_ENGINE_ADVICE_BOUNDARY, "Reward/risk is unavailable because no recommendation-engine read is attached."]
+        return [RECOMMENDATION_ENGINE_ADVICE_BOUNDARY, "Reward/risk needs a recommendation-engine read with current quote, invalidation, target, and source context."]
     reward_risk = _recommendation_get(read, "expected_reward_risk")
     if reward_risk is None:
-        return [RECOMMENDATION_ENGINE_ADVICE_BOUNDARY, "Reward/risk is unavailable because the read did not include scenario math."]
+        return [RECOMMENDATION_ENGINE_ADVICE_BOUNDARY, "Reward/risk needs scenario math from entry, invalidation, and target."]
     ratio = _to_float(_recommendation_get(reward_risk, "reward_risk_ratio"))
     probability = _to_float(_recommendation_get(reward_risk, "planning_probability"))
     expected_value = _to_float(_recommendation_get(reward_risk, "expected_value_units"))
@@ -3803,9 +3803,9 @@ def _recommendation_reward_risk_lines(read: Any | None) -> list[str]:
 
 def _recommendation_position_sizing_lines(read: Any | None) -> list[str]:
     if read is None:
-        return ["Position-sizing notes are unavailable; no broker/order behavior changes."]
+        return ["Position sizing needs portfolio context, generated risk budget, current quote, and invalidation."]
     lines = _recommendation_list(_recommendation_get(read, "position_sizing_notes"))
-    return _recommendation_clean_lines(lines, limit=7) or ["Position sizing is planning context only and does not alter broker/order behavior."]
+    return _recommendation_clean_lines(lines, limit=7) or ["Position sizing needs portfolio context, generated risk budget, current quote, and invalidation."]
 
 
 def _recommendation_field_lines(read: Any | None, field: str, *, fallback: str, limit: int = 6) -> list[str]:
@@ -4361,13 +4361,15 @@ def _recommendation_reward_status(reward_risk: Any | None) -> str:
 
 def _recommendation_position_sizing_label(read: Any | None) -> str:
     if read is None:
-        return "Planning Only"
+        return "Needs Inputs"
     notes = " ".join(_recommendation_position_sizing_lines(read)).lower()
     if "elevated" in notes or "poor" in notes or "reduce" in notes or "oversizing" in notes:
         return "Constrained"
-    if "unavailable" in notes:
-        return "Needs Context"
-    return "Planning Only"
+    if "next input" in notes or "unavailable" in notes or "needs current entry" in notes:
+        return "Needs Inputs"
+    if "derived stock size" in notes or "derived risk budget" in notes:
+        return "Derived Sizing"
+    return "Sizing Assumptions"
 
 
 def _recommendation_position_sizing_status(lines: list[str]) -> str:
@@ -5609,6 +5611,7 @@ def _render_scenarios_unguarded(self: tk.Tk, payload: _ResearchPayload) -> None:
                 earnings_text=payload.earnings_text,
                 risk_budget=max_risk,
                 stock_plan=stock_plan,
+                capital_structure_indicator=getattr(payload.command_center_report, "capital_structure_indicator", None),
             )
             setattr(self, "schwab_research_option_candidates", candidates)
     selected_candidate = _selected_option_candidate(self)
@@ -5792,6 +5795,7 @@ def _render_options_strategy_unguarded(self: tk.Tk) -> None:
             earnings_text=payload.earnings_text,
             risk_budget=_float_from_var(getattr(self, "schwab_research_max_risk_var", None)),
             stock_plan=getattr(self, "schwab_research_stock_plan", None),
+            capital_structure_indicator=getattr(payload.command_center_report, "capital_structure_indicator", None),
         )
         self.schwab_research_option_candidates = candidates
         if not candidates:
@@ -6455,8 +6459,12 @@ def _render_candidate_score_breakdown(frame: ttk.Frame, candidate: OptionCandida
         rows = {
             "Technical Fit": f"{candidate.technical_fit_score:.0f}/100",
             "Liquidity Fit": f"{candidate.liquidity_score:.0f}/100; spread {_percent(candidate.spread_pct) if candidate.spread_pct is not None else '--'}",
-            "Greek Fit": f"{candidate.greek_score:.0f}/100; delta {_number(candidate.delta)}; IV {_percent(candidate.iv) if candidate.iv is not None else '--'}",
+            "Greek Fit": f"{candidate.greek_score:.0f}/100; delta {_number(candidate.delta)}; theta {_number(candidate.theta)}; gamma {_number(candidate.gamma)}",
+            "Volatility Fit": f"{candidate.volatility_fit_score:.0f}/100; IV {_percent(candidate.iv) if candidate.iv is not None else '--'}; implied move {_percent(move_read.implied_move_pct) if move_read is not None and move_read.implied_move_pct is not None else '--'}",
             "Risk-Budget Fit": f"{candidate.risk_budget_score:.0f}/100; max loss {_money(candidate.max_loss)}",
+            "Portfolio Fit": f"{candidate.portfolio_fit_score:.0f}/100; controlled shares {candidate.controlled_shares:g}",
+            "Event Risk": f"{candidate.event_risk_score:.0f}/100",
+            "Capital Structure": f"{candidate.capital_structure_fit_score:.0f}/100",
             "Move To Breakeven": move,
             "Implied Move": _percent(move_read.implied_move_pct) if move_read is not None and move_read.implied_move_pct is not None else "--",
             "Required vs Implied": _option_required_move_summary(move_read),
@@ -6466,8 +6474,12 @@ def _render_candidate_score_breakdown(frame: ttk.Frame, candidate: OptionCandida
         rows = {
             "No-Trade Action Score": f"{candidate.score:.0f}/100",
             "Liquidity Fit": "Not scored; no contract selected.",
-            "Greek Fit": "Not scored; no delta/theta/IV exposure.",
+            "Greek Fit": "Not scored; no delta/theta/gamma/vega/rho exposure.",
+            "Volatility Fit": "Not scored; no option premium or IV exposure.",
             "Risk-Budget Fit": "Not scored; no option capital committed.",
+            "Portfolio Fit": "Not scored; waiting leaves current shares and cash unchanged.",
+            "Event Risk": "Not scored as a contract; waiting avoids fresh event-premium exposure.",
+            "Capital Structure": "Not scored as a contract; no added supply-sensitive option exposure.",
             "Move To Breakeven": "Not applicable.",
             "Implied Move": _percent(move_read.implied_move_pct) if move_read is not None and move_read.implied_move_pct is not None else "--",
             "Required vs Implied": _option_required_move_summary(move_read),

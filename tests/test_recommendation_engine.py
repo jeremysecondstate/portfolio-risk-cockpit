@@ -30,6 +30,11 @@ def _supportive_report() -> SimpleNamespace:
         key="timing_5m",
         label="10d 5m",
         candle_count=90,
+        latest_close=100.0,
+        atr_14=2.0,
+        vwap_distance_percent=0.4,
+        support_zones=[SimpleNamespace(low=97.5, high=98.5, center=98.0)],
+        resistance_zones=[SimpleNamespace(low=105.0, high=106.0, center=105.5)],
         volume_read=volume_read,
         scores={"Volume": _score(74, "Volume confirms the move.")},
     )
@@ -162,6 +167,46 @@ class RecommendationEngineTests(unittest.TestCase):
         summary = read.expected_reward_risk.summary.lower()
         self.assertNotIn("guaranteed returns", summary)
         self.assertNotIn("price prediction", summary)
+
+    def test_missing_ticket_levels_derive_reward_risk_and_sizing_from_analysis(self) -> None:
+        report = _supportive_report()
+        report.ticket_check = SimpleNamespace(
+            risk_reward="Reward/risk unavailable because ticket levels are incomplete.",
+            risk_reward_ratio=None,
+            risk_reward_read="unknown",
+            target_price=None,
+            risk_note="Ticket stop is missing; use technical invalidation until confirmed.",
+        )
+        stock_plan = SimpleNamespace(
+            quantity=250.0,
+            risk_dollars=500.0,
+            notional=25_000.0,
+            portfolio_weight=0.25,
+            per_share_risk=2.0,
+        )
+
+        read = build_recommendation_engine_read(
+            command_center_report=report,
+            capital_structure_indicator=_capital(),
+            macro_text="Official Macro Snapshot\nNeutral/mixed.",
+            fundamentals_text="Latest reported fundamentals: revenue growth and cash flow.",
+            option_candidates=[_option(max_loss=240.0, breakeven=104.0)],
+            portfolio_context=_context(),
+            stock_plan=stock_plan,
+            source_statuses=_statuses(),
+            as_of=AS_OF,
+        )
+
+        self.assertEqual(read.expected_reward_risk.label, "Derived reward/risk")
+        self.assertGreater(read.expected_reward_risk.reward_risk_ratio or 0, 0)
+        self.assertIn("Derived from current analysis", read.expected_reward_risk.summary)
+        notes = " ".join(read.position_sizing_notes)
+        self.assertIn("Derived stock size", notes)
+        self.assertIn("Best option candidate max loss", notes)
+        prominent = f"{read.expected_reward_risk.summary} {notes}".lower()
+        self.assertNotIn("not financial advice", prominent)
+        self.assertNotIn("does not alter broker/order behavior", prominent)
+        self.assertNotIn("reward/risk not defined", prominent)
 
     def test_missing_layers_degrade_to_no_read_without_crashing(self) -> None:
         read = build_recommendation_engine_read(symbol="MISS", as_of=AS_OF)
