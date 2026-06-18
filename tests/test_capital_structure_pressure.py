@@ -18,7 +18,7 @@ from app.analytics.technical_analysis import (
     build_technical_command_center_report,
     format_technical_command_center_report,
 )
-from app.data.sec_edgar import SecCompany, SecFiling
+from app.data.sec_edgar import SecCompany, SecFiling, SecFilingDocument
 
 
 AS_OF = date(2026, 6, 4)
@@ -103,6 +103,49 @@ class FakeSecTextClient:
             "The Common Warrants are exercisable for 1,000,000 shares of common stock "
             "at an exercise price of $5.00 per share. This resale prospectus relates to shares offered by selling stockholders."
         )
+
+
+class FakeSecondPassSecClient:
+    def __init__(self, *, exhibit_text: str) -> None:
+        self.exhibit_text = exhibit_text
+        self.index_calls = 0
+        self.exhibit_calls: list[str] = []
+
+    def recent_filings(self, *args: Any, **kwargs: Any) -> list[SecFiling]:
+        company = SecCompany(ticker="TEST", cik="0001234567", title="Test Corp")
+        return [
+            SecFiling(
+                company=company,
+                accession_number="0001234567-26-000001",
+                filing_date="2026-04-12",
+                report_date="2026-04-12",
+                form="8-K",
+                primary_document="test-8k.htm",
+                description="Material agreement",
+            )
+        ]
+
+    def document_text_url(self, filing_url: str, *args: Any, **kwargs: Any) -> str:
+        return (
+            "The company entered into a securities purchase agreement, issued warrants, "
+            "and warned investors about future dilution. The exercise price will be determined later."
+        )
+
+    def filing_documents(self, filing: SecFiling) -> list[SecFilingDocument]:
+        self.index_calls += 1
+        return [
+            SecFilingDocument(
+                filing=filing,
+                document="ex-4-1.htm",
+                description="Warrant agreement",
+                type="EX-4.1",
+                sequence="2",
+            )
+        ]
+
+    def document_text(self, document: SecFilingDocument) -> str:
+        self.exhibit_calls.append(document.url)
+        return self.exhibit_text
 
 
 class CapitalStructurePressureTests(unittest.TestCase):
@@ -396,6 +439,40 @@ class CapitalStructurePressureTests(unittest.TestCase):
         self.assertIn("Warrants", {signal.label for signal in report.signals})
         self.assertTrue(report.parsed_terms.warrants)
         self.assertTrue(report.parsed_terms.warrants[0].excerpt)
+
+    def test_second_pass_exhibit_scan_fills_missing_pressure_level(self) -> None:
+        client = FakeSecondPassSecClient(
+            exhibit_text=(
+                "The Common Warrants are exercisable for 2,000,000 shares of common stock "
+                "at an exercise price of $3.50 per share."
+            )
+        )
+
+        report = analyze_capital_structure_pressure("TEST", client=client, max_documents=2, as_of=AS_OF)
+
+        self.assertEqual(client.index_calls, 1)
+        self.assertEqual(len(client.exhibit_calls), 1)
+        self.assertTrue(any(level.level_type == "warrant_strike" and level.price == 3.5 for level in report.possible_supply_levels))
+        self.assertEqual(report.source_diagnostics["relevant_exhibits_considered"], 1)
+        self.assertEqual(report.source_diagnostics["second_pass_documents_fetched"], 1)
+        self.assertIn("second_pass_result", report.source_diagnostics)
+
+    def test_no_level_after_pressure_scan_gets_explicit_diagnostic(self) -> None:
+        client = FakeSecondPassSecClient(
+            exhibit_text=(
+                "The warrant agreement describes common warrants and future dilution, "
+                "but the exercise price will be determined in a later notice."
+            )
+        )
+
+        report = analyze_capital_structure_pressure("TEST", client=client, max_documents=2, as_of=AS_OF)
+
+        self.assertTrue(report.signals)
+        self.assertEqual(report.possible_supply_levels, [])
+        self.assertEqual(report.source_diagnostics["no_level_reason"], "Pressure signals were found, but no explicit price level was parsed.")
+        self.assertEqual(report.source_diagnostics["second_pass_documents_fetched"], 1)
+        self.assertIn("Pressure signals were found, but no explicit price level was parsed.", report.explanation_lines)
+        self.assertIn("not a failed fetch", " ".join(report.explanation_lines))
 
     def test_technical_modifier_language(self) -> None:
         high = _scan(

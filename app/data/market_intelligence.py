@@ -43,6 +43,7 @@ class ExternalMarketIntelligence:
     fmp_quote: dict[str, Any] = field(default_factory=dict)
     fmp_fundamentals: dict[str, Any] = field(default_factory=dict)
     fmp_filing_metadata: tuple[dict[str, Any], ...] = ()
+    fmp_macro_context: dict[str, Any] = field(default_factory=dict)
     databento_equity_tape: dict[str, Any] = field(default_factory=dict)
     databento_equity_candles: dict[str, tuple[Candle, ...]] = field(default_factory=dict)
     databento_technical_candles: dict[str, tuple[Candle, ...]] = field(default_factory=dict)
@@ -123,6 +124,14 @@ def build_external_market_intelligence(
         warnings=warnings,
         secret_values=secret_values,
     )
+    fmp_macro_context = _fmp_macro_context(
+        active_fmp_provider,
+        clean_symbol,
+        force_refresh=force_refresh,
+        statuses=source_statuses,
+        warnings=warnings,
+        secret_values=secret_values,
+    )
 
     databento_equity_tape, databento_equity_candles = _databento_equity_context(
         active_equities_provider,
@@ -154,6 +163,10 @@ def build_external_market_intelligence(
             "fmp_quote": _field_provenance(fmp_quote),
             "fmp_fundamentals": _field_provenance(fmp_fundamentals),
             "fmp_filing_metadata": fmp_filing_metadata,
+            "fmp_macro_context": {
+                key: _field_provenance(value if isinstance(value, Mapping) else {})
+                for key, value in fmp_macro_context.items()
+            },
             "databento_equity_tape": _field_provenance(databento_equity_tape),
             "databento_equity_candles": {
                 key: {"rows": len(value), "source": "Databento US Equities"}
@@ -181,6 +194,7 @@ def build_external_market_intelligence(
         fmp_quote=fmp_quote,
         fmp_fundamentals=fmp_fundamentals,
         fmp_filing_metadata=tuple(fmp_filing_metadata),
+        fmp_macro_context=fmp_macro_context,
         databento_equity_tape=databento_equity_tape,
         databento_equity_candles=databento_equity_candles,
         databento_technical_candles=databento_technical_candles,
@@ -279,6 +293,84 @@ def _fmp_filing_metadata_context(
         )
     )
     return tuple(_sanitize_payload(dict(row), secret_values) for row in rows[:12])
+
+
+def _fmp_macro_context(
+    provider: Any,
+    symbol: str,
+    *,
+    force_refresh: bool,
+    statuses: list[MarketDataProviderStatus],
+    warnings: list[str],
+    secret_values: tuple[str, ...],
+) -> dict[str, Any]:
+    method = None
+    method_name = ""
+    for candidate in ("macro_context", "economic_context", "macro_proxy_context"):
+        candidate_method = getattr(provider, candidate, None)
+        if callable(candidate_method):
+            method = candidate_method
+            method_name = candidate
+            break
+    if method is None:
+        statuses.append(
+            MarketDataProviderStatus(
+                "FMP macro context",
+                "unavailable",
+                _now(),
+                "Configured FMP provider does not expose macro proxy context; official macro rows remain source of record.",
+            )
+        )
+        return {}
+    try:
+        try:
+            payload = method(symbol, force_refresh=force_refresh, limit=2)
+        except TypeError:
+            try:
+                payload = method(force_refresh=force_refresh, limit=2)
+            except TypeError:
+                payload = method(symbol)
+    except Exception as exc:
+        message = _redact_text(f"FMP macro context failed: {exc}", secret_values)
+        statuses.append(MarketDataProviderStatus("FMP macro context", "error", _now(), message))
+        warnings.append(message)
+        return {}
+    rows = _coerce_macro_context_rows(payload)
+    statuses.append(
+        MarketDataProviderStatus(
+            "FMP macro context",
+            "available" if rows else "empty",
+            _now(),
+            f"Loaded {len(rows)} FMP macro proxy row(s) via {method_name}; official macro releases remain source of record.",
+        )
+    )
+    return {key: _sanitize_payload(dict(value), secret_values) for key, value in rows.items()}
+
+
+def _coerce_macro_context_rows(payload: Any) -> dict[str, Mapping[str, Any]]:
+    if isinstance(payload, Mapping):
+        for key in ("rows", "records", "data", "results"):
+            rows = payload.get(key)
+            if isinstance(rows, Mapping):
+                return {str(row_key): row for row_key, row in rows.items() if isinstance(row, Mapping)}
+            if isinstance(rows, list):
+                result: dict[str, Mapping[str, Any]] = {}
+                for index, row in enumerate(rows):
+                    if not isinstance(row, Mapping):
+                        continue
+                    key_value = row.get("symbol") or row.get("metric") or row.get("name") or index
+                    result[str(key_value)] = row
+                return result
+        return {str(key): row for key, row in payload.items() if isinstance(row, Mapping)}
+    if isinstance(payload, (list, tuple)):
+        result: dict[str, Mapping[str, Any]] = {}
+        for index, row in enumerate(payload):
+            if not isinstance(row, Mapping):
+                continue
+            key_value = row.get("symbol") or row.get("metric") or row.get("name") or index
+            result[str(key_value)] = row
+        return result
+    return {}
 
 
 def _coerce_metadata_rows(payload: Any) -> list[Mapping[str, Any]]:

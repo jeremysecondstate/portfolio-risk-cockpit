@@ -531,6 +531,7 @@ class TechnicalCommandCenterTests(unittest.TestCase):
         assert indicator is not None
         self.assertIsNone(indicator.nearest_supply_level)
         self.assertEqual(indicator.read, "rally_fade_risk")
+        self.assertTrue(any("Pressure signals were found, but no explicit price level was parsed." in line for line in indicator.explanation_lines))
         self.assertTrue(any("no supply level is inferred" in line for line in indicator.explanation_lines))
         self.assertTrue(any("no supply level is inferred" in line for line in indicator.recommendation_lines))
         self.assertIn("Capital Structure / Supply", report.scores)

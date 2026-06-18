@@ -2609,6 +2609,7 @@ def _capital_structure_no_level_explanation(report: CapitalStructurePressureRepo
     if report.signals:
         labels = ", ".join(_dedupe([signal.label for signal in report.signals])[:4])
         return (
+            f"Pressure signals were found, but no explicit price level was parsed. "
             f"SEC scan found filing-derived pressure signal(s) ({labels}) but no supported warrant exercise, "
             "conversion, offering, purchase, or resale price level was parsed; no supply level is inferred."
         )

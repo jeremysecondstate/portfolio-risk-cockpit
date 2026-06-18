@@ -9,9 +9,11 @@ from app.analytics.research_workspace_insights import (
     build_earnings_workspace_summary,
     build_fundamental_metric_cards,
     build_fundamental_verdict,
+    build_macro_metric_cards,
     build_technical_at_glance_read,
 )
 from app.analytics.stock_research import AdvancedIndicatorSnapshot, PortfolioSymbolContext
+from app.macro.models import MacroRelease, MacroSnapshot
 
 
 def _indicators(*, trend: str = "bullish", momentum: str = "improving") -> AdvancedIndicatorSnapshot:
@@ -181,6 +183,31 @@ def _structured_fundamentals(*, with_pressure: bool = False) -> str:
     )
 
 
+def _macro_release(
+    metric: str,
+    *,
+    actual: float | None,
+    prior: float | None,
+    category: str = "inflation",
+    unit: str = "%",
+) -> MacroRelease:
+    return MacroRelease(
+        category=category,
+        metric=metric,
+        source="Official test source",
+        period="2026-05",
+        release_timestamp="2026-06-17T12:00:00+00:00",
+        actual=actual,
+        prior=prior,
+        revision=None,
+        forecast=None,
+        unit=unit,
+        raw_source="https://example.test/macro",
+        freshness_status="fresh",
+        fetch_timestamp="2026-06-17T12:01:00+00:00",
+    )
+
+
 class ResearchWorkspaceInsightTests(unittest.TestCase):
     def test_earnings_source_links_label_search_helpers_separately(self) -> None:
         earnings_text = "\n".join(
@@ -266,6 +293,61 @@ class ResearchWorkspaceInsightTests(unittest.TestCase):
         self.assertEqual(by_title["Revenue Trend"].status, "good")
         self.assertEqual(by_title["Operating Profit"].label, "+18.0%")
         self.assertTrue(by_title["Balance Sheet"].label.startswith("Cash 32.0%"))
+
+    def test_macro_unavailable_rows_do_not_score_as_mixed(self) -> None:
+        snapshot = MacroSnapshot(
+            fetched_at="2026-06-17T12:00:00+00:00",
+            releases=[_macro_release("CPI", actual=None, prior=3.1)],
+            source_statuses=[],
+        )
+
+        cards = build_macro_metric_cards(snapshot)
+        by_group = {card.group: card for card in cards}
+
+        self.assertEqual(by_group["Inflation"].simple_read, "Unavailable")
+        self.assertEqual(by_group["Growth / Consumer"].simple_read, "Unavailable")
+        self.assertEqual(by_group["Overall Macro Backdrop"].simple_read, "Unavailable")
+        self.assertIn("no composite macro read was scored", by_group["Overall Macro Backdrop"].interpretation)
+
+    def test_macro_composite_excludes_unavailable_rows_and_labels_provider_proxies(self) -> None:
+        snapshot = MacroSnapshot(
+            fetched_at="2026-06-17T12:00:00+00:00",
+            releases=[
+                _macro_release("CPI", actual=3.4, prior=3.1, category="inflation"),
+                _macro_release("Payroll", actual=None, prior=175_000, category="labor", unit=""),
+            ],
+            source_statuses=[],
+        )
+        provider_context = SimpleNamespace(
+            databento_futures_context={
+                "CL.FUT": {
+                    "price": 74.5,
+                    "previous_close": 72.0,
+                    "timestamp": "2026-06-17T15:00:00+00:00",
+                    "unit": "USD",
+                }
+            },
+            fmp_macro_context={
+                "retail_sales": {
+                    "category": "consumer",
+                    "metric": "Retail sales provider context",
+                    "value": 101.2,
+                    "prior": 100.0,
+                    "date": "2026-05",
+                    "unit": "index",
+                }
+            },
+        )
+
+        cards = build_macro_metric_cards(snapshot, provider_context=provider_context)
+        by_group = {card.group: card for card in cards}
+        proxy_rows = [card for card in cards if card.simple_read == "Proxy Context"]
+
+        self.assertEqual(by_group["Overall Macro Backdrop"].simple_read, "Headwind")
+        self.assertTrue(all(row.source in {"Databento market proxy", "FMP provider fallback"} for row in proxy_rows))
+        self.assertTrue(any(row.group == "Energy" and row.source == "Databento market proxy" for row in proxy_rows))
+        self.assertTrue(any(row.group == "Growth / Consumer" and row.source == "FMP provider fallback" for row in proxy_rows))
+        self.assertIn("provider proxy context shown separately", by_group["Overall Macro Backdrop"].interpretation)
 
     def test_fundamental_combined_read_calls_out_macro_trade_conflict(self) -> None:
         verdict = build_fundamental_verdict(_structured_fundamentals(), _indicators(), "Headwind")

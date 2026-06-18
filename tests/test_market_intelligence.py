@@ -94,6 +94,7 @@ def test_external_market_intelligence_all_external_providers_disabled_or_missing
     assert intelligence.fmp_profile == {}
     assert intelligence.fmp_quote == {}
     assert intelligence.fmp_fundamentals == {}
+    assert intelligence.fmp_macro_context == {}
     assert intelligence.databento_equity_tape == {}
     assert intelligence.databento_futures_context == {}
     assert ("FMP profile/classification", "unavailable") in statuses
@@ -140,6 +141,15 @@ def test_external_market_intelligence_fmp_only_enrichment() -> None:
                         pe_ratio=22.0,
                         eps=1.25,
                         revenue_growth=14.5,
+                        revenue=500_000_000,
+                        net_income=75_000_000,
+                        operating_income=90_000_000,
+                        operating_income_yoy=18.0,
+                        operating_cash_flow=110_000_000,
+                        operating_cash_flow_yoy=12.0,
+                        cash_and_equivalents=240_000_000,
+                        total_liabilities=600_000_000,
+                        cash_to_liabilities=40.0,
                         shares_float=50_000_000,
                         source="FMP fundamentals",
                     ),
@@ -147,6 +157,33 @@ def test_external_market_intelligence_fmp_only_enrichment() -> None:
                 fetched_at="2026-06-17T10:00:00+00:00",
                 statuses=(MarketDataProviderStatus("FMP fundamentals", "available", "2026-06-17T10:00:00+00:00", "Loaded fundamentals."),),
             )
+
+        def filing_metadata(self, symbol, *, force_refresh: bool = False, limit: int = 12):
+            return (
+                {
+                    "symbol": symbol,
+                    "companyName": "Acme Corp",
+                    "cik": "0001234567",
+                    "form": "424B5",
+                    "filingDate": "2026-06-12",
+                    "accessionNumber": "0001234567-26-000001",
+                    "primaryDocument": "acme-424b5.htm",
+                    "finalLink": "https://www.sec.gov/Archives/edgar/data/1234567/000123456726000001/acme-424b5.htm",
+                    "description": "prefilter row fmp-test-key",
+                },
+            )
+
+        def macro_context(self, symbol, *, force_refresh: bool = False, limit: int = 2):
+            return {
+                "CPI": {
+                    "category": "Inflation",
+                    "metric": "CPI economic indicator",
+                    "value": 3.2,
+                    "prior": 3.0,
+                    "date": "2026-05",
+                    "source": "FMP macro proxy fmp-test-key",
+                }
+            }
 
     intelligence = build_external_market_intelligence(
         "ACME",
@@ -158,7 +195,18 @@ def test_external_market_intelligence_fmp_only_enrichment() -> None:
     assert intelligence.fmp_profile["sector"] == "Technology"
     assert intelligence.fmp_quote["price"] == 12.25
     assert intelligence.fmp_fundamentals["market_cap"] == 1_000_000_000
+    assert intelligence.fmp_fundamentals["operating_income_yoy"] == 18.0
+    assert intelligence.fmp_fundamentals["cash_to_liabilities"] == 40.0
+    assert intelligence.fmp_filing_metadata[0]["primaryDocument"] == "acme-424b5.htm"
+    assert intelligence.fmp_filing_metadata[0]["description"] == "prefilter row [REDACTED]"
+    assert intelligence.fmp_macro_context["CPI"]["value"] == 3.2
+    assert intelligence.fmp_macro_context["CPI"]["source"] == "FMP macro proxy [REDACTED]"
+    assert "fmp-test-key" not in str(intelligence.fmp_filing_metadata)
+    assert "fmp-test-key" not in str(intelligence.fmp_macro_context)
+    assert "fmp-test-key" not in str(intelligence.provenance)
     assert any(status.source == "FMP fundamentals" and status.status == "available" for status in intelligence.source_statuses)
+    assert any(status.source == "FMP filing metadata" and status.status == "available" for status in intelligence.source_statuses)
+    assert any(status.source == "FMP macro context" and status.status == "available" for status in intelligence.source_statuses)
 
 
 def test_external_market_intelligence_databento_equities_ohlcv_tape_and_candles() -> None:

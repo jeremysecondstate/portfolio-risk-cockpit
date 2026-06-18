@@ -393,6 +393,10 @@ def analyze_capital_structure_pressure(
     source_diagnostics: dict[str, Any] = {
         "sec_recent_filings_requested": 0,
         "sec_filing_text_documents_fetched": 0,
+        "sec_forms_scanned": (),
+        "sec_documents_fetched": (),
+        "relevant_exhibits_considered": 0,
+        "second_pass_documents_fetched": 0,
         "fmp_metadata_rows": 0,
         "fmp_metadata_used": False,
     }
@@ -430,11 +434,14 @@ def analyze_capital_structure_pressure(
             source_diagnostics=source_diagnostics,
         )
 
+    source_diagnostics["sec_forms_scanned"] = tuple(dict.fromkeys(filing.form for filing in filings if filing.form))
     filing_texts: list[CapitalStructureFilingText] = []
+    fetched_urls: list[str] = []
     for filing in filings[: max(1, max_documents)]:
         try:
             text = fetch_primary_filing_text(active_client, filing)
             source_diagnostics["sec_filing_text_documents_fetched"] += 1
+            fetched_urls.append(filing.filing_url)
         except Exception as exc:
             warnings.append(f"{filing.form} filed {filing.filing_date or '--'} text fetch failed: {exc}")
             continue
@@ -449,6 +456,7 @@ def analyze_capital_structure_pressure(
                 text=text[:MAX_FILING_TEXT_CHARS],
             )
         )
+    source_diagnostics["sec_documents_fetched"] = tuple(fetched_urls)
 
     company_name = filings[0].company.title if filings else clean_symbol
     if not filing_texts:
@@ -467,7 +475,131 @@ def analyze_capital_structure_pressure(
         warnings=warnings,
         as_of=as_of,
     )
+    if report.signals and not report.possible_supply_levels:
+        remaining_budget = max(0, int(max_documents) - int(source_diagnostics["sec_filing_text_documents_fetched"]))
+        if remaining_budget > 0:
+            second_pass_texts = _second_pass_capital_structure_texts(
+                active_client,
+                filings,
+                fetched_urls=fetched_urls,
+                max_documents=remaining_budget,
+                source_diagnostics=source_diagnostics,
+                warnings=warnings,
+            )
+            if second_pass_texts:
+                filing_texts.extend(second_pass_texts)
+                report = scan_capital_structure_filings(
+                    clean_symbol,
+                    company_name=company_name,
+                    filings=filing_texts,
+                    warnings=warnings,
+                    as_of=as_of,
+                )
+    if report.signals and not report.possible_supply_levels:
+        source_diagnostics["no_level_reason"] = "Pressure signals were found, but no explicit price level was parsed."
+        report = _with_no_level_explanation(report)
     return replace(report, source_label=source_label, source_diagnostics=source_diagnostics)
+
+
+def _second_pass_capital_structure_texts(
+    client: SecEdgarClient,
+    filings: list[SecFiling],
+    *,
+    fetched_urls: list[str],
+    max_documents: int,
+    source_diagnostics: dict[str, Any],
+    warnings: list[str],
+) -> list[CapitalStructureFilingText]:
+    filing_documents = getattr(client, "filing_documents", None)
+    document_text = getattr(client, "document_text", None)
+    if not callable(filing_documents) or not callable(document_text):
+        source_diagnostics["second_pass_skipped"] = "SEC client does not expose filing document index/text helpers."
+        return []
+    selected: list[CapitalStructureFilingText] = []
+    considered = 0
+    for filing in filings:
+        if len(selected) >= max_documents:
+            break
+        try:
+            documents = filing_documents(filing)
+        except Exception as exc:
+            warnings.append(f"{filing.form} filed {filing.filing_date or '--'} document index fetch failed: {exc}")
+            continue
+        for document in documents:
+            if len(selected) >= max_documents:
+                break
+            document_url = str(getattr(document, "url", "") or "")
+            if not document_url or document_url in fetched_urls:
+                continue
+            if not _capital_structure_document_is_relevant(document):
+                continue
+            considered += 1
+            try:
+                text = document_text(document)
+            except Exception as exc:
+                warnings.append(f"{filing.form} filed {filing.filing_date or '--'} document {getattr(document, 'document', '--')} fetch failed: {exc}")
+                continue
+            if not str(text or "").strip():
+                continue
+            fetched_urls.append(document_url)
+            selected.append(
+                CapitalStructureFilingText(
+                    form=filing.form,
+                    filing_date=filing.filing_date,
+                    source_url=document_url,
+                    text=str(text)[:MAX_FILING_TEXT_CHARS],
+                )
+            )
+    source_diagnostics["relevant_exhibits_considered"] = int(source_diagnostics.get("relevant_exhibits_considered", 0) or 0) + considered
+    source_diagnostics["second_pass_documents_fetched"] = int(source_diagnostics.get("second_pass_documents_fetched", 0) or 0) + len(selected)
+    source_diagnostics["sec_documents_fetched"] = tuple(fetched_urls)
+    if considered and not selected:
+        source_diagnostics["second_pass_result"] = "Relevant exhibits/docs were considered, but no readable additional SEC text was fetched."
+    elif selected:
+        source_diagnostics["second_pass_result"] = "Additional relevant SEC filing documents were scanned after pressure signals lacked a parsed level."
+    return selected
+
+
+def _capital_structure_document_is_relevant(document: Any) -> bool:
+    haystack = f"{getattr(document, 'type', '')} {getattr(document, 'document', '')} {getattr(document, 'description', '')}".lower()
+    if not haystack.strip():
+        return False
+    return any(
+        term in haystack
+        for term in (
+            "ex-4",
+            "exhibit 4",
+            "ex-10",
+            "exhibit 10",
+            "warrant",
+            "preferred",
+            "convertible",
+            "conversion",
+            "subscription",
+            "purchase agreement",
+            "securities purchase",
+            "placement",
+            "sales agreement",
+            "equity distribution",
+            "atm",
+            "resale",
+            "prospectus",
+            "424b",
+        )
+    )
+
+
+def _with_no_level_explanation(report: CapitalStructurePressureReport) -> CapitalStructurePressureReport:
+    message = "Pressure signals were found, but no explicit price level was parsed."
+    detail = (
+        "This is a filing-derived risk modifier, not a failed fetch and not an inferred support/resistance level."
+    )
+    explanation_lines = list(report.explanation_lines)
+    if message not in explanation_lines:
+        explanation_lines.insert(0, message)
+    if detail not in explanation_lines:
+        explanation_lines.insert(1, detail)
+    return replace(report, explanation_lines=explanation_lines)
 
 
 def _fmp_prefilter_filings(

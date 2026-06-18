@@ -498,6 +498,26 @@ class EarningsPipelineTests(unittest.TestCase):
                             pe_ratio=42.0,
                             eps=2.4,
                             revenue_growth=30.0,
+                            revenue=44_100_000_000,
+                            net_income=18_800_000_000,
+                            operating_income=21_900_000_000,
+                            net_income_yoy=22.0,
+                            operating_income_yoy=18.0,
+                            diluted_eps_yoy=12.0,
+                            operating_cash_flow=20_500_000_000,
+                            free_cash_flow=19_200_000_000,
+                            operating_cash_flow_yoy=16.0,
+                            free_cash_flow_yoy=14.0,
+                            cash_and_equivalents=53_700_000_000,
+                            total_assets=144_000_000_000,
+                            total_liabilities=60_000_000_000,
+                            total_debt=12_000_000_000,
+                            cash_to_liabilities=89.5,
+                            liabilities_to_assets=41.7,
+                            enterprise_value=3_050_000_000_000,
+                            ev_to_sales=19.5,
+                            ev_to_ebitda=35.0,
+                            price_to_sales=18.8,
                             shares_float=2_400_000_000,
                             shares_outstanding=2_450_000_000,
                             source="FMP fundamentals",
@@ -519,6 +539,12 @@ class EarningsPipelineTests(unittest.TestCase):
         cards = {card.title: card for card in build_fundamental_metric_cards(fundamentals_text)}
         self.assertEqual(cards["Revenue Trend"].label, "+30.0%")
         self.assertEqual(cards["Revenue Trend"].status, "good")
+        self.assertEqual(cards["Operating Profit"].label, "+18.0%")
+        self.assertEqual(cards["Operating Cash Flow"].label, "+16.0%")
+        self.assertTrue(cards["Balance Sheet"].label.startswith("Cash 89.5%"))
+        self.assertEqual(cards["Valuation"].label, "42.0x")
+        self.assertIn("Net income: $18,800,000,000.00", fundamentals_text)
+        self.assertIn("EV/EBITDA: 35", fundamentals_text)
 
     def test_incomplete_fmp_fundamentals_do_not_block_sec_companyfacts_fallback(self) -> None:
         from app.data.market_data_provider import MarketDataProviderStatus, MarketQuoteFundamentalsRecord, MarketQuoteFundamentalsSnapshot
