@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
-from typing import Iterable, Literal
+from typing import Any, Iterable, Literal, Mapping
 
-from app.data.sec_edgar import DEFAULT_CACHE_TTL, SecEdgarClient, SecFiling, normalize_ticker
+from app.data.sec_edgar import DEFAULT_CACHE_TTL, SecCompany, SecEdgarClient, SecFiling, normalize_ticker
 
 CapitalPressureSeverity = Literal["low", "medium", "high"]
 CapitalPressureRead = Literal["Low", "Moderate", "High", "Unknown"]
@@ -185,6 +185,8 @@ class CapitalStructurePressureReport:
     what_would_change: list[str]
     possible_supply_levels: list[CapitalStructureLevel] = field(default_factory=list)
     parsed_terms: CapitalStructureTermsReport = field(default_factory=CapitalStructureTermsReport)
+    source_label: str = "SEC-only fallback"
+    source_diagnostics: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -377,6 +379,9 @@ def analyze_capital_structure_pressure(
     symbol: str,
     *,
     client: SecEdgarClient | None = None,
+    fmp_provider: Any | None = None,
+    fmp_profile: Mapping[str, Any] | None = None,
+    fmp_filing_metadata: Iterable[Mapping[str, Any]] | None = None,
     filing_limit: int = 24,
     max_documents: int = 8,
     as_of: date | None = None,
@@ -384,25 +389,52 @@ def analyze_capital_structure_pressure(
     clean_symbol = _clean_symbol(symbol)
     active_client = client or SecEdgarClient(timeout_seconds=10)
     warnings: list[str] = []
+    source_label = "SEC-only fallback"
+    source_diagnostics: dict[str, Any] = {
+        "sec_recent_filings_requested": 0,
+        "sec_filing_text_documents_fetched": 0,
+        "fmp_metadata_rows": 0,
+        "fmp_metadata_used": False,
+    }
 
-    try:
-        filings = active_client.recent_filings(clean_symbol, forms=CAPITAL_STRUCTURE_FORMS, limit=filing_limit)
-    except Exception as exc:
-        return unknown_capital_structure_report(
-            clean_symbol,
-            warnings=[f"Capital structure overlay unavailable: SEC recent filings fetch failed: {exc}"],
-        )
+    fmp_filings = _fmp_prefilter_filings(
+        clean_symbol,
+        fmp_profile=fmp_profile,
+        fmp_filing_metadata=fmp_filing_metadata,
+        fmp_provider=fmp_provider,
+        limit=filing_limit,
+    )
+    source_diagnostics["fmp_metadata_rows"] = len(fmp_filings)
+    if fmp_filings:
+        filings = fmp_filings
+        source_label = "FMP metadata + SEC source text"
+        source_diagnostics["fmp_metadata_used"] = True
+        source_diagnostics["sec_recent_filings_skipped"] = True
+    else:
+        try:
+            source_diagnostics["sec_recent_filings_requested"] = 1
+            filings = active_client.recent_filings(clean_symbol, forms=CAPITAL_STRUCTURE_FORMS, limit=filing_limit)
+        except Exception as exc:
+            return unknown_capital_structure_report(
+                clean_symbol,
+                warnings=[f"Capital structure overlay unavailable: SEC recent filings fetch failed: {exc}"],
+                source_label=source_label,
+                source_diagnostics=source_diagnostics,
+            )
 
     if not filings:
         return unknown_capital_structure_report(
             clean_symbol,
             warnings=["Capital structure overlay unavailable: no recent capital-structure SEC filing forms were found."],
+            source_label=source_label,
+            source_diagnostics=source_diagnostics,
         )
 
     filing_texts: list[CapitalStructureFilingText] = []
     for filing in filings[: max(1, max_documents)]:
         try:
             text = fetch_primary_filing_text(active_client, filing)
+            source_diagnostics["sec_filing_text_documents_fetched"] += 1
         except Exception as exc:
             warnings.append(f"{filing.form} filed {filing.filing_date or '--'} text fetch failed: {exc}")
             continue
@@ -424,15 +456,153 @@ def analyze_capital_structure_pressure(
             clean_symbol,
             company_name=company_name,
             warnings=warnings or ["Capital structure overlay unavailable: filing text could not be loaded."],
+            source_label=source_label,
+            source_diagnostics=source_diagnostics,
         )
 
-    return scan_capital_structure_filings(
+    report = scan_capital_structure_filings(
         clean_symbol,
         company_name=company_name,
         filings=filing_texts,
         warnings=warnings,
         as_of=as_of,
     )
+    return replace(report, source_label=source_label, source_diagnostics=source_diagnostics)
+
+
+def _fmp_prefilter_filings(
+    symbol: str,
+    *,
+    fmp_profile: Mapping[str, Any] | None,
+    fmp_filing_metadata: Iterable[Mapping[str, Any]] | None,
+    fmp_provider: Any | None,
+    limit: int,
+) -> list[SecFiling]:
+    metadata_rows = list(fmp_filing_metadata or ())
+    if not metadata_rows and fmp_provider is not None:
+        metadata_rows = _fmp_provider_filing_metadata(symbol, fmp_provider, limit=limit)
+    company = _sec_company_from_fmp(symbol, fmp_profile, metadata_rows)
+    if company is None:
+        return []
+    filings: list[SecFiling] = []
+    seen: set[tuple[str, str]] = set()
+    for row in metadata_rows:
+        if not isinstance(row, Mapping):
+            continue
+        filing = _sec_filing_from_fmp_metadata(company, row)
+        if filing is None:
+            continue
+        if filing.form not in CAPITAL_STRUCTURE_FORMS:
+            continue
+        key = (filing.accession_number, filing.primary_document)
+        if key in seen:
+            continue
+        seen.add(key)
+        filings.append(filing)
+        if len(filings) >= max(1, limit):
+            break
+    return filings
+
+
+def _fmp_provider_filing_metadata(symbol: str, provider: Any, *, limit: int) -> list[Mapping[str, Any]]:
+    for method_name in ("filing_metadata", "sec_filings", "filings"):
+        method = getattr(provider, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            payload = method(symbol, limit=limit)
+        except TypeError:
+            try:
+                payload = method([symbol], max_symbols=1)
+            except TypeError:
+                payload = method(symbol)
+        except Exception:
+            return []
+        return _coerce_metadata_rows(payload)
+    return []
+
+
+def _coerce_metadata_rows(payload: Any) -> list[Mapping[str, Any]]:
+    if isinstance(payload, Mapping):
+        for key in ("filings", "records", "data", "results"):
+            rows = payload.get(key)
+            if isinstance(rows, list):
+                return [row for row in rows if isinstance(row, Mapping)]
+        return [payload]
+    if isinstance(payload, (list, tuple)):
+        return [row for row in payload if isinstance(row, Mapping)]
+    return []
+
+
+def _sec_company_from_fmp(
+    symbol: str,
+    profile: Mapping[str, Any] | None,
+    metadata_rows: list[Mapping[str, Any]],
+) -> SecCompany | None:
+    profile = profile or {}
+    cik = _normalize_cik_value(_first_metadata_value(profile, "cik", "CIK", "cik_str"))
+    company_name = str(_first_metadata_value(profile, "company_name", "companyName", "name") or "").strip()
+    for row in metadata_rows:
+        cik = cik or _normalize_cik_value(_first_metadata_value(row, "cik", "CIK", "cik_str"))
+        company_name = company_name or str(_first_metadata_value(row, "companyName", "company_name", "name") or "").strip()
+        if cik and company_name:
+            break
+    if not cik:
+        return None
+    return SecCompany(ticker=_clean_symbol(symbol), cik=cik, title=company_name or _clean_symbol(symbol))
+
+
+def _sec_filing_from_fmp_metadata(company: SecCompany, row: Mapping[str, Any]) -> SecFiling | None:
+    form = str(_first_metadata_value(row, "form", "type", "filingType") or "").strip().upper()
+    if not form:
+        return None
+    filing_url = str(_first_metadata_value(row, "filing_url", "finalLink", "link", "url", "reportUrl") or "").strip()
+    accession = str(_first_metadata_value(row, "accession_number", "accessionNumber", "accessionNo", "accession") or "").strip()
+    if not accession:
+        accession = _parse_accession_from_url(filing_url)
+    accession = _format_accession_number(accession)
+    primary_document = str(_first_metadata_value(row, "primary_document", "primaryDocument", "document") or "").strip()
+    if not primary_document:
+        primary_document = filing_url.rstrip("/").rsplit("/", 1)[-1] if filing_url else ""
+    if not accession or not primary_document:
+        return None
+    return SecFiling(
+        company=company,
+        accession_number=accession,
+        filing_date=str(_first_metadata_value(row, "filing_date", "fillingDate", "filedDate", "date", "acceptedDate") or ""),
+        report_date=str(_first_metadata_value(row, "report_date", "reportDate", "periodOfReport") or ""),
+        form=form,
+        primary_document=primary_document,
+        description=str(_first_metadata_value(row, "description", "title") or "FMP filing metadata prefilter"),
+        items=str(_first_metadata_value(row, "items", "item") or ""),
+    )
+
+
+def _first_metadata_value(payload: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = payload.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _normalize_cik_value(value: Any) -> str:
+    digits = re.sub(r"\D", "", str(value or ""))
+    return digits.zfill(10) if digits else ""
+
+
+def _parse_accession_from_url(url: str) -> str:
+    match = re.search(r"(\d{10})[-/]?(\d{2})[-/]?(\d{6})", str(url or ""))
+    if not match:
+        return ""
+    return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+
+
+def _format_accession_number(value: str) -> str:
+    digits = re.sub(r"\D", "", str(value or ""))
+    if len(digits) == 18:
+        return f"{digits[:10]}-{digits[10:12]}-{digits[12:]}"
+    return str(value or "").strip()
 
 
 def fetch_primary_filing_text(client: SecEdgarClient, filing: SecFiling) -> str:
@@ -540,6 +710,8 @@ def unknown_capital_structure_report(
     *,
     company_name: str = "",
     warnings: Iterable[str] | None = None,
+    source_label: str = "SEC-only fallback",
+    source_diagnostics: Mapping[str, Any] | None = None,
 ) -> CapitalStructurePressureReport:
     clean_symbol = _clean_symbol(symbol)
     report_warnings = list(warnings or [])
@@ -562,6 +734,8 @@ def unknown_capital_structure_report(
             "SEC recent filings and primary filing text load successfully.",
             "A later scan finds recent registration, warrant, convertible, preferred, or dilution language.",
         ],
+        source_label=source_label,
+        source_diagnostics=dict(source_diagnostics or {}),
     )
 
 
@@ -610,6 +784,7 @@ def format_capital_structure_pressure_section(
         f"- Breakout quality adjustment: {report.breakout_quality_adjustment}.",
         f"- Confidence: {report.confidence}.",
         f"- Filings analyzed: {report.filings_analyzed}.",
+        f"- Source route: {report.source_label}.",
         f"- Technical confidence modifier: {capital_structure_technical_modifier(technical_read, report)}",
         "- This is a filing-derived risk overlay, not a price prediction.",
     ]
@@ -652,6 +827,12 @@ def format_capital_structure_pressure_section(
     if report.warnings:
         lines.extend(["", "Overlay data notes"])
         lines.extend(f"- {warning}" for warning in report.warnings)
+    if report.source_diagnostics:
+        lines.extend(["", "Source diagnostics"])
+        for key, value in report.source_diagnostics.items():
+            if value in (None, "", (), [], {}):
+                continue
+            lines.append(f"- {key}: {value}")
 
     lines.extend(["", "What would change"])
     lines.extend(f"- {line}" for line in report.what_would_change)

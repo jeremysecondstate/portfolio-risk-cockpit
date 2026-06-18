@@ -88,6 +88,23 @@ class FakeSecClient:
         )
 
 
+class FakeSecTextClient:
+    def __init__(self) -> None:
+        self.recent_calls = 0
+        self.document_calls: list[str] = []
+
+    def recent_filings(self, *args: Any, **kwargs: Any) -> list[SecFiling]:
+        self.recent_calls += 1
+        return []
+
+    def document_text_url(self, filing_url: str, *args: Any, **kwargs: Any) -> str:
+        self.document_calls.append(filing_url)
+        return (
+            "The Common Warrants are exercisable for 1,000,000 shares of common stock "
+            "at an exercise price of $5.00 per share. This resale prospectus relates to shares offered by selling stockholders."
+        )
+
+
 class CapitalStructurePressureTests(unittest.TestCase):
     def test_detects_shelf_and_atm_language(self) -> None:
         report = _scan(
@@ -338,6 +355,47 @@ class CapitalStructurePressureTests(unittest.TestCase):
         self.assertEqual(report.company_name, "Test Corp")
         self.assertEqual(report.filings_analyzed, 1)
         self.assertIn("Shelf / registration capacity", {signal.label for signal in report.signals})
+
+    def test_fmp_metadata_narrows_sec_text_fetches_without_replacing_source_text(self) -> None:
+        client = FakeSecTextClient()
+        metadata = [
+            {
+                "symbol": "TEST",
+                "companyName": "Test Corp",
+                "cik": "1234567",
+                "form": "424B5",
+                "filingDate": "2026-04-12",
+                "accessionNumber": "0001234567-26-000001",
+                "primaryDocument": "test-424b5.htm",
+                "finalLink": "https://www.sec.gov/Archives/edgar/data/1234567/000123456726000001/test-424b5.htm",
+            },
+            {
+                "symbol": "TEST",
+                "companyName": "Test Corp",
+                "cik": "1234567",
+                "form": "4",
+                "filingDate": "2026-04-11",
+                "accessionNumber": "0001234567-26-000002",
+                "primaryDocument": "test-form4.htm",
+            },
+        ]
+
+        report = analyze_capital_structure_pressure(
+            "TEST",
+            client=client,
+            fmp_profile={"company_name": "Test Corp", "cik": "1234567"},
+            fmp_filing_metadata=metadata,
+            max_documents=4,
+            as_of=AS_OF,
+        )
+
+        self.assertEqual(client.recent_calls, 0)
+        self.assertEqual(len(client.document_calls), 1)
+        self.assertEqual(report.source_label, "FMP metadata + SEC source text")
+        self.assertEqual(report.source_diagnostics["sec_filing_text_documents_fetched"], 1)
+        self.assertIn("Warrants", {signal.label for signal in report.signals})
+        self.assertTrue(report.parsed_terms.warrants)
+        self.assertTrue(report.parsed_terms.warrants[0].excerpt)
 
     def test_technical_modifier_language(self) -> None:
         high = _scan(

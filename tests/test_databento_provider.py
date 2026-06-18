@@ -37,6 +37,29 @@ class _ListDatabentoClient:
         return [row for row in self.rows if row.get("symbol") in requested]
 
 
+class _TechnicalHistoryClient:
+    def __init__(self) -> None:
+        self.history_calls: list[dict[str, object]] = []
+
+    def fetch_technical_history(self, *, symbols, dataset, schema, timeframe, lookback_minutes):
+        self.history_calls.append(
+            {
+                "symbols": tuple(symbols),
+                "dataset": dataset,
+                "schema": schema,
+                "timeframe": timeframe,
+                "lookback_minutes": lookback_minutes,
+            }
+        )
+        return {
+            symbol: [
+                {"symbol": symbol, "open": 10.0, "high": 10.2, "low": 9.8, "close": 10.1, "volume": 100, "ts_event": "2026-06-16T14:30:00+00:00"},
+                {"symbol": symbol, "open": 10.1, "high": 10.4, "low": 10.0, "close": 10.3, "volume": 150, "ts_event": "2026-06-16T14:31:00+00:00"},
+            ]
+            for symbol in symbols
+        }
+
+
 def test_databento_equities_disabled_returns_status_without_network() -> None:
     client = _FakeDatabentoClient({"ACME": {"symbol": "ACME", "price": 12.5}})
     provider = DatabentoEquitiesProvider(enabled=False, api_key="", dataset="", schema="", client=client)
@@ -217,6 +240,31 @@ def test_databento_equities_warns_for_non_intraday_equity_dataset_schema() -> No
     assert "ohlcv-1m" in combined
     assert snapshot.diagnostics["databento_dataset_mismatch_warnings"] == 2
     assert snapshot.diagnostics["rows_provider_returned_no_usable_data"] == 1
+
+
+def test_databento_technical_history_uses_timeframe_lookbacks_and_skips_daily_for_intraday_schema() -> None:
+    client = _TechnicalHistoryClient()
+    provider = DatabentoEquitiesProvider(
+        enabled=True,
+        api_key="db-secret",
+        dataset="XNAS.ITCH",
+        schema="ohlcv-1m",
+        client=client,
+        cache_ttl_seconds=0,
+    )
+
+    snapshot = provider.technical_history(
+        ["ACME"],
+        timeframes={"timing_1m": 390, "daily_1y": 370 * 24 * 60},
+        max_symbols=1,
+    )
+
+    assert [call["timeframe"] for call in client.history_calls] == ["timing_1m"]
+    assert client.history_calls[0]["lookback_minutes"] == 390
+    assert "timing_1m" in snapshot.rows_by_timeframe
+    assert "daily_1y" not in snapshot.rows_by_timeframe
+    assert snapshot.timeframe_diagnostics["daily_1y"]["status"] == "skipped"
+    assert "Short row/tape context is not treated as full daily/regime history" in snapshot.statuses[0].message
 
 
 def test_databento_cme_context_stays_separate_from_equity_rows() -> None:

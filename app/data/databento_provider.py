@@ -84,6 +84,16 @@ class DatabentoEquityRowsSnapshot:
     diagnostics: Mapping[str, int] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class DatabentoTechnicalHistorySnapshot:
+    rows_by_timeframe: Mapping[str, Mapping[str, Mapping[str, Any]]]
+    fetched_at: str
+    statuses: tuple[MarketDataProviderStatus, ...]
+    errors: tuple[str, ...] = ()
+    diagnostics: Mapping[str, Any] = field(default_factory=dict)
+    timeframe_diagnostics: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+
+
 class DatabentoEquitiesProvider:
     provider_name = "databento_us_equities"
 
@@ -357,6 +367,158 @@ class DatabentoEquitiesProvider:
             ),
         )
 
+    def technical_history(
+        self,
+        symbols: Iterable[str],
+        *,
+        timeframes: Mapping[str, int] | None = None,
+        force_refresh: bool = False,
+        max_symbols: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
+    ) -> DatabentoTechnicalHistorySnapshot:
+        fetched_at = _now()
+        capped_input = _limited_symbols(symbols, max_symbols)
+        requested = capped_input[: self.symbol_limit]
+        skipped_limited = max(0, len(capped_input) - len(requested))
+        requested_timeframes = {
+            str(key): max(1, int(value))
+            for key, value in (timeframes or {}).items()
+            if str(key or "").strip()
+        }
+        if not requested_timeframes:
+            requested_timeframes = {
+                "timing_1m": 24 * 60,
+                "timing_5m": 14 * 24 * 60,
+                "setup_30m": 14 * 24 * 60,
+                "daily_1y": 370 * 24 * 60,
+            }
+
+        disabled = self._disabled_snapshot(fetched_at, len(capped_input))
+        if disabled is not None:
+            return DatabentoTechnicalHistorySnapshot(
+                rows_by_timeframe={},
+                fetched_at=fetched_at,
+                statuses=disabled.statuses,
+                errors=disabled.errors,
+                diagnostics={
+                    **dict(disabled.diagnostics),
+                    "databento_technical_timeframes_requested": len(requested_timeframes),
+                },
+            )
+        if max_symbols <= 0 or self.symbol_limit <= 0:
+            return DatabentoTechnicalHistorySnapshot(
+                rows_by_timeframe={},
+                fetched_at=fetched_at,
+                statuses=(
+                    MarketDataProviderStatus(
+                        "Databento technical history",
+                        "disabled",
+                        fetched_at,
+                        f"Databento technical history: 0 rows updated; {len(capped_input)} skipped/limited because the symbol cap is 0.",
+                    ),
+                ),
+                diagnostics={
+                    "rows_skipped_by_configured_symbol_cap": len(capped_input),
+                    "databento_technical_timeframes_requested": len(requested_timeframes),
+                },
+            )
+        if _looks_like_cme_dataset(self.dataset):
+            message = (
+                f"Databento technical history: configured dataset '{self.dataset}' looks like CME/futures coverage. "
+                "Refusing to merge futures/options data into selected-equity technical history; configure "
+                f"{DATABENTO_EQUITIES_DATASET_ENV} for US equities or enable CME context separately."
+            )
+            return DatabentoTechnicalHistorySnapshot(
+                rows_by_timeframe={},
+                fetched_at=fetched_at,
+                statuses=(MarketDataProviderStatus("Databento technical history", "warning", fetched_at, message),),
+                errors=(message,),
+                diagnostics={
+                    "databento_dataset_mismatch_warnings": 1,
+                    "rows_provider_returned_no_usable_data": len(requested),
+                    "rows_skipped_by_configured_symbol_cap": skipped_limited,
+                    "databento_technical_timeframes_requested": len(requested_timeframes),
+                },
+            )
+
+        config_warnings = list(_databento_equities_config_warnings(self.dataset, self.schema))
+        rows_by_timeframe: dict[str, Mapping[str, Mapping[str, Any]]] = {}
+        timeframe_diagnostics: dict[str, Mapping[str, Any]] = {}
+        errors: list[str] = []
+        total_cache_hits = 0
+        total_chunks_attempted = 0
+        skipped_timeframes = 0
+        for timeframe_key, lookback_minutes in requested_timeframes.items():
+            if timeframe_key == "daily_1y" and not _databento_schema_supports_daily_history(self.schema):
+                skipped_timeframes += 1
+                timeframe_diagnostics[timeframe_key] = {
+                    "status": "skipped",
+                    "reason": "Configured Databento schema is not daily/history-capable for a 1y regime read.",
+                    "requested_lookback_minutes": lookback_minutes,
+                    "rows_returned": 0,
+                }
+                continue
+            rows, cache_hits, chunks_attempted, warnings = self._rows_by_symbol_with_lookback(
+                requested,
+                force_refresh=force_refresh,
+                context=f"equities_history_{timeframe_key}_{lookback_minutes}",
+                lookback_minutes=lookback_minutes,
+                timeframe_key=timeframe_key,
+            )
+            total_cache_hits += cache_hits
+            total_chunks_attempted += chunks_attempted
+            errors.extend(warnings)
+            rows_by_timeframe[timeframe_key] = rows
+            timeframe_diagnostics[timeframe_key] = {
+                "status": "available" if rows else "empty",
+                "requested_lookback_minutes": lookback_minutes,
+                "rows_returned": len(rows),
+                "provider_calls_attempted": chunks_attempted,
+                "provider_cache_hits": cache_hits,
+            }
+
+        rows_returned = sum(len(rows) for rows in rows_by_timeframe.values())
+        warnings = [*config_warnings, *errors]
+        status = "available" if rows_returned else "empty"
+        if warnings:
+            status = "partial" if rows_returned else "warning"
+        if skipped_timeframes and rows_returned:
+            status = "partial"
+        timeframes_text = ", ".join(
+            f"{key}:{value}m" for key, value in requested_timeframes.items()
+        )
+        message = (
+            f"Databento technical history: {rows_returned} timeframe row set(s) updated across {len(requested_timeframes)} requested timeframe(s); "
+            f"attempted {len(requested)} symbol(s) in {total_chunks_attempted} chunk(s); cache used for {total_cache_hits}; "
+            f"{skipped_limited} skipped/limited; {skipped_timeframes} timeframe(s) skipped. "
+            f"Requested windows: {timeframes_text}. Dataset={self.dataset or 'not configured'}; schema={self.schema or 'not configured'}. "
+            "Short row/tape context is not treated as full daily/regime history."
+        )
+        if config_warnings:
+            message += f" Config warning: {_short_warning(config_warnings[0], self.api_key)}"
+        if errors:
+            message += f" Provider warning: {_short_warning(errors[0], self.api_key)}"
+        return DatabentoTechnicalHistorySnapshot(
+            rows_by_timeframe=rows_by_timeframe,
+            fetched_at=fetched_at,
+            statuses=(MarketDataProviderStatus("Databento technical history", status, fetched_at, _redact_databento_secret(message, self.api_key)),),
+            errors=tuple(_redact_databento_secret(warning, self.api_key) for warning in warnings[:6]),
+            diagnostics={
+                "databento_technical_timeframes_requested": len(requested_timeframes),
+                "databento_technical_timeframes_skipped": skipped_timeframes,
+                "databento_technical_rows_returned": rows_returned,
+                "databento_technical_cache_hits": total_cache_hits,
+                "databento_technical_chunks_attempted": total_chunks_attempted,
+                "provider_rows_requested": len(requested),
+                "provider_rows_returned": rows_returned,
+                "provider_calls_attempted": total_chunks_attempted,
+                "provider_cache_hits": total_cache_hits,
+                "provider_warnings": len(warnings),
+                "rows_skipped_by_configured_symbol_cap": skipped_limited,
+                "rows_blocked_by_provider_plan_rate_auth_limit": 1 if any(_is_provider_limit_warning(warning) for warning in errors) else 0,
+            },
+            timeframe_diagnostics=timeframe_diagnostics,
+        )
+
     def _disabled_snapshot(self, fetched_at: str, capped_count: int) -> MarketQuoteFundamentalsSnapshot | None:
         if not self.enabled:
             return MarketQuoteFundamentalsSnapshot(
@@ -396,13 +558,30 @@ class DatabentoEquitiesProvider:
         return None
 
     def _rows_by_symbol(self, symbols: tuple[str, ...], *, force_refresh: bool) -> tuple[dict[str, Mapping[str, Any]], int, int, list[str]]:
+        return self._rows_by_symbol_with_lookback(
+            symbols,
+            force_refresh=force_refresh,
+            context="equities",
+            lookback_minutes=self.lookback_minutes,
+            timeframe_key=None,
+        )
+
+    def _rows_by_symbol_with_lookback(
+        self,
+        symbols: tuple[str, ...],
+        *,
+        force_refresh: bool,
+        context: str,
+        lookback_minutes: int,
+        timeframe_key: str | None,
+    ) -> tuple[dict[str, Mapping[str, Any]], int, int, list[str]]:
         rows: dict[str, Mapping[str, Any]] = {}
         missing: list[str] = []
         cache_hits = 0
         chunks_attempted = 0
         warnings: list[str] = []
         for symbol in symbols:
-            cached = self._cache_get("equities", symbol, force_refresh=force_refresh)
+            cached = self._cache_get(context, symbol, force_refresh=force_refresh)
             if cached is None:
                 missing.append(symbol)
             else:
@@ -422,8 +601,9 @@ class DatabentoEquitiesProvider:
                         symbols=chunk,
                         dataset=self.dataset,
                         schema=self.schema,
-                        lookback_minutes=self.lookback_minutes,
-                        context="equities",
+                        lookback_minutes=lookback_minutes,
+                        context=context,
+                        timeframe_key=timeframe_key,
                     )
                 except DatabentoProviderWarning as exc:
                     warnings.append(_redact_databento_secret(str(exc), self.api_key))
@@ -433,7 +613,7 @@ class DatabentoEquitiesProvider:
                     break
                 for symbol, row in _coerce_rows_by_symbol(fetched_rows, chunk).items():
                     rows[symbol] = row
-                    self._cache_set("equities", symbol, row)
+                    self._cache_set(context, symbol, row)
         return rows, cache_hits, chunks_attempted, warnings
 
     def _record_from_row(self, symbol: str, row: Mapping[str, Any], *, fetched_at: str) -> MarketQuoteFundamentalsRecord:
@@ -707,20 +887,57 @@ def _call_databento_rows(
     schema: str,
     lookback_minutes: int,
     context: str,
+    timeframe_key: str | None = None,
 ) -> Any:
-    custom_method = getattr(client, "fetch_equity_rows" if context == "equities" else "fetch_context_rows", None)
-    if callable(custom_method):
-        return custom_method(symbols=symbols, dataset=dataset, schema=schema)
+    if timeframe_key:
+        technical_method = getattr(client, "fetch_technical_history", None)
+        if callable(technical_method):
+            return technical_method(
+                symbols=symbols,
+                dataset=dataset,
+                schema=schema,
+                timeframe=timeframe_key,
+                lookback_minutes=max(1, lookback_minutes),
+            )
 
-    generic_method = getattr(client, "fetch_rows", None)
-    if callable(generic_method):
-        return generic_method(symbols=symbols, dataset=dataset, schema=schema, context=context)
+        generic_method = getattr(client, "fetch_rows", None)
+        if callable(generic_method):
+            try:
+                return generic_method(
+                    symbols=symbols,
+                    dataset=dataset,
+                    schema=schema,
+                    context=context,
+                    timeframe=timeframe_key,
+                    lookback_minutes=max(1, lookback_minutes),
+                )
+            except TypeError:
+                pass
+
+        timeseries = getattr(client, "timeseries", None)
+        get_range = getattr(timeseries, "get_range", None)
+        if not callable(get_range):
+            raise DatabentoProviderWarning(
+                "Databento technical history requires fetch_technical_history, timeframe-aware fetch_rows, or timeseries.get_range; "
+                "short row/tape clients are not reused for daily/regime history."
+            )
+
+    is_equity_context = context == "equities" or context.startswith("equities_history_")
+    if not timeframe_key:
+        custom_method = getattr(client, "fetch_equity_rows" if is_equity_context else "fetch_context_rows", None)
+        if callable(custom_method):
+            return custom_method(symbols=symbols, dataset=dataset, schema=schema)
+
+        generic_method = getattr(client, "fetch_rows", None)
+        if callable(generic_method):
+            return generic_method(symbols=symbols, dataset=dataset, schema=schema, context=context)
 
     timeseries = getattr(client, "timeseries", None)
     get_range = getattr(timeseries, "get_range", None)
     if callable(get_range):
         end = datetime.now(timezone.utc)
         start = end - timedelta(minutes=max(1, lookback_minutes))
+        row_limit = max(1, len(symbols) * min(max(lookback_minutes, 10), 10_000))
         try:
             store = get_range(
                 dataset=dataset,
@@ -729,7 +946,7 @@ def _call_databento_rows(
                 stype_in="raw_symbol",
                 start=start.isoformat(),
                 end=end.isoformat(),
-                limit=max(1, len(symbols) * 10),
+                limit=row_limit,
             )
         except TypeError:
             store = get_range(
@@ -738,7 +955,7 @@ def _call_databento_rows(
                 symbols=list(symbols),
                 start=start.isoformat(),
                 end=end.isoformat(),
-                limit=max(1, len(symbols) * 10),
+                limit=row_limit,
             )
         try:
             frame = store.to_df()
@@ -1125,6 +1342,10 @@ def _databento_equities_config_warnings(dataset: str, schema: str) -> tuple[str,
             f"use {recommended}."
         )
     return tuple(warnings)
+
+
+def _databento_schema_supports_daily_history(schema: str) -> bool:
+    return str(schema or "").strip().lower() in {"ohlcv-1d", "ohlcv-1day", "ohlcv-daily", "daily", "eod"}
 
 
 def _is_provider_limit_warning(message: str) -> bool:

@@ -8,7 +8,9 @@ from tkinter import messagebox, simpledialog, ttk
 
 from app.analytics.technical_analysis import (
     DEFAULT_COMMAND_CENTER_TIMEFRAMES,
+    QuoteSnapshot,
     TechnicalTicket,
+    TimeframeSpec,
     build_technical_command_center_report,
     candles_from_price_history,
     format_technical_command_center_report,
@@ -313,9 +315,22 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             if session is None:
                 return
 
-            timeframe_candles = {}
+            external_intelligence = None
             warnings = []
+            try:
+                external_intelligence = build_external_market_intelligence(
+                    symbol,
+                    schwab_session=session,
+                    force_refresh=False,
+                )
+            except Exception:
+                warnings.append("External market intelligence unavailable due to an unexpected enrichment error.")
+
+            timeframe_candles = {}
             for spec in DEFAULT_COMMAND_CENTER_TIMEFRAMES:
+                if _provider_first_history_available(external_intelligence, symbol, spec):
+                    timeframe_candles[spec.key] = []
+                    continue
                 try:
                     status_code, payload = session.get_price_history(
                         symbol,
@@ -365,18 +380,16 @@ class SchwabTradingCockpitApp(PortfolioRiskCockpitApp):
             except Exception as exc:
                 warnings.append(f"{symbol} quote fetch failed: {exc}")
 
-            external_intelligence = None
-            try:
-                external_intelligence = build_external_market_intelligence(
-                    symbol,
-                    schwab_session=session,
-                    force_refresh=False,
-                )
-            except Exception:
-                warnings.append("External market intelligence unavailable due to an unexpected enrichment error.")
+            if quote_snapshot is None:
+                quote_snapshot = _quote_snapshot_from_external_intelligence(symbol, external_intelligence)
 
             try:
-                capital_structure_pressure = analyze_capital_structure_pressure(symbol)
+                fmp_filings = _external_fmp_filing_metadata(external_intelligence)
+                capital_structure_pressure = analyze_capital_structure_pressure(
+                    symbol,
+                    fmp_profile=getattr(external_intelligence, "fmp_profile", None),
+                    fmp_filing_metadata=fmp_filings,
+                )
             except Exception as exc:
                 capital_structure_pressure = unknown_capital_structure_report(
                     symbol,
@@ -678,3 +691,51 @@ def _portfolio_value(app: tk.Tk) -> float | None:
         return value if value > 0 else None
     except Exception:
         return None
+
+
+def _provider_first_history_available(external_intelligence, symbol: str, spec: TimeframeSpec) -> bool:
+    candles_by_timeframe = getattr(external_intelligence, "databento_technical_candles", None)
+    if not isinstance(candles_by_timeframe, dict):
+        return False
+    candles = candles_by_timeframe.get(spec.key) or ()
+    try:
+        count = len(candles)
+    except TypeError:
+        return False
+    min_count = 1 if spec.key == "timing_1m" else 35
+    return count >= min_count
+
+
+def _quote_snapshot_from_external_intelligence(symbol: str, external_intelligence) -> QuoteSnapshot | None:
+    for source_name, payload in (
+        ("Databento tape", getattr(external_intelligence, "databento_equity_tape", None)),
+        ("FMP quote", getattr(external_intelligence, "fmp_quote", None)),
+    ):
+        if not isinstance(payload, dict):
+            continue
+        price = _optional_float(str(payload.get("price") or payload.get("last") or ""))
+        volume = _optional_float(str(payload.get("volume") or ""))
+        if price is None and volume is None:
+            continue
+        return QuoteSnapshot(
+            symbol=symbol,
+            last=price,
+            mark=price,
+            total_volume=volume,
+            raw=payload,
+            data_quality_warnings=[f"Schwab quote unavailable; using {source_name} as quote fallback context."],
+        )
+    return None
+
+
+def _external_fmp_filing_metadata(external_intelligence) -> tuple[dict, ...]:
+    direct = getattr(external_intelligence, "fmp_filing_metadata", None)
+    if isinstance(direct, (list, tuple)):
+        return tuple(item for item in direct if isinstance(item, dict))
+    provenance = getattr(external_intelligence, "provenance", None)
+    if not isinstance(provenance, dict):
+        return ()
+    filings = provenance.get("fmp_filings") or provenance.get("fmp_filing_metadata")
+    if not isinstance(filings, (list, tuple)):
+        return ()
+    return tuple(item for item in filings if isinstance(item, dict))
