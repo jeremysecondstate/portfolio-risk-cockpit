@@ -2246,7 +2246,7 @@ def _build_research_payload(session: Any, portfolio, symbol: str, *, ticket: Tec
     try:
         macro_snapshot = fetch_macro_release_snapshot(timeout_seconds=8)
         macro_text = format_macro_report(macro_snapshot)
-        statuses.append(DataSourceStatus("Official macro", "fresh/cache", _now(), "BLS/BEA/Treasury macro context loaded."))
+        statuses.append(DataSourceStatus("Official macro", "fresh/cache", _now(), "BLS/BEA/Treasury plus Census/Fed/EIA status context loaded where configured."))
     except Exception as exc:
         macro_text = f"Official Macro Snapshot\nFetched: unavailable\n\nMacro data unavailable/error: {exc}"
         statuses.append(DataSourceStatus("Official macro", "error", _now(), str(exc)))

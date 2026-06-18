@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from app.analytics.technical_analysis import (
     Candle,
+    QuoteSnapshot,
     build_technical_command_center_report,
     format_technical_command_center_report,
 )
@@ -65,6 +67,17 @@ def _price_history_payload(count: int = 90) -> dict[str, object]:
             for candle in _candles(count)
         ]
     }
+
+
+def _fresh_minute_candles(count: int, *, start: float = 20.0, step: float = 0.05) -> list[Candle]:
+    base_ms = int(datetime.now(timezone.utc).timestamp() * 1000) - (count * 60_000)
+    rows: list[Candle] = []
+    price = start
+    for index in range(count):
+        close = price + step
+        rows.append(Candle(base_ms + index * 60_000, price, max(price, close) + 0.10, min(price, close) - 0.10, close, 1_000 + index))
+        price = close
+    return rows
 
 
 def test_external_market_intelligence_all_external_providers_disabled_or_missing_keys(monkeypatch) -> None:
@@ -278,6 +291,52 @@ def test_show_technical_analysis_still_succeeds_when_enrichment_returns_warnings
     assert captured
     assert "MARKET INTELLIGENCE SOURCES" in captured[0]
     assert "External warning only." in captured[0]
+
+
+def test_command_center_uses_databento_candles_when_schwab_timeframe_missing() -> None:
+    intelligence = ExternalMarketIntelligence(
+        symbol="ACME",
+        databento_equity_tape={"price": 22.0, "volume": 2_000, "avg_volume": 1_000, "fetched_at": datetime.now(timezone.utc).isoformat()},
+        databento_equity_candles={"ACME": tuple(_fresh_minute_candles(60, start=20.0, step=0.04))},
+    )
+
+    report = build_technical_command_center_report(
+        "ACME",
+        {"daily_1y": _candles(90), "timing_5m": []},
+        external_intelligence=intelligence,
+    )
+    text = format_technical_command_center_report(report)
+
+    timing_source = report.timeframe_source_labels["timing_5m"]
+    assert timing_source.source == "Databento"
+    assert report.snapshots["timing_5m"].candle_count > 0
+    assert report.snapshots["timing_5m"].source == "Databento"
+    assert "TIMEFRAME DATA SOURCES" in text
+    assert "Databento selected-equity candles influenced VWAP" in text
+
+
+def test_command_center_demotes_confidence_on_external_quote_conflict() -> None:
+    intelligence = ExternalMarketIntelligence(
+        symbol="ACME",
+        fmp_profile={"company_name": "Acme Corp", "sector": "Technology", "industry": "Software"},
+        fmp_quote={"price": 105.0, "volume": 10_000},
+        fmp_fundamentals={"market_cap": 1_000_000_000, "revenue_growth": 12.0, "shares_float": 50_000_000},
+        databento_equity_tape={"price": 99.75, "volume": 10_000, "avg_volume": 7_000, "fetched_at": datetime.now(timezone.utc).isoformat()},
+    )
+
+    report = build_technical_command_center_report(
+        "ACME",
+        {"daily_1y": _candles(90), "setup_30m": _candles(90), "timing_5m": _candles(90)},
+        quote_snapshot=QuoteSnapshot("ACME", bid=99.95, ask=100.05, last=100.0, mark=100.0),
+        external_intelligence=intelligence,
+    )
+    text = format_technical_command_center_report(report)
+
+    assert any("Source conflict" in warning for warning in report.warnings)
+    assert report.best_action == "Wait for source confirmation"
+    assert report.confidence in {"Medium", "Low"}
+    assert "DECISION-WEIGHTED READ" in text
+    assert "Market Intelligence" in report.scores
 
 
 def test_external_market_intelligence_redacts_provider_secrets_from_statuses_and_warnings() -> None:
