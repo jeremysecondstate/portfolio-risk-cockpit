@@ -1199,6 +1199,20 @@ def test_fmp_staged_family_methods_batch_profile_filter_fields_and_report_cache(
             return _FakeFmpResponse(200, [{"symbol": "ACME", "priceEarningsRatioTTM": 18.5}])
         if url.endswith("/income-statement-growth"):
             return _FakeFmpResponse(200, [{"symbol": "ACME", "growthRevenue": 0.124}])
+        if url.endswith("/income-statement"):
+            return _FakeFmpResponse(
+                200,
+                [{"symbol": "ACME", "revenue": 1_250_000_000, "netIncome": 120_000_000, "operatingIncome": 180_000_000, "epsdiluted": 0.82}],
+            )
+        if url.endswith("/balance-sheet-statement"):
+            return _FakeFmpResponse(
+                200,
+                [{"symbol": "ACME", "cashAndCashEquivalents": 100_000_000, "totalAssets": 1_000_000_000, "totalLiabilities": 400_000_000, "shortTermDebt": 50_000_000, "longTermDebt": 150_000_000}],
+            )
+        if url.endswith("/cash-flow-statement"):
+            return _FakeFmpResponse(200, [{"symbol": "ACME", "operatingCashFlow": 300_000_000, "freeCashFlow": 250_000_000}])
+        if url.endswith("/cash-flow-statement-growth"):
+            return _FakeFmpResponse(200, [{"symbol": "ACME", "growthOperatingCashFlow": 0.15, "growthFreeCashFlow": 0.12}])
         if url.endswith("/shares-float"):
             return _FakeFmpResponse(200, [{"symbol": "ACME", "floatShares": 120_000_000, "outstandingShares": 150_000_000}])
         raise AssertionError(url)
@@ -1230,9 +1244,24 @@ def test_fmp_staged_family_methods_batch_profile_filter_fields_and_report_cache(
     assert fundamentals_record.market_cap == 2_500_000_000
     assert fundamentals_record.pe_ratio == 18.5
     assert fundamentals_record.revenue_growth == 12.4
+    assert fundamentals_record.revenue == 1_250_000_000
+    assert fundamentals_record.net_income == 120_000_000
+    assert fundamentals_record.operating_income == 180_000_000
+    assert fundamentals_record.operating_cash_flow == 300_000_000
+    assert fundamentals_record.free_cash_flow == 250_000_000
+    assert fundamentals_record.operating_cash_flow_yoy == 15.0
+    assert fundamentals_record.free_cash_flow_yoy == 12.0
+    assert fundamentals_record.cash_and_equivalents == 100_000_000
+    assert fundamentals_record.total_liabilities == 400_000_000
+    assert fundamentals_record.total_debt == 200_000_000
+    assert fundamentals_record.cash_to_liabilities == 25.0
     assert fundamentals_record.shares_float == 120_000_000
     assert fundamentals_record.price is None
-    assert fundamentals.diagnostics["provider_calls_attempted"] == 4
+    assert fundamentals.diagnostics["provider_calls_attempted"] == 8
+    assert fundamentals.diagnostics["rows_enriched_by_fmp_income_statement"] == 1
+    assert fundamentals.diagnostics["rows_enriched_by_fmp_balance_sheet"] == 1
+    assert fundamentals.diagnostics["rows_enriched_by_fmp_cash_flow"] == 1
+    assert fundamentals.diagnostics["rows_enriched_by_fmp_cash_flow_growth"] == 1
 
 
 def test_fmp_missing_key_is_optional_and_does_not_call_network() -> None:
@@ -1246,6 +1275,76 @@ def test_fmp_missing_key_is_optional_and_does_not_call_network() -> None:
     assert snapshot.statuses[0].source == "FMP quote/fundamentals"
     assert snapshot.statuses[0].status == "unavailable"
     assert "No FMP_API_KEY is configured" in snapshot.statuses[0].message
+
+
+def test_fmp_filing_metadata_normalizes_sec_prefilter_rows_without_key_leakage() -> None:
+    api_key = "fmp-secret-filing-key"
+
+    def handler(url: str, params: dict[str, object]) -> _FakeFmpResponse:
+        assert "apikey" not in params
+        if url.endswith("/sec-filings-search/symbol"):
+            assert params["symbol"] == "ACME"
+            assert params["limit"] == "2"
+            return _FakeFmpResponse(
+                200,
+                [
+                    {
+                        "symbol": "ACME",
+                        "companyName": "Acme Corp",
+                        "cik": "1234567",
+                        "form": "424B5",
+                        "filingDate": "2026-06-12",
+                        "finalLink": "https://www.sec.gov/Archives/edgar/data/1234567/000123456726000123/acme-424b5.htm",
+                    }
+                ],
+            )
+        raise AssertionError(url)
+
+    session = _FakeFmpSession(handler)
+    provider = FmpQuoteFundamentalsProvider(api_key=api_key, session=session, cache_ttl_seconds=600)
+
+    rows = provider.filing_metadata("ACME", limit=2)
+    cached = provider.filing_metadata("ACME", limit=2)
+
+    assert len(rows) == 1
+    assert rows == cached
+    assert rows[0]["accessionNumber"] == "0001234567-26-000123"
+    assert rows[0]["primaryDocument"] == "acme-424b5.htm"
+    assert rows[0]["source"] == "FMP filing metadata"
+    assert api_key not in str(rows)
+    assert len(session.calls) == 1
+
+
+def test_fmp_macro_context_builds_labeled_proxy_rows_and_caches() -> None:
+    def handler(url: str, params: dict[str, object]) -> _FakeFmpResponse:
+        assert "apikey" not in params
+        if url.endswith("/economic-indicators"):
+            name = str(params["name"])
+            return _FakeFmpResponse(
+                200,
+                [
+                    {"date": "2026-05", "value": 3.2 if name == "CPI" else 2.0},
+                    {"date": "2026-04", "value": 3.0 if name == "CPI" else 1.8},
+                ],
+            )
+        if url.endswith("/quote"):
+            symbol = str(params["symbol"])
+            return _FakeFmpResponse(200, [{"symbol": symbol, "price": 75.0, "previousClose": 73.5}])
+        raise AssertionError(url)
+
+    session = _FakeFmpSession(handler)
+    provider = FmpQuoteFundamentalsProvider(api_key="secret", session=session, cache_ttl_seconds=600)
+
+    context = provider.macro_context(limit=2)
+    cached = provider.macro_context(limit=2)
+
+    assert context == cached
+    assert context["CPI"]["category"] == "Inflation"
+    assert context["CPI"]["value"] == 3.2
+    assert context["CPI"]["prior"] == 3.0
+    assert context["CLUSD"]["category"] == "Energy"
+    assert context["CLUSD"]["price"] == 75.0
+    assert len(session.calls) == 7
 
 
 def test_fmp_missing_fields_remain_none_and_screener_renders_dashes() -> None:

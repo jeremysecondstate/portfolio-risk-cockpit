@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 from app.analytics.research_scoring import BadgeReadout, direction_strength_label
 from app.analytics.stock_research import AdvancedIndicatorSnapshot, GeneratedStockPosition, PortfolioSymbolContext
@@ -140,6 +140,10 @@ class FundamentalTrendMetrics:
     operating_cash_flow_yoy: float | None = None
     cash_to_liabilities: float | None = None
     liabilities_to_assets: float | None = None
+    pe_ratio: float | None = None
+    ev_to_sales: float | None = None
+    ev_to_ebitda: float | None = None
+    price_to_sales: float | None = None
     data_points: int = 0
     companyfacts_source: bool = False
     risk_flags: tuple[str, ...] = ()
@@ -189,9 +193,9 @@ TERM_HELPERS = {
 }
 
 
-def build_macro_metric_cards(snapshot: MacroSnapshot | None) -> list[MacroMetricReadout]:
+def build_macro_metric_cards(snapshot: MacroSnapshot | None, provider_context: Any | None = None) -> list[MacroMetricReadout]:
     if snapshot is None:
-        return [
+        readouts = [
             MacroMetricReadout(
                 group=group,
                 metric="Unavailable",
@@ -201,12 +205,15 @@ def build_macro_metric_cards(snapshot: MacroSnapshot | None) -> list[MacroMetric
                 period="--",
                 source="--",
                 freshness="unavailable",
-                simple_read="Mixed",
+                simple_read="Unavailable",
                 status="info",
                 interpretation="Official macro data was not available. Historical comparison unavailable.",
             )
             for group in ("Inflation", "Labor", "Growth / Consumer", "Rates / Treasury", "Energy")
         ]
+        readouts = _with_macro_provider_proxies(readouts, provider_context)
+        readouts.append(_overall_macro_readout(readouts))
+        return readouts
 
     groups = {
         "Inflation": ("CPI", "Core CPI", "PPI"),
@@ -227,6 +234,7 @@ def build_macro_metric_cards(snapshot: MacroSnapshot | None) -> list[MacroMetric
         elif not releases:
             releases = [release for release in snapshot.releases if release.category in _group_categories(group)]
         readouts.append(_macro_group_readout(group, releases[:3]))
+    readouts = _with_macro_provider_proxies(readouts, provider_context)
     readouts.append(_overall_macro_readout(readouts))
     return readouts
 
@@ -1044,6 +1052,9 @@ def build_fundamental_metric_cards(fundamentals_text: str) -> list[BadgeReadout]
     elif metrics.diluted_eps_yoy is not None:
         cards.append(_fundamental_change_badge("Diluted EPS", metrics.diluted_eps_yoy, "latest comparable-period diluted EPS change"))
     cards.append(_balance_sheet_badge(metrics))
+    valuation = _valuation_badge(metrics)
+    if valuation is not None:
+        cards.append(valuation)
     return cards
 
 
@@ -1161,7 +1172,7 @@ def build_risk_plan(
 
 def _macro_group_readout(group: str, releases: list[MacroRelease]) -> MacroMetricReadout:
     if not releases:
-        return MacroMetricReadout(group, "Unavailable", "--", "--", "--", "--", "--", "unavailable", "Mixed", "info", "Historical comparison unavailable.")
+        return MacroMetricReadout(group, "Unavailable", "--", "--", "--", "--", "--", "unavailable", "Unavailable", "info", "Official macro data unavailable. Historical comparison unavailable.")
     primary = releases[0]
     latest = _format_macro_value(primary.actual, primary.unit)
     prior = _format_macro_value(primary.prior, primary.unit)
@@ -1173,20 +1184,185 @@ def _macro_group_readout(group: str, releases: list[MacroRelease]) -> MacroMetri
 
 
 def _overall_macro_readout(readouts: list[MacroMetricReadout]) -> MacroMetricReadout:
-    hot = sum(1 for readout in readouts if readout.simple_read in {"Hot", "Strong", "Headwind"})
-    cool = sum(1 for readout in readouts if readout.simple_read in {"Cool", "Weak", "Tailwind"})
-    if hot > cool:
+    official_rows = [readout for readout in readouts if not _is_macro_proxy_row(readout)]
+    scored_rows = [readout for readout in official_rows if readout.simple_read not in {"Unavailable", "No Data"}]
+    hot = sum(1 for readout in scored_rows if readout.simple_read in {"Hot", "Strong", "Headwind"})
+    cool = sum(1 for readout in scored_rows if readout.simple_read in {"Cool", "Weak", "Tailwind"})
+    unavailable_groups = [readout.group for readout in official_rows if readout.simple_read in {"Unavailable", "No Data"}]
+    cached_rows = [readout for readout in scored_rows if "cached" in readout.freshness.lower()]
+    proxy_rows = [readout for readout in readouts if _is_macro_proxy_row(readout)]
+    if not scored_rows:
+        if proxy_rows:
+            simple, status = "Proxy Context", "info"
+            text = "Official macro rows were unavailable; provider proxy/fallback rows are shown separately and are not counted as official macro evidence."
+        else:
+            simple, status = "Unavailable", "info"
+            text = "Official macro rows were unavailable, so no composite macro read was scored."
+    elif hot > cool:
         simple, status, text = "Headwind", "bad", "Inflation/rates or demand pressure is elevated, so entries need more discipline."
     elif cool > hot:
         simple, status, text = "Tailwind", "good", "Macro pressure is cooling enough to support risk appetite if growth holds up."
     else:
-        simple, status, text = "Mixed", "mixed", "Macro signals conflict; symbol-level trend and earnings should carry more weight."
-    return MacroMetricReadout("Overall Macro Backdrop", "Composite", "--", "--", "--", "--", "Official sources", "fresh/cache", simple, status, text)
+        simple, status, text = "Mixed", "mixed", "Official macro signals conflict; symbol-level trend and earnings should carry more weight."
+    notes: list[str] = []
+    if unavailable_groups:
+        notes.append("official unavailable: " + ", ".join(unavailable_groups[:4]))
+    if cached_rows:
+        notes.append("cached fallback rows present")
+    if proxy_rows:
+        notes.append("provider proxy context shown separately")
+    if notes:
+        text = f"{text} Diagnostics: {'; '.join(notes)}."
+    return MacroMetricReadout("Overall Macro Backdrop", "Composite", "--", "--", "--", "--", "Official sources", "fresh/cache/proxy", simple, status, text)
+
+
+def _is_macro_proxy_row(readout: MacroMetricReadout) -> bool:
+    lower = f"{readout.source} {readout.freshness} {readout.metric}".lower()
+    return "market proxy" in lower or "provider fallback" in lower or readout.simple_read == "Proxy Context"
+
+
+def _with_macro_provider_proxies(readouts: list[MacroMetricReadout], provider_context: Any | None) -> list[MacroMetricReadout]:
+    if provider_context is None:
+        return readouts
+    missing_groups = {
+        readout.group
+        for readout in readouts
+        if readout.simple_read in {"Unavailable", "No Data"} and readout.group != "Overall Macro Backdrop"
+    }
+    if not missing_groups:
+        return readouts
+    proxies = _macro_provider_proxy_readouts(provider_context, missing_groups)
+    if not proxies:
+        return readouts
+    return [*readouts, *proxies]
+
+
+def _macro_provider_proxy_readouts(provider_context: Any, missing_groups: set[str]) -> list[MacroMetricReadout]:
+    rows: list[MacroMetricReadout] = []
+    databento_context = _provider_mapping(getattr(provider_context, "databento_futures_context", None))
+    if not databento_context:
+        databento_context = _provider_mapping(_mapping_value(provider_context, "databento_futures_context"))
+    for symbol, payload in databento_context.items():
+        if not isinstance(payload, Mapping):
+            continue
+        group = _databento_macro_proxy_group(str(symbol), payload)
+        if group not in missing_groups:
+            continue
+        row = _macro_proxy_readout(
+            group,
+            metric=f"Databento market proxy: {symbol}",
+            source="Databento market proxy",
+            payload=payload,
+            interpretation="Official macro data for this group is unavailable. Databento CME/futures context is shown as a market proxy only and is not counted as official macro evidence.",
+        )
+        if row is not None:
+            rows.append(row)
+
+    fmp_context = _provider_mapping(getattr(provider_context, "fmp_macro_context", None))
+    if not fmp_context:
+        fmp_context = _provider_mapping(_mapping_value(provider_context, "fmp_macro_context", "fmp_macro", "fmp_economic_context"))
+    for key, payload in fmp_context.items():
+        if not isinstance(payload, Mapping):
+            continue
+        group = _fmp_macro_proxy_group(str(key), payload)
+        if group not in missing_groups:
+            continue
+        label = str(_first_mapping_value(payload, "metric", "name", "label") or key)
+        row = _macro_proxy_readout(
+            group,
+            metric=f"FMP provider fallback: {label}",
+            source="FMP provider fallback",
+            payload=payload,
+            interpretation="Official macro data for this group is unavailable. FMP economic/commodity context is shown as provider fallback only and is not counted as official macro evidence.",
+        )
+        if row is not None:
+            rows.append(row)
+    return rows[:4]
+
+
+def _macro_proxy_readout(
+    group: str,
+    *,
+    metric: str,
+    source: str,
+    payload: Mapping[str, Any],
+    interpretation: str,
+) -> MacroMetricReadout | None:
+    latest = _to_float(_first_mapping_value(payload, "price", "value", "actual", "close", "settle"))
+    prior = _to_float(_first_mapping_value(payload, "prior", "previous", "previous_close", "open"))
+    change_value = None if latest is None or prior is None else latest - prior
+    period = str(_first_mapping_value(payload, "timestamp", "fetched_at", "date", "period") or "--")
+    freshness = str(_first_mapping_value(payload, "freshness", "status") or "proxy")
+    if latest is None and prior is None:
+        return None
+    return MacroMetricReadout(
+        group=group,
+        metric=metric,
+        latest_value=_format_macro_value(latest, str(_first_mapping_value(payload, "unit") or "")),
+        prior_value=_format_macro_value(prior, str(_first_mapping_value(payload, "unit") or "")),
+        change="--" if change_value is None else f"{change_value:+.2f}",
+        period=period,
+        source=source,
+        freshness=f"proxy/{freshness}",
+        simple_read="Proxy Context",
+        status="info",
+        interpretation=interpretation,
+    )
+
+
+def _databento_macro_proxy_group(symbol: str, payload: Mapping[str, Any]) -> str:
+    haystack = f"{symbol} {_first_mapping_value(payload, 'symbol', 'name', 'description')}".upper()
+    if any(token in haystack for token in ("CL", "NG", "RB", "HO", "BZ", "WTI", "CRUDE", "NATGAS", "GASOLINE", "OIL")):
+        return "Energy"
+    if any(token in haystack for token in ("ZN", "ZB", "ZT", "ZF", "SR3", "SOFR", "TREASURY", "FED", "RATE", "YIELD")):
+        return "Rates / Treasury"
+    if any(token in haystack for token in ("ES", "NQ", "RTY", "YM", "E-MINI", "EQUITY")):
+        return "Growth / Consumer"
+    return ""
+
+
+def _fmp_macro_proxy_group(key: str, payload: Mapping[str, Any]) -> str:
+    haystack = f"{key} {_first_mapping_value(payload, 'category', 'metric', 'name', 'label', 'symbol')}".lower()
+    if any(term in haystack for term in ("oil", "crude", "gasoline", "energy", "natural gas", "commodity")):
+        return "Energy"
+    if any(term in haystack for term in ("cpi", "inflation", "ppi", "price index")):
+        return "Inflation"
+    if any(term in haystack for term in ("unemployment", "payroll", "labor", "jobs", "employment")):
+        return "Labor"
+    if any(term in haystack for term in ("treasury", "rate", "yield", "fed", "sofr")):
+        return "Rates / Treasury"
+    if any(term in haystack for term in ("gdp", "retail", "consumer", "pce", "growth")):
+        return "Growth / Consumer"
+    return ""
+
+
+def _provider_mapping(value: Any) -> Mapping[str, Any]:
+    if isinstance(value, Mapping):
+        return value
+    return {}
+
+
+def _mapping_value(value: Any, *keys: str) -> Any:
+    if isinstance(value, Mapping):
+        return _first_mapping_value(value, *keys)
+    for key in keys:
+        item = getattr(value, key, None)
+        if item not in (None, ""):
+            return item
+    return None
+
+
+def _first_mapping_value(payload: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = payload.get(key)
+        if value not in (None, ""):
+            return value
+    return None
 
 
 def _macro_simple_read(release: MacroRelease) -> tuple[str, str]:
     if release.actual is None or release.prior is None:
-        return "Mixed", "info"
+        return "Unavailable", "info"
     delta = release.actual - release.prior
     if abs(delta) < 0.0001:
         return "Mixed", "mixed"
@@ -2121,8 +2297,12 @@ def _structured_fundamental_metrics(text: str) -> FundamentalTrendMetrics:
 
     cash_to_liabilities = _parse_ratio_line(lower, r"cash equals roughly\s+([+-]?\d+(?:\.\d+)?)%\s+of reported liabilities")
     liabilities_to_assets = _parse_ratio_line(lower, r"liabilities are roughly\s+([+-]?\d+(?:\.\d+)?)%\s+of reported assets")
+    pe_ratio = _parse_ratio_line(lower, r"\bp/e:\s*([+-]?\d+(?:\.\d+)?)")
+    ev_to_sales = _parse_ratio_line(lower, r"\bev/sales:\s*([+-]?\d+(?:\.\d+)?)")
+    ev_to_ebitda = _parse_ratio_line(lower, r"\bev/ebitda:\s*([+-]?\d+(?:\.\d+)?)")
+    price_to_sales = _parse_ratio_line(lower, r"\bprice/sales:\s*([+-]?\d+(?:\.\d+)?)")
     risk_flags = _fundamental_risk_flags(lower, values, cash_to_liabilities, liabilities_to_assets)
-    data_points = sum(1 for value in [*values.values(), cash_to_liabilities, liabilities_to_assets] if value is not None)
+    data_points = sum(1 for value in [*values.values(), cash_to_liabilities, liabilities_to_assets, pe_ratio, ev_to_sales, ev_to_ebitda, price_to_sales] if value is not None)
     return FundamentalTrendMetrics(
         revenue_yoy=values["revenue_yoy"],
         net_income_yoy=values["net_income_yoy"],
@@ -2131,6 +2311,10 @@ def _structured_fundamental_metrics(text: str) -> FundamentalTrendMetrics:
         operating_cash_flow_yoy=values["operating_cash_flow_yoy"],
         cash_to_liabilities=cash_to_liabilities,
         liabilities_to_assets=liabilities_to_assets,
+        pe_ratio=pe_ratio,
+        ev_to_sales=ev_to_sales,
+        ev_to_ebitda=ev_to_ebitda,
+        price_to_sales=price_to_sales,
         data_points=data_points,
         companyfacts_source=companyfacts_source,
         risk_flags=tuple(risk_flags),
@@ -2272,6 +2456,22 @@ def _balance_sheet_badge(metrics: FundamentalTrendMetrics) -> BadgeReadout:
         status = "good" if value <= 50 else "bad" if value >= 75 else "mixed"
         return BadgeReadout("Balance Sheet", f"Liabilities {value:.1f}% of assets", status, 100 - value, "Structured fundamental balance-sheet ratio from cockpit interpretation.")
     return BadgeReadout("Balance Sheet", "Limited", "info", 0, "No structured cash/liability ratio was parsed from structured fundamentals text.")
+
+
+def _valuation_badge(metrics: FundamentalTrendMetrics) -> BadgeReadout | None:
+    if metrics.pe_ratio is not None:
+        value = metrics.pe_ratio
+        status = "info" if value <= 0 else "good" if value <= 25 else "mixed" if value <= 60 else "bad"
+        return BadgeReadout("Valuation", f"{value:.1f}x", status, 100 - min(100.0, max(0.0, value)), "Structured valuation ratio from FMP/companyfacts fundamentals text: P/E.")
+    for title, value, detail in (
+        ("EV/EBITDA", metrics.ev_to_ebitda, "EV/EBITDA"),
+        ("EV/Sales", metrics.ev_to_sales, "EV/sales"),
+        ("Price/Sales", metrics.price_to_sales, "price/sales"),
+    ):
+        if value is not None:
+            status = "info" if value <= 0 else "good" if value <= 5 else "mixed" if value <= 20 else "bad"
+            return BadgeReadout("Valuation", f"{title} {value:.1f}x", status, 100 - min(100.0, max(0.0, value * 5)), f"Structured valuation ratio from FMP/companyfacts fundamentals text: {detail}.")
+    return None
 
 
 def _format_signed_pct(value: float) -> str:

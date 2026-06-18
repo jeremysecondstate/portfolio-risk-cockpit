@@ -43,7 +43,14 @@ FMP_PROFILE_BY_CIK_DOC_URL = "https://site.financialmodelingprep.com/developer/d
 FMP_KEY_METRICS_TTM_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/key-metrics-ttm"
 FMP_RATIOS_TTM_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/ratios-ttm"
 FMP_INCOME_GROWTH_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/income-statement-growth"
+FMP_INCOME_STATEMENT_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/income-statement"
+FMP_BALANCE_SHEET_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/balance-sheet-statement"
+FMP_CASH_FLOW_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/cashflow-statement"
+FMP_CASH_FLOW_GROWTH_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/cashflow-statement-growth"
 FMP_SHARES_FLOAT_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/shares-float"
+FMP_SEC_FILINGS_BY_SYMBOL_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/search-by-symbol"
+FMP_ECONOMIC_INDICATORS_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/economics-indicators"
+FMP_COMMODITIES_QUOTE_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/commodities-quote"
 ALPHA_VANTAGE_DOC_URL = "https://www.alphavantage.co/documentation/"
 _SHARED_FMP_CACHE: dict[tuple[str, str, str], tuple[float, Mapping[str, Any]]] = {}
 _SHARED_ALPHA_VANTAGE_CACHE: dict[tuple[str, str, str], tuple[float, Mapping[str, Any]]] = {}
@@ -88,6 +95,28 @@ class MarketQuoteFundamentalsRecord:
     industry: str | None = None
     shares_float: float | None = None
     shares_outstanding: float | None = None
+    revenue: float | None = None
+    net_income: float | None = None
+    operating_income: float | None = None
+    diluted_eps: float | None = None
+    operating_cash_flow: float | None = None
+    free_cash_flow: float | None = None
+    net_income_yoy: float | None = None
+    operating_income_yoy: float | None = None
+    diluted_eps_yoy: float | None = None
+    operating_cash_flow_yoy: float | None = None
+    free_cash_flow_yoy: float | None = None
+    cash_and_equivalents: float | None = None
+    total_assets: float | None = None
+    total_liabilities: float | None = None
+    total_debt: float | None = None
+    cash_to_liabilities: float | None = None
+    liabilities_to_assets: float | None = None
+    debt_to_liabilities: float | None = None
+    enterprise_value: float | None = None
+    ev_to_sales: float | None = None
+    ev_to_ebitda: float | None = None
+    price_to_sales: float | None = None
     field_provenance: tuple[MarketDataFieldProvenance, ...] = ()
     cik: str | None = None
     market_cap_currency: str | None = None
@@ -126,6 +155,28 @@ class MarketQuoteFundamentalsRecord:
             "revenue_growth": _optional_float(_first_present(payload, "revenue_growth", "revenueGrowth", "revenueGrowthTTM", "growthRevenue", "QuarterlyRevenueGrowthYOY")),
             "shares_float": _optional_float(_first_present(payload, "shares_float", "float", "sharesFloat", "floatShares", "freeFloat")),
             "shares_outstanding": _optional_float(_first_present(payload, "shares_outstanding", "sharesOutstanding", "outstandingShares", "shares_outstanding", "weightedAverageShsOut", "weightedAverageShsOutTTM")),
+            "revenue": _optional_float(_first_present(payload, "revenue", "totalRevenue", "revenueTTM")),
+            "net_income": _optional_float(_first_present(payload, "net_income", "netIncome", "netIncomeTTM")),
+            "operating_income": _optional_float(_first_present(payload, "operating_income", "operatingIncome", "operatingIncomeTTM")),
+            "diluted_eps": _optional_float(_first_present(payload, "diluted_eps", "epsdiluted", "epsDiluted", "dilutedEPS", "epsdilutedTTM")),
+            "operating_cash_flow": _optional_float(_first_present(payload, "operating_cash_flow", "operatingCashFlow", "netCashProvidedByOperatingActivities", "netCashProvidedByUsedInOperatingActivities")),
+            "free_cash_flow": _optional_float(_first_present(payload, "free_cash_flow", "freeCashFlow", "freeCashFlowTTM")),
+            "net_income_yoy": _optional_float(_first_present(payload, "net_income_yoy", "growthNetIncome", "netIncomeGrowth")),
+            "operating_income_yoy": _optional_float(_first_present(payload, "operating_income_yoy", "growthOperatingIncome", "operatingIncomeGrowth")),
+            "diluted_eps_yoy": _optional_float(_first_present(payload, "diluted_eps_yoy", "growthEPSDiluted", "epsDilutedGrowth", "dilutedEPSGrowth")),
+            "operating_cash_flow_yoy": _optional_float(_first_present(payload, "operating_cash_flow_yoy", "growthOperatingCashFlow", "operatingCashFlowGrowth")),
+            "free_cash_flow_yoy": _optional_float(_first_present(payload, "free_cash_flow_yoy", "growthFreeCashFlow", "freeCashFlowGrowth")),
+            "cash_and_equivalents": _optional_float(_first_present(payload, "cash_and_equivalents", "cashAndCashEquivalents", "cashAndShortTermInvestments", "cashCashEquivalentsAndShortTermInvestments")),
+            "total_assets": _optional_float(_first_present(payload, "total_assets", "totalAssets")),
+            "total_liabilities": _optional_float(_first_present(payload, "total_liabilities", "totalLiabilities", "totalLiabilitiesNetMinorityInterest")),
+            "total_debt": _optional_float(_first_present(payload, "total_debt", "totalDebt", "netDebt")),
+            "cash_to_liabilities": _optional_float(_first_present(payload, "cash_to_liabilities", "cashToLiabilities")),
+            "liabilities_to_assets": _optional_float(_first_present(payload, "liabilities_to_assets", "liabilitiesToAssets")),
+            "debt_to_liabilities": _optional_float(_first_present(payload, "debt_to_liabilities", "debtToLiabilities")),
+            "enterprise_value": _optional_float(_first_present(payload, "enterprise_value", "enterpriseValue", "enterpriseValueTTM")),
+            "ev_to_sales": _optional_float(_first_present(payload, "ev_to_sales", "enterpriseValueOverRevenue", "evToSales", "evToSalesTTM")),
+            "ev_to_ebitda": _optional_float(_first_present(payload, "ev_to_ebitda", "enterpriseValueOverEBITDA", "evToEbitda", "evToEBITDA", "evToEbitdaTTM")),
+            "price_to_sales": _optional_float(_first_present(payload, "price_to_sales", "priceToSalesRatio", "priceToSalesRatioTTM", "priceToSales")),
             "cik": _normalize_cik(_first_present(payload, "cik", "cik_str", "CIK")) or None,
             "market_cap_currency": _normalize_currency(_first_present(payload, "market_cap_currency", "marketCapCurrency", "market_cap_reported_currency", "reportedCurrency", "currency")),
             "market_cap_rank_value": _optional_float(_first_present(payload, "market_cap_rank_value", "marketCapRankValue", "market_cap_usd", "marketCapUsd", "marketCapUSD", "marketCapUSDTTM")),
@@ -533,10 +584,14 @@ class FmpQuoteFundamentalsProvider:
             "key-metrics-ttm": 0,
             "ratios-ttm": 0,
             "income-statement-growth": 0,
+            "income-statement": 0,
+            "balance-sheet-statement": 0,
+            "cash-flow-statement": 0,
+            "cash-flow-statement-growth": 0,
             "shares-float": 0,
         }
         for symbol in requested:
-            for endpoint, source, source_url in _FMP_DEEP_ENDPOINTS:
+            for endpoint, source, source_url in (*_FMP_DEEP_ENDPOINTS, *_FMP_STATEMENT_ENDPOINTS):
                 try:
                     payload, endpoint_cache_hit, endpoint_calls, endpoint_returned = self._single_symbol_payload(endpoint, symbol, force_refresh=force_refresh)
                     cache_hits += int(endpoint_cache_hit)
@@ -574,6 +629,10 @@ class FmpQuoteFundamentalsProvider:
                 "rows_enriched_by_fmp_key_metrics": endpoint_rows["key-metrics-ttm"],
                 "rows_enriched_by_fmp_ratios": endpoint_rows["ratios-ttm"],
                 "rows_enriched_by_fmp_income_growth": endpoint_rows["income-statement-growth"],
+                "rows_enriched_by_fmp_income_statement": endpoint_rows["income-statement"],
+                "rows_enriched_by_fmp_balance_sheet": endpoint_rows["balance-sheet-statement"],
+                "rows_enriched_by_fmp_cash_flow": endpoint_rows["cash-flow-statement"],
+                "rows_enriched_by_fmp_cash_flow_growth": endpoint_rows["cash-flow-statement-growth"],
                 "rows_enriched_by_fmp_shares_float": endpoint_rows["shares-float"],
             },
             detail="fundamental/metrics fields only",
@@ -872,6 +931,81 @@ class FmpQuoteFundamentalsProvider:
                 "rows_provider_returned_no_usable_data": no_usable_rows,
             },
         )
+
+    def filing_metadata(
+        self,
+        symbol: str,
+        *,
+        force_refresh: bool = False,
+        limit: int = 12,
+    ) -> tuple[dict[str, Any], ...]:
+        clean_symbol = _normalize_symbol(symbol)
+        row_limit = max(1, min(100, int(limit or 12)))
+        if not clean_symbol or not _optional_string(self.api_key):
+            return ()
+        endpoint = "sec-filings-search/symbol"
+        cached = self._cache_get(endpoint, clean_symbol, force_refresh=force_refresh)
+        if cached is not None:
+            cached_rows = cached.get("rows")
+            if isinstance(cached_rows, list):
+                return tuple(dict(row) for row in cached_rows if isinstance(row, Mapping))[:row_limit]
+        payload = self._get_json(endpoint, {"symbol": clean_symbol, "page": "0", "limit": str(row_limit)})
+        rows = _coerce_fmp_rows(payload)
+        normalized = tuple(
+            row
+            for row in (_normalize_fmp_filing_metadata_row(row, clean_symbol) for row in rows)
+            if row
+        )[:row_limit]
+        self._cache_set(endpoint, clean_symbol, {"rows": list(normalized)})
+        return normalized
+
+    def sec_filings(
+        self,
+        symbol: str,
+        *,
+        force_refresh: bool = False,
+        limit: int = 12,
+    ) -> tuple[dict[str, Any], ...]:
+        return self.filing_metadata(symbol, force_refresh=force_refresh, limit=limit)
+
+    def macro_context(
+        self,
+        symbol: str | None = None,
+        *,
+        force_refresh: bool = False,
+        limit: int = 2,
+    ) -> dict[str, dict[str, Any]]:
+        row_limit = max(1, min(10, int(limit or 2)))
+        if not _optional_string(self.api_key):
+            return {}
+        context: dict[str, dict[str, Any]] = {}
+        for name, category in _FMP_MACRO_INDICATORS:
+            endpoint = "economic-indicators"
+            cache_key = f"indicator:{name}"
+            cached = self._cache_get(endpoint, cache_key, force_refresh=force_refresh)
+            if cached is None:
+                payload = self._get_json(endpoint, {"name": name})
+                rows = _coerce_fmp_rows(payload)[:row_limit]
+                cached = {"rows": list(rows)}
+                self._cache_set(endpoint, cache_key, cached)
+            rows = _coerce_fmp_rows(cached.get("rows") if isinstance(cached, Mapping) else cached)
+            row = _normalize_fmp_macro_indicator_rows(name, category, rows)
+            if row:
+                context[name] = row
+        for commodity_symbol, category, label in _FMP_MACRO_COMMODITY_SYMBOLS:
+            endpoint = "quote"
+            cache_key = f"commodity:{commodity_symbol}"
+            cached = self._cache_get(endpoint, cache_key, force_refresh=force_refresh)
+            if cached is None:
+                payload = self._get_json(endpoint, {"symbol": commodity_symbol})
+                rows = _coerce_fmp_rows(payload)[:1]
+                cached = {"rows": list(rows)}
+                self._cache_set(endpoint, cache_key, cached)
+            rows = _coerce_fmp_rows(cached.get("rows") if isinstance(cached, Mapping) else cached)
+            row = _normalize_fmp_macro_quote_row(commodity_symbol, category, label, rows[0] if rows else {})
+            if row:
+                context[commodity_symbol] = row
+        return context
 
     def _unavailable_snapshot(
         self,
@@ -1388,6 +1522,26 @@ _FMP_DEEP_ENDPOINTS = (
     ("shares-float", "FMP shares float", FMP_SHARES_FLOAT_DOC_URL),
 )
 
+_FMP_STATEMENT_ENDPOINTS = (
+    ("income-statement", "FMP income statement", FMP_INCOME_STATEMENT_DOC_URL),
+    ("balance-sheet-statement", "FMP balance sheet", FMP_BALANCE_SHEET_DOC_URL),
+    ("cash-flow-statement", "FMP cash flow", FMP_CASH_FLOW_DOC_URL),
+    ("cash-flow-statement-growth", "FMP cash flow growth", FMP_CASH_FLOW_GROWTH_DOC_URL),
+)
+
+_FMP_MACRO_INDICATORS = (
+    ("GDP", "Growth / Consumer"),
+    ("CPI", "Inflation"),
+    ("unemploymentRate", "Labor"),
+    ("federalFunds", "Rates / Treasury"),
+)
+
+_FMP_MACRO_COMMODITY_SYMBOLS = (
+    ("CLUSD", "Energy", "Crude oil commodity quote"),
+    ("BZUSD", "Energy", "Brent crude commodity quote"),
+    ("NGUSD", "Energy", "Natural gas commodity quote"),
+)
+
 
 def _record_needs_deeper_fmp_fields(record: MarketQuoteFundamentalsRecord) -> bool:
     return any(
@@ -1442,7 +1596,37 @@ def _record_with_family_fields(record: MarketQuoteFundamentalsRecord, family: st
     fields_by_family = {
         "profile_classification": {"company_name", "exchange", "sector", "industry", "cik", *profile_metadata},
         "quote_tape": {"price", "change_percent", "volume", "avg_volume"},
-        "fundamentals": {"market_cap", "pe_ratio", "eps", "revenue_growth", "shares_float", "shares_outstanding", *market_cap_metadata},
+        "fundamentals": {
+            "market_cap",
+            "pe_ratio",
+            "eps",
+            "revenue_growth",
+            "shares_float",
+            "shares_outstanding",
+            "revenue",
+            "net_income",
+            "operating_income",
+            "diluted_eps",
+            "operating_cash_flow",
+            "free_cash_flow",
+            "net_income_yoy",
+            "operating_income_yoy",
+            "diluted_eps_yoy",
+            "operating_cash_flow_yoy",
+            "free_cash_flow_yoy",
+            "cash_and_equivalents",
+            "total_assets",
+            "total_liabilities",
+            "total_debt",
+            "cash_to_liabilities",
+            "liabilities_to_assets",
+            "debt_to_liabilities",
+            "enterprise_value",
+            "ev_to_sales",
+            "ev_to_ebitda",
+            "price_to_sales",
+            *market_cap_metadata,
+        },
     }
     allowed = fields_by_family.get(family)
     if not allowed:
@@ -1463,6 +1647,28 @@ def _record_with_family_fields(record: MarketQuoteFundamentalsRecord, family: st
         "revenue_growth",
         "shares_float",
         "shares_outstanding",
+        "revenue",
+        "net_income",
+        "operating_income",
+        "diluted_eps",
+        "operating_cash_flow",
+        "free_cash_flow",
+        "net_income_yoy",
+        "operating_income_yoy",
+        "diluted_eps_yoy",
+        "operating_cash_flow_yoy",
+        "free_cash_flow_yoy",
+        "cash_and_equivalents",
+        "total_assets",
+        "total_liabilities",
+        "total_debt",
+        "cash_to_liabilities",
+        "liabilities_to_assets",
+        "debt_to_liabilities",
+        "enterprise_value",
+        "ev_to_sales",
+        "ev_to_ebitda",
+        "price_to_sales",
         "cik",
         "market_cap_currency",
         "market_cap_rank_value",
@@ -1491,6 +1697,20 @@ def _normalized_fmp_payload_fields(payload: Mapping[str, Any]) -> dict[str, Any]
         ("eps", ("eps", "EPS", "epsTTM", "earningsPerShareTTM", "netIncomePerShareTTM")),
         ("shares_float", ("sharesFloat", "floatShares", "freeFloat", "float")),
         ("shares_outstanding", ("sharesOutstanding", "outstandingShares", "weightedAverageShsOut", "weightedAverageShsOutTTM")),
+        ("revenue", ("revenue", "totalRevenue", "revenueTTM")),
+        ("net_income", ("netIncome", "netIncomeTTM")),
+        ("operating_income", ("operatingIncome", "operatingIncomeTTM")),
+        ("diluted_eps", ("epsdiluted", "epsDiluted", "dilutedEPS", "epsdilutedTTM")),
+        ("operating_cash_flow", ("operatingCashFlow", "netCashProvidedByOperatingActivities", "netCashProvidedByUsedInOperatingActivities")),
+        ("free_cash_flow", ("freeCashFlow", "freeCashFlowTTM")),
+        ("cash_and_equivalents", ("cashAndCashEquivalents", "cashAndShortTermInvestments", "cashCashEquivalentsAndShortTermInvestments")),
+        ("total_assets", ("totalAssets",)),
+        ("total_liabilities", ("totalLiabilities", "totalLiabilitiesNetMinorityInterest")),
+        ("total_debt", ("totalDebt", "netDebt")),
+        ("enterprise_value", ("enterpriseValue", "enterpriseValueTTM")),
+        ("ev_to_sales", ("enterpriseValueOverRevenue", "evToSales", "evToSalesTTM")),
+        ("ev_to_ebitda", ("enterpriseValueOverEBITDA", "evToEbitda", "evToEBITDA", "evToEbitdaTTM")),
+        ("price_to_sales", ("priceToSalesRatio", "priceToSalesRatioTTM", "priceToSales")),
         ("exchange", ("exchangeShortName", "exchange")),
         ("cik", ("cik", "CIK", "cik_str")),
         ("market_cap_currency", ("marketCapCurrency", "reportedCurrency", "currency")),
@@ -1516,6 +1736,31 @@ def _normalized_fmp_payload_fields(payload: Mapping[str, Any]) -> dict[str, Any]
     growth = _fmp_percent_value(_first_present(payload, "revenueGrowth", "revenueGrowthTTM", "growthRevenue", "QuarterlyRevenueGrowthYOY"))
     if growth is not None:
         normalized["revenue_growth"] = growth
+    for target, keys in (
+        ("net_income_yoy", ("growthNetIncome", "growthNetIncomeRatio", "netIncomeGrowth")),
+        ("operating_income_yoy", ("growthOperatingIncome", "growthOperatingIncomeRatio", "operatingIncomeGrowth")),
+        ("diluted_eps_yoy", ("growthEPSDiluted", "growthEpsDiluted", "epsDilutedGrowth", "dilutedEPSGrowth")),
+        ("operating_cash_flow_yoy", ("growthOperatingCashFlow", "growthNetCashProvidedByOperatingActivities", "operatingCashFlowGrowth")),
+        ("free_cash_flow_yoy", ("growthFreeCashFlow", "freeCashFlowGrowth")),
+    ):
+        value = _fmp_percent_value(_first_present(payload, *keys))
+        if value is not None:
+            normalized[target] = value
+    if "total_debt" not in normalized:
+        short_debt = _optional_float(_first_present(payload, "shortTermDebt"))
+        long_debt = _optional_float(_first_present(payload, "longTermDebt"))
+        if short_debt is not None or long_debt is not None:
+            normalized["total_debt"] = (short_debt or 0.0) + (long_debt or 0.0)
+    cash = _optional_float(normalized.get("cash_and_equivalents"))
+    assets = _optional_float(normalized.get("total_assets"))
+    liabilities = _optional_float(normalized.get("total_liabilities"))
+    debt = _optional_float(normalized.get("total_debt"))
+    if cash is not None and liabilities not in (None, 0):
+        normalized["cash_to_liabilities"] = (cash / abs(liabilities)) * 100
+    if liabilities is not None and assets not in (None, 0):
+        normalized["liabilities_to_assets"] = (liabilities / assets) * 100
+    if debt is not None and liabilities not in (None, 0):
+        normalized["debt_to_liabilities"] = (debt / abs(liabilities)) * 100
     return normalized
 
 
@@ -1788,6 +2033,28 @@ def _merge_quote_records(left: MarketQuoteFundamentalsRecord, right: MarketQuote
         revenue_growth=_prefer_ladder_field(left.revenue_growth, right.revenue_growth),
         shares_float=_prefer_ladder_field(left.shares_float, right.shares_float),
         shares_outstanding=_prefer_ladder_field(left.shares_outstanding, right.shares_outstanding),
+        revenue=_prefer_ladder_field(left.revenue, right.revenue),
+        net_income=_prefer_ladder_field(left.net_income, right.net_income),
+        operating_income=_prefer_ladder_field(left.operating_income, right.operating_income),
+        diluted_eps=_prefer_ladder_field(left.diluted_eps, right.diluted_eps),
+        operating_cash_flow=_prefer_ladder_field(left.operating_cash_flow, right.operating_cash_flow),
+        free_cash_flow=_prefer_ladder_field(left.free_cash_flow, right.free_cash_flow),
+        net_income_yoy=_prefer_ladder_field(left.net_income_yoy, right.net_income_yoy),
+        operating_income_yoy=_prefer_ladder_field(left.operating_income_yoy, right.operating_income_yoy),
+        diluted_eps_yoy=_prefer_ladder_field(left.diluted_eps_yoy, right.diluted_eps_yoy),
+        operating_cash_flow_yoy=_prefer_ladder_field(left.operating_cash_flow_yoy, right.operating_cash_flow_yoy),
+        free_cash_flow_yoy=_prefer_ladder_field(left.free_cash_flow_yoy, right.free_cash_flow_yoy),
+        cash_and_equivalents=_prefer_ladder_field(left.cash_and_equivalents, right.cash_and_equivalents),
+        total_assets=_prefer_ladder_field(left.total_assets, right.total_assets),
+        total_liabilities=_prefer_ladder_field(left.total_liabilities, right.total_liabilities),
+        total_debt=_prefer_ladder_field(left.total_debt, right.total_debt),
+        cash_to_liabilities=_prefer_ladder_field(left.cash_to_liabilities, right.cash_to_liabilities),
+        liabilities_to_assets=_prefer_ladder_field(left.liabilities_to_assets, right.liabilities_to_assets),
+        debt_to_liabilities=_prefer_ladder_field(left.debt_to_liabilities, right.debt_to_liabilities),
+        enterprise_value=_prefer_ladder_field(left.enterprise_value, right.enterprise_value),
+        ev_to_sales=_prefer_ladder_field(left.ev_to_sales, right.ev_to_sales),
+        ev_to_ebitda=_prefer_ladder_field(left.ev_to_ebitda, right.ev_to_ebitda),
+        price_to_sales=_prefer_ladder_field(left.price_to_sales, right.price_to_sales),
         source=", ".join(dict.fromkeys([source for source in (left.source, right.source) if source])),
         source_url=left.source_url or right.source_url,
         fetched_at=left.fetched_at or right.fetched_at,
@@ -1841,6 +2108,28 @@ def _quote_record_has_any_value(record: MarketQuoteFundamentalsRecord) -> bool:
             record.revenue_growth,
             record.shares_float,
             record.shares_outstanding,
+            record.revenue,
+            record.net_income,
+            record.operating_income,
+            record.diluted_eps,
+            record.operating_cash_flow,
+            record.free_cash_flow,
+            record.net_income_yoy,
+            record.operating_income_yoy,
+            record.diluted_eps_yoy,
+            record.operating_cash_flow_yoy,
+            record.free_cash_flow_yoy,
+            record.cash_and_equivalents,
+            record.total_assets,
+            record.total_liabilities,
+            record.total_debt,
+            record.cash_to_liabilities,
+            record.liabilities_to_assets,
+            record.debt_to_liabilities,
+            record.enterprise_value,
+            record.ev_to_sales,
+            record.ev_to_ebitda,
+            record.price_to_sales,
             record.market_cap_currency,
             record.market_cap_rank_value,
             record.market_cap_rank_currency,
@@ -1871,6 +2160,28 @@ _QUOTE_VALUE_FIELDS = (
     "revenue_growth",
     "shares_float",
     "shares_outstanding",
+    "revenue",
+    "net_income",
+    "operating_income",
+    "diluted_eps",
+    "operating_cash_flow",
+    "free_cash_flow",
+    "net_income_yoy",
+    "operating_income_yoy",
+    "diluted_eps_yoy",
+    "operating_cash_flow_yoy",
+    "free_cash_flow_yoy",
+    "cash_and_equivalents",
+    "total_assets",
+    "total_liabilities",
+    "total_debt",
+    "cash_to_liabilities",
+    "liabilities_to_assets",
+    "debt_to_liabilities",
+    "enterprise_value",
+    "ev_to_sales",
+    "ev_to_ebitda",
+    "price_to_sales",
     "cik",
     "market_cap_currency",
     "market_cap_rank_value",
@@ -2103,6 +2414,101 @@ def _coerce_fmp_rows(payload: Any) -> list[Mapping[str, Any]]:
             return [row for row in rows if isinstance(row, Mapping)]
         return [payload]
     return []
+
+
+def _normalize_fmp_filing_metadata_row(row: Mapping[str, Any], fallback_symbol: str) -> dict[str, Any]:
+    filing_url = _optional_string(_first_present(row, "finalLink", "filing_url", "filingUrl", "link", "url", "reportUrl")) or ""
+    accession = _optional_string(_first_present(row, "accessionNumber", "accession_number", "accessionNo", "accession")) or _accession_from_fmp_filing_url(filing_url)
+    primary_document = _optional_string(_first_present(row, "primaryDocument", "primary_document", "document")) or _document_from_fmp_filing_url(filing_url)
+    form = _optional_string(_first_present(row, "form", "type", "filingType", "formType")) or ""
+    if not accession or not primary_document or not form:
+        return {}
+    symbol = _normalize_symbol(_first_present(row, "symbol", "ticker")) or fallback_symbol
+    payload = {
+        "symbol": symbol,
+        "companyName": _optional_string(_first_present(row, "companyName", "company_name", "company", "name")) or "",
+        "cik": _normalize_cik(_first_present(row, "cik", "CIK", "cik_str")),
+        "form": form.upper(),
+        "filingDate": _optional_string(_first_present(row, "filingDate", "fillingDate", "filedDate", "date", "acceptedDate")) or "",
+        "reportDate": _optional_string(_first_present(row, "reportDate", "periodOfReport")) or "",
+        "acceptedDate": _optional_string(_first_present(row, "acceptedDate", "accepted_date")) or "",
+        "accessionNumber": accession,
+        "primaryDocument": primary_document,
+        "finalLink": filing_url,
+        "description": _optional_string(_first_present(row, "description", "title")) or "FMP filing metadata prefilter",
+        "source": "FMP filing metadata",
+        "source_url": FMP_SEC_FILINGS_BY_SYMBOL_DOC_URL,
+    }
+    return {key: value for key, value in payload.items() if value not in (None, "")}
+
+
+def _normalize_fmp_macro_indicator_rows(name: str, category: str, rows: list[Mapping[str, Any]]) -> dict[str, Any]:
+    if not rows:
+        return {}
+    latest = rows[0]
+    prior = rows[1] if len(rows) > 1 else {}
+    value = _optional_float(_first_present(latest, "value", "actual", "price", "close"))
+    prior_value = _optional_float(_first_present(prior, "value", "actual", "price", "close"))
+    if value is None and prior_value is None:
+        return {}
+    return {
+        "category": category,
+        "metric": _fmp_macro_indicator_label(name),
+        "value": value,
+        "prior": prior_value,
+        "date": _optional_string(_first_present(latest, "date", "period")) or "",
+        "unit": _fmp_macro_indicator_unit(name),
+        "source": "FMP economic indicators proxy",
+        "source_url": FMP_ECONOMIC_INDICATORS_DOC_URL,
+    }
+
+
+def _normalize_fmp_macro_quote_row(symbol: str, category: str, label: str, row: Mapping[str, Any]) -> dict[str, Any]:
+    if not row:
+        return {}
+    value = _optional_float(_first_present(row, "price", "close", "previousClose"))
+    prior = _optional_float(_first_present(row, "previousClose", "open"))
+    if value is None and prior is None:
+        return {}
+    return {
+        "category": category,
+        "symbol": _normalize_symbol(_first_present(row, "symbol")) or symbol,
+        "metric": label,
+        "price": value,
+        "previous_close": prior,
+        "date": _optional_string(_first_present(row, "timestamp", "date")) or "",
+        "unit": "USD",
+        "source": "FMP commodity quote proxy",
+        "source_url": FMP_COMMODITIES_QUOTE_DOC_URL,
+    }
+
+
+def _fmp_macro_indicator_label(name: str) -> str:
+    return {
+        "GDP": "GDP economic indicator",
+        "CPI": "CPI economic indicator",
+        "unemploymentRate": "Unemployment rate economic indicator",
+        "federalFunds": "Federal funds economic indicator",
+    }.get(name, name)
+
+
+def _fmp_macro_indicator_unit(name: str) -> str:
+    return "%" if name in {"CPI", "unemploymentRate", "federalFunds"} else ""
+
+
+def _accession_from_fmp_filing_url(url: str) -> str:
+    match = re.search(r"(\d{10})[-/]?(\d{2})[-/]?(\d{6})", str(url or ""))
+    if not match:
+        return ""
+    return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+
+
+def _document_from_fmp_filing_url(url: str) -> str:
+    text = str(url or "").strip().rstrip("/")
+    if not text:
+        return ""
+    document = text.rsplit("/", 1)[-1]
+    return document if "." in document else ""
 
 
 def _fmp_payload_shape_is_unexpected(payload: Any) -> bool:

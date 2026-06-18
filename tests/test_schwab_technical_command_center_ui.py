@@ -142,7 +142,7 @@ class SchwabTechnicalCommandCenterUiTests(unittest.TestCase):
         note_rows = _technical_capital_structure_note_rows(report)
 
         self.assertEqual(cards[0].label, "No Source Level")
-        self.assertIn("no supported warrant exercise", supply_rows[0][-1])
+        self.assertIn("Pressure signals were found, but no explicit price level was parsed.", supply_rows[0][-1])
         self.assertIn("no supply level is inferred", supply_rows[0][-1])
         self.assertIn(("Explanation", "High pressure came from recent registration and resale language."), note_rows)
 
@@ -255,7 +255,7 @@ class SchwabTechnicalCommandCenterUiTests(unittest.TestCase):
         status = _capital_structure_pressure_status(signal_no_level)
 
         self.assertEqual(status.status, "fresh/cache")
-        self.assertIn("no source-backed supply price level", status.message)
+        self.assertIn("pressure signals were found, but no explicit price level was parsed", status.message)
 
     def test_detail_button_text_formats_popout_content(self) -> None:
         text = _detail_button_text("Warnings", ["First warning", "Second warning"])

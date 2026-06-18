@@ -2371,7 +2371,7 @@ def _capital_structure_pressure_status(report: Any | None) -> DataSourceStatus:
                 _now(),
                 (
                     f"{getattr(report, 'read', 'Unknown')} pressure; score {getattr(report, 'supply_overhang_score', '--')}/100; "
-                    "no source-backed supply price level was parsed."
+                    "pressure signals were found, but no explicit price level was parsed."
                 ),
             )
         if level_count == 0 and parsed_count == 0:
@@ -2746,14 +2746,67 @@ def _market_snapshot_record_payload(snapshot: Any, symbol: str) -> dict[str, Any
         if hasattr(record, "to_dict"):
             payload = record.to_dict()
         else:
-            payload = {name: getattr(record, name, None) for name in ("symbol", "company_name", "exchange", "sector", "industry", "market_cap", "pe_ratio", "eps", "revenue_growth", "shares_float", "shares_outstanding", "cik", "source")}
+            payload = {
+                name: getattr(record, name, None)
+                for name in (
+                    "symbol",
+                    "company_name",
+                    "exchange",
+                    "sector",
+                    "industry",
+                    "market_cap",
+                    "pe_ratio",
+                    "eps",
+                    "revenue_growth",
+                    "shares_float",
+                    "shares_outstanding",
+                    "revenue",
+                    "net_income",
+                    "operating_income",
+                    "diluted_eps",
+                    "operating_cash_flow",
+                    "free_cash_flow",
+                    "net_income_yoy",
+                    "operating_income_yoy",
+                    "diluted_eps_yoy",
+                    "operating_cash_flow_yoy",
+                    "free_cash_flow_yoy",
+                    "cash_and_equivalents",
+                    "total_assets",
+                    "total_liabilities",
+                    "total_debt",
+                    "cash_to_liabilities",
+                    "liabilities_to_assets",
+                    "debt_to_liabilities",
+                    "enterprise_value",
+                    "ev_to_sales",
+                    "ev_to_ebitda",
+                    "price_to_sales",
+                    "cik",
+                    "source",
+                )
+            }
         return {key: value for key, value in payload.items() if value not in (None, "", [], (), {})}
     return {}
 
 
 def _fmp_fundamentals_are_sufficient(profile: dict[str, Any], fundamentals: dict[str, Any]) -> bool:
     profile_fields = ("company_name", "exchange", "sector", "industry", "cik")
-    fundamental_fields = ("market_cap", "pe_ratio", "eps", "revenue_growth", "shares_float", "shares_outstanding")
+    fundamental_fields = (
+        "market_cap",
+        "pe_ratio",
+        "eps",
+        "revenue_growth",
+        "shares_float",
+        "shares_outstanding",
+        "net_income_yoy",
+        "operating_income_yoy",
+        "operating_cash_flow_yoy",
+        "cash_and_equivalents",
+        "total_assets",
+        "total_liabilities",
+        "cash_to_liabilities",
+    )
     profile_count = sum(1 for field in profile_fields if profile.get(field) not in (None, ""))
     fundamental_count = sum(1 for field in fundamental_fields if _to_float(fundamentals.get(field)) is not None)
     return profile_count >= 2 and fundamental_count >= 2
@@ -2763,6 +2816,13 @@ def _format_fmp_fundamentals_text(symbol: str, profile: dict[str, Any], fundamen
     clean_symbol = symbol.strip().upper()
     company_name = str(profile.get("company_name") or profile.get("companyName") or clean_symbol)
     revenue_growth = _to_float(fundamentals.get("revenue_growth"))
+    net_income_yoy = _to_float(fundamentals.get("net_income_yoy"))
+    operating_income_yoy = _to_float(fundamentals.get("operating_income_yoy"))
+    diluted_eps_yoy = _to_float(fundamentals.get("diluted_eps_yoy"))
+    operating_cash_flow_yoy = _to_float(fundamentals.get("operating_cash_flow_yoy"))
+    free_cash_flow_yoy = _to_float(fundamentals.get("free_cash_flow_yoy"))
+    cash_to_liabilities = _to_float(fundamentals.get("cash_to_liabilities"))
+    liabilities_to_assets = _to_float(fundamentals.get("liabilities_to_assets"))
     lines = [
         f"FUNDAMENTAL ANALYSIS - {clean_symbol}",
         "",
@@ -2774,13 +2834,30 @@ def _format_fmp_fundamentals_text(symbol: str, profile: dict[str, Any], fundamen
         "Latest reported fundamentals:",
         f"- Market cap: {_money(_to_float(fundamentals.get('market_cap')))}",
         f"- P/E: {_format_optional_number(_to_float(fundamentals.get('pe_ratio')))}",
+        f"- EV/sales: {_format_optional_number(_to_float(fundamentals.get('ev_to_sales')))}",
+        f"- EV/EBITDA: {_format_optional_number(_to_float(fundamentals.get('ev_to_ebitda')))}",
+        f"- Price/sales: {_format_optional_number(_to_float(fundamentals.get('price_to_sales')))}",
         f"- EPS: {_format_optional_number(_to_float(fundamentals.get('eps')))}",
+        f"- Revenue amount: {_money(_to_float(fundamentals.get('revenue')))}",
         f"- Revenue: FMP revenue growth YoY {_format_signed_percent(revenue_growth)}.",
+        f"- Net income: {_money(_to_float(fundamentals.get('net_income')))}; YoY {_format_signed_percent(net_income_yoy)}.",
+        f"- Operating income: {_money(_to_float(fundamentals.get('operating_income')))}; YoY {_format_signed_percent(operating_income_yoy)}.",
+        f"- Diluted EPS: {_format_optional_number(_to_float(fundamentals.get('diluted_eps')))}; YoY {_format_signed_percent(diluted_eps_yoy)}.",
+        f"- Operating cash flow: {_money(_to_float(fundamentals.get('operating_cash_flow')))}; YoY {_format_signed_percent(operating_cash_flow_yoy)}.",
+        f"- Free cash flow: {_money(_to_float(fundamentals.get('free_cash_flow')))}; YoY {_format_signed_percent(free_cash_flow_yoy)}.",
+        f"- Cash and equivalents: {_money(_to_float(fundamentals.get('cash_and_equivalents')))}",
+        f"- Total assets: {_money(_to_float(fundamentals.get('total_assets')))}",
+        f"- Total liabilities: {_money(_to_float(fundamentals.get('total_liabilities')))}",
+        f"- Total debt: {_money(_to_float(fundamentals.get('total_debt')))}",
         f"- Float: {_format_plain_count(_to_float(fundamentals.get('shares_float')))}",
         f"- Shares outstanding: {_format_plain_count(_to_float(fundamentals.get('shares_outstanding')))}",
         "",
         "Cockpit interpretation:",
         _fmp_revenue_interpretation(revenue_growth),
+        _fmp_profitability_interpretation("Net income", net_income_yoy),
+        _fmp_profitability_interpretation("Operating income", operating_income_yoy),
+        _fmp_cash_flow_interpretation(operating_cash_flow_yoy, free_cash_flow_yoy),
+        _fmp_balance_sheet_interpretation(cash_to_liabilities, liabilities_to_assets, _to_float(fundamentals.get("debt_to_liabilities"))),
         "- FMP is used for clean profile/fundamental UI cards when sufficient; SEC companyfacts remains the fallback and verification layer.",
         "- SEC filing text is still required for warrants, convertibles, preferred terms, offerings, resale language, and source-backed clauses.",
         "",
@@ -2798,6 +2875,35 @@ def _fmp_revenue_interpretation(revenue_growth: float | None) -> str:
     if revenue_growth > 0:
         return f"- Revenue is growing on the latest FMP snapshot ({_format_signed_percent(revenue_growth)} YoY)."
     return f"- Revenue is contracting on the latest FMP snapshot ({_format_signed_percent(revenue_growth)} YoY)."
+
+
+def _fmp_profitability_interpretation(label: str, value: float | None) -> str:
+    if value is None:
+        return f"- {label} trend is not available from FMP statements."
+    direction = "improved" if value > 0 else "weakened" if value < 0 else "was flat"
+    return f"- {label} {direction} on the latest FMP comparable period ({_format_signed_percent(value)} YoY)."
+
+
+def _fmp_cash_flow_interpretation(operating_cash_flow_yoy: float | None, free_cash_flow_yoy: float | None) -> str:
+    if operating_cash_flow_yoy is None and free_cash_flow_yoy is None:
+        return "- Cash-flow trend is not available from FMP statements."
+    parts = []
+    if operating_cash_flow_yoy is not None:
+        parts.append(f"operating cash flow {_format_signed_percent(operating_cash_flow_yoy)} YoY")
+    if free_cash_flow_yoy is not None:
+        parts.append(f"free cash flow {_format_signed_percent(free_cash_flow_yoy)} YoY")
+    return "- FMP cash-flow statement context: " + "; ".join(parts) + "."
+
+
+def _fmp_balance_sheet_interpretation(cash_to_liabilities: float | None, liabilities_to_assets: float | None, debt_to_liabilities: float | None) -> str:
+    parts: list[str] = []
+    if cash_to_liabilities is not None:
+        parts.append(f"Cash equals roughly {cash_to_liabilities:.1f}% of reported liabilities in the latest FMP balance-sheet snapshot.")
+    if liabilities_to_assets is not None:
+        parts.append(f"Liabilities are roughly {liabilities_to_assets:.1f}% of reported assets.")
+    if debt_to_liabilities is not None:
+        parts.append(f"Debt is roughly {debt_to_liabilities:.1f}% of reported liabilities.")
+    return "- " + " ".join(parts) if parts else "- Balance-sheet ratios are not available from FMP statements."
 
 
 def _format_signed_percent(value: float | None) -> str:
@@ -4818,6 +4924,7 @@ def _capital_structure_no_level_reason(report: Any | None, indicator: CapitalStr
     signals = _capital_structure_signal_labels(report)
     if signals:
         return (
+            f"Pressure signals were found, but no explicit price level was parsed. "
             f"SEC scan found filing-derived pressure signal(s) ({', '.join(signals[:4])}) but no supported warrant exercise, "
             "conversion, offering, purchase, or resale price level was parsed; no supply level is inferred."
         )
@@ -6999,7 +7106,8 @@ def _render_etf_fundamentals(self: tk.Tk, payload: _ResearchPayload) -> None:
 def _render_macro(self: tk.Tk, payload: _ResearchPayload) -> None:
     frame = self.schwab_research_macro_frame
     decision = payload.decision
-    readouts = build_macro_metric_cards(payload.macro_snapshot)
+    provider_context = getattr(payload.command_center_report, "market_intelligence", None) if payload.command_center_report is not None else None
+    readouts = build_macro_metric_cards(payload.macro_snapshot, provider_context=provider_context)
     metric_grid(
         frame.cards,  # type: ignore[attr-defined]
         [
