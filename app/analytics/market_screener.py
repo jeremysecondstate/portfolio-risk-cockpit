@@ -83,6 +83,11 @@ MARKET_SCREENER_ENRICH_ALL_MARKET_DATA = "all_market_data"
 MARKET_SCREENER_ENRICH_VISIBLE_PAGE = "visible_page"
 MARKET_SCREENER_ENRICH_SELECTED_ROW = "selected_row"
 MARKET_SCREENER_ENRICH_ASK_SCREENER_CANDIDATE_SET = "ask_screener_candidate_set"
+MARKET_SCREENER_REFRESH_QUOTE_TAPE = "quote_tape"
+MARKET_SCREENER_REFRESH_PROFILE = "profile"
+MARKET_SCREENER_REFRESH_FUNDAMENTALS = "fundamentals"
+MARKET_SCREENER_REFRESH_FILINGS = "filings"
+MARKET_SCREENER_REFRESH_FULL_REBUILD = "full_rebuild"
 MARKET_SCREENER_ENRICHMENT_MODES = frozenset(
     {
         MARKET_SCREENER_ENRICH_PROFILE_CLASSIFICATION,
@@ -94,6 +99,22 @@ MARKET_SCREENER_ENRICHMENT_MODES = frozenset(
         MARKET_SCREENER_ENRICH_ASK_SCREENER_CANDIDATE_SET,
     }
 )
+MARKET_SCREENER_REFRESH_JOBS = frozenset(
+    {
+        MARKET_SCREENER_REFRESH_QUOTE_TAPE,
+        MARKET_SCREENER_REFRESH_PROFILE,
+        MARKET_SCREENER_REFRESH_FUNDAMENTALS,
+        MARKET_SCREENER_REFRESH_FILINGS,
+        MARKET_SCREENER_REFRESH_FULL_REBUILD,
+    }
+)
+MARKET_SCREENER_REFRESH_JOB_LABELS = {
+    MARKET_SCREENER_REFRESH_QUOTE_TAPE: "Quote/Tape Refresh",
+    MARKET_SCREENER_REFRESH_PROFILE: "Profile Refresh",
+    MARKET_SCREENER_REFRESH_FUNDAMENTALS: "Fundamentals Refresh",
+    MARKET_SCREENER_REFRESH_FILINGS: "Filing Refresh",
+    MARKET_SCREENER_REFRESH_FULL_REBUILD: "Full Rebuild",
+}
 
 MARKET_SCREENER_AI_SYSTEM_PROMPT = """You are a market intelligence analyst inside Portfolio Risk Cockpit.
 
@@ -355,6 +376,36 @@ _SEC_VISIBLE_CHART_FIELDS = frozenset(
         "industry",
         "eps",
         "revenue_growth",
+    }
+)
+_SEC_NON_FILING_FIELD_SOURCE_BLOCKLIST = frozenset(
+    {
+        "symbol",
+        "company_name",
+        "exchange",
+        "sector",
+        "industry",
+        "price",
+        "change_percent",
+        "volume",
+        "avg_volume",
+        "market_cap",
+        "pe_ratio",
+        "eps",
+        "revenue_growth",
+        "shares_float",
+        "shares_outstanding",
+        "market_cap_currency",
+        "market_cap_rank_value",
+        "market_cap_rank_currency",
+        "market_cap_rank_trusted",
+        "market_cap_rank_reason",
+        "instrument_type",
+        "country",
+        "is_adr",
+        "is_etf",
+        "is_fund",
+        "is_otc",
     }
 )
 _SYMBOL_ALIASES = {
@@ -742,6 +793,35 @@ class MarketScreenerEnrichmentResult:
             "statuses": [asdict(status) for status in self.statuses],
             "errors": list(self.errors),
             "notes": list(self.notes),
+        }
+
+
+@dataclass(frozen=True)
+class MarketScreenerRefreshJobResult:
+    job: str
+    label: str
+    snapshot: MarketScreenerSnapshot
+    requested_symbols: tuple[str, ...]
+    rows_updated: int
+    statuses: tuple[MarketScreenerSourceStatus, ...] = ()
+    errors: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "job": self.job,
+            "label": self.label,
+            "snapshot": {
+                "records": [record.to_dict() for record in self.snapshot.records],
+                "fetched_at": self.snapshot.fetched_at,
+                "sources": list(self.snapshot.sources),
+                "statuses": [asdict(status) for status in self.snapshot.statuses],
+                "errors": list(self.snapshot.errors),
+                "diagnostics": self.snapshot.diagnostics.to_dict(),
+            },
+            "requested_symbols": list(self.requested_symbols),
+            "rows_updated": self.rows_updated,
+            "statuses": [asdict(status) for status in self.statuses],
+            "errors": list(self.errors),
         }
 
 
@@ -1140,6 +1220,128 @@ def market_screener_snapshot_from_records(
     )
 
 
+def refresh_market_screener_records(
+    records: Iterable[MarketScreenerRecord],
+    job: str,
+    *,
+    provider: Any | None = None,
+    config: MarketScreenerBackfillConfig | None = None,
+    symbols: Iterable[str] | None = None,
+    force_refresh: bool = False,
+    max_symbols: int | None = None,
+    include_fallback_provider: bool = True,
+) -> MarketScreenerRefreshJobResult:
+    clean_job = _normalize_market_screener_refresh_job(job)
+    if clean_job == MARKET_SCREENER_REFRESH_FULL_REBUILD:
+        raise ValueError("Full Rebuild must call fetch_market_screener_snapshot so universe, filings, earnings, and provider inputs are rebuilt together.")
+
+    fetched_at = _now()
+    config = config or market_screener_backfill_config_from_env()
+    base_rows = tuple(_normalize_record(record, fetched_at=fetched_at) for record in records)
+    if not config.enabled:
+        status = MarketScreenerSourceStatus(
+            MARKET_SCREENER_REFRESH_JOB_LABELS[clean_job],
+            "disabled",
+            fetched_at,
+            f"Provider refresh disabled by {MARKET_SCREENER_PROVIDER_BACKFILL_ENABLED_ENV}=false.",
+        )
+        snapshot = market_screener_snapshot_from_records(base_rows, fetched_at=fetched_at, statuses=(status,))
+        return MarketScreenerRefreshJobResult(clean_job, MARKET_SCREENER_REFRESH_JOB_LABELS[clean_job], snapshot, (), 0, statuses=(status,))
+
+    active_provider = provider or configured_market_data_provider(
+        include_fallback_provider=include_fallback_provider,
+        fmp_symbol_limit=max(config.profile_limit, config.quote_limit, config.fundamental_limit),
+        databento_symbol_limit=config.databento_limit,
+        cache_ttl_seconds=config.cache_ttl_seconds,
+        batch_size=config.batch_size,
+    )
+    symbol_cap = max_symbols if max_symbols is not None else _market_screener_refresh_job_limit(clean_job, config)
+    requested_symbols = _market_screener_refresh_job_symbols(base_rows, symbols=symbols, max_symbols=max(0, int(symbol_cap)))
+    if not requested_symbols:
+        status = MarketScreenerSourceStatus(
+            MARKET_SCREENER_REFRESH_JOB_LABELS[clean_job],
+            "empty",
+            fetched_at,
+            "No symbol-bearing rows were available for this targeted refresh job.",
+        )
+        snapshot = market_screener_snapshot_from_records(base_rows, fetched_at=fetched_at, statuses=(status,))
+        return MarketScreenerRefreshJobResult(clean_job, MARKET_SCREENER_REFRESH_JOB_LABELS[clean_job], snapshot, (), 0, statuses=(status,))
+
+    if clean_job == MARKET_SCREENER_REFRESH_FILINGS:
+        return _refresh_market_screener_filing_records(
+            base_rows,
+            active_provider,
+            requested_symbols,
+            force_refresh=force_refresh,
+            fetched_at=fetched_at,
+        )
+
+    family = _market_screener_refresh_job_family(clean_job)
+    result = enrich_market_screener_records(
+        base_rows,
+        family,
+        provider=active_provider,
+        config=config,
+        symbols=requested_symbols,
+        force_refresh=force_refresh,
+        include_fallback_provider=include_fallback_provider,
+    )
+    statuses = (
+        *result.statuses,
+        MarketScreenerSourceStatus(
+            MARKET_SCREENER_REFRESH_JOB_LABELS[clean_job],
+            "available" if result.report.rows_updated else "empty",
+            result.fetched_at,
+            (
+                f"{MARKET_SCREENER_REFRESH_JOB_LABELS[clean_job]} requested {len(result.requested_symbols)} symbol(s); "
+                f"updated {result.report.rows_updated} row(s). Only {family.replace('_', ' ')} fields were eligible to merge."
+            ),
+        ),
+    )
+    snapshot = market_screener_snapshot_from_records(
+        result.records,
+        fetched_at=result.fetched_at,
+        statuses=statuses,
+        errors=result.errors,
+    )
+    return MarketScreenerRefreshJobResult(
+        clean_job,
+        MARKET_SCREENER_REFRESH_JOB_LABELS[clean_job],
+        snapshot,
+        result.requested_symbols,
+        result.report.rows_updated,
+        statuses=statuses,
+        errors=result.errors,
+    )
+
+
+def rebuild_market_screener_snapshot(**kwargs: Any) -> MarketScreenerRefreshJobResult:
+    snapshot = fetch_market_screener_snapshot(**kwargs)
+    status = MarketScreenerSourceStatus(
+        MARKET_SCREENER_REFRESH_JOB_LABELS[MARKET_SCREENER_REFRESH_FULL_REBUILD],
+        "available" if snapshot.records else "empty",
+        snapshot.fetched_at,
+        f"Full Rebuild reconstructed {len(snapshot.records)} Market Screener row(s).",
+    )
+    rebuilt_snapshot = MarketScreenerSnapshot(
+        records=snapshot.records,
+        fetched_at=snapshot.fetched_at,
+        sources=snapshot.sources,
+        statuses=(*snapshot.statuses, status),
+        errors=snapshot.errors,
+        diagnostics=snapshot.diagnostics,
+    )
+    return MarketScreenerRefreshJobResult(
+        MARKET_SCREENER_REFRESH_FULL_REBUILD,
+        MARKET_SCREENER_REFRESH_JOB_LABELS[MARKET_SCREENER_REFRESH_FULL_REBUILD],
+        rebuilt_snapshot,
+        tuple(_market_data_candidate_symbols(snapshot.records, len(snapshot.records))),
+        len(snapshot.records),
+        statuses=rebuilt_snapshot.statuses,
+        errors=rebuilt_snapshot.errors,
+    )
+
+
 def build_market_screener_records(
     universe: Iterable[MarketUniverseEntry],
     recent_records: Iterable[RecentEarningsRecord] = (),
@@ -1166,7 +1368,7 @@ def build_market_screener_records(
         _merge_into(merged, _strip_sec_visible_chart_fields(_normalize_record(record, fetched_at=fetched_at)))
 
     for record in market_data_records:
-        _merge_into(merged, _record_from_market_data(record, fetched_at=fetched_at))
+        _merge_into(merged, _strip_sec_non_filing_fields(_record_from_market_data(record, fetched_at=fetched_at)))
 
     return sorted(merged.values(), key=lambda row: ((row.symbol or "ZZZZ").upper(), (row.company_name or "").lower()))
 
@@ -1176,6 +1378,7 @@ def merge_market_data_records_into_screener_records(
     market_data_records: Iterable[MarketQuoteFundamentalsRecord],
     *,
     fetched_at: str | None = None,
+    family: str | None = None,
 ) -> list[MarketScreenerRecord]:
     fetched_at = fetched_at or _now()
     rows = [_normalize_record(record, fetched_at=fetched_at) for record in records]
@@ -1185,11 +1388,12 @@ def merge_market_data_records_into_screener_records(
             indexes_by_key.setdefault(key, index)
     for market_data_record in market_data_records:
         incoming = _record_from_market_data(market_data_record, fetched_at=fetched_at)
+        incoming = _scope_screener_incoming_record_for_family(incoming, family)
         key = next((candidate for candidate in _record_keys(incoming) if candidate in indexes_by_key), "")
         if not key:
             continue
         index = indexes_by_key[key]
-        rows[index] = merge_market_screener_record(rows[index], incoming)
+        rows[index] = _merge_market_screener_record_for_family(rows[index], incoming, family)
         for updated_key in _record_keys(rows[index]):
             indexes_by_key[updated_key] = index
     return rows
@@ -1291,7 +1495,7 @@ def enrich_market_screener_records(
         statuses.extend(MarketScreenerSourceStatus(status.source, status.status, status.fetched_at, status.message) for status in snapshot.statuses)
         errors.extend(redact_symbol_chat_secrets(error) for error in snapshot.errors)
         _merge_counter_mapping(diagnostics, snapshot.diagnostics)
-        enriched_rows = merge_market_data_records_into_screener_records(enriched_rows, snapshot.records, fetched_at=snapshot.fetched_at)
+        enriched_rows = merge_market_data_records_into_screener_records(enriched_rows, snapshot.records, fetched_at=snapshot.fetched_at, family=family)
 
     changed_rows = _count_screener_rows_changed(before_rows, enriched_rows, _market_screener_fields_for_families(families))
     diagnostics["provider_rows_updated"] = max(diagnostics.get("provider_rows_updated", 0), changed_rows)
@@ -1423,12 +1627,9 @@ def _market_screener_scope_rows(
 
 
 def _market_screener_family_fields(family: str) -> tuple[str, ...]:
-    if family == MARKET_SCREENER_ENRICH_PROFILE_CLASSIFICATION:
-        return ("company_name", "exchange", "sector", "industry", "cik")
-    if family == MARKET_SCREENER_ENRICH_QUOTE_TAPE:
-        return ("price", "change_percent", "volume", "avg_volume")
-    if family == MARKET_SCREENER_ENRICH_FUNDAMENTALS:
-        return ("market_cap", "pe_ratio", "eps", "revenue_growth", "shares_float", "shares_outstanding")
+    scoped_fields = _market_screener_refresh_family_fields(family)
+    if scoped_fields:
+        return scoped_fields
     return tuple(sorted(ASK_SCREENER_PROVIDER_AWARE_FIELDS))
 
 
@@ -1496,6 +1697,253 @@ def _market_screener_provider_family_snapshot(
     if callable(method):
         return method(symbols, force_refresh=force_refresh, max_symbols=max_symbols)
     return provider.quote_fundamentals(symbols, force_refresh=force_refresh, max_symbols=max_symbols)
+
+
+def _normalize_market_screener_refresh_job(job: str) -> str:
+    clean = str(job or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "quote": MARKET_SCREENER_REFRESH_QUOTE_TAPE,
+        "quotes": MARKET_SCREENER_REFRESH_QUOTE_TAPE,
+        "tape": MARKET_SCREENER_REFRESH_QUOTE_TAPE,
+        "quote_refresh": MARKET_SCREENER_REFRESH_QUOTE_TAPE,
+        "quote_tape_refresh": MARKET_SCREENER_REFRESH_QUOTE_TAPE,
+        "profile_classification": MARKET_SCREENER_REFRESH_PROFILE,
+        "profile_refresh": MARKET_SCREENER_REFRESH_PROFILE,
+        "fundamental": MARKET_SCREENER_REFRESH_FUNDAMENTALS,
+        "fundamental_refresh": MARKET_SCREENER_REFRESH_FUNDAMENTALS,
+        "fundamentals_refresh": MARKET_SCREENER_REFRESH_FUNDAMENTALS,
+        "filing": MARKET_SCREENER_REFRESH_FILINGS,
+        "filing_refresh": MARKET_SCREENER_REFRESH_FILINGS,
+        "filings_refresh": MARKET_SCREENER_REFRESH_FILINGS,
+        "rebuild": MARKET_SCREENER_REFRESH_FULL_REBUILD,
+        "full": MARKET_SCREENER_REFRESH_FULL_REBUILD,
+        "full_rebuild": MARKET_SCREENER_REFRESH_FULL_REBUILD,
+    }
+    clean = aliases.get(clean, clean)
+    if clean not in MARKET_SCREENER_REFRESH_JOBS:
+        raise ValueError(f"Unsupported Market Screener refresh job: {job}")
+    return clean
+
+
+def _market_screener_refresh_job_family(job: str) -> str:
+    clean_job = _normalize_market_screener_refresh_job(job)
+    if clean_job == MARKET_SCREENER_REFRESH_QUOTE_TAPE:
+        return MARKET_SCREENER_ENRICH_QUOTE_TAPE
+    if clean_job == MARKET_SCREENER_REFRESH_PROFILE:
+        return MARKET_SCREENER_ENRICH_PROFILE_CLASSIFICATION
+    if clean_job == MARKET_SCREENER_REFRESH_FUNDAMENTALS:
+        return MARKET_SCREENER_ENRICH_FUNDAMENTALS
+    raise ValueError(f"Market Screener refresh job has no provider family: {job}")
+
+
+def _market_screener_refresh_job_limit(job: str, config: MarketScreenerBackfillConfig) -> int:
+    clean_job = _normalize_market_screener_refresh_job(job)
+    if clean_job == MARKET_SCREENER_REFRESH_PROFILE:
+        return config.profile_limit
+    if clean_job == MARKET_SCREENER_REFRESH_QUOTE_TAPE:
+        return max(config.quote_limit, config.databento_limit)
+    if clean_job == MARKET_SCREENER_REFRESH_FUNDAMENTALS:
+        return config.fundamental_limit
+    if clean_job == MARKET_SCREENER_REFRESH_FILINGS:
+        return config.profile_limit
+    return max(config.profile_limit, config.quote_limit, config.fundamental_limit, config.databento_limit)
+
+
+def _market_screener_refresh_job_symbols(
+    records: Iterable[MarketScreenerRecord],
+    *,
+    symbols: Iterable[str] | None,
+    max_symbols: int,
+) -> tuple[str, ...]:
+    if max_symbols <= 0:
+        return ()
+    if symbols is not None:
+        return tuple(_dedupe_texts(_normalize_symbol(symbol) for symbol in symbols if _normalize_symbol(symbol)))[:max_symbols]
+    return _market_data_candidate_symbols(records, max_symbols)
+
+
+def _refresh_market_screener_filing_records(
+    base_rows: tuple[MarketScreenerRecord, ...],
+    provider: Any,
+    requested_symbols: tuple[str, ...],
+    *,
+    force_refresh: bool,
+    fetched_at: str,
+) -> MarketScreenerRefreshJobResult:
+    statuses: list[MarketScreenerSourceStatus] = []
+    errors: list[str] = []
+    provider_diagnostics: dict[str, int] = {}
+    filing_records = _load_provider_filing_metadata_records_for_symbols(
+        provider,
+        requested_symbols,
+        statuses,
+        errors,
+        fetched_at,
+        force_refresh,
+        provider_diagnostics,
+    )
+    before_rows = tuple(base_rows)
+    refreshed_rows = _merge_market_screener_records_for_family(base_rows, filing_records, MARKET_SCREENER_REFRESH_FILINGS, fetched_at=fetched_at)
+    rows_updated = _count_screener_rows_changed(before_rows, refreshed_rows, _market_screener_refresh_family_fields(MARKET_SCREENER_REFRESH_FILINGS))
+    provider_diagnostics["provider_rows_updated"] = max(provider_diagnostics.get("provider_rows_updated", 0), rows_updated)
+    status = MarketScreenerSourceStatus(
+        MARKET_SCREENER_REFRESH_JOB_LABELS[MARKET_SCREENER_REFRESH_FILINGS],
+        "available" if rows_updated else "empty",
+        fetched_at,
+        (
+            f"Filing Refresh requested {len(requested_symbols)} symbol(s); updated {rows_updated} row(s). "
+            "Only recent filing date/type, filing links, filing signals, and filing provenance were eligible to merge."
+        ),
+    )
+    statuses.append(status)
+    snapshot = market_screener_snapshot_from_records(refreshed_rows, fetched_at=fetched_at, statuses=statuses, errors=errors)
+    return MarketScreenerRefreshJobResult(
+        MARKET_SCREENER_REFRESH_FILINGS,
+        MARKET_SCREENER_REFRESH_JOB_LABELS[MARKET_SCREENER_REFRESH_FILINGS],
+        snapshot,
+        requested_symbols,
+        rows_updated,
+        statuses=tuple(statuses),
+        errors=tuple(errors),
+    )
+
+
+_QUOTE_TAPE_SIGNAL_LABELS = frozenset({"High volume", "Mover"})
+_FILING_REFRESH_SIGNAL_LABELS = frozenset({"Recent SEC filing"})
+
+
+def _market_screener_refresh_family_fields(family: str | None) -> tuple[str, ...]:
+    if family in {MARKET_SCREENER_ENRICH_QUOTE_TAPE, MARKET_SCREENER_REFRESH_QUOTE_TAPE}:
+        return ("price", "change_percent", "volume", "avg_volume")
+    if family in {MARKET_SCREENER_ENRICH_PROFILE_CLASSIFICATION, MARKET_SCREENER_REFRESH_PROFILE}:
+        return (
+            "company_name",
+            "exchange",
+            "sector",
+            "industry",
+            "cik",
+            "country",
+            "instrument_type",
+            "is_adr",
+            "is_etf",
+            "is_fund",
+            "is_otc",
+        )
+    if family in {MARKET_SCREENER_ENRICH_FUNDAMENTALS, MARKET_SCREENER_REFRESH_FUNDAMENTALS}:
+        return (
+            "market_cap",
+            "pe_ratio",
+            "eps",
+            "revenue_growth",
+            "shares_float",
+            "shares_outstanding",
+            "market_cap_currency",
+            "market_cap_rank_value",
+            "market_cap_rank_currency",
+            "market_cap_rank_trusted",
+            "market_cap_rank_reason",
+            "instrument_type",
+            "country",
+            "is_adr",
+            "is_etf",
+            "is_fund",
+            "is_otc",
+        )
+    if family == MARKET_SCREENER_REFRESH_FILINGS:
+        return ("recent_filing_date", "recent_filing_type", "source_links", "signals")
+    return ()
+
+
+def _scope_screener_incoming_record_for_family(
+    record: MarketScreenerRecord,
+    family: str | None,
+) -> MarketScreenerRecord:
+    clean = _strip_sec_non_filing_fields(record)
+    allowed = set(_market_screener_refresh_family_fields(family))
+    if not allowed:
+        return clean
+    replacements: dict[str, Any] = {}
+    for field in _SCREENER_SINGLE_VALUE_FIELDS:
+        if field in {"symbol", "source_excerpt"}:
+            continue
+        if field not in allowed:
+            replacements[field] = None
+    signals = clean.signals
+    if family in {MARKET_SCREENER_ENRICH_QUOTE_TAPE, MARKET_SCREENER_REFRESH_QUOTE_TAPE}:
+        signals = tuple(signal for signal in clean.signals if signal in _QUOTE_TAPE_SIGNAL_LABELS)
+    elif family == MARKET_SCREENER_REFRESH_FILINGS:
+        signals = tuple(signal for signal in clean.signals if signal in _FILING_REFRESH_SIGNAL_LABELS)
+    else:
+        signals = ()
+    filtered_provenance = tuple(row for row in clean.field_provenance if row.field in allowed)
+    return replace(
+        clean,
+        **replacements,
+        signals=signals,
+        risk_flags=(),
+        source_links=clean.source_links,
+        source_excerpt=None,
+        field_provenance=filtered_provenance,
+    )
+
+
+def _merge_market_screener_record_for_family(
+    existing: MarketScreenerRecord,
+    incoming: MarketScreenerRecord,
+    family: str | None,
+) -> MarketScreenerRecord:
+    if family in {MARKET_SCREENER_ENRICH_PROFILE_CLASSIFICATION, MARKET_SCREENER_REFRESH_PROFILE}:
+        reset_profile_fields = {
+            field: None
+            for field in _market_screener_refresh_family_fields(MARKET_SCREENER_REFRESH_PROFILE)
+            if field in _SCREENER_SINGLE_VALUE_FIELDS and _has_value(getattr(incoming, field, None))
+        }
+        if reset_profile_fields:
+            existing = replace(existing, **reset_profile_fields)
+    if family in {MARKET_SCREENER_ENRICH_QUOTE_TAPE, MARKET_SCREENER_REFRESH_QUOTE_TAPE} and any(
+        getattr(incoming, field) is not None for field in _market_screener_refresh_family_fields(MARKET_SCREENER_REFRESH_QUOTE_TAPE)
+    ):
+        existing = replace(existing, signals=tuple(signal for signal in existing.signals if signal not in _QUOTE_TAPE_SIGNAL_LABELS))
+    if family == MARKET_SCREENER_REFRESH_FILINGS and (
+        incoming.recent_filing_date or incoming.recent_filing_type or incoming.source_links
+    ):
+        existing = replace(existing, signals=tuple(signal for signal in existing.signals if signal not in _FILING_REFRESH_SIGNAL_LABELS))
+    return merge_market_screener_record(existing, incoming)
+
+
+def _merge_market_screener_records_for_family(
+    records: Iterable[MarketScreenerRecord],
+    incoming_records: Iterable[MarketScreenerRecord],
+    family: str,
+    *,
+    fetched_at: str,
+) -> list[MarketScreenerRecord]:
+    rows = [_normalize_record(record, fetched_at=fetched_at) for record in records]
+    indexes_by_key: dict[str, int] = {}
+    for index, record in enumerate(rows):
+        for key in _record_keys(record):
+            indexes_by_key.setdefault(key, index)
+    for incoming_record in incoming_records:
+        incoming = _scope_screener_incoming_record_for_family(_normalize_record(incoming_record, fetched_at=fetched_at), family)
+        if not _screener_record_has_refresh_family_value(incoming, family):
+            continue
+        key = next((candidate for candidate in _record_keys(incoming) if candidate in indexes_by_key), "")
+        if not key:
+            continue
+        index = indexes_by_key[key]
+        rows[index] = _merge_market_screener_record_for_family(rows[index], incoming, family)
+        for updated_key in _record_keys(rows[index]):
+            indexes_by_key[updated_key] = index
+    return rows
+
+
+def _screener_record_has_refresh_family_value(record: MarketScreenerRecord, family: str | None) -> bool:
+    fields = _market_screener_refresh_family_fields(family)
+    if not fields:
+        return True
+    return any(_has_value(getattr(record, field, None)) for field in fields if field not in {"signals", "source_links"}) or bool(
+        ("signals" in fields and record.signals) or ("source_links" in fields and record.source_links)
+    )
 
 
 def _count_screener_rows_changed(
@@ -3630,6 +4078,90 @@ def _load_provider_filing_metadata_records(
     return tuple(enriched)
 
 
+def _load_provider_filing_metadata_records_for_symbols(
+    provider: Any | None,
+    symbols: Iterable[str],
+    statuses: list[MarketScreenerSourceStatus],
+    errors: list[str],
+    fetched_at: str,
+    force_refresh: bool,
+    provider_diagnostics: dict[str, int],
+) -> tuple[MarketScreenerRecord, ...]:
+    requested = tuple(_dedupe_texts(_normalize_symbol(symbol) for symbol in symbols if _normalize_symbol(symbol)))
+    if provider is None:
+        statuses.append(
+            MarketScreenerSourceStatus(
+                "FMP SEC filings by symbol",
+                "unavailable",
+                fetched_at,
+                "No configured provider supports filing metadata refresh.",
+            )
+        )
+        provider_diagnostics["provider_unavailable"] = provider_diagnostics.get("provider_unavailable", 0) + 1
+        return ()
+    filing_method = getattr(provider, "sec_filings", None) or getattr(provider, "filing_metadata", None)
+    if not callable(filing_method):
+        statuses.append(
+            MarketScreenerSourceStatus(
+                "FMP SEC filings by symbol",
+                "unavailable",
+                fetched_at,
+                "No configured provider supports filing metadata refresh.",
+            )
+        )
+        provider_diagnostics["provider_unavailable"] = provider_diagnostics.get("provider_unavailable", 0) + 1
+        return ()
+    if not requested:
+        statuses.append(
+            MarketScreenerSourceStatus(
+                "FMP SEC filings by symbol",
+                "empty",
+                fetched_at,
+                "No symbol-bearing rows were available for filing metadata refresh.",
+            )
+        )
+        return ()
+
+    enriched: list[MarketScreenerRecord] = []
+    failures = 0
+    for symbol in requested:
+        try:
+            rows = filing_method(symbol, force_refresh=force_refresh, limit=1)
+        except TypeError:
+            rows = filing_method(symbol, limit=1)
+        except Exception as exc:
+            clean_error = _redact_market_screener_provider_error(str(exc))
+            errors.append(f"FMP SEC filings by symbol {symbol}: {clean_error}")
+            failures += 1
+            continue
+        first = next((row for row in rows if isinstance(row, Mapping)), None)
+        record = _record_from_provider_filing_metadata(symbol, first, fetched_at=fetched_at)
+        if record is not None:
+            enriched.append(_scope_screener_incoming_record_for_family(record, MARKET_SCREENER_REFRESH_FILINGS))
+    status = "available" if enriched else "empty"
+    if not enriched and failures:
+        status = "unavailable"
+    statuses.append(
+        MarketScreenerSourceStatus(
+            "FMP SEC filings by symbol",
+            status,
+            fetched_at,
+            (
+                f"Refreshed FMP SEC filing metadata for {len(enriched)} of {len(requested)} symbol row(s); "
+                f"{failures} nonblocking failure(s). Filing refresh merges filing date/type/link fields only."
+            ),
+        )
+    )
+    provider_diagnostics["rows_enriched_by_fmp_sec_filings"] = provider_diagnostics.get("rows_enriched_by_fmp_sec_filings", 0) + len(enriched)
+    provider_diagnostics["provider_rows_requested"] = provider_diagnostics.get("provider_rows_requested", 0) + len(requested)
+    provider_diagnostics["provider_rows_returned"] = provider_diagnostics.get("provider_rows_returned", 0) + len(enriched)
+    provider_diagnostics["provider_rows_parsed"] = provider_diagnostics.get("provider_rows_parsed", 0) + len(enriched)
+    provider_diagnostics["provider_calls_attempted"] = provider_diagnostics.get("provider_calls_attempted", 0) + len(requested)
+    if failures:
+        provider_diagnostics["provider_warnings"] = provider_diagnostics.get("provider_warnings", 0) + failures
+    return tuple(enriched)
+
+
 def _redact_market_screener_provider_error(value: str) -> str:
     text = redact_symbol_chat_secrets(str(value or ""))
     for env_name in ("FMP_API_KEY", "DATABENTO_API_KEY", "ALPHA_VANTAGE_API_KEY", "OPENAI_API_KEY"):
@@ -4410,8 +4942,6 @@ def _record_from_provider_filing_metadata(
     source_url = _optional_text(payload.get("source_url") or payload.get("sourceUrl")) or filing_url
     values = {
         "symbol": clean_symbol,
-        "company_name": _optional_text(payload.get("companyName") or payload.get("company_name") or payload.get("company") or payload.get("name")),
-        "cik": _normalize_cik(payload.get("cik") or payload.get("CIK") or payload.get("cik_str")) or None,
         "recent_filing_date": filing_date[:10],
         "recent_filing_type": form.upper(),
         "signals": ("Recent SEC filing",),
@@ -4419,15 +4949,18 @@ def _record_from_provider_filing_metadata(
     }
     return MarketScreenerRecord(
         symbol=values["symbol"],
-        company_name=values["company_name"],
-        cik=values["cik"],
         recent_filing_date=values["recent_filing_date"],
         recent_filing_type=values["recent_filing_type"],
         signals=values["signals"],
         sources=(source,),
         source_links=values["source_links"],
         fetched_at=fetched_at,
-        field_provenance=_provenance_for_values(values, source=source, source_link=source_url, fetched_at=fetched_at),
+        field_provenance=_provenance_for_values(
+            {key: value for key, value in values.items() if key != "symbol"},
+            source=source,
+            source_link=source_url,
+            fetched_at=fetched_at,
+        ),
     )
 
 
@@ -4577,12 +5110,16 @@ def _normalize_record(record: MarketScreenerRecord, *, fetched_at: str) -> Marke
 
 
 def _strip_sec_visible_chart_fields(record: MarketScreenerRecord) -> MarketScreenerRecord:
+    return _strip_sec_non_filing_fields(record)
+
+
+def _strip_sec_non_filing_fields(record: MarketScreenerRecord) -> MarketScreenerRecord:
     if not _record_has_sec_owned_source(record):
         return record
     provenance_by_field = _provenance_by_field(record.field_provenance)
     strip_fields: set[str] = set()
     record_sources_are_sec_only = bool(record.sources) and all(_source_is_sec_owned(source) for source in record.sources)
-    for field in _SEC_VISIBLE_CHART_FIELDS:
+    for field in _SEC_NON_FILING_FIELD_SOURCE_BLOCKLIST:
         if not _has_value(getattr(record, field, None)):
             continue
         provenance = provenance_by_field.get(field)
@@ -4592,12 +5129,17 @@ def _strip_sec_visible_chart_fields(record: MarketScreenerRecord) -> MarketScree
         elif record_sources_are_sec_only:
             strip_fields.add(field)
     if not strip_fields:
-        return record
-    replacements = {field: None for field in strip_fields}
+        filtered_provenance = tuple(
+            row
+            for row in record.field_provenance
+            if not (row.field in _SEC_NON_FILING_FIELD_SOURCE_BLOCKLIST and _source_is_sec_owned(row.source))
+        )
+        return replace(record, field_provenance=filtered_provenance) if len(filtered_provenance) != len(record.field_provenance) else record
+    replacements = {field: None for field in strip_fields if field != "symbol"}
     filtered_provenance = tuple(
         row
         for row in record.field_provenance
-        if not (row.field in strip_fields and _source_is_sec_owned(row.source))
+        if not (row.field in _SEC_NON_FILING_FIELD_SOURCE_BLOCKLIST and _source_is_sec_owned(row.source))
     )
     return replace(record, **replacements, field_provenance=filtered_provenance)
 
