@@ -34,12 +34,10 @@ from app.ui.trading_workspace_extension import (
     _configure_side_combobox_styles,
     _ensure_execution_workspace_vars,
     _first_available_command,
-    _run_workspace_action,
     _workspace_holdings_table,
 )
 from app.ui import polished_theme
 from app.ui.polished_theme import _make_paned
-from app.ui.symbol_chat_window import open_symbol_chat_window
 from app.ui.venue_mid_extension import _extract_schwab_quote, _first_number, _format_optional_price, _format_price
 
 
@@ -594,16 +592,10 @@ def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
     def schwab_action(*names: str) -> Callable[[], None]:
         return lambda: _run_schwab_workspace_action(self, *names)
 
-    _add_action_button(actions, row=0, column=0, text="Open Symbol Chat", command=lambda app=self: _open_schwab_symbol_chat(app), style="Accent.TButton")
     _add_action_button(actions, row=0, column=3, text="Tech Analysis", command=schwab_action("show_technical_analysis"))
     _add_action_button(actions, row=1, column=3, text="Preview Schwab", command=schwab_action("run_schwab_preview"))
     _add_action_button(actions, row=0, column=2, text="Recent Orders", command=lambda app=self: _refresh_schwab_recent_orders_tab(app))
     _add_action_button(actions, row=1, column=2, text="Open Only", command=schwab_action("load_selected_open_orders_only", "load_schwab_open_orders_only"))
-
-    # _add_action_button(actions, row=0, column=2, text="Preview Risk", command=schwab_action("preview_order"), style="Accent.TButton")
-    # _add_action_button(actions, row=0, column=0, text="Connect Schwab", command=schwab_action("connect_schwab", "run_schwab_preview"))
-    # _add_action_button(actions, row=0, column=1, text="Refresh Account", command=schwab_action("refresh_schwab_account", "refresh_portfolio"))
-    # _add_action_button(actions, row=1, column=1, text="Position Size", command=schwab_action("show_position_size"))
 
     show_ipo_pipeline = getattr(self, "show_ipo_pipeline", None)
     if callable(show_ipo_pipeline):
@@ -612,31 +604,6 @@ def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
 
     _add_action_button(actions, row=2, column=2, text="Cancel Order", command=schwab_action("cancel_selected_order", "show_cancel_order_placeholder"), style="Danger.TButton")
     _add_action_button(actions, row=2, column=3, text="LIVE Submit", command=lambda app=self: _submit_schwab_live_order(app), style="Danger.TButton")
-
-
-def _open_schwab_symbol_chat(self: tk.Tk) -> None:
-    symbol = _resolve_open_symbol_chat_symbol(self)
-    if not symbol:
-        messagebox.showinfo("Open Symbol Chat", "Select a Schwab position or enter a symbol first.")
-        return
-    try:
-        open_symbol_chat_window(
-            self,
-            symbol,
-            app_context=self,
-            schwab_session=getattr(self, "schwab_session", None),
-        )
-        if hasattr(self, "schwab_status_var"):
-            self.schwab_status_var.set(f"Symbol Chat: opened for {symbol}")
-        _set_schwab_mode_text(
-            self,
-            "AI SYMBOL CHAT\n"
-            "==============\n\n"
-            f"Opened analysis-only Symbol Chat for {symbol}.\n\n"
-            "No order was placed, previewed, modified, or automated.",
-        )
-    except Exception as exc:
-        messagebox.showerror("Open Symbol Chat failed", str(exc))
 
 
 def _resolve_open_symbol_chat_symbol(self: tk.Tk) -> str:
