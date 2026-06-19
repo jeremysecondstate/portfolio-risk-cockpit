@@ -569,12 +569,13 @@ class MarketScreenerRecord:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "MarketScreenerRecord":
-        values = dict(payload)
+        allowed_fields = set(cls.__dataclass_fields__)
+        values = {key: value for key, value in dict(payload).items() if key in allowed_fields}
         values["symbol"] = _normalize_symbol(values.get("symbol"))
-        values["signals"] = tuple(values.get("signals") or ())
-        values["risk_flags"] = tuple(values.get("risk_flags") or ())
-        values["sources"] = tuple(values.get("sources") or ())
-        values["source_links"] = tuple(values.get("source_links") or ())
+        values["signals"] = _tuple_texts_from_payload(values.get("signals"))
+        values["risk_flags"] = _tuple_texts_from_payload(values.get("risk_flags"))
+        values["sources"] = _tuple_texts_from_payload(values.get("sources"))
+        values["source_links"] = _tuple_texts_from_payload(values.get("source_links"))
         values["field_provenance"] = _field_provenance_from_payload(values.get("field_provenance"))
         for key in ("market_cap_currency", "market_cap_rank_currency"):
             values[key] = _normalize_currency_code(values.get(key)) or None
@@ -1112,6 +1113,28 @@ def fetch_market_screener_snapshot(
         fetched_at=fetched_at,
         sources=sources,
         statuses=tuple(statuses),
+        errors=tuple(errors),
+        diagnostics=diagnostics,
+    )
+
+
+def market_screener_snapshot_from_records(
+    records: Iterable[MarketScreenerRecord],
+    *,
+    fetched_at: str | None = None,
+    statuses: Iterable[MarketScreenerSourceStatus] = (),
+    errors: Iterable[str] = (),
+) -> MarketScreenerSnapshot:
+    rows = tuple(records)
+    snapshot_fetched_at = fetched_at or _latest_record_fetched_at(rows) or _now()
+    clean_statuses = tuple(statuses)
+    diagnostics = _build_market_screener_diagnostics(rows, clean_statuses, {})
+    sources = tuple(sorted({source for record in rows for source in record.sources if source}))
+    return MarketScreenerSnapshot(
+        records=rows,
+        fetched_at=snapshot_fetched_at,
+        sources=sources,
+        statuses=clean_statuses,
         errors=tuple(errors),
         diagnostics=diagnostics,
     )
@@ -4961,6 +4984,7 @@ def _field_provenance_payload(record: MarketScreenerRecord) -> Any:
 
 
 def _field_provenance_from_payload(payload: Any) -> tuple[MarketScreenerFieldProvenance, ...]:
+    payload = _json_payload_or_original(payload)
     if not payload:
         return ()
     rows: list[MarketScreenerFieldProvenance] = []
@@ -5528,6 +5552,35 @@ def _dedupe_texts(values: Iterable[Any]) -> list[str]:
         seen.add(text)
         result.append(text)
     return result
+
+
+def _tuple_texts_from_payload(payload: Any) -> tuple[str, ...]:
+    if not payload:
+        return ()
+    value = _json_payload_or_original(payload)
+    if isinstance(value, (list, tuple, set)):
+        return tuple(_dedupe_texts(value))
+    text = redact_symbol_chat_secrets(str(value or "").strip())
+    return (text,) if text else ()
+
+
+def _json_payload_or_original(payload: Any) -> Any:
+    if not isinstance(payload, str):
+        return payload
+    text = payload.strip()
+    if not text:
+        return ()
+    if not (text.startswith("[") or text.startswith("{")):
+        return payload
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return payload
+
+
+def _latest_record_fetched_at(records: Iterable[MarketScreenerRecord]) -> str:
+    values = [record.fetched_at for record in records if record.fetched_at]
+    return max(values) if values else ""
 
 
 def _normalize_symbol(value: Any) -> str:

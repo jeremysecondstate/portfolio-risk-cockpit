@@ -49,6 +49,7 @@ from app.analytics.market_screener import (
     MarketScreenerEnrichmentResult,
     MarketScreenerRecord,
     MarketScreenerSnapshot,
+    MarketScreenerSourceStatus,
     OpenAiAskScreenerPlannerClient,
     OpenAiMarketScreenerClient,
     ask_screener_config_from_env,
@@ -70,6 +71,7 @@ from app.analytics.market_screener import (
     market_screener_has_ai_signal,
     market_screener_major_cap_diagnostic_lines,
     market_screener_market_cap_rank,
+    market_screener_snapshot_from_records,
     merge_market_data_records_into_screener_records,
     parse_ask_screener_fallback,
     sort_market_screener_records,
@@ -77,6 +79,11 @@ from app.analytics.market_screener import (
 from app.analytics.symbol_chat import redact_symbol_chat_secrets
 from app.data.earnings_calendar import ALPHA_VANTAGE_HORIZONS, UpcomingEarningsRecord, configured_upcoming_earnings_provider
 from app.data.market_data_provider import MarketQuoteFundamentalsSnapshot, configured_market_data_provider, configured_market_data_symbol_limit
+from app.data.market_screener_parquet_store import (
+    MarketScreenerParquetStore,
+    MarketScreenerParquetStoreError,
+    market_screener_parquet_snapshot_enabled,
+)
 from app.data.sec_edgar import SecEdgarClient
 from app.ui import polished_theme
 from app.ui.symbol_chat_window import open_symbol_chat_window
@@ -270,6 +277,8 @@ def _ensure_state(self: tk.Tk) -> None:
     self._market_screener_refreshing = False
     self._market_screener_refresh_pending = False
     self._market_screener_refresh_pending_force = False
+    self._market_screener_initial_parquet_checked = False
+    self._market_screener_parquet_persistence_enabled = True
     self._market_screener_ask_running = False
     self.market_screener_source_status_base_text = "Source/status: Market Intelligence Screener has not loaded yet."
     self.market_screener_market_data_status_lines: list[str] = []
@@ -822,6 +831,8 @@ def _refresh_screener(self: tk.Tk, *, force_refresh: bool) -> None:
         self._market_screener_refresh_pending = True
         self._market_screener_refresh_pending_force = bool(getattr(self, "_market_screener_refresh_pending_force", False) or force_refresh)
         return
+    if not force_refresh and _try_load_initial_screener_parquet_snapshot(self):
+        return
     if force_refresh:
         _reset_screener_market_data_enrichment_state(self)
     self._market_screener_refreshing = True
@@ -862,6 +873,7 @@ def _refresh_screener(self: tk.Tk, *, force_refresh: bool) -> None:
 def _finish_screener_success(self: tk.Tk, snapshot: MarketScreenerSnapshot) -> None:
     self._market_screener_refreshing = False
     _load_screener_snapshot(self, snapshot)
+    _persist_current_screener_parquet_snapshot(self, snapshot.records, reason="provider refresh")
     signals = sum(1 for record in snapshot.records if market_screener_has_ai_signal(record))
     holdings = sum(1 for record in snapshot.records if market_screener_is_my_holding(record))
     warnings = f" ({len(snapshot.errors)} nonblocking warning(s))" if snapshot.errors else ""
@@ -891,6 +903,100 @@ def _run_pending_screener_refresh(self: tk.Tk) -> None:
         self.after(50, lambda app=self, force=force_refresh: _refresh_screener(app, force_refresh=force))
     except tk.TclError:
         return
+
+
+def _try_load_initial_screener_parquet_snapshot(self: tk.Tk) -> bool:
+    if bool(getattr(self, "_market_screener_initial_parquet_checked", False)):
+        return False
+    self._market_screener_initial_parquet_checked = True
+    if not market_screener_parquet_snapshot_enabled():
+        return False
+    store = MarketScreenerParquetStore()
+    if not store.current_exists():
+        return False
+    try:
+        records = store.load_current()
+    except MarketScreenerParquetStoreError as exc:
+        self.market_screener_status_var.set(f"Parquet screener snapshot could not be loaded; falling back to providers: {exc}")
+        _append_screener_market_data_status(self, f"Parquet snapshot load failed; provider refresh will rebuild it: {redact_symbol_chat_secrets(str(exc))}")
+        return False
+    fetched_at = max((record.fetched_at for record in records if record.fetched_at), default="")
+    status = MarketScreenerSourceStatus(
+        "Market Screener Parquet snapshot",
+        "cache",
+        fetched_at,
+        f"Loaded {len(records)} row(s) from {store.current_path}.",
+    )
+    snapshot = market_screener_snapshot_from_records(records, fetched_at=fetched_at or None, statuses=(status,))
+    _load_screener_snapshot(self, snapshot)
+    signals = sum(1 for record in snapshot.records if market_screener_has_ai_signal(record))
+    holdings = sum(1 for record in snapshot.records if market_screener_is_my_holding(record))
+    source_status = market_screener_diagnostics_summary(snapshot.diagnostics)
+    self.market_screener_status_var.set(
+        f"Loaded {len(snapshot.records)} screener rows from Parquet; {holdings} My Holdings; {signals} with AI-worthy signals. {source_status} Snapshot {snapshot.fetched_at}."
+    )
+    _append_screener_market_data_status(self, f"Parquet snapshot loaded: rows={len(snapshot.records)}; path={store.current_path}.")
+    return True
+
+
+def _persist_current_screener_parquet_snapshot(
+    self: tk.Tk,
+    records: Iterable[MarketScreenerRecord],
+    *,
+    reason: str,
+) -> None:
+    if not bool(getattr(self, "_market_screener_parquet_persistence_enabled", False)):
+        return
+    if not market_screener_parquet_snapshot_enabled():
+        return
+    rows = tuple(records)
+    try:
+        store = MarketScreenerParquetStore()
+        store.save_current(rows)
+    except MarketScreenerParquetStoreError as exc:
+        _append_screener_market_data_status(self, f"Parquet snapshot save failed after {reason}: {redact_symbol_chat_secrets(str(exc))}")
+        return
+    _append_screener_market_data_status(self, f"Parquet snapshot saved after {reason}: rows={len(rows)}; path={store.current_path}.")
+
+
+def _refresh_loaded_screener_snapshot_from_records(
+    self: tk.Tk,
+    records: Iterable[MarketScreenerRecord],
+    *,
+    fetched_at: str | None = None,
+    statuses: Iterable[Any] = (),
+    errors: Iterable[str] = (),
+) -> None:
+    current = getattr(self, "market_screener_last_snapshot", None)
+    base_statuses = tuple(getattr(current, "statuses", ()) or ())
+    extra_statuses = tuple(_coerce_screener_source_status(status) for status in statuses)
+    base_errors = tuple(getattr(current, "errors", ()) or ())
+    snapshot = market_screener_snapshot_from_records(
+        tuple(records),
+        fetched_at=fetched_at or getattr(current, "fetched_at", None),
+        statuses=(*base_statuses, *extra_statuses),
+        errors=(*base_errors, *tuple(redact_symbol_chat_secrets(error) for error in errors)),
+    )
+    self.market_screener_last_snapshot = snapshot
+    self.market_screener_source_status_base_text = _screener_source_status_text(snapshot)
+    summary_var = getattr(self, "market_screener_source_summary_var", None)
+    if summary_var is not None:
+        try:
+            summary_var.set(_screener_source_summary_text(snapshot))
+        except tk.TclError:
+            pass
+    _refresh_screener_source_text(self)
+
+
+def _coerce_screener_source_status(status: Any) -> MarketScreenerSourceStatus:
+    if isinstance(status, MarketScreenerSourceStatus):
+        return status
+    return MarketScreenerSourceStatus(
+        source=str(getattr(status, "source", "") or "Market data provider"),
+        status=str(getattr(status, "status", "") or "available"),
+        fetched_at=str(getattr(status, "fetched_at", "") or ""),
+        message=str(getattr(status, "message", "") or ""),
+    )
 
 
 def _load_screener_snapshot(self: tk.Tk, snapshot: MarketScreenerSnapshot) -> None:
@@ -1078,6 +1184,13 @@ def _finish_ask_screener_enrichment_success(self: tk.Tk, result: AskScreenerExec
     _set_ask_screener_actions_enabled(self, True)
     if result.all_records:
         self.market_screener_records = list(result.all_records)
+        _refresh_loaded_screener_snapshot_from_records(
+            self,
+            self.market_screener_records,
+            statuses=(),
+            errors=(),
+        )
+        _persist_current_screener_parquet_snapshot(self, self.market_screener_records, reason="Ask Screener enrichment")
     _apply_ask_screener_plan_local(self, result.plan, source_label=source_label, precomputed_result=result)
 
 
@@ -1422,6 +1535,14 @@ def _finish_screener_market_data_enrichment(
             if selected_symbol:
                 _select_screener_symbol(self, selected_symbol)
                 _update_screener_detail_panel(self, _record_by_symbol(self.market_screener_records, selected_symbol))
+            _refresh_loaded_screener_snapshot_from_records(
+                self,
+                self.market_screener_records,
+                fetched_at=result.fetched_at,
+                statuses=result.statuses,
+                errors=result.errors,
+            )
+            _persist_current_screener_parquet_snapshot(self, self.market_screener_records, reason=f"market data {reason}")
         resort_note = _post_enrichment_resort_note(self, before_order, requested_symbols)
         _append_screener_market_data_status(
             self,
@@ -1443,6 +1564,14 @@ def _finish_screener_market_data_enrichment(
         if selected_symbol:
             _select_screener_symbol(self, selected_symbol)
             _update_screener_detail_panel(self, _record_by_symbol(self.market_screener_records, selected_symbol))
+        _refresh_loaded_screener_snapshot_from_records(
+            self,
+            self.market_screener_records,
+            fetched_at=result.fetched_at,
+            statuses=result.statuses,
+            errors=result.errors,
+        )
+        _persist_current_screener_parquet_snapshot(self, self.market_screener_records, reason=f"market data {reason}")
     resort_note = _post_enrichment_resort_note(self, before_order, requested_symbols)
     _append_screener_market_data_status(
         self,
