@@ -182,6 +182,33 @@ def test_databento_equities_computes_tape_metrics_only_from_supported_rows() -> 
     assert by_symbol["BETA"].avg_volume is None
 
 
+def test_databento_equities_accepts_daily_ohlcv_for_screener_tape_fields() -> None:
+    client = _ListDatabentoClient(
+        [
+            {"symbol": "ACME", "open": 10.0, "close": 11.0, "volume": 100, "ts_event": "2026-06-13T20:00:00+00:00"},
+            {"symbol": "ACME", "open": 11.0, "close": 12.0, "volume": 300, "ts_event": "2026-06-14T20:00:00+00:00"},
+        ]
+    )
+    provider = DatabentoEquitiesProvider(
+        enabled=True,
+        api_key="db-secret",
+        dataset="XNAS.ITCH",
+        schema="ohlcv-1d",
+        client=client,
+        cache_ttl_seconds=0,
+    )
+
+    snapshot = provider.quote_fundamentals(["ACME"], max_symbols=5)
+
+    record = snapshot.records[0]
+    assert record.price == 12.0
+    assert record.volume == 300
+    assert record.avg_volume == 100
+    assert record.change_percent == 20.0
+    assert snapshot.statuses[0].status == "available"
+    assert snapshot.diagnostics["databento_dataset_mismatch_warnings"] == 0
+
+
 def test_databento_equities_warning_redacts_api_key() -> None:
     api_key = "db-secret-redact"
     provider = DatabentoEquitiesProvider(

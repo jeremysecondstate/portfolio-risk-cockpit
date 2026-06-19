@@ -40,8 +40,10 @@ DEFAULT_ALPHA_VANTAGE_CACHE_TTL_SECONDS = 900
 FMP_QUOTE_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/quote"
 FMP_PROFILE_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/profile-symbol"
 FMP_PROFILE_BY_CIK_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/profile-cik"
+FMP_KEY_METRICS_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/key-metrics"
 FMP_KEY_METRICS_TTM_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/key-metrics-ttm"
 FMP_RATIOS_TTM_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/ratios-ttm"
+FMP_HISTORICAL_PRICE_EOD_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/historical-price-eod-full"
 FMP_INCOME_GROWTH_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/income-statement-growth"
 FMP_FINANCIAL_GROWTH_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/financial-statement-growth"
 FMP_INCOME_STATEMENT_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/income-statement"
@@ -585,6 +587,7 @@ class FmpQuoteFundamentalsProvider:
         rows_returned = 0
         endpoint_rows = {
             "market-capitalization": 0,
+            "key-metrics": 0,
             "key-metrics-ttm": 0,
             "ratios-ttm": 0,
             "income-statement-growth": 0,
@@ -663,7 +666,7 @@ class FmpQuoteFundamentalsProvider:
             skipped_limited=skipped_limited,
             extra_diagnostics={
                 "rows_enriched_by_fmp_market_cap": endpoint_rows["market-capitalization"],
-                "rows_enriched_by_fmp_key_metrics": endpoint_rows["key-metrics-ttm"],
+                "rows_enriched_by_fmp_key_metrics": endpoint_rows["key-metrics"] + endpoint_rows["key-metrics-ttm"],
                 "rows_enriched_by_fmp_ratios": endpoint_rows["ratios-ttm"],
                 "rows_enriched_by_fmp_income_growth": endpoint_rows["income-statement-growth"],
                 "rows_enriched_by_fmp_financial_growth": endpoint_rows["financial-growth"],
@@ -741,6 +744,7 @@ class FmpQuoteFundamentalsProvider:
         financial_growth_rows = 0
         shares_float_rows = 0
         market_cap_rows = 0
+        historical_eod_rows = 0
         income_statement_rows = 0
         calls_attempted = 0
         provider_rows_returned = 0
@@ -823,6 +827,32 @@ class FmpQuoteFundamentalsProvider:
         if not fmp_blocked:
             for symbol in requested:
                 existing = records_by_symbol.get(symbol)
+                if existing is not None and existing.avg_volume is not None:
+                    continue
+                try:
+                    historical_payload, historical_cache_hit, historical_calls, historical_returned = self._historical_eod_payload(symbol, force_refresh=force_refresh)
+                    cache_hits += int(historical_cache_hit)
+                    calls_attempted += historical_calls
+                    provider_rows_returned += historical_returned
+                except FmpProviderWarning as exc:
+                    warnings.append(str(exc))
+                    if _is_fmp_limit_warning(str(exc)):
+                        fmp_blocked = True
+                        break
+                    continue
+                if not historical_payload:
+                    continue
+                historical_record = self._record_from_payload(symbol, historical_payload, source="FMP historical EOD", source_url=FMP_HISTORICAL_PRICE_EOD_DOC_URL, fetched_at=fetched_at)
+                historical_record = _record_with_family_fields(historical_record, "quote_tape")
+                if historical_record.avg_volume is None and historical_record.change_percent is None and historical_record.volume is None and historical_record.price is None:
+                    continue
+                historical_eod_rows += 1
+                existing = records_by_symbol.get(symbol)
+                records_by_symbol[symbol] = historical_record if existing is None else _merge_quote_records(existing, historical_record)
+
+        if not fmp_blocked:
+            for symbol in requested:
+                existing = records_by_symbol.get(symbol)
                 if existing is not None and not _record_needs_deeper_fmp_fields(existing):
                     continue
                 for endpoint, source, source_url in (*_FMP_DEEP_ENDPOINTS, *_FMP_VISIBLE_STATEMENT_ENDPOINTS):
@@ -844,7 +874,7 @@ class FmpQuoteFundamentalsProvider:
                     endpoint_record = self._record_from_payload(symbol, payload, source=source, source_url=source_url, fetched_at=fetched_at)
                     if not _quote_record_has_any_value(endpoint_record):
                         continue
-                    if endpoint == "key-metrics-ttm":
+                    if endpoint in {"key-metrics", "key-metrics-ttm"}:
                         key_metrics_rows += 1
                     elif endpoint == "ratios-ttm":
                         ratios_rows += 1
@@ -873,7 +903,7 @@ class FmpQuoteFundamentalsProvider:
         )
         message = (
             f"FMP enrichment: {len(records)} rows updated; quote rows {quote_rows}; profile rows {profile_rows}; "
-            f"market cap {market_cap_rows}; key metrics {key_metrics_rows}; ratios {ratios_rows}; growth {growth_rows}; "
+            f"market cap {market_cap_rows}; historical EOD {historical_eod_rows}; key metrics {key_metrics_rows}; ratios {ratios_rows}; growth {growth_rows}; "
             f"financial-growth {financial_growth_rows}; income statement {income_statement_rows}; shares-float {shares_float_rows}; "
             f"profile-by-CIK rows 0; quote endpoint {quote_endpoint}; cache used for {cache_hits}; {skipped_limited} skipped/limited; {no_usable_rows} no usable data. "
             f"FMP cap is {self.symbol_limit} symbol(s) via {FMP_MARKET_DATA_SYMBOL_LIMIT_ENV}; {paid_mode_text}."
@@ -890,6 +920,7 @@ class FmpQuoteFundamentalsProvider:
                 "rows_enriched_by_fmp_quote": quote_rows,
                 "rows_enriched_by_fmp_profile": profile_rows,
                 "rows_enriched_by_fmp_market_cap": market_cap_rows,
+                "rows_enriched_by_fmp_historical_eod": historical_eod_rows,
                 "rows_enriched_by_fmp_key_metrics": key_metrics_rows,
                 "rows_enriched_by_fmp_ratios": ratios_rows,
                 "rows_enriched_by_fmp_income_growth": growth_rows,
@@ -1034,7 +1065,18 @@ class FmpQuoteFundamentalsProvider:
             cached_rows = cached.get("rows")
             if isinstance(cached_rows, list):
                 return tuple(dict(row) for row in cached_rows if isinstance(row, Mapping))[:row_limit]
-        payload = self._get_json(endpoint, {"symbol": clean_symbol, "page": "0", "limit": str(row_limit)})
+        to_date = datetime.now(timezone.utc).date()
+        from_date = to_date - timedelta(days=370)
+        payload = self._get_json(
+            endpoint,
+            {
+                "symbol": clean_symbol,
+                "from": from_date.isoformat(),
+                "to": to_date.isoformat(),
+                "page": "0",
+                "limit": str(row_limit),
+            },
+        )
         rows = _coerce_fmp_rows(payload)
         normalized = tuple(
             row
@@ -1217,39 +1259,74 @@ class FmpQuoteFundamentalsProvider:
         return payloads, cache_hits, endpoint_text, calls_attempted, rows_returned
 
     def _quote_rows_from_batch_endpoint(self, missing: tuple[str, ...]) -> tuple[list[Mapping[str, Any]], str, int]:
-        primary_endpoint = "batch-quote-short"
+        primary_endpoint = "quote"
+        batch_primary_endpoint = "batch-quote-short"
         fallback_endpoint = "batch-quote"
-        primary_warning: str | None = None
+        warnings: list[str] = []
         calls_attempted = 0
-        try:
-            calls_attempted += 1
-            payload = self._get_json(primary_endpoint, {"symbols": ",".join(missing)})
-            if not _fmp_payload_shape_is_unexpected(payload):
-                rows = _coerce_fmp_rows(payload)
-                if _fmp_quote_rows_are_recognizable(rows, missing):
-                    return rows, primary_endpoint, calls_attempted
-                primary_warning = f"FMP {primary_endpoint} returned rows without recognizable requested symbols."
-            else:
-                primary_warning = f"FMP {primary_endpoint} returned a malformed payload."
-        except FmpProviderWarning as exc:
-            if _is_fmp_limit_warning(str(exc)):
-                raise
-            primary_warning = str(exc)
+        rows_by_symbol: dict[str, Mapping[str, Any]] = {}
+        unresolved: list[str] = []
+        for symbol in missing:
+            try:
+                calls_attempted += 1
+                payload = self._get_json(primary_endpoint, {"symbol": symbol})
+            except FmpProviderWarning as exc:
+                if _is_fmp_limit_warning(str(exc)):
+                    raise
+                warnings.append(str(exc))
+                unresolved.append(symbol)
+                continue
+            if _fmp_payload_shape_is_unexpected(payload):
+                warnings.append(f"FMP {primary_endpoint} returned a malformed payload for {symbol}.")
+                unresolved.append(symbol)
+                continue
+            rows = _coerce_fmp_rows(payload)
+            selected = _fmp_quote_rows_by_symbol(rows, (symbol,))
+            if not selected:
+                warnings.append(f"FMP {primary_endpoint} returned rows without recognizable requested symbol {symbol}.")
+                unresolved.append(symbol)
+                continue
+            rows_by_symbol.update(selected)
+        if not unresolved:
+            return list(rows_by_symbol.values()), primary_endpoint, calls_attempted
 
         try:
             calls_attempted += 1
-            fallback_payload = self._get_json(fallback_endpoint, {"symbols": ",".join(missing)})
+            primary_payload = self._get_json(batch_primary_endpoint, {"symbols": ",".join(unresolved)})
+            if not _fmp_payload_shape_is_unexpected(primary_payload):
+                rows = _coerce_fmp_rows(primary_payload)
+                if not rows:
+                    unresolved = []
+                elif _fmp_quote_rows_are_recognizable(rows, tuple(unresolved)):
+                    rows_by_symbol.update(_fmp_quote_rows_by_symbol(rows, tuple(unresolved)))
+                    unresolved = [symbol for symbol in unresolved if symbol not in rows_by_symbol]
+                else:
+                    warnings.append(f"FMP {batch_primary_endpoint} returned rows without recognizable requested symbols.")
+            else:
+                warnings.append(f"FMP {batch_primary_endpoint} returned a malformed payload.")
         except FmpProviderWarning as exc:
-            message = f"{primary_warning or f'FMP {primary_endpoint} was unusable'} FMP {fallback_endpoint} fallback failed: {exc}"
+            if _is_fmp_limit_warning(str(exc)):
+                raise
+            warnings.append(str(exc))
+
+        if not unresolved:
+            return list(rows_by_symbol.values()), f"{primary_endpoint}+{batch_primary_endpoint}", calls_attempted
+
+        try:
+            calls_attempted += 1
+            fallback_payload = self._get_json(fallback_endpoint, {"symbols": ",".join(unresolved)})
+        except FmpProviderWarning as exc:
+            message = f"{warnings[0] if warnings else f'FMP {primary_endpoint} was unusable'} FMP {fallback_endpoint} fallback failed: {exc}"
             raise FmpProviderWarning(_redact_fmp_secret(message, self.api_key)) from None
         if _fmp_payload_shape_is_unexpected(fallback_payload):
-            message = f"{primary_warning or f'FMP {primary_endpoint} was unusable'} FMP {fallback_endpoint} fallback returned a malformed payload."
+            message = f"{warnings[0] if warnings else f'FMP {primary_endpoint} was unusable'} FMP {fallback_endpoint} fallback returned a malformed payload."
             raise FmpProviderWarning(_redact_fmp_secret(message, self.api_key)) from None
         rows = _coerce_fmp_rows(fallback_payload)
-        if not _fmp_quote_rows_are_recognizable(rows, missing):
-            message = f"{primary_warning or f'FMP {primary_endpoint} was unusable'} FMP {fallback_endpoint} fallback returned rows without recognizable requested symbols."
+        if not _fmp_quote_rows_are_recognizable(rows, tuple(unresolved)):
+            message = f"{warnings[0] if warnings else f'FMP {primary_endpoint} was unusable'} FMP {fallback_endpoint} fallback returned rows without recognizable requested symbols."
             raise FmpProviderWarning(_redact_fmp_secret(message, self.api_key)) from None
-        return rows, fallback_endpoint, calls_attempted
+        rows_by_symbol.update(_fmp_quote_rows_by_symbol(rows, tuple(unresolved)))
+        return list(rows_by_symbol.values()), f"{primary_endpoint}+{fallback_endpoint}", calls_attempted
 
     def _market_cap_payloads(self, symbols: tuple[str, ...], *, force_refresh: bool) -> tuple[dict[str, Mapping[str, Any]], int, str, int, int]:
         payloads: dict[str, Mapping[str, Any]] = {}
@@ -1308,6 +1385,18 @@ class FmpQuoteFundamentalsProvider:
         if not payloads and batch_warning:
             raise FmpProviderWarning(_redact_fmp_secret(batch_warning, self.api_key)) from None
         return payloads, cache_hits, endpoint if len(payloads) > 1 else "market-capitalization", calls_attempted, rows_returned
+
+    def _historical_eod_payload(self, symbol: str, *, force_refresh: bool) -> tuple[Mapping[str, Any] | None, bool, int, int]:
+        endpoint = "historical-price-eod/full"
+        cached = self._cache_get(endpoint, symbol, force_refresh=force_refresh)
+        if cached is not None:
+            return cached, True, 0, 0
+        payload = self._get_json(endpoint, {"symbol": symbol})
+        rows = _coerce_fmp_rows(payload)
+        normalized = _fmp_historical_eod_summary(symbol, rows)
+        if normalized is not None:
+            self._cache_set(endpoint, symbol, normalized)
+        return normalized, False, 1, len(rows)
 
     def _profile_payload(self, symbol: str, *, force_refresh: bool) -> tuple[Mapping[str, Any] | None, bool, int, int]:
         cached = self._cache_get("profile", symbol, force_refresh=force_refresh)
@@ -1659,8 +1748,9 @@ class AlphaVantageFallbackProvider:
 
 
 _FMP_DEEP_ENDPOINTS = (
-    ("key-metrics-ttm", "FMP key metrics TTM", FMP_KEY_METRICS_TTM_DOC_URL),
+    ("key-metrics", "FMP key metrics", FMP_KEY_METRICS_DOC_URL),
     ("ratios-ttm", "FMP ratios TTM", FMP_RATIOS_TTM_DOC_URL),
+    ("key-metrics-ttm", "FMP key metrics TTM", FMP_KEY_METRICS_TTM_DOC_URL),
     ("income-statement-growth", "FMP income growth", FMP_INCOME_GROWTH_DOC_URL),
     ("financial-growth", "FMP financial growth", FMP_FINANCIAL_GROWTH_DOC_URL),
     ("shares-float", "FMP shares float", FMP_SHARES_FLOAT_DOC_URL),
@@ -1707,7 +1797,7 @@ def _record_needs_deeper_fmp_fields(record: MarketQuoteFundamentalsRecord) -> bo
 
 
 def _record_needs_fmp_endpoint(record: MarketQuoteFundamentalsRecord, endpoint: str) -> bool:
-    if endpoint == "key-metrics-ttm":
+    if endpoint in {"key-metrics", "key-metrics-ttm"}:
         return record.market_cap is None or record.pe_ratio is None or record.eps is None
     if endpoint == "ratios-ttm":
         return record.pe_ratio is None
@@ -2694,6 +2784,36 @@ def _normalize_fmp_macro_quote_row(symbol: str, category: str, label: str, row: 
         "source": "FMP commodity quote proxy",
         "source_url": FMP_COMMODITIES_QUOTE_DOC_URL,
     }
+
+
+def _fmp_historical_eod_summary(symbol: str, rows: list[Mapping[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    sorted_rows = sorted(rows, key=lambda row: str(_first_present(row, "date", "timestamp", "time") or ""), reverse=True)
+    latest = sorted_rows[0]
+    close = _optional_float(_first_present(latest, "close", "adjClose", "price"))
+    volume = _optional_float(_first_present(latest, "volume"))
+    direct_change = _fmp_percent_value(_first_present(latest, "changePercent", "change_percent", "changesPercentage"))
+    previous_close = _optional_float(_first_present(latest, "previousClose", "prevClose"))
+    if direct_change is None and previous_close in (None, 0) and len(sorted_rows) > 1:
+        previous_close = _optional_float(_first_present(sorted_rows[1], "close", "adjClose", "price"))
+    change_percent = direct_change
+    if change_percent is None and previous_close not in (None, 0) and close is not None:
+        change_percent = ((close - previous_close) / abs(previous_close)) * 100
+    volumes = [
+        parsed
+        for row in sorted_rows[:30]
+        if (parsed := _optional_float(_first_present(row, "volume"))) is not None
+    ]
+    avg_volume = sum(volumes) / len(volumes) if volumes else None
+    values = {
+        "symbol": symbol,
+        "price": close,
+        "volume": volume,
+        "avgVolume": avg_volume,
+        "changesPercentage": change_percent,
+    }
+    return {key: value for key, value in values.items() if value is not None}
 
 
 def _fmp_macro_indicator_label(name: str) -> str:

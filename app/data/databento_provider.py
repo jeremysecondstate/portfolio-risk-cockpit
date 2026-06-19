@@ -41,7 +41,8 @@ DATABENTO_HISTORICAL_DOC_URL = "https://databento.com/docs/api-reference-histori
 RECOMMENDED_DATABENTO_EQUITIES_DATASET = "EQUS.MINI"
 RECOMMENDED_DATABENTO_EQUITIES_SCHEMA = "ohlcv-1m"
 _DATABENTO_EQUITY_INTRADAY_TAPE_SCHEMAS = {"ohlcv-1m", "ohlcv-1s", "trades", "tbbo", "bbo", "mbp-1", "mbp-10"}
-_DATABENTO_EQUITY_UNSUPPORTED_SCREENER_SCHEMAS = {"definition", "definitions", "statistics", "ohlcv-1d"}
+_DATABENTO_EQUITY_DAILY_TAPE_SCHEMAS = {"ohlcv-1d", "ohlcv-1day", "ohlcv-daily", "daily", "eod"}
+_DATABENTO_EQUITY_UNSUPPORTED_SCREENER_SCHEMAS = {"definition", "definitions", "statistics"}
 
 _SHARED_DATABENTO_CACHE: dict[tuple[str, str, str, str, str], tuple[float, Mapping[str, Any]]] = {}
 _PLACEHOLDER_SECRETS = {"", "THIS IS NOT A KEY", "NOT_A_KEY", "CHANGEME", "CHANGE_ME"}
@@ -309,7 +310,7 @@ class DatabentoEquitiesProvider:
             f"Databento US Equities: {len(records)} rows updated; attempted {len(requested)} symbol(s) in {chunks_attempted} chunk(s); tape/computed tape fields only; cache used for {cache_hits}; "
             f"{skipped_limited} skipped/limited; {no_usable} no usable data. "
             f"Dataset={self.dataset or 'not configured'}; schema={self.schema or 'not configured'}. "
-            "Path=historical timeseries backfill; live subscriptions and CME/futures context are not merged into equity screener tape fields. "
+            "Path=historical timeseries backfill; selected-equity OHLCV/trade rows only; live subscriptions and CME/futures context are not merged into equity screener tape fields. "
             f"Recommended equity tape config is {RECOMMENDED_DATABENTO_EQUITIES_DATASET} + {RECOMMENDED_DATABENTO_EQUITIES_SCHEMA}. "
             "Databento fills supported equity tape fields only; FMP remains the fundamentals/profile source."
         )
@@ -1336,16 +1337,16 @@ def _databento_equities_config_warnings(dataset: str, schema: str) -> tuple[str,
             f"Databento US Equities config: schema '{schema}' cannot reasonably produce intraday price/volume/change/avg-volume screener fields; "
             f"use {recommended}."
         )
-    elif schema_text and schema_text not in _DATABENTO_EQUITY_INTRADAY_TAPE_SCHEMAS:
+    elif schema_text and schema_text not in _DATABENTO_EQUITY_INTRADAY_TAPE_SCHEMAS and schema_text not in _DATABENTO_EQUITY_DAILY_TAPE_SCHEMAS:
         warnings.append(
-            f"Databento US Equities config: schema '{schema}' is not a supported intraday tape schema for screener enrichment; "
+            f"Databento US Equities config: schema '{schema}' is not a supported selected-equity tape/OHLCV schema for screener enrichment; "
             f"use {recommended}."
         )
     return tuple(warnings)
 
 
 def _databento_schema_supports_daily_history(schema: str) -> bool:
-    return str(schema or "").strip().lower() in {"ohlcv-1d", "ohlcv-1day", "ohlcv-daily", "daily", "eod"}
+    return str(schema or "").strip().lower() in _DATABENTO_EQUITY_DAILY_TAPE_SCHEMAS
 
 
 def _is_provider_limit_warning(message: str) -> bool:

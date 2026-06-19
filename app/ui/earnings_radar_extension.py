@@ -2941,12 +2941,12 @@ def _screener_source_ladder_lines() -> list[str]:
     return [
         "Provider/source ladder",
         "- 1. Local market-data file/cache",
-        "- 2. SEC CIK/ticker identity resolution",
-        "- 3. SEC submissions metadata",
+        "- 2. SEC CIK/ticker identity and submissions are candidate/filing-ingest context only; they are not visible chart-field sources.",
+        "- 3. FMP profile / Databento reference data for symbol, company, exchange, sector, and industry",
         "- 4. Schwab quote",
-        "- 5. Databento US Equities, when enabled/configured, for equity tape price/volume and supported computed tape fields from OHLCV/trade rows",
-        "- 6. FMP quote/profile/profile-by-CIK/market-cap/key-metrics/ratios/income-growth/financial-growth/income-statement/shares-float for equity quote, profile, and fundamentals",
-        "- 7. FMP SEC filings by symbol can supplement recent filing metadata when SEC/current filing rows are absent.",
+        "- 5. Databento US Equities, when enabled/configured, for selected-equity price/volume/change/avg-volume from supported OHLCV/trade rows",
+        "- 6. FMP quote/profile/profile-by-CIK/market-cap/key-metrics/historical-EOD/ratios/income-growth/financial-growth/income-statement/shares-float for equity quote, profile, and fundamentals",
+        "- 7. FMP SEC filings by symbol supplies recent filing date/type for the chart.",
         "- 8. Alpha Vantage upcoming earnings calendar, then FMP stable earnings-calendar fallback.",
         "- 9. Optional fallback provider, only when configured, and only for visible-page or selected-row enrichment",
         "- Separate. Databento CME context, when enabled/configured, is cross-asset futures/options context and is not merged into equity rows.",
@@ -2977,13 +2977,13 @@ def _screener_provider_config_lines() -> list[str]:
 def _screener_blank_explanation_lines() -> list[str]:
     return [
         "Why blanks happen",
-        "- SEC company_tickers supplies symbol, company name, and CIK only. It does not supply exchange, sector, industry, price, avg volume, change %, market cap, P/E, EPS, or revenue growth.",
-        "- Exchange, sector, and industry require SEC submissions metadata, local seed data, FMP profile/profile-by-CIK, a local market-data file, or a configured fallback profile.",
+        "- SEC company_tickers/submissions may supply candidate identity for fetch planning, but they are not used as Market Screener chart-field sources.",
+        "- Exchange, sector, and industry require FMP profile/profile-by-CIK, Databento reference/security-master fields when configured, local seed data, a local market-data file, or a configured fallback profile.",
         "- Price and volume require a local market-data file/cache, Schwab quote, Databento US Equities, FMP quote, or configured fallback quote.",
-        "- Change % and avg volume require explicit provider fields or enough Databento open/close/volume history to compute them. Unsupported schemas leave these blank; missing values are not treated as zero.",
+        "- Change % and avg volume require explicit provider fields, enough Databento selected-equity OHLCV/trade history to compute them, or FMP historical EOD. Unsupported schemas leave these blank; missing values are not treated as zero.",
         "- Market cap requires local seed data, FMP profile/key-metrics/market-cap endpoints, or a configured fallback. Trusted USD/common-equity caps sort ahead of ambiguous caps; missing caps sort last.",
-        "- Fundamentals require local market-data/fundamental seed data, parsed SEC filing rows, FMP quote/profile/key-metrics/ratios/income-growth/financial-growth/income-statement/shares-float fields, or a configured fallback profile. Databento CME context is not selected-equity fundamentals. Missing values are left blank and are not inferred.",
-        "- Earnings and recent filing columns require the upcoming earnings calendar, SEC EDGAR/current filing rows, or FMP earnings-calendar / SEC-filings-by-symbol fallback metadata.",
+        "- Fundamentals require local market-data/fundamental seed data, FMP quote/profile/key-metrics/ratios/income-growth/financial-growth/income-statement/shares-float fields, Databento shares outstanding where available, or a configured fallback profile. SEC filing rows are not chart-field sources; Databento CME context is not selected-equity fundamentals. Missing values are left blank and are not inferred.",
+        "- Earnings and recent filing columns require the upcoming earnings calendar or FMP earnings-calendar / SEC-filings-by-symbol fallback metadata.",
     ]
 
 

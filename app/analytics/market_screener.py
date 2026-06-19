@@ -341,6 +341,24 @@ MAJOR_US_LARGE_CAP_SYMBOLS = (
     "JPM",
     "V",
 )
+
+SEC_CHART_FIELD_SOURCE_WARNING = (
+    "SEC records may be used only as candidate identity/filing context; visible Market Screener chart fields "
+    "must come from FMP, Databento, or internal app data."
+)
+
+_SEC_VISIBLE_CHART_FIELDS = frozenset(
+    {
+        "company_name",
+        "exchange",
+        "sector",
+        "industry",
+        "eps",
+        "revenue_growth",
+        "recent_filing_date",
+        "recent_filing_type",
+    }
+)
 US_PRIMARY_EXCHANGES = {
     "NASDAQ",
     "NASD",
@@ -402,6 +420,7 @@ class MarketScreenerCoverageDiagnostics:
     rows_enriched_by_fmp_profile: int = 0
     rows_enriched_by_fmp_profile_by_cik: int = 0
     rows_enriched_by_fmp_market_cap: int = 0
+    rows_enriched_by_fmp_historical_eod: int = 0
     rows_enriched_by_fmp_key_metrics: int = 0
     rows_enriched_by_fmp_ratios: int = 0
     rows_enriched_by_fmp_income_growth: int = 0
@@ -1119,17 +1138,17 @@ def build_market_screener_records(
     merged: dict[str, MarketScreenerRecord] = {}
 
     for entry in universe:
-        record = _record_from_universe(entry, fetched_at=fetched_at)
+        record = _strip_sec_visible_chart_fields(_record_from_universe(entry, fetched_at=fetched_at))
         _merge_into(merged, record)
 
     for record in recent_records:
-        _merge_into(merged, _record_from_recent_earnings(record, fetched_at=fetched_at))
+        _merge_into(merged, _strip_sec_visible_chart_fields(_record_from_recent_earnings(record, fetched_at=fetched_at)))
 
     for record in upcoming_records:
         _merge_into(merged, _record_from_upcoming_earnings(record, fetched_at=fetched_at))
 
     for record in supplemental_records:
-        _merge_into(merged, _normalize_record(record, fetched_at=fetched_at))
+        _merge_into(merged, _strip_sec_visible_chart_fields(_normalize_record(record, fetched_at=fetched_at)))
 
     for record in market_data_records:
         _merge_into(merged, _record_from_market_data(record, fetched_at=fetched_at))
@@ -1630,7 +1649,7 @@ def _market_screener_missing_source_families(record: MarketScreenerRecord) -> tu
     if not record.next_earnings_date:
         families.append("earnings calendar")
     if not record.recent_filing_date:
-        families.append("SEC/FMP filings")
+        families.append("FMP filings")
     return tuple(families)
 
 
@@ -3197,8 +3216,8 @@ def market_screener_record_missing_reason_lines(record: MarketScreenerRecord) ->
     profile_missing = _missing_named_fields(record, ("exchange", "sector", "industry"))
     if profile_missing:
         reasons.append(
-            f"missing profile fields: {', '.join(profile_missing)}; requires SEC submissions metadata, local seed data, FMP profile/profile-by-CIK, or configured fallback profile data. "
-            "Databento US Equities and Databento CME context do not supply sector/industry profile fields."
+            f"missing profile fields: {', '.join(profile_missing)}; requires FMP profile/profile-by-CIK, Databento reference/security-master fields when configured, local seed data, or configured fallback profile data. "
+            "SEC metadata is candidate context only for Market Screener chart fields; Databento CME context does not supply selected-equity profile fields."
         )
     tape_missing = _missing_named_fields(record, ("price", "volume", "change_percent", "avg_volume"))
     if tape_missing:
@@ -3209,8 +3228,8 @@ def market_screener_record_missing_reason_lines(record: MarketScreenerRecord) ->
     fundamental_missing = _missing_named_fields(record, ("market_cap", "pe_ratio", "eps", "revenue_growth", "shares_float", "shares_outstanding"))
     if fundamental_missing:
         reasons.append(
-            f"missing FMP/profile fundamental fields: {', '.join(fundamental_missing)}; requires local seed data, parsed SEC filing rows, FMP quote/profile/market-cap/key-metrics/ratios/income-growth/financial-growth/income-statement/shares-float endpoints, or configured fallback profile data. "
-            "Databento equities and CME context are unsupported for selected-equity fundamentals."
+            f"missing FMP/profile fundamental fields: {', '.join(fundamental_missing)}; requires local seed data, FMP quote/profile/market-cap/key-metrics/ratios/income-growth/financial-growth/income-statement/shares-float endpoints, Databento shares outstanding where available, or configured fallback profile data. "
+            "SEC filing data is not used for Market Screener chart fundamentals; Databento CME context is unsupported for selected-equity fundamentals."
         )
     rank = market_screener_market_cap_rank(record)
     if record.market_cap is not None and not rank.trusted:
@@ -3415,7 +3434,8 @@ def _load_sec_cik_identity_records(
             (
                 f"Resolved {len(resolved)} symbol(s) by exact SEC CIK match; "
                 f"{len(unresolved_ciks) - len(resolved)} CIK row(s) remain unresolved"
-                + (f"; {ambiguous} ambiguous multi-ticker CIK row(s) were not guessed." if ambiguous else ".")
+                + (f"; {ambiguous} ambiguous multi-ticker CIK row(s) were not guessed. " if ambiguous else ". ")
+                + SEC_CHART_FIELD_SOURCE_WARNING
             ),
         )
     )
@@ -3438,7 +3458,7 @@ def _load_sec_submission_metadata_records(
                 "SEC submissions metadata",
                 "empty",
                 fetched_at,
-                "No capped filing CIK rows needed SEC submissions metadata enrichment.",
+                f"No capped filing CIK rows needed SEC submissions identity context. {SEC_CHART_FIELD_SOURCE_WARNING}",
             )
         )
         return ()
@@ -3463,7 +3483,7 @@ def _load_sec_submission_metadata_records(
             "SEC submissions metadata",
             status,
             fetched_at,
-            f"Loaded SEC submissions metadata for {len(enriched)} of {len(candidate_ciks)} capped CIK row(s).",
+            f"Loaded SEC submissions identity context for {len(enriched)} of {len(candidate_ciks)} capped CIK row(s). {SEC_CHART_FIELD_SOURCE_WARNING}",
         )
     )
     return tuple(enriched)
@@ -3772,6 +3792,7 @@ def market_screener_diagnostics_summary(diagnostics: MarketScreenerCoverageDiagn
     ]
     fmp_deep = (
         diagnostics.rows_enriched_by_fmp_market_cap
+        + diagnostics.rows_enriched_by_fmp_historical_eod
         + diagnostics.rows_enriched_by_fmp_key_metrics
         + diagnostics.rows_enriched_by_fmp_ratios
         + diagnostics.rows_enriched_by_fmp_income_growth
@@ -3822,6 +3843,7 @@ def market_screener_diagnostics_detail_lines(diagnostics: MarketScreenerCoverage
         ("Rows enriched by FMP profile", diagnostics.rows_enriched_by_fmp_profile),
         ("Rows enriched by FMP profile-by-CIK", diagnostics.rows_enriched_by_fmp_profile_by_cik),
         ("Rows enriched by FMP market cap", diagnostics.rows_enriched_by_fmp_market_cap),
+        ("Rows enriched by FMP historical EOD", diagnostics.rows_enriched_by_fmp_historical_eod),
         ("Rows enriched by FMP key metrics", diagnostics.rows_enriched_by_fmp_key_metrics),
         ("Rows enriched by FMP ratios", diagnostics.rows_enriched_by_fmp_ratios),
         ("Rows enriched by FMP income growth", diagnostics.rows_enriched_by_fmp_income_growth),
@@ -3947,6 +3969,10 @@ def _build_market_screener_diagnostics(
         rows_enriched_by_fmp_market_cap=max(
             _counter(provider_diagnostics, "rows_enriched_by_fmp_market_cap"),
             _count_rows_with_source(rows, "FMP market cap"),
+        ),
+        rows_enriched_by_fmp_historical_eod=max(
+            _counter(provider_diagnostics, "rows_enriched_by_fmp_historical_eod"),
+            _count_rows_with_source(rows, "FMP historical EOD"),
         ),
         rows_enriched_by_fmp_key_metrics=max(
             _counter(provider_diagnostics, "rows_enriched_by_fmp_key_metrics"),
@@ -4532,6 +4558,45 @@ def _normalize_record(record: MarketScreenerRecord, *, fetched_at: str) -> Marke
     )
 
 
+def _strip_sec_visible_chart_fields(record: MarketScreenerRecord) -> MarketScreenerRecord:
+    if not _record_has_sec_owned_source(record):
+        return record
+    provenance_by_field = _provenance_by_field(record.field_provenance)
+    strip_fields: set[str] = set()
+    record_sources_are_sec_only = bool(record.sources) and all(_source_is_sec_owned(source) for source in record.sources)
+    for field in _SEC_VISIBLE_CHART_FIELDS:
+        if not _has_value(getattr(record, field, None)):
+            continue
+        provenance = provenance_by_field.get(field)
+        if provenance is not None:
+            if _source_is_sec_owned(provenance.source):
+                strip_fields.add(field)
+        elif record_sources_are_sec_only:
+            strip_fields.add(field)
+    if not strip_fields:
+        return record
+    replacements = {field: None for field in strip_fields}
+    filtered_provenance = tuple(
+        row
+        for row in record.field_provenance
+        if not (row.field in strip_fields and _source_is_sec_owned(row.source))
+    )
+    return replace(record, **replacements, field_provenance=filtered_provenance)
+
+
+def _record_has_sec_owned_source(record: MarketScreenerRecord) -> bool:
+    return any(_source_is_sec_owned(source) for source in (*record.sources, *(row.source for row in record.field_provenance)))
+
+
+def _source_is_sec_owned(source: str | None) -> bool:
+    text = str(source or "").strip().lower()
+    if not text:
+        return False
+    if "fmp" in text:
+        return False
+    return "sec" in text or "edgar" in text
+
+
 def _merge_into(records: dict[str, MarketScreenerRecord], incoming: MarketScreenerRecord) -> None:
     keys = _record_keys(incoming)
     if not keys:
@@ -5008,6 +5073,16 @@ def _merge_screener_field_provenance(
 def _screener_field_selected_from_incoming(existing: MarketScreenerRecord, incoming: MarketScreenerRecord, field: str) -> bool:
     incoming_value = getattr(incoming, field)
     existing_value = getattr(existing, field)
+    if field == "symbol" and _has_value(incoming_value):
+        existing_provenance = _provenance_by_field(existing.field_provenance).get("symbol")
+        incoming_provenance = _provenance_by_field(incoming.field_provenance).get("symbol")
+        if (
+            existing_provenance is not None
+            and incoming_provenance is not None
+            and _source_is_sec_owned(existing_provenance.source)
+            and not _source_is_sec_owned(incoming_provenance.source)
+        ):
+            return True
     if field in _MARKET_CAP_METADATA_FIELDS and field != "market_cap_rank_value":
         return _has_value(incoming_value) and (incoming.market_cap is not None or not _has_value(existing_value))
     if field in _INCOMING_NUMERIC_FIELDS:
