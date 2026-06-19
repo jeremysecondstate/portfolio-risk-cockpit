@@ -428,6 +428,7 @@ class MarketScreenerCoverageDiagnostics:
     rows_with_avg_volume: int = 0
     rows_missing_avg_volume: int = 0
     rows_with_fundamentals: int = 0
+    rows_with_market_cap: int = 0
     rows_with_trusted_usd_market_cap: int = 0
     rows_with_trusted_primary_market_cap: int = 0
     rows_with_trusted_non_primary_market_cap: int = 0
@@ -450,6 +451,7 @@ class MarketScreenerCoverageDiagnostics:
     provider_warnings: int = 0
     rows_still_missing_price_volume: int = 0
     rows_still_missing_fundamentals: int = 0
+    market_cap_coverage_incomplete: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return asdict(self)
@@ -2160,9 +2162,8 @@ def _ask_screener_enrichment_candidate_symbols(
 
 
 def _ask_screener_enrichment_priority(record: MarketScreenerRecord) -> int:
-    if market_screener_is_my_holding(record):
-        return 0
-    if record.recent_filing_date or record.next_earnings_date or record.risk_flags or record.signals:
+    non_portfolio_signals = [signal for signal in record.signals if signal not in {"Schwab holding", "Watchlist"}]
+    if record.recent_filing_date or record.next_earnings_date or record.risk_flags or non_portfolio_signals:
         return 1
     return 2
 
@@ -3489,6 +3490,9 @@ def _load_market_data_records(
     statuses.extend(MarketScreenerSourceStatus(status.source, status.status, status.fetched_at, status.message) for status in snapshot.statuses)
     errors.extend(snapshot.errors)
     _merge_counter_mapping(provider_diagnostics, snapshot.diagnostics)
+    if requested:
+        provider_diagnostics["provider_rows_requested"] = max(provider_diagnostics.get("provider_rows_requested", 0), len(requested))
+        provider_diagnostics["provider_calls_attempted"] = max(provider_diagnostics.get("provider_calls_attempted", 0), 1)
     return tuple(snapshot.records)
 
 
@@ -3580,6 +3584,7 @@ def _market_data_coverage_status(
     source_text = ", ".join(sources) if sources else "configured market-data providers"
     limit_text = max(0, min(100, max_symbols))
     summary = market_screener_diagnostics_summary(diagnostics)
+    coverage_note = _market_cap_coverage_note(rows, diagnostics)
     if provider_symbols:
         return MarketScreenerSourceStatus(
             "Market data enrichment",
@@ -3588,7 +3593,8 @@ def _market_data_coverage_status(
             (
                 f"{summary} Market data: enriched {len(provider_symbols)} of {len(rows)} rows via {source_text}. "
                 f"Initial refresh requested up to {limit_text} symbol(s). Increase MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT up to 100, "
-                "or use page/selected-row enrichment. Missing market cap, P/E, EPS, revenue growth, avg volume, and change % stay blank unless a provider/local file supplies them."
+                "or use page/selected-row enrichment. Missing market cap, P/E, EPS, revenue growth, avg volume, and change % stay blank unless a provider/local file supplies them. "
+                f"{coverage_note}"
             ),
         )
     return MarketScreenerSourceStatus(
@@ -3597,8 +3603,33 @@ def _market_data_coverage_status(
         fetched_at,
         (
             f"{summary} Market data: enriched 0 of {len(rows)} rows via {source_text}. "
-            "No quote/fundamental fields were supplied by the configured capped providers; missing fields stay blank and are not inferred."
+            "No quote/fundamental fields were supplied by the configured capped providers; missing fields stay blank and are not inferred. "
+            f"{coverage_note}"
         ),
+    )
+
+
+def _market_cap_coverage_note(
+    records: Iterable[MarketScreenerRecord],
+    diagnostics: MarketScreenerCoverageDiagnostics,
+) -> str:
+    rows = list(records)
+    total = diagnostics.total_rows or len(rows)
+    with_cap = diagnostics.rows_with_market_cap or max(0, total - diagnostics.rows_missing_market_cap)
+    incomplete = bool(diagnostics.market_cap_coverage_incomplete or diagnostics.rows_missing_market_cap)
+    if total <= 0 or not incomplete:
+        return "Market-cap ranking coverage is complete for loaded rows."
+    cap_rows = [record for record in rows if market_screener_market_cap_rank(record).ranking_market_cap is not None]
+    holding_cap_rows = [record for record in cap_rows if market_screener_is_my_holding(record)]
+    holding_only_note = ""
+    if cap_rows and len(cap_rows) == len(holding_cap_rows):
+        holding_only_note = " Market caps currently exist only on portfolio/holding rows; holding labels are display metadata and do not make the global ranking complete."
+    skipped_note = ""
+    if diagnostics.rows_skipped_by_configured_symbol_cap:
+        skipped_note = f" {diagnostics.rows_skipped_by_configured_symbol_cap} row(s) were skipped by configured provider caps."
+    return (
+        f"Global market-cap ranking coverage incomplete: {with_cap} of {total} loaded row(s) have market caps; "
+        f"{diagnostics.rows_missing_market_cap} row(s) are missing market caps before page-1 ranking.{skipped_note}{holding_only_note}"
     )
 
 
@@ -3616,7 +3647,9 @@ def _source_ladder_diagnostics_status(
 
 
 def market_screener_diagnostics_summary(diagnostics: MarketScreenerCoverageDiagnostics) -> str:
+    rows_with_market_cap = diagnostics.rows_with_market_cap or max(0, diagnostics.total_rows - diagnostics.rows_missing_market_cap)
     parts = [
+        f"market caps {rows_with_market_cap}/{diagnostics.total_rows}",
         f"Resolved {diagnostics.rows_resolved_by_sec_cik_mapping} symbols via SEC CIK",
         f"SEC submissions {diagnostics.rows_resolved_by_sec_submissions_metadata}",
         f"Schwab quotes {diagnostics.rows_enriched_by_schwab_quote}",
@@ -3654,6 +3687,8 @@ def market_screener_diagnostics_summary(diagnostics: MarketScreenerCoverageDiagn
         parts.insert(-2, f"provider cache hits {diagnostics.provider_cache_hits}")
     if diagnostics.provider_warnings:
         parts.insert(-2, f"provider warnings {diagnostics.provider_warnings}")
+    if diagnostics.market_cap_coverage_incomplete or diagnostics.rows_missing_market_cap:
+        parts.insert(1, "market-cap ranking incomplete")
     return "; ".join(parts) + "."
 
 
@@ -3699,6 +3734,7 @@ def market_screener_diagnostics_detail_lines(diagnostics: MarketScreenerCoverage
         ("Rows with avg volume", diagnostics.rows_with_avg_volume),
         ("Rows missing avg volume", diagnostics.rows_missing_avg_volume),
         ("Rows with fundamentals", diagnostics.rows_with_fundamentals),
+        ("Rows with market cap", diagnostics.rows_with_market_cap),
         ("Rows with trusted USD market cap", diagnostics.rows_with_trusted_usd_market_cap),
         ("Rows with trusted primary market cap rank", diagnostics.rows_with_trusted_primary_market_cap),
         ("Rows with trusted non-primary market cap rank", diagnostics.rows_with_trusted_non_primary_market_cap),
@@ -3721,6 +3757,7 @@ def market_screener_diagnostics_detail_lines(diagnostics: MarketScreenerCoverage
         ("Provider warnings", diagnostics.provider_warnings),
         ("Rows still missing price/volume", diagnostics.rows_still_missing_price_volume),
         ("Rows still missing fundamentals", diagnostics.rows_still_missing_fundamentals),
+        ("Market-cap coverage incomplete", diagnostics.market_cap_coverage_incomplete),
     )
     return [f"{label}: {value}" for label, value in labels]
 
@@ -3746,10 +3783,13 @@ def _build_market_screener_diagnostics(
     rows_with_volume = sum(1 for record in rows if record.volume is not None)
     rows_with_avg_volume = sum(1 for record in rows if record.avg_volume is not None)
     rows_with_fundamentals = sum(1 for record in rows if market_screener_record_has_fundamentals(record))
+    market_cap_ranks = [market_screener_market_cap_rank(record) for record in rows]
+    rows_with_market_cap = sum(1 for rank in market_cap_ranks if rank.ranking_market_cap is not None)
     rows_with_revenue_growth = sum(1 for record in rows if record.revenue_growth is not None)
     rows_with_float_or_shares = sum(1 for record in rows if record.shares_float is not None or record.shares_outstanding is not None)
+    total_rows = len(rows)
     return MarketScreenerCoverageDiagnostics(
-        total_rows=len(rows),
+        total_rows=total_rows,
         rows_with_cik=sum(1 for record in rows if _normalize_cik(record.cik)),
         rows_missing_cik=sum(1 for record in rows if not _normalize_cik(record.cik)),
         rows_with_symbol=sum(1 for record in rows if _normalize_symbol(record.symbol)),
@@ -3826,12 +3866,20 @@ def _build_market_screener_diagnostics(
         rows_with_volume=rows_with_volume,
         rows_missing_volume=max(0, len(rows) - rows_with_volume),
         rows_with_avg_volume=rows_with_avg_volume,
-        rows_missing_avg_volume=max(0, len(rows) - rows_with_avg_volume),
+        rows_missing_avg_volume=max(0, total_rows - rows_with_avg_volume),
         rows_with_fundamentals=rows_with_fundamentals,
+        rows_with_market_cap=rows_with_market_cap,
+        rows_with_trusted_usd_market_cap=sum(1 for rank in market_cap_ranks if rank.trusted and rank.currency == "USD"),
+        rows_with_trusted_primary_market_cap=sum(1 for rank in market_cap_ranks if rank.category == "us_primary_common"),
+        rows_with_trusted_non_primary_market_cap=sum(1 for rank in market_cap_ranks if rank.category == "trusted_non_primary"),
+        rows_with_untrusted_market_cap=sum(1 for rank in market_cap_ranks if rank.ranking_market_cap is not None and not rank.trusted),
+        rows_with_non_usd_market_cap=sum(1 for rank in market_cap_ranks if rank.ranking_market_cap is not None and rank.currency not in {"", "USD", "unknown"}),
+        rows_with_ambiguous_market_cap=sum(1 for rank in market_cap_ranks if rank.category == "untrusted_ambiguous"),
+        rows_missing_market_cap=max(0, total_rows - rows_with_market_cap),
         rows_with_revenue_growth=rows_with_revenue_growth,
-        rows_missing_revenue_growth=max(0, len(rows) - rows_with_revenue_growth),
+        rows_missing_revenue_growth=max(0, total_rows - rows_with_revenue_growth),
         rows_with_float_or_shares=rows_with_float_or_shares,
-        rows_missing_float_or_shares=max(0, len(rows) - rows_with_float_or_shares),
+        rows_missing_float_or_shares=max(0, total_rows - rows_with_float_or_shares),
         provider_calls_attempted=_counter(provider_diagnostics, "provider_calls_attempted"),
         provider_rows_requested=_counter(provider_diagnostics, "provider_rows_requested"),
         provider_rows_returned=_counter(provider_diagnostics, "provider_rows_returned"),
@@ -3847,6 +3895,7 @@ def _build_market_screener_diagnostics(
         + blocked,
         rows_still_missing_price_volume=sum(1 for record in rows if record.price is None or record.volume is None),
         rows_still_missing_fundamentals=sum(1 for record in rows if not market_screener_record_has_fundamentals(record)),
+        market_cap_coverage_incomplete=int(rows_with_market_cap < total_rows),
     )
 
 
@@ -3913,16 +3962,18 @@ def _market_data_candidate_symbols(records: Iterable[MarketScreenerRecord], limi
     if limit <= 0:
         return ()
     rows = [record for record in records if _normalize_symbol(record.symbol)]
+    major_cap_order = {symbol: index for index, symbol in enumerate(MAJOR_US_LARGE_CAP_SYMBOLS)}
 
-    def priority(record: MarketScreenerRecord) -> tuple[int, str]:
-        signals = set(record.signals)
-        if "Schwab holding" in signals or "Watchlist" in signals:
-            rank = 0
-        elif record.next_earnings_date or record.recent_filing_date or record.risk_flags:
-            rank = 1
-        else:
-            rank = 2
-        return rank, record.symbol
+    def priority(record: MarketScreenerRecord) -> tuple[int, int, str]:
+        symbol = _normalize_symbol(record.symbol)
+        broad_universe_row = _record_has_broad_universe_source(record)
+        if broad_universe_row and symbol in major_cap_order:
+            return 0, major_cap_order[symbol], symbol
+        if broad_universe_row:
+            return 1, 0, symbol
+        if record.next_earnings_date or record.recent_filing_date or record.risk_flags:
+            return 2, 0, symbol
+        return 3, 0, symbol
 
     seen: set[str] = set()
     result: list[str] = []
@@ -3935,6 +3986,18 @@ def _market_data_candidate_symbols(records: Iterable[MarketScreenerRecord], limi
         if len(result) >= limit:
             break
     return tuple(result)
+
+
+def _record_has_broad_universe_source(record: MarketScreenerRecord) -> bool:
+    source_text = " ".join(record.sources).lower()
+    return any(
+        label in source_text
+        for label in (
+            "sec company_tickers.json",
+            "local market universe seed",
+            "built-in fallback universe",
+        )
+    )
 
 
 def _market_data_candidate_ciks(records: Iterable[MarketScreenerRecord], limit: int) -> tuple[str, ...]:
@@ -4549,7 +4612,6 @@ def _market_cap_fallback_sort_key(record: MarketScreenerRecord) -> tuple[Any, ..
     return (
         -market_screener_data_completeness_score(record),
         -price_volume_count,
-        -int(market_screener_is_my_holding(record)),
         -int(market_screener_has_ai_signal(record)),
         symbol,
         company,

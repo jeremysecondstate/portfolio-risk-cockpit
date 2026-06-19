@@ -406,6 +406,69 @@ def test_market_screener_initial_market_data_enrichment_respects_cap_and_reports
     assert "MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT up to 100" in status.message
 
 
+def test_market_screener_startup_candidate_selection_uses_broad_universe_before_holdings() -> None:
+    universe = MarketUniverseSnapshot(
+        records=tuple(MarketUniverseEntry(symbol, f"{symbol} Corp") for symbol in ("ACME", "BETA", "GAMMA")),
+        fetched_at="2026-06-14T10:00:00+00:00",
+        sources=("Fixture",),
+        statuses=(),
+    )
+    provider = _FakeMarketDataProvider(
+        {
+            "ACME": MarketQuoteFundamentalsRecord("ACME", market_cap=3_000_000_000, source="Fake quote"),
+            "BETA": MarketQuoteFundamentalsRecord("BETA", market_cap=2_000_000_000, source="Fake quote"),
+            "AAPL": MarketQuoteFundamentalsRecord("AAPL", market_cap=4_000_000_000_000, source="Fake quote"),
+        }
+    )
+
+    snapshot = fetch_market_screener_snapshot(
+        universe_snapshot=universe,
+        recent_records=(),
+        upcoming_records=(),
+        supplemental_records=[
+            MarketScreenerRecord(
+                "AAPL",
+                "Apple Inc.",
+                signals=("Schwab holding",),
+                sources=("Local app holdings",),
+                portfolio_quantity=10,
+            )
+        ],
+        market_data_provider=provider,
+        market_data_symbol_limit=2,
+    )
+
+    assert provider.calls == [(("ACME", "BETA"), 2, False)]
+    aapl = next(record for record in snapshot.records if record.symbol == "AAPL")
+    assert market_screener_is_my_holding(aapl) is True
+    assert aapl.market_cap is None
+
+
+def test_market_screener_startup_major_cap_universe_rows_lead_global_candidates() -> None:
+    universe = MarketUniverseSnapshot(
+        records=tuple(MarketUniverseEntry(symbol, f"{symbol} Corp") for symbol in ("ACME", "AAPL", "MSFT", "ZZZZ")),
+        fetched_at="2026-06-14T10:00:00+00:00",
+        sources=("Fixture",),
+        statuses=(),
+    )
+    provider = _FakeMarketDataProvider(
+        {
+            "AAPL": MarketQuoteFundamentalsRecord("AAPL", market_cap=3_000_000_000_000, source="Fake quote"),
+            "MSFT": MarketQuoteFundamentalsRecord("MSFT", market_cap=3_100_000_000_000, source="Fake quote"),
+        }
+    )
+
+    fetch_market_screener_snapshot(
+        universe_snapshot=universe,
+        recent_records=(),
+        upcoming_records=(),
+        market_data_provider=provider,
+        market_data_symbol_limit=2,
+    )
+
+    assert provider.calls == [(("MSFT", "AAPL"), 2, False)]
+
+
 def test_market_screener_resolves_cik_only_filing_row_through_sec_mapping() -> None:
     recent = _recent_record()
     recent = RecentEarningsRecord(**{**recent.to_dict(), "ticker": None, "sector": None, "industry": None, "exchange": None})
@@ -526,6 +589,50 @@ def test_market_screener_diagnostics_count_limits_empty_provider_and_unresolved_
     assert diagnostics.rows_skipped_by_configured_symbol_cap >= 2
     assert diagnostics.unresolved_rows == 1
     assert "unresolved" in market_screener_diagnostics_summary(diagnostics)
+
+
+def test_market_screener_reports_incomplete_global_market_cap_coverage_when_only_holdings_have_caps() -> None:
+    snapshot = fetch_market_screener_snapshot(
+        sec_client=_FakeSecIdentityClient(ticker_payload={}),
+        universe_snapshot=MarketUniverseSnapshot(
+            records=(
+                MarketUniverseEntry("ACME", "Acme Corp"),
+                MarketUniverseEntry("BETA", "Beta Inc"),
+            ),
+            fetched_at="2026-06-14T10:00:00+00:00",
+            sources=("Fixture",),
+            statuses=(),
+        ),
+        recent_records=(),
+        upcoming_records=(),
+        supplemental_records=[
+            MarketScreenerRecord(
+                "HOLD",
+                "Held Corp",
+                signals=("Schwab holding",),
+                sources=("Local app holdings",),
+                portfolio_quantity=15,
+            )
+        ],
+        market_data_records=(
+            MarketQuoteFundamentalsRecord("HOLD", market_cap=1_000_000_000, source="FMP profile"),
+        ),
+        market_data_symbol_limit=3,
+    )
+
+    diagnostics = snapshot.diagnostics
+    status = next(status for status in snapshot.statuses if status.source == "Market data enrichment")
+    summary = earnings_radar_extension._screener_source_summary_text(snapshot)
+    popout = earnings_radar_extension._screener_diagnostics_popout_text(snapshot)
+
+    assert diagnostics.rows_with_market_cap == 1
+    assert diagnostics.rows_missing_market_cap == 2
+    assert diagnostics.market_cap_coverage_incomplete == 1
+    assert "Global market-cap ranking coverage incomplete" in status.message
+    assert "only on portfolio/holding rows" in status.message
+    assert "market-cap ranking incomplete" in summary
+    assert "Rows with market cap: 1/3" in popout
+    assert "Global market-cap ranking coverage incomplete before page-1 ranking" in popout
 
 
 def test_market_screener_does_not_guess_symbol_from_company_name_when_identity_untrusted() -> None:
@@ -1767,6 +1874,24 @@ def test_market_screener_market_cap_sort_does_not_bucket_holdings_or_non_primary
     ranked = sort_market_screener_records([holding, primary, missing, foreign, etf], "market_cap", descending=True)
 
     assert [record.symbol for record in ranked] == ["VXUS", "STX", "ACN", "HOLD", "MISS"]
+
+
+def test_market_screener_position_rows_are_labels_only_for_market_cap_ordering() -> None:
+    holding = MarketScreenerRecord(
+        "HOLD",
+        "Held Small Cap",
+        market_cap=1_000_000_000,
+        signals=("Schwab holding",),
+        sources=("Local app holdings",),
+        portfolio_quantity=25,
+    )
+    larger_non_position = MarketScreenerRecord("BETA", "Beta Large Cap", market_cap=20_000_000_000)
+
+    ranked = sort_market_screener_records([holding, larger_non_position], "market_cap", descending=True)
+
+    assert [record.symbol for record in ranked] == ["BETA", "HOLD"]
+    assert filter_market_screener_records([holding, larger_non_position], event_type="My Holdings") == [holding]
+    assert market_screener_data_label(holding).startswith("Holding")
 
 
 def test_market_quote_record_marks_foreign_local_currency_cap_untrusted_for_screener_rank() -> None:

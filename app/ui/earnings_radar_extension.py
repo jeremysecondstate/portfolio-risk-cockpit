@@ -2857,8 +2857,10 @@ def _screener_diagnostics_popout_text(
     lines.extend(_screener_provider_config_lines())
     lines.append("")
     lines.append("Market cap ranking diagnostics")
+    rows_with_market_cap = snapshot.diagnostics.rows_with_market_cap or max(0, snapshot.diagnostics.total_rows - snapshot.diagnostics.rows_missing_market_cap)
     lines.extend(
         [
+            f"- Rows with market cap: {rows_with_market_cap}/{snapshot.diagnostics.total_rows}",
             f"- Trusted USD market caps: {snapshot.diagnostics.rows_with_trusted_usd_market_cap}",
             f"- Trusted U.S. primary/common rank rows: {snapshot.diagnostics.rows_with_trusted_primary_market_cap}",
             f"- Trusted non-primary rank rows: {snapshot.diagnostics.rows_with_trusted_non_primary_market_cap}",
@@ -2868,6 +2870,8 @@ def _screener_diagnostics_popout_text(
             f"- Missing market caps: {snapshot.diagnostics.rows_missing_market_cap}",
         ]
     )
+    if snapshot.diagnostics.market_cap_coverage_incomplete or snapshot.diagnostics.rows_missing_market_cap:
+        lines.append("- Global market-cap ranking coverage incomplete before page-1 ranking; rows without market caps sort below rows with numeric market caps.")
     lines.append("")
     lines.append("Major-cap diagnostics")
     major_lines = market_screener_major_cap_diagnostic_lines(snapshot.records, snapshot.diagnostics)
