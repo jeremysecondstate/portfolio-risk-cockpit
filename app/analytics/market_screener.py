@@ -1034,7 +1034,7 @@ def fetch_market_screener_snapshot(
     recent = _load_recent_records(client, recent_records, statuses, errors, fetched_at)
     upcoming = _load_upcoming_records(upcoming_provider, upcoming_records, statuses, errors, fetched_at, horizon, upcoming_symbols, force_refresh)
     supplemental = tuple(supplemental_records or ())
-    identity_records: tuple[MarketUniverseEntry, ...] = ()
+    identity_records: tuple[MarketScreenerRecord, ...] = ()
     universe_records = tuple(universe_snapshot.records)
 
     base_records = build_market_screener_records(
