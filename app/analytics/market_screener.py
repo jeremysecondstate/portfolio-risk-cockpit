@@ -53,6 +53,9 @@ MARKET_SCREENER_DATABENTO_BACKFILL_LIMIT_ENV = "MARKET_SCREENER_DATABENTO_BACKFI
 MARKET_SCREENER_BACKFILL_BATCH_SIZE_ENV = "MARKET_SCREENER_BACKFILL_BATCH_SIZE"
 MARKET_SCREENER_BACKFILL_CACHE_TTL_SECONDS_ENV = "MARKET_SCREENER_BACKFILL_CACHE_TTL_SECONDS"
 MARKET_SCREENER_CONFIRM_BACKFILL_ABOVE_ENV = "MARKET_SCREENER_CONFIRM_BACKFILL_ABOVE"
+MARKET_SCREENER_TOP_MARKET_CAP_UNIVERSE_ENABLED_ENV = "MARKET_SCREENER_TOP_MARKET_CAP_UNIVERSE_ENABLED"
+MARKET_SCREENER_TOP_MARKET_CAP_UNIVERSE_LIMIT_ENV = "MARKET_SCREENER_TOP_MARKET_CAP_UNIVERSE_LIMIT"
+MARKET_SCREENER_TOP_MARKET_CAP_CANDIDATE_LIMIT_ENV = "MARKET_SCREENER_TOP_MARKET_CAP_CANDIDATE_LIMIT"
 ASK_SCREENER_SMALL_CAP_MAX_MARKET_CAP_ENV = "ASK_SCREENER_SMALL_CAP_MAX_MARKET_CAP"
 ASK_SCREENER_PENNY_STOCK_MAX_PRICE_ENV = "ASK_SCREENER_PENNY_STOCK_MAX_PRICE"
 ASK_SCREENER_ENV_NAME_DATABENTO_ENABLED = "MARKET_SCREENER_ENABLE_DATABENTO_EQUITIES"
@@ -70,6 +73,8 @@ DEFAULT_MARKET_SCREENER_DATABENTO_BACKFILL_LIMIT = 2000
 DEFAULT_MARKET_SCREENER_BACKFILL_BATCH_SIZE = 100
 DEFAULT_MARKET_SCREENER_BACKFILL_CACHE_TTL_SECONDS = 3600
 DEFAULT_MARKET_SCREENER_CONFIRM_BACKFILL_ABOVE = 3000
+DEFAULT_MARKET_SCREENER_TOP_MARKET_CAP_UNIVERSE_LIMIT = 750
+DEFAULT_MARKET_SCREENER_TOP_MARKET_CAP_CANDIDATE_LIMIT = 750
 DEFAULT_ASK_SCREENER_SMALL_CAP_MAX_MARKET_CAP = 2_000_000_000.0
 DEFAULT_ASK_SCREENER_PENNY_STOCK_MAX_PRICE = 5.0
 ASK_SCREENER_PROVIDER_ACTION_EXECUTE_LOCAL_ONLY = "execute_local_only"
@@ -532,6 +537,17 @@ class MarketScreenerCoverageDiagnostics:
     rows_still_missing_price_volume: int = 0
     rows_still_missing_fundamentals: int = 0
     market_cap_coverage_incomplete: int = 0
+    top_market_cap_candidate_limit: int = 0
+    top_market_cap_universe_limit: int = 0
+    top_market_cap_candidate_rows: int = 0
+    top_market_cap_provider_rows: int = 0
+    top_market_cap_ranked_rows: int = 0
+    top_market_cap_selected_rows: int = 0
+    top_market_cap_excluded_rows: int = 0
+    top_market_cap_missing_market_cap_rows: int = 0
+    top_market_cap_demoted_non_primary_rows: int = 0
+    top_market_cap_untrusted_rows: int = 0
+    top_market_cap_universe_applied: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return asdict(self)
@@ -643,6 +659,16 @@ class MarketScreenerSnapshot:
     statuses: tuple[MarketScreenerSourceStatus, ...]
     errors: tuple[str, ...] = ()
     diagnostics: MarketScreenerCoverageDiagnostics = field(default_factory=MarketScreenerCoverageDiagnostics)
+
+
+@dataclass(frozen=True)
+class _TopMarketCapUniverseConstruction:
+    universe_records: tuple[MarketUniverseEntry, ...]
+    market_data_records: tuple[MarketQuoteFundamentalsRecord, ...] = ()
+    statuses: tuple[MarketScreenerSourceStatus, ...] = ()
+    errors: tuple[str, ...] = ()
+    diagnostics: Mapping[str, int] = field(default_factory=dict)
+    applied: bool = False
 
 
 @dataclass(frozen=True)
@@ -1094,6 +1120,8 @@ def fetch_market_screener_snapshot(
     market_data_provider: Any | None = None,
     universe_limit: int = 750,
     market_data_symbol_limit: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
+    top_market_cap_universe_limit: int | None = None,
+    top_market_cap_candidate_limit: int | None = None,
     horizon: str = "3month",
     upcoming_symbols: Iterable[str] | None = None,
     force_refresh: bool = False,
@@ -1116,21 +1144,37 @@ def fetch_market_screener_snapshot(
     upcoming = _load_upcoming_records(upcoming_provider, upcoming_records, statuses, errors, fetched_at, horizon, upcoming_symbols, force_refresh)
     supplemental = tuple(supplemental_records or ())
     identity_records: tuple[MarketScreenerRecord, ...] = ()
-    universe_records = tuple(universe_snapshot.records)
+    original_universe_records = tuple(universe_snapshot.records)
+    active_market_data_provider = None if market_data_records is not None else (market_data_provider or configured_market_data_provider())
+    provider_diagnostics: dict[str, int] = {}
+
+    top_universe = _build_top_market_cap_universe(
+        original_universe_records,
+        provider=active_market_data_provider,
+        provided_market_data_records=market_data_records,
+        fetched_at=fetched_at,
+        force_refresh=force_refresh,
+        top_n=top_market_cap_universe_limit,
+        candidate_limit=top_market_cap_candidate_limit,
+    )
+    statuses.extend(top_universe.statuses)
+    errors.extend(top_universe.errors)
+    _merge_counter_mapping(provider_diagnostics, top_universe.diagnostics)
+    universe_records = top_universe.universe_records if top_universe.applied else original_universe_records
+    top_market_data_records = top_universe.market_data_records
 
     base_records = build_market_screener_records(
         universe_records,
         recent,
         upcoming,
         supplemental_records=supplemental,
+        market_data_records=top_market_data_records,
         fetched_at=fetched_at,
     )
     sec_submission_records: tuple[MarketScreenerRecord, ...] = ()
     supplemental_with_sec_metadata = supplemental
     all_market_data_symbols = _market_data_candidate_symbols(base_records, max(10_000, market_data_symbol_limit))
     market_data_symbols = all_market_data_symbols[: max(0, market_data_symbol_limit)]
-    provider_diagnostics: dict[str, int] = {}
-    active_market_data_provider = None if market_data_records is not None else (market_data_provider or configured_market_data_provider())
     market_data = _load_market_data_records(
         active_market_data_provider,
         market_data_records,
@@ -1181,9 +1225,11 @@ def fetch_market_screener_snapshot(
         recent,
         upcoming,
         supplemental_records=(*supplemental_with_sec_metadata, *fmp_filing_records),
-        market_data_records=all_market_data,
+        market_data_records=(*top_market_data_records, *all_market_data),
         fetched_at=fetched_at,
     )
+    if top_universe.applied:
+        records = sort_market_screener_records(records, "market_cap", descending=True)
     diagnostics = _build_market_screener_diagnostics(records, statuses, provider_diagnostics)
     statuses.append(_market_data_coverage_status(records, all_market_data, market_data_symbol_limit, fetched_at, diagnostics))
     statuses.append(_source_ladder_diagnostics_status(diagnostics, fetched_at))
@@ -3952,6 +3998,234 @@ def _load_sec_submission_metadata_records(
     return tuple(enriched)
 
 
+def _build_top_market_cap_universe(
+    universe_records: Iterable[MarketUniverseEntry],
+    *,
+    provider: Any | None,
+    provided_market_data_records: Iterable[MarketQuoteFundamentalsRecord] | None,
+    fetched_at: str,
+    force_refresh: bool,
+    top_n: int | None,
+    candidate_limit: int | None,
+) -> _TopMarketCapUniverseConstruction:
+    original_entries = tuple(universe_records)
+    if not _top_market_cap_universe_enabled():
+        return _TopMarketCapUniverseConstruction(original_entries)
+    top_limit = _top_market_cap_limit(top_n)
+    candidate_cap = _top_market_cap_candidate_limit(candidate_limit)
+    if top_limit <= 0 or candidate_cap <= 0:
+        return _TopMarketCapUniverseConstruction(
+            original_entries,
+            diagnostics={
+                "top_market_cap_universe_limit": top_limit,
+                "top_market_cap_candidate_limit": candidate_cap,
+            },
+        )
+
+    candidate_entries = tuple(_dedupe_universe_entries_for_ranking(original_entries)[:candidate_cap])
+    if not candidate_entries:
+        return _TopMarketCapUniverseConstruction(
+            (),
+            diagnostics={
+                "top_market_cap_universe_limit": top_limit,
+                "top_market_cap_candidate_limit": candidate_cap,
+            },
+        )
+    candidate_symbols = tuple(entry.symbol for entry in candidate_entries if _normalize_symbol(entry.symbol))
+    ranking_records: tuple[MarketQuoteFundamentalsRecord, ...] = ()
+    statuses: list[MarketScreenerSourceStatus] = []
+    errors: list[str] = []
+    diagnostics: dict[str, int] = {
+        "top_market_cap_universe_limit": top_limit,
+        "top_market_cap_candidate_limit": candidate_cap,
+        "top_market_cap_candidate_rows": len(candidate_entries),
+    }
+
+    if provided_market_data_records is not None:
+        wanted = {_normalize_symbol(symbol) for symbol in candidate_symbols}
+        ranking_records = tuple(record for record in provided_market_data_records if _normalize_symbol(record.symbol) in wanted)
+    else:
+        ranking_method = getattr(provider, "market_cap_rankings", None)
+        if not callable(ranking_method):
+            return _TopMarketCapUniverseConstruction(original_entries, diagnostics=diagnostics)
+        try:
+            snapshot = ranking_method(candidate_symbols, force_refresh=force_refresh, max_symbols=len(candidate_symbols))
+        except Exception as exc:
+            clean_error = _redact_market_screener_provider_error(str(exc))
+            errors.append(f"Top market-cap universe: {clean_error}")
+            statuses.append(
+                MarketScreenerSourceStatus(
+                    "Top market-cap universe",
+                    "error",
+                    fetched_at,
+                    f"Top market-cap universe construction failed before truncation: {clean_error}",
+                )
+            )
+            diagnostics["provider_unavailable"] = diagnostics.get("provider_unavailable", 0) + 1
+            return _TopMarketCapUniverseConstruction(original_entries, statuses=tuple(statuses), errors=tuple(errors), diagnostics=diagnostics)
+        ranking_records = tuple(snapshot.records)
+        statuses.extend(MarketScreenerSourceStatus(status.source, status.status, status.fetched_at, status.message) for status in snapshot.statuses)
+        errors.extend(_redact_market_screener_provider_error(error) for error in snapshot.errors)
+        _merge_counter_mapping(diagnostics, snapshot.diagnostics)
+
+    diagnostics["top_market_cap_provider_rows"] = len(ranking_records)
+    merged_records = build_market_screener_records(candidate_entries, market_data_records=ranking_records, fetched_at=fetched_at)
+    rank_rows = [(record, market_screener_market_cap_rank(record)) for record in merged_records]
+    rankable_rows = [(record, rank) for record, rank in rank_rows if rank.ranking_market_cap is not None]
+    diagnostics["top_market_cap_ranked_rows"] = len(rankable_rows)
+    diagnostics["top_market_cap_missing_market_cap_rows"] = max(0, len(merged_records) - len(rankable_rows))
+    diagnostics["top_market_cap_demoted_non_primary_rows"] = sum(1 for _record, rank in rankable_rows if rank.category != "us_primary_common")
+    diagnostics["top_market_cap_untrusted_rows"] = sum(1 for _record, rank in rankable_rows if not rank.trusted)
+    if not rankable_rows:
+        statuses.append(
+            MarketScreenerSourceStatus(
+                "Top market-cap universe",
+                "warning",
+                fetched_at,
+                (
+                    f"Top market-cap universe was not applied: 0 of {len(candidate_entries)} candidate row(s) had usable market cap ranking data. "
+                    f"Configured top N={top_limit}; candidate cap={candidate_cap}. SEC was not used for identity/profile/market/fundamental fields."
+                ),
+            )
+        )
+        return _TopMarketCapUniverseConstruction(original_entries, (), tuple(statuses), tuple(errors), diagnostics)
+
+    ordered_records = [record for record, _rank in sorted(rankable_rows, key=lambda item: _top_market_cap_universe_sort_key(item[0], item[1]))]
+    selected_records = tuple(ordered_records[:top_limit])
+    selected_entries = tuple(_market_universe_entry_from_ranked_record(record, candidate_entries) for record in selected_records)
+    selected_symbols = {_normalize_symbol(record.symbol) for record in selected_records if _normalize_symbol(record.symbol)}
+    selected_ranking_records = tuple(record for record in ranking_records if _normalize_symbol(record.symbol) in selected_symbols)
+    diagnostics["top_market_cap_selected_rows"] = len(selected_entries)
+    diagnostics["top_market_cap_excluded_rows"] = max(0, len(candidate_entries) - len(selected_entries))
+    diagnostics["top_market_cap_universe_applied"] = 1
+    statuses.append(
+        MarketScreenerSourceStatus(
+            "Top market-cap universe",
+            "available",
+            fetched_at,
+            (
+                f"Top market-cap universe selected {len(selected_entries)} row(s) from {len(candidate_entries)} provider-owned candidate(s) before homepage/current snapshot truncation. "
+                f"Configured top N={top_limit}; candidate cap={candidate_cap}; ranking rows={len(ranking_records)}; "
+                f"missing caps={diagnostics['top_market_cap_missing_market_cap_rows']}; demoted non-primary/ambiguous rows={diagnostics['top_market_cap_demoted_non_primary_rows']}. "
+                "SEC was not used for identity/profile/market/fundamental fields."
+            ),
+        )
+    )
+    return _TopMarketCapUniverseConstruction(
+        universe_records=selected_entries,
+        market_data_records=selected_ranking_records,
+        statuses=tuple(statuses),
+        errors=tuple(errors),
+        diagnostics=diagnostics,
+        applied=True,
+    )
+
+
+def _dedupe_universe_entries_for_ranking(universe_records: Iterable[MarketUniverseEntry]) -> list[MarketUniverseEntry]:
+    merged: dict[str, MarketUniverseEntry] = {}
+    for entry in universe_records:
+        symbol = _normalize_symbol(entry.symbol)
+        if not symbol:
+            continue
+        existing = merged.get(symbol)
+        if existing is None:
+            merged[symbol] = MarketUniverseEntry(
+                symbol=symbol,
+                company_name=entry.company_name,
+                cik=entry.cik,
+                exchange=entry.exchange,
+                sector=entry.sector,
+                industry=entry.industry,
+                source=entry.source,
+                source_url=entry.source_url,
+            )
+            continue
+        merged[symbol] = MarketUniverseEntry(
+            symbol=symbol,
+            company_name=existing.company_name or entry.company_name,
+            cik=existing.cik or entry.cik,
+            exchange=existing.exchange or entry.exchange,
+            sector=existing.sector or entry.sector,
+            industry=existing.industry or entry.industry,
+            source=existing.source or entry.source,
+            source_url=existing.source_url or entry.source_url,
+        )
+    return list(merged.values())
+
+
+def _top_market_cap_universe_sort_key(
+    record: MarketScreenerRecord,
+    rank: MarketScreenerMarketCapRank | None = None,
+) -> tuple[Any, ...]:
+    rank = rank or market_screener_market_cap_rank(record)
+    category_rank = {
+        "us_primary_common": 0,
+        "trusted_non_primary": 1,
+        "untrusted_non_usd": 2,
+        "untrusted_non_primary": 3,
+        "untrusted_explicit": 4,
+        "untrusted_ambiguous": 5,
+    }.get(rank.category, 8)
+    cap = _float_or_none(rank.ranking_market_cap)
+    return (
+        category_rank,
+        0.0 if cap is None else -cap,
+        *_market_cap_fallback_sort_key(record),
+    )
+
+
+def _market_universe_entry_from_ranked_record(
+    record: MarketScreenerRecord,
+    candidate_entries: Iterable[MarketUniverseEntry],
+) -> MarketUniverseEntry:
+    symbol = _normalize_symbol(record.symbol)
+    source_entry = next((entry for entry in candidate_entries if _normalize_symbol(entry.symbol) == symbol), None)
+    source = source_entry.source if source_entry is not None else "Provider top-market-cap universe"
+    source_url = source_entry.source_url if source_entry is not None else None
+    return MarketUniverseEntry(
+        symbol=symbol,
+        company_name=record.company_name or (source_entry.company_name if source_entry is not None else None),
+        cik=record.cik or (source_entry.cik if source_entry is not None else None),
+        exchange=record.exchange or (source_entry.exchange if source_entry is not None else None),
+        sector=record.sector or (source_entry.sector if source_entry is not None else None),
+        industry=record.industry or (source_entry.industry if source_entry is not None else None),
+        source=source,
+        source_url=source_url,
+    )
+
+
+def _top_market_cap_universe_enabled() -> bool:
+    return _coerce_bool(os.getenv(MARKET_SCREENER_TOP_MARKET_CAP_UNIVERSE_ENABLED_ENV), default=True)
+
+
+def _top_market_cap_limit(value: int | None) -> int:
+    if value is not None:
+        try:
+            return max(0, min(10_000, int(value)))
+        except (TypeError, ValueError):
+            return DEFAULT_MARKET_SCREENER_TOP_MARKET_CAP_UNIVERSE_LIMIT
+    return _env_int(
+        MARKET_SCREENER_TOP_MARKET_CAP_UNIVERSE_LIMIT_ENV,
+        DEFAULT_MARKET_SCREENER_TOP_MARKET_CAP_UNIVERSE_LIMIT,
+        minimum=0,
+        maximum=10_000,
+    )
+
+
+def _top_market_cap_candidate_limit(value: int | None) -> int:
+    if value is not None:
+        try:
+            return max(0, min(20_000, int(value)))
+        except (TypeError, ValueError):
+            return DEFAULT_MARKET_SCREENER_TOP_MARKET_CAP_CANDIDATE_LIMIT
+    return _env_int(
+        MARKET_SCREENER_TOP_MARKET_CAP_CANDIDATE_LIMIT_ENV,
+        DEFAULT_MARKET_SCREENER_TOP_MARKET_CAP_CANDIDATE_LIMIT,
+        minimum=0,
+        maximum=20_000,
+    )
+
+
 def _load_market_data_records(
     provider: Any | None,
     provided: Iterable[MarketQuoteFundamentalsRecord] | None,
@@ -4369,6 +4643,8 @@ def market_screener_diagnostics_summary(diagnostics: MarketScreenerCoverageDiagn
         parts.insert(-2, f"provider cache hits {diagnostics.provider_cache_hits}")
     if diagnostics.provider_warnings:
         parts.insert(-2, f"provider warnings {diagnostics.provider_warnings}")
+    if diagnostics.top_market_cap_universe_applied:
+        parts.insert(1, f"top market-cap universe {diagnostics.top_market_cap_selected_rows}/{diagnostics.top_market_cap_candidate_rows}")
     if diagnostics.market_cap_coverage_incomplete or diagnostics.rows_missing_market_cap:
         parts.insert(1, "market-cap ranking incomplete")
     return "; ".join(parts) + "."
@@ -4445,6 +4721,17 @@ def market_screener_diagnostics_detail_lines(diagnostics: MarketScreenerCoverage
         ("Rows still missing price/volume", diagnostics.rows_still_missing_price_volume),
         ("Rows still missing fundamentals", diagnostics.rows_still_missing_fundamentals),
         ("Market-cap coverage incomplete", diagnostics.market_cap_coverage_incomplete),
+        ("Top market-cap candidate limit", diagnostics.top_market_cap_candidate_limit),
+        ("Top market-cap universe limit", diagnostics.top_market_cap_universe_limit),
+        ("Top market-cap candidate rows", diagnostics.top_market_cap_candidate_rows),
+        ("Top market-cap provider ranking rows", diagnostics.top_market_cap_provider_rows),
+        ("Top market-cap rankable rows", diagnostics.top_market_cap_ranked_rows),
+        ("Top market-cap selected rows", diagnostics.top_market_cap_selected_rows),
+        ("Top market-cap excluded rows", diagnostics.top_market_cap_excluded_rows),
+        ("Top market-cap rows missing market cap", diagnostics.top_market_cap_missing_market_cap_rows),
+        ("Top market-cap demoted non-primary/ambiguous rows", diagnostics.top_market_cap_demoted_non_primary_rows),
+        ("Top market-cap untrusted rows", diagnostics.top_market_cap_untrusted_rows),
+        ("Top market-cap universe applied", diagnostics.top_market_cap_universe_applied),
     )
     return [f"{label}: {value}" for label, value in labels]
 
@@ -4475,6 +4762,8 @@ def _build_market_screener_diagnostics(
     rows_with_revenue_growth = sum(1 for record in rows if record.revenue_growth is not None)
     rows_with_float_or_shares = sum(1 for record in rows if record.shares_float is not None or record.shares_outstanding is not None)
     total_rows = len(rows)
+    present_major_symbols = {_normalize_symbol(record.symbol) for record in rows if _normalize_symbol(record.symbol)}
+    major_present = sum(1 for symbol in MAJOR_US_LARGE_CAP_SYMBOLS if symbol in present_major_symbols)
     return MarketScreenerCoverageDiagnostics(
         total_rows=total_rows,
         rows_with_cik=sum(1 for record in rows if _normalize_cik(record.cik)),
@@ -4583,6 +4872,8 @@ def _build_market_screener_diagnostics(
         rows_with_non_usd_market_cap=sum(1 for rank in market_cap_ranks if rank.ranking_market_cap is not None and rank.currency not in {"", "USD", "unknown"}),
         rows_with_ambiguous_market_cap=sum(1 for rank in market_cap_ranks if rank.category == "untrusted_ambiguous"),
         rows_missing_market_cap=max(0, total_rows - rows_with_market_cap),
+        major_us_large_caps_present=major_present,
+        major_us_large_caps_absent=max(0, len(MAJOR_US_LARGE_CAP_SYMBOLS) - major_present),
         rows_with_revenue_growth=rows_with_revenue_growth,
         rows_missing_revenue_growth=max(0, total_rows - rows_with_revenue_growth),
         rows_with_float_or_shares=rows_with_float_or_shares,
@@ -4603,6 +4894,17 @@ def _build_market_screener_diagnostics(
         rows_still_missing_price_volume=sum(1 for record in rows if record.price is None or record.volume is None),
         rows_still_missing_fundamentals=sum(1 for record in rows if not market_screener_record_has_fundamentals(record)),
         market_cap_coverage_incomplete=int(rows_with_market_cap < total_rows),
+        top_market_cap_candidate_limit=_counter(provider_diagnostics, "top_market_cap_candidate_limit"),
+        top_market_cap_universe_limit=_counter(provider_diagnostics, "top_market_cap_universe_limit"),
+        top_market_cap_candidate_rows=_counter(provider_diagnostics, "top_market_cap_candidate_rows"),
+        top_market_cap_provider_rows=_counter(provider_diagnostics, "top_market_cap_provider_rows"),
+        top_market_cap_ranked_rows=_counter(provider_diagnostics, "top_market_cap_ranked_rows"),
+        top_market_cap_selected_rows=_counter(provider_diagnostics, "top_market_cap_selected_rows"),
+        top_market_cap_excluded_rows=_counter(provider_diagnostics, "top_market_cap_excluded_rows"),
+        top_market_cap_missing_market_cap_rows=_counter(provider_diagnostics, "top_market_cap_missing_market_cap_rows"),
+        top_market_cap_demoted_non_primary_rows=_counter(provider_diagnostics, "top_market_cap_demoted_non_primary_rows"),
+        top_market_cap_untrusted_rows=_counter(provider_diagnostics, "top_market_cap_untrusted_rows"),
+        top_market_cap_universe_applied=_counter(provider_diagnostics, "top_market_cap_universe_applied"),
     )
 
 

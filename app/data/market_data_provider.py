@@ -696,6 +696,117 @@ class FmpQuoteFundamentalsProvider:
     ) -> MarketQuoteFundamentalsSnapshot:
         return self.quote_fundamentals(symbols, force_refresh=force_refresh, max_symbols=max_symbols)
 
+    def market_cap_rankings(
+        self,
+        symbols: Iterable[str],
+        *,
+        force_refresh: bool = False,
+        max_symbols: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
+    ) -> MarketQuoteFundamentalsSnapshot:
+        fetched_at = _now()
+        capped_input = _limited_symbols(symbols, max_symbols)
+        requested = capped_input[: self.symbol_limit]
+        skipped_limited = max(0, len(capped_input) - len(requested))
+
+        if not _optional_string(self.api_key):
+            return MarketQuoteFundamentalsSnapshot(
+                records=(),
+                fetched_at=fetched_at,
+                statuses=(
+                    MarketDataProviderStatus(
+                        "FMP top-market-cap ranking",
+                        "unavailable",
+                        fetched_at,
+                        f"FMP top-market-cap ranking: 0 rows updated; {skipped_limited} skipped/limited. No {FMP_API_KEY_ENV} is configured.",
+                    ),
+                ),
+                diagnostics={
+                    "provider_unavailable": 1,
+                    "rows_skipped_by_configured_symbol_cap": skipped_limited,
+                },
+            )
+
+        if max_symbols <= 0 or self.symbol_limit <= 0:
+            return MarketQuoteFundamentalsSnapshot(
+                records=(),
+                fetched_at=fetched_at,
+                statuses=(
+                    MarketDataProviderStatus(
+                        "FMP top-market-cap ranking",
+                        "disabled",
+                        fetched_at,
+                        f"FMP top-market-cap ranking: 0 rows updated; {len(capped_input)} skipped/limited because the symbol cap is 0.",
+                    ),
+                ),
+                diagnostics={"rows_skipped_by_configured_symbol_cap": len(capped_input)},
+            )
+
+        warnings: list[str] = []
+        cache_hits = 0
+        calls_attempted = 0
+        rows_returned = 0
+        payloads: dict[str, Mapping[str, Any]] = {}
+        endpoint = "market-capitalization"
+        try:
+            payloads, cache_hits, endpoint, calls_attempted, rows_returned = self._market_cap_payloads(
+                requested,
+                force_refresh=force_refresh,
+            )
+        except FmpProviderWarning as exc:
+            warnings.append(str(exc))
+
+        records: list[MarketQuoteFundamentalsRecord] = []
+        for symbol, payload in payloads.items():
+            record = self._record_from_payload(
+                symbol,
+                payload,
+                source="FMP top-market-cap ranking",
+                source_url=FMP_BATCH_MARKET_CAP_DOC_URL if endpoint == "market-capitalization-batch" else FMP_MARKET_CAP_DOC_URL,
+                fetched_at=fetched_at,
+            )
+            if record.market_cap is None:
+                continue
+            values = record.to_dict()
+            values["market_cap_rank_value"] = record.market_cap_rank_value if record.market_cap_rank_value is not None else record.market_cap
+            values["market_cap_rank_currency"] = record.market_cap_rank_currency or record.market_cap_currency or "USD"
+            values["market_cap_currency"] = record.market_cap_currency or values["market_cap_rank_currency"]
+            values["market_cap_rank_trusted"] = record.market_cap_rank_trusted if record.market_cap_rank_trusted is not None else True
+            values["market_cap_rank_reason"] = record.market_cap_rank_reason or "FMP market-cap endpoint used for pre-truncation ranking"
+            record = _record_with_family_fields(MarketQuoteFundamentalsRecord.from_dict(values), "fundamentals")
+            records.append(record)
+
+        status = "available" if records else "empty"
+        if warnings:
+            status = "partial" if records else "warning"
+        no_usable_rows = max(0, len(requested) - len(records))
+        message = (
+            f"FMP top-market-cap ranking: {len(records)} rows updated from {len(requested)} requested symbol(s); "
+            f"endpoint {endpoint}; cache used for {cache_hits}; {skipped_limited} skipped/limited; {no_usable_rows} no usable market-cap row(s). "
+            f"FMP cap is {self.symbol_limit} symbol(s) via {FMP_MARKET_DATA_SYMBOL_LIMIT_ENV}."
+        )
+        if warnings:
+            message += f" Provider warning: {_short_warning(warnings[0], self.api_key)}"
+        return MarketQuoteFundamentalsSnapshot(
+            records=tuple(records),
+            fetched_at=fetched_at,
+            statuses=(MarketDataProviderStatus("FMP top-market-cap ranking", status, fetched_at, _redact_fmp_secret(message, self.api_key)),),
+            errors=tuple(_redact_fmp_secret(warning, self.api_key) for warning in warnings[:4]),
+            diagnostics={
+                "rows_enriched_by_fmp_market_cap": len(records),
+                "fmp_cache_hits": cache_hits,
+                "provider_rows_requested": len(requested),
+                "provider_rows_returned": rows_returned,
+                "provider_rows_parsed": len(records),
+                "provider_rows_updated": len(records),
+                "provider_cache_hits": cache_hits,
+                "provider_warnings": len(warnings),
+                "provider_calls_attempted": calls_attempted,
+                "rows_blocked_by_provider_plan_rate_auth_limit": 1 if any(_is_fmp_limit_warning(warning) for warning in warnings) else 0,
+                "rows_skipped_by_configured_symbol_cap": skipped_limited,
+                "rows_provider_returned_no_usable_data": no_usable_rows,
+            },
+        )
+
     def quote_fundamentals(
         self,
         symbols: Iterable[str],
@@ -2084,6 +2195,60 @@ class CompositeMarketDataProvider:
         max_symbols: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
     ) -> MarketQuoteFundamentalsSnapshot:
         return self.quote_fundamentals(symbols, force_refresh=force_refresh, max_symbols=max_symbols)
+
+    def market_cap_rankings(
+        self,
+        symbols: Iterable[str],
+        *,
+        force_refresh: bool = False,
+        max_symbols: int = DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
+    ) -> MarketQuoteFundamentalsSnapshot:
+        fetched_at = _now()
+        requested = _limited_symbols(symbols, max_symbols)
+        if not self.providers:
+            return MarketQuoteFundamentalsSnapshot(
+                records=(),
+                fetched_at=fetched_at,
+                statuses=(MarketDataProviderStatus("Top market-cap ranking provider", "unavailable", fetched_at, "No market-cap ranking provider is configured."),),
+                diagnostics={"provider_unavailable": 1},
+            )
+
+        merged: dict[str, MarketQuoteFundamentalsRecord] = {}
+        statuses: list[MarketDataProviderStatus] = []
+        errors: list[str] = []
+        diagnostics: dict[str, int] = {}
+        for provider in self.providers:
+            method = getattr(provider, "market_cap_rankings", None)
+            if not callable(method) or provider is self:
+                continue
+            snapshot = method(requested, force_refresh=force_refresh, max_symbols=max_symbols)
+            statuses.extend(snapshot.statuses)
+            errors.extend(snapshot.errors)
+            _merge_diagnostics(diagnostics, snapshot.diagnostics)
+            for record in snapshot.records:
+                filtered = _record_with_family_fields(record, "fundamentals")
+                key = _normalize_symbol(filtered.symbol)
+                if not key or filtered.market_cap is None:
+                    continue
+                existing = merged.get(key)
+                merged[key] = filtered if existing is None else _merge_quote_records(existing, filtered)
+        if not statuses:
+            statuses.append(
+                MarketDataProviderStatus(
+                    "Top market-cap ranking provider",
+                    "unavailable",
+                    fetched_at,
+                    "No configured provider supports pre-truncation market-cap ranking.",
+                )
+            )
+            diagnostics["provider_unavailable"] = diagnostics.get("provider_unavailable", 0) + 1
+        return MarketQuoteFundamentalsSnapshot(
+            records=tuple(merged.values()),
+            fetched_at=fetched_at,
+            statuses=tuple(statuses),
+            errors=tuple(errors),
+            diagnostics=diagnostics,
+        )
 
     def quote_fundamentals(
         self,
