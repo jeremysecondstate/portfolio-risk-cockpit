@@ -47,7 +47,7 @@ from app.analytics.market_screener import (
 )
 from app.data.earnings_calendar import MISSING_API_KEY_MESSAGE, UpcomingEarningsRecord
 from app.data.market_data_provider import CompositeMarketDataProvider, FmpQuoteFundamentalsProvider, LocalMarketDataFileProvider, MarketDataProviderStatus, MarketQuoteFundamentalsRecord, MarketQuoteFundamentalsSnapshot
-from app.data.market_universe import MarketUniverseEntry, MarketUniverseSnapshot
+from app.data.market_universe import MarketUniverseEntry, MarketUniverseSnapshot, fetch_market_universe_snapshot
 from app.ui import earnings_radar_extension
 
 
@@ -318,6 +318,35 @@ class _FakeFmpSession:
         return self.handler(url, call["params"])
 
 
+def test_market_universe_defaults_to_fmp_stock_list_without_sec_symbol_discovery(monkeypatch) -> None:
+    monkeypatch.setenv("FMP_API_KEY", "fmp-secret-universe-key")
+    calls: list[dict[str, object]] = []
+
+    class _FailIfSecUniverseClient:
+        def _fetch_json(self, *_args, **_kwargs):
+            raise AssertionError("SEC company_tickers.json should not be used by the default screener universe")
+
+    def fake_get(url, *, headers=None, timeout=None):
+        calls.append({"url": url, "headers": dict(headers or {}), "timeout": timeout})
+        return _FakeFmpResponse(
+            200,
+            [
+                {"symbol": "BRK-B", "name": "Berkshire Hathaway Inc.", "exchangeShortName": "NYSE"},
+                {"ticker": "BF/B", "companyName": "Brown-Forman Corporation", "exchange": "NYSE"},
+            ],
+        )
+
+    monkeypatch.setattr("app.data.market_universe.requests.get", fake_get)
+
+    snapshot = fetch_market_universe_snapshot(_FailIfSecUniverseClient(), limit=2, include_fallback=False)
+
+    assert {record.symbol for record in snapshot.records} == {"BRK.B", "BF.B"}
+    assert snapshot.sources == ("FMP stock-list",)
+    assert any(status.source == "FMP stock-list" and status.status == "available" for status in snapshot.statuses)
+    assert calls[0]["url"] == "https://financialmodelingprep.com/stable/stock-list"
+    assert calls[0]["headers"]["apikey"] == "fmp-secret-universe-key"
+
+
 def test_market_screener_default_sort_initializes_to_market_cap_desc(monkeypatch) -> None:
     monkeypatch.setattr(earnings_radar_extension.tk, "StringVar", _FakeTkVar)
     monkeypatch.setattr(earnings_radar_extension.tk, "BooleanVar", _FakeTkVar)
@@ -345,10 +374,11 @@ def test_market_screener_merge_combines_universe_recent_and_upcoming_rows() -> N
     beta = next(record for record in records if record.symbol == "BETA")
 
     assert acme.company_name == "Acme Corp"
-    assert acme.exchange is None
+    assert acme.exchange == "Nasdaq"
     assert acme.price == 120.5
     assert acme.next_earnings_date == "2026-07-21"
-    assert acme.recent_filing_date is None
+    assert acme.recent_filing_date == "2026-06-05"
+    assert acme.recent_filing_type == "8-K 2.02"
     assert acme.eps is None
     assert acme.revenue_growth is None
     assert "Guidance mentioned" in acme.signals
@@ -356,7 +386,7 @@ def test_market_screener_merge_combines_universe_recent_and_upcoming_rows() -> N
     assert "Revenue decline" in acme.risk_flags
     assert "SEC EDGAR" in acme.sources
     assert "Alpha Vantage" in acme.sources
-    assert beta.company_name is None
+    assert beta.company_name == "Beta Inc"
     assert beta.next_earnings_date is None
 
 
@@ -399,7 +429,16 @@ def test_market_screener_quote_fundamental_records_merge_correctly() -> None:
 
 def test_market_screener_fmp_replaces_sec_candidate_chart_field_provenance() -> None:
     rows = build_market_screener_records(
-        [MarketUniverseEntry("ACME", "SEC Name", exchange="Nasdaq", sector="Technology")],
+        [
+            MarketUniverseEntry(
+                "ACME",
+                "SEC Name",
+                exchange="Nasdaq",
+                sector="Technology",
+                source="SEC company_tickers.json",
+                source_url="https://www.sec.gov/files/company_tickers.json",
+            )
+        ],
         market_data_records=[
             MarketQuoteFundamentalsRecord(
                 "ACME",
@@ -573,7 +612,7 @@ def test_market_screener_startup_major_cap_universe_rows_lead_global_candidates(
     assert provider.calls == [(("MSFT", "AAPL"), 2, False)]
 
 
-def test_market_screener_resolves_cik_only_filing_row_through_sec_mapping() -> None:
+def test_market_screener_does_not_resolve_cik_only_filing_row_through_sec_identity_metadata() -> None:
     recent = _recent_record()
     recent = RecentEarningsRecord(**{**recent.to_dict(), "ticker": None, "sector": None, "industry": None, "exchange": None})
     sec_client = _FakeSecIdentityClient(
@@ -599,16 +638,20 @@ def test_market_screener_resolves_cik_only_filing_row_through_sec_mapping() -> N
 
     assert len(snapshot.records) == 1
     record = snapshot.records[0]
-    assert record.symbol == "ACME"
+    assert record.symbol == ""
     assert record.cik == "0000000001"
+    assert record.company_name is None
     assert record.exchange is None
     assert record.sector is None
     assert record.industry is None
+    assert record.recent_filing_date == "2026-06-05"
+    assert record.recent_filing_type == "8-K 2.02"
     provenance = {(row.field, row.source) for row in record.field_provenance}
-    assert ("symbol", "SEC CIK/ticker identity") in provenance
+    assert ("recent_filing_date", "SEC EDGAR") in provenance
+    assert ("symbol", "SEC CIK/ticker identity") not in provenance
     assert ("sector", "SEC submissions metadata") not in provenance
-    assert snapshot.diagnostics.rows_resolved_by_sec_cik_mapping == 1
-    assert snapshot.diagnostics.rows_resolved_by_sec_submissions_metadata == 1
+    assert snapshot.diagnostics.rows_resolved_by_sec_cik_mapping == 0
+    assert snapshot.diagnostics.rows_resolved_by_sec_submissions_metadata == 0
 
 
 def test_market_screener_cik_only_row_can_use_fmp_profile_by_cik_without_symbol_guessing() -> None:
@@ -2839,7 +2882,7 @@ def test_screener_source_diagnostics_popout_shows_full_counters_and_company_tick
     text = earnings_radar_extension._screener_diagnostics_popout_text(snapshot, selected_record=record)
 
     assert "SOURCE DIAGNOSTICS / WHY BLANKS?" in text
-    assert "SEC company_tickers/submissions may supply candidate identity" in text
+    assert "SEC company_tickers/submissions are not used for Market Screener symbol" in text
     assert "Rows skipped by configured symbol cap: 2" in text
     assert "Rows blocked by provider plan/rate/auth limit: 1" in text
     assert "FMP quote/profile/profile-by-CIK" in text
@@ -3014,7 +3057,7 @@ def test_market_screener_missing_providers_degrade_to_fallback_and_status_messag
     )
 
     assert snapshot.records
-    assert any(status.source == "SEC company_tickers.json" and status.status == "unavailable" for status in snapshot.statuses)
+    assert any(status.source == "FMP stock-list" and status.status == "unavailable" for status in snapshot.statuses)
     assert any(status.source == "Built-in fallback universe" and status.status == "fallback" for status in snapshot.statuses)
     assert any(status.source == "Upcoming earnings calendar" and status.status == "unavailable" for status in snapshot.statuses)
     assert any(status.source == "Market data enrichment" and status.status == "unavailable" for status in snapshot.statuses)

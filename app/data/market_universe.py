@@ -3,16 +3,33 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+import requests
+
 from app.data.sec_edgar import SEC_TICKER_URL, TICKER_CACHE_TTL, SecEdgarClient
 
 
 MARKET_UNIVERSE_SEED_PATH_ENV = "MARKET_UNIVERSE_SEED_PATH"
+MARKET_UNIVERSE_PROVIDER_ENV = "MARKET_UNIVERSE_PROVIDER"
+DEFAULT_MARKET_UNIVERSE_PROVIDER = "fmp"
+FMP_API_KEY_ENV = "FMP_API_KEY"
+FMP_BASE_URL_ENV = "FMP_BASE_URL"
+DEFAULT_FMP_BASE_URL = "https://financialmodelingprep.com/stable"
+FMP_STOCK_LIST_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/stock-list"
 DEFAULT_MARKET_UNIVERSE_LIMIT = 750
+_SYMBOL_ALIASES = {
+    "BRK-B": "BRK.B",
+    "BRK/B": "BRK.B",
+    "BRK B": "BRK.B",
+    "BF-B": "BF.B",
+    "BF/B": "BF.B",
+    "BF B": "BF.B",
+}
 
 
 @dataclass(frozen=True)
@@ -23,8 +40,8 @@ class MarketUniverseEntry:
     exchange: str | None = None
     sector: str | None = None
     industry: str | None = None
-    source: str = "SEC company_tickers.json"
-    source_url: str | None = SEC_TICKER_URL
+    source: str = "Provider market universe"
+    source_url: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -87,11 +104,17 @@ def fetch_market_universe_snapshot(
     limit: int = DEFAULT_MARKET_UNIVERSE_LIMIT,
     include_fallback: bool = True,
     seed_path: str | Path | None = None,
+    provider: str | None = None,
 ) -> MarketUniverseSnapshot:
     fetched_at = _now()
     statuses: list[MarketUniverseSourceStatus] = []
     errors: list[str] = []
     rows: list[MarketUniverseEntry] = []
+    provider_name = (
+        provider
+        or os.getenv(MARKET_UNIVERSE_PROVIDER_ENV, DEFAULT_MARKET_UNIVERSE_PROVIDER)
+        or DEFAULT_MARKET_UNIVERSE_PROVIDER
+    ).strip().lower()
 
     local_seed = _load_local_seed(seed_path or os.getenv(MARKET_UNIVERSE_SEED_PATH_ENV, ""))
     if local_seed:
@@ -105,25 +128,59 @@ def fetch_market_universe_snapshot(
             )
         )
 
-    try:
-        sec_rows = _load_sec_company_tickers(client or SecEdgarClient(timeout_seconds=12), limit=limit)
-        rows.extend(sec_rows)
-        statuses.append(
-            MarketUniverseSourceStatus(
-                "SEC company_tickers.json",
-                "available",
-                fetched_at,
-                f"Loaded {len(sec_rows)} public-company ticker row(s) from SEC cache/API.",
+    if provider_name in {"fmp", "provider", "market_data"}:
+        try:
+            fmp_rows = _load_fmp_stock_universe(limit=limit)
+            rows.extend(fmp_rows)
+            statuses.append(
+                MarketUniverseSourceStatus(
+                    "FMP stock-list",
+                    "available",
+                    fetched_at,
+                    f"Loaded {len(fmp_rows)} provider-owned symbol row(s). SEC was not used for screener symbol discovery.",
+                )
             )
-        )
-    except Exception as exc:
-        errors.append(f"SEC company_tickers.json: {exc}")
+        except Exception as exc:
+            clean_error = _redact_provider_secret(str(exc), os.getenv(FMP_API_KEY_ENV, ""))
+            errors.append(f"FMP stock-list: {clean_error}")
+            statuses.append(
+                MarketUniverseSourceStatus(
+                    "FMP stock-list",
+                    "unavailable",
+                    fetched_at,
+                    f"FMP symbol universe unavailable: {clean_error}",
+                )
+            )
+    elif provider_name == "sec":
+        try:
+            sec_rows = _load_sec_company_tickers(client or SecEdgarClient(timeout_seconds=12), limit=limit)
+            rows.extend(sec_rows)
+            statuses.append(
+                MarketUniverseSourceStatus(
+                    "SEC company_tickers.json",
+                    "available",
+                    fetched_at,
+                    f"Loaded {len(sec_rows)} public-company ticker row(s) from SEC cache/API via legacy provider override.",
+                )
+            )
+        except Exception as exc:
+            errors.append(f"SEC company_tickers.json: {exc}")
+            statuses.append(
+                MarketUniverseSourceStatus(
+                    "SEC company_tickers.json",
+                    "unavailable",
+                    fetched_at,
+                    f"SEC ticker universe unavailable: {exc}",
+                )
+            )
+    else:
+        errors.append(f"Unsupported market universe provider: {provider_name}")
         statuses.append(
             MarketUniverseSourceStatus(
-                "SEC company_tickers.json",
+                "Market universe provider",
                 "unavailable",
                 fetched_at,
-                f"SEC ticker universe unavailable: {exc}",
+                f"Unsupported {MARKET_UNIVERSE_PROVIDER_ENV} value: {provider_name}.",
             )
         )
 
@@ -137,7 +194,7 @@ def fetch_market_universe_snapshot(
                 "Built-in fallback universe",
                 "fallback",
                 fetched_at,
-                f"Loaded {len(fallback)} static large-cap rows because public/provider universe data was unavailable.",
+                f"Loaded {len(fallback)} static large-cap rows because provider universe data was unavailable.",
             )
         )
 
@@ -151,6 +208,55 @@ def fetch_market_universe_snapshot(
         errors=tuple(errors),
         used_fallback=used_fallback,
     )
+
+
+def _load_fmp_stock_universe(*, limit: int) -> list[MarketUniverseEntry]:
+    api_key = os.getenv(FMP_API_KEY_ENV, "").strip()
+    if not api_key:
+        raise RuntimeError(f"No {FMP_API_KEY_ENV} is configured.")
+    base_url = (os.getenv(FMP_BASE_URL_ENV, DEFAULT_FMP_BASE_URL) or DEFAULT_FMP_BASE_URL).rstrip("/")
+    try:
+        response = requests.get(
+            f"{base_url}/stock-list",
+            headers={"apikey": api_key, "User-Agent": "portfolio-risk-cockpit/1.0"},
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        raise RuntimeError(_redact_provider_secret(f"FMP stock-list request failed: {exc}", api_key)) from None
+
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    if status_code in {401, 403}:
+        raise RuntimeError(f"FMP stock-list authentication was rejected (HTTP {status_code}); check {FMP_API_KEY_ENV}.")
+    if status_code == 429:
+        raise RuntimeError("FMP stock-list rate or daily plan limit was reached (HTTP 429).")
+    if status_code < 200 or status_code >= 300:
+        raise RuntimeError(f"FMP stock-list returned HTTP {status_code}.")
+    try:
+        payload = response.json()
+    except ValueError:
+        raise RuntimeError("FMP stock-list returned a non-JSON response.") from None
+    if not isinstance(payload, list):
+        raise RuntimeError("FMP stock-list returned an unexpected response shape.")
+
+    rows: list[MarketUniverseEntry] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        symbol = _normalize_symbol(item.get("symbol") or item.get("ticker"))
+        if not symbol:
+            continue
+        rows.append(
+            MarketUniverseEntry(
+                symbol=symbol,
+                company_name=_optional_string(item.get("name") or item.get("companyName") or item.get("company_name")),
+                exchange=_optional_string(item.get("exchangeShortName") or item.get("exchange")),
+                source="FMP stock-list",
+                source_url=FMP_STOCK_LIST_DOC_URL,
+            )
+        )
+        if len(rows) >= max(1, limit):
+            break
+    return rows
 
 
 def _load_sec_company_tickers(client: SecEdgarClient, *, limit: int) -> list[MarketUniverseEntry]:
@@ -235,13 +341,26 @@ def _dedupe_entries(entries: Iterable[MarketUniverseEntry]) -> list[MarketUniver
 
 
 def _normalize_symbol(value: Any) -> str:
-    symbol = str(value or "").strip().upper().replace("/", ".")
+    symbol = str(value or "").strip().upper()
+    symbol = _SYMBOL_ALIASES.get(symbol, symbol)
+    symbol = symbol.replace("/", ".")
+    symbol = _SYMBOL_ALIASES.get(symbol, symbol)
     return symbol if symbol and len(symbol) <= 16 else ""
 
 
 def _optional_string(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _redact_provider_secret(value: str, secret: str | None) -> str:
+    text = str(value or "")
+    clean_secret = str(secret or "").strip()
+    if clean_secret:
+        text = text.replace(clean_secret, "[REDACTED]")
+    text = re.sub(r"(?i)(apikey=)[^&\s]+", r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)(apikey['\"]?\s*[:=]\s*['\"]?)[^,'\"\s)}]+", r"\1[REDACTED]", text)
+    return text
 
 
 def _now() -> str:

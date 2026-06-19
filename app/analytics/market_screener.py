@@ -343,8 +343,8 @@ MAJOR_US_LARGE_CAP_SYMBOLS = (
 )
 
 SEC_CHART_FIELD_SOURCE_WARNING = (
-    "SEC records may be used only as candidate identity/filing context; visible Market Screener chart fields "
-    "must come from FMP, Databento, or internal app data."
+    "SEC records may be used only by the legacy universe override or as filing context; visible Market Screener "
+    "identity, profile, market, and fundamental fields must come from FMP, Databento, or internal app data."
 )
 
 _SEC_VISIBLE_CHART_FIELDS = frozenset(
@@ -355,10 +355,16 @@ _SEC_VISIBLE_CHART_FIELDS = frozenset(
         "industry",
         "eps",
         "revenue_growth",
-        "recent_filing_date",
-        "recent_filing_type",
     }
 )
+_SYMBOL_ALIASES = {
+    "BRK-B": "BRK.B",
+    "BRK/B": "BRK.B",
+    "BRK B": "BRK.B",
+    "BF-B": "BF.B",
+    "BF/B": "BF.B",
+    "BF B": "BF.B",
+}
 US_PRIMARY_EXCHANGES = {
     "NASDAQ",
     "NASD",
@@ -1028,8 +1034,8 @@ def fetch_market_screener_snapshot(
     recent = _load_recent_records(client, recent_records, statuses, errors, fetched_at)
     upcoming = _load_upcoming_records(upcoming_provider, upcoming_records, statuses, errors, fetched_at, horizon, upcoming_symbols, force_refresh)
     supplemental = tuple(supplemental_records or ())
-    identity_records = _load_sec_cik_identity_records(client, universe_snapshot.records, recent, supplemental, statuses, errors, fetched_at)
-    universe_records = (*universe_snapshot.records, *identity_records)
+    identity_records: tuple[MarketUniverseEntry, ...] = ()
+    universe_records = tuple(universe_snapshot.records)
 
     base_records = build_market_screener_records(
         universe_records,
@@ -1038,22 +1044,8 @@ def fetch_market_screener_snapshot(
         supplemental_records=supplemental,
         fetched_at=fetched_at,
     )
-    sec_submission_records = _load_sec_submission_metadata_records(
-        client,
-        base_records,
-        statuses,
-        errors,
-        fetched_at,
-        max_ciks=market_data_symbol_limit,
-    )
-    supplemental_with_sec_metadata = (*supplemental, *sec_submission_records)
-    base_records = build_market_screener_records(
-        universe_records,
-        recent,
-        upcoming,
-        supplemental_records=supplemental_with_sec_metadata,
-        fetched_at=fetched_at,
-    )
+    sec_submission_records: tuple[MarketScreenerRecord, ...] = ()
+    supplemental_with_sec_metadata = supplemental
     all_market_data_symbols = _market_data_candidate_symbols(base_records, max(10_000, market_data_symbol_limit))
     market_data_symbols = all_market_data_symbols[: max(0, market_data_symbol_limit)]
     provider_diagnostics: dict[str, int] = {}
@@ -4153,6 +4145,9 @@ def _record_has_broad_universe_source(record: MarketScreenerRecord) -> bool:
     return any(
         label in source_text
         for label in (
+            "fmp stock-list",
+            "fmp company-screener",
+            "provider market universe",
             "sec company_tickers.json",
             "local market universe seed",
             "built-in fallback universe",
@@ -5536,7 +5531,11 @@ def _dedupe_texts(values: Iterable[Any]) -> list[str]:
 
 
 def _normalize_symbol(value: Any) -> str:
-    return str(value or "").strip().upper().replace("/", ".")
+    symbol = str(value or "").strip().upper()
+    symbol = _SYMBOL_ALIASES.get(symbol, symbol)
+    symbol = symbol.replace("/", ".")
+    symbol = _SYMBOL_ALIASES.get(symbol, symbol)
+    return symbol
 
 
 def _normalize_cik(value: Any) -> str:

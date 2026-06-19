@@ -59,6 +59,14 @@ FMP_COMMODITIES_QUOTE_DOC_URL = "https://site.financialmodelingprep.com/develope
 ALPHA_VANTAGE_DOC_URL = "https://www.alphavantage.co/documentation/"
 _SHARED_FMP_CACHE: dict[tuple[str, str, str], tuple[float, Mapping[str, Any]]] = {}
 _SHARED_ALPHA_VANTAGE_CACHE: dict[tuple[str, str, str], tuple[float, Mapping[str, Any]]] = {}
+_SYMBOL_ALIASES = {
+    "BRK-B": "BRK.B",
+    "BRK/B": "BRK.B",
+    "BRK B": "BRK.B",
+    "BF-B": "BF.B",
+    "BF/B": "BF.B",
+    "BF B": "BF.B",
+}
 
 
 @dataclass(frozen=True)
@@ -2633,7 +2641,10 @@ def _chunk_symbols(symbols: tuple[str, ...], chunk_size: int) -> tuple[tuple[str
 
 
 def _normalize_symbol(value: Any) -> str:
-    symbol = str(value or "").strip().upper().replace("/", ".")
+    symbol = str(value or "").strip().upper()
+    symbol = _SYMBOL_ALIASES.get(symbol, symbol)
+    symbol = symbol.replace("/", ".")
+    symbol = _SYMBOL_ALIASES.get(symbol, symbol)
     return symbol if symbol and len(symbol) <= 16 else ""
 
 

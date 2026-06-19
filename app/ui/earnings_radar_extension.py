@@ -2941,7 +2941,7 @@ def _screener_source_ladder_lines() -> list[str]:
     return [
         "Provider/source ladder",
         "- 1. Local market-data file/cache",
-        "- 2. SEC CIK/ticker identity and submissions are candidate/filing-ingest context only; they are not visible chart-field sources.",
+        "- 2. SEC EDGAR and FMP SEC-filings metadata supply filing date/type only; SEC company_tickers/submissions are not used for screener identity.",
         "- 3. FMP profile / Databento reference data for symbol, company, exchange, sector, and industry",
         "- 4. Schwab quote",
         "- 5. Databento US Equities, when enabled/configured, for selected-equity price/volume/change/avg-volume from supported OHLCV/trade rows",
@@ -2977,7 +2977,7 @@ def _screener_provider_config_lines() -> list[str]:
 def _screener_blank_explanation_lines() -> list[str]:
     return [
         "Why blanks happen",
-        "- SEC company_tickers/submissions may supply candidate identity for fetch planning, but they are not used as Market Screener chart-field sources.",
+        "- SEC company_tickers/submissions are not used for Market Screener symbol, company, exchange, sector, or industry. SEC is limited to filing date/type context.",
         "- Exchange, sector, and industry require FMP profile/profile-by-CIK, Databento reference/security-master fields when configured, local seed data, a local market-data file, or a configured fallback profile.",
         "- Price and volume require a local market-data file/cache, Schwab quote, Databento US Equities, FMP quote, or configured fallback quote.",
         "- Change % and avg volume require explicit provider fields, enough Databento selected-equity OHLCV/trade history to compute them, or FMP historical EOD. Unsupported schemas leave these blank; missing values are not treated as zero.",
