@@ -75,7 +75,7 @@ from app.analytics.market_screener import (
     sort_market_screener_records,
 )
 from app.analytics.symbol_chat import redact_symbol_chat_secrets
-from app.data.earnings_calendar import ALPHA_VANTAGE_HORIZONS, AlphaVantageEarningsCalendarClient, UpcomingEarningsRecord
+from app.data.earnings_calendar import ALPHA_VANTAGE_HORIZONS, UpcomingEarningsRecord, configured_upcoming_earnings_provider
 from app.data.market_data_provider import MarketQuoteFundamentalsSnapshot, configured_market_data_provider, configured_market_data_symbol_limit
 from app.data.sec_edgar import SecEdgarClient
 from app.ui import polished_theme
@@ -1712,7 +1712,7 @@ def _refresh_upcoming(self: tk.Tk, *, force_refresh: bool) -> None:
     symbols = _symbol_list(self.earnings_upcoming_symbols_var.get())
 
     def worker() -> None:
-        client = AlphaVantageEarningsCalendarClient()
+        client = configured_upcoming_earnings_provider()
         try:
             records = client.upcoming_earnings(horizon=horizon, symbols=symbols, force_refresh=force_refresh)
         except Exception as exc:
@@ -2617,6 +2617,9 @@ def _screener_detail_text(
             f"{'trusted' if market_cap_rank.trusted else 'untrusted'} | {market_cap_rank.reason}"
         ),
     ]
+    missing_families = tuple(completeness.get("missing_source_families", ()) or ())
+    if missing_families:
+        lines.insert(2, "Missing source families: " + ", ".join(str(family) for family in missing_families))
     if market_screener_is_my_holding(record):
         lines.append(
             "Portfolio: "
@@ -2942,8 +2945,10 @@ def _screener_source_ladder_lines() -> list[str]:
         "- 3. SEC submissions metadata",
         "- 4. Schwab quote",
         "- 5. Databento US Equities, when enabled/configured, for equity tape price/volume and supported computed tape fields from OHLCV/trade rows",
-        "- 6. FMP quote/profile/profile-by-CIK/key-metrics/ratios/income-growth/shares-float for equity quote, profile, and fundamentals",
-        "- 7. Optional fallback provider, only when configured, and only for visible-page or selected-row enrichment",
+        "- 6. FMP quote/profile/profile-by-CIK/market-cap/key-metrics/ratios/income-growth/financial-growth/income-statement/shares-float for equity quote, profile, and fundamentals",
+        "- 7. FMP SEC filings by symbol can supplement recent filing metadata when SEC/current filing rows are absent.",
+        "- 8. Alpha Vantage upcoming earnings calendar, then FMP stable earnings-calendar fallback.",
+        "- 9. Optional fallback provider, only when configured, and only for visible-page or selected-row enrichment",
         "- Separate. Databento CME context, when enabled/configured, is cross-asset futures/options context and is not merged into equity rows.",
     ]
 
@@ -2976,7 +2981,9 @@ def _screener_blank_explanation_lines() -> list[str]:
         "- Exchange, sector, and industry require SEC submissions metadata, local seed data, FMP profile/profile-by-CIK, a local market-data file, or a configured fallback profile.",
         "- Price and volume require a local market-data file/cache, Schwab quote, Databento US Equities, FMP quote, or configured fallback quote.",
         "- Change % and avg volume require explicit provider fields or enough Databento open/close/volume history to compute them. Unsupported schemas leave these blank; missing values are not treated as zero.",
-        "- Fundamentals require local market-data/fundamental seed data, parsed SEC filing rows, FMP quote/profile/key-metrics/ratios/income-growth/shares-float fields, or a configured fallback profile. Databento CME context is not selected-equity fundamentals. Missing values are left blank and are not inferred.",
+        "- Market cap requires local seed data, FMP profile/key-metrics/market-cap endpoints, or a configured fallback. Trusted USD/common-equity caps sort ahead of ambiguous caps; missing caps sort last.",
+        "- Fundamentals require local market-data/fundamental seed data, parsed SEC filing rows, FMP quote/profile/key-metrics/ratios/income-growth/financial-growth/income-statement/shares-float fields, or a configured fallback profile. Databento CME context is not selected-equity fundamentals. Missing values are left blank and are not inferred.",
+        "- Earnings and recent filing columns require the upcoming earnings calendar, SEC EDGAR/current filing rows, or FMP earnings-calendar / SEC-filings-by-symbol fallback metadata.",
     ]
 
 

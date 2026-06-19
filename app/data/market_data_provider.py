@@ -43,11 +43,14 @@ FMP_PROFILE_BY_CIK_DOC_URL = "https://site.financialmodelingprep.com/developer/d
 FMP_KEY_METRICS_TTM_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/key-metrics-ttm"
 FMP_RATIOS_TTM_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/ratios-ttm"
 FMP_INCOME_GROWTH_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/income-statement-growth"
+FMP_FINANCIAL_GROWTH_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/financial-statement-growth"
 FMP_INCOME_STATEMENT_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/income-statement"
 FMP_BALANCE_SHEET_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/balance-sheet-statement"
 FMP_CASH_FLOW_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/cashflow-statement"
 FMP_CASH_FLOW_GROWTH_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/cashflow-statement-growth"
 FMP_SHARES_FLOAT_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/shares-float"
+FMP_MARKET_CAP_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/market-cap"
+FMP_BATCH_MARKET_CAP_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/batch-market-cap"
 FMP_SEC_FILINGS_BY_SYMBOL_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/search-by-symbol"
 FMP_ECONOMIC_INDICATORS_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/economics-indicators"
 FMP_COMMODITIES_QUOTE_DOC_URL = "https://site.financialmodelingprep.com/developer/docs/stable/commodities-quote"
@@ -151,7 +154,7 @@ class MarketQuoteFundamentalsRecord:
             "avg_volume": _optional_float(_first_present(payload, "avg_volume", "average_volume", "avgVolume", "averageVolume")),
             "market_cap": _optional_float(_first_present(payload, "market_cap", "marketCap", "marketCapTTM", "mktCap", "marketCapitalization", "MarketCapitalization")),
             "pe_ratio": _optional_float(_first_present(payload, "pe_ratio", "pe", "peRatio", "peRatioTTM", "PERatio", "priceEarningsRatio", "priceEarningsRatioTTM", "priceToEarningsRatioTTM")),
-            "eps": _optional_float(_first_present(payload, "eps", "EPS", "epsTTM", "earnings_per_share", "earningsPerShareTTM", "netIncomePerShareTTM")),
+            "eps": _optional_float(_first_present(payload, "eps", "EPS", "epsTTM", "earnings_per_share", "earningsPerShareTTM", "netIncomePerShareTTM", "epsdiluted", "epsDiluted", "dilutedEPS", "epsdilutedTTM")),
             "revenue_growth": _optional_float(_first_present(payload, "revenue_growth", "revenueGrowth", "revenueGrowthTTM", "growthRevenue", "QuarterlyRevenueGrowthYOY")),
             "shares_float": _optional_float(_first_present(payload, "shares_float", "float", "sharesFloat", "floatShares", "freeFloat")),
             "shares_outstanding": _optional_float(_first_present(payload, "shares_outstanding", "sharesOutstanding", "outstandingShares", "shares_outstanding", "weightedAverageShsOut", "weightedAverageShsOutTTM")),
@@ -581,17 +584,50 @@ class FmpQuoteFundamentalsProvider:
         calls_attempted = 0
         rows_returned = 0
         endpoint_rows = {
+            "market-capitalization": 0,
             "key-metrics-ttm": 0,
             "ratios-ttm": 0,
             "income-statement-growth": 0,
+            "financial-growth": 0,
             "income-statement": 0,
             "balance-sheet-statement": 0,
             "cash-flow-statement": 0,
             "cash-flow-statement-growth": 0,
             "shares-float": 0,
         }
+        market_cap_payloads: dict[str, Mapping[str, Any]] = {}
+        try:
+            market_cap_payloads, market_cap_cache_hits, _market_cap_endpoint, market_cap_calls, market_cap_returned = self._market_cap_payloads(
+                requested,
+                force_refresh=force_refresh,
+            )
+            cache_hits += market_cap_cache_hits
+            calls_attempted += market_cap_calls
+            rows_returned += market_cap_returned
+        except FmpProviderWarning as exc:
+            warnings.append(str(exc))
+            if _is_fmp_limit_warning(str(exc)):
+                market_cap_payloads = {}
+                requested = ()
+        for symbol, payload in market_cap_payloads.items():
+            endpoint_record = self._record_from_payload(
+                symbol,
+                payload,
+                source="FMP market cap",
+                source_url=FMP_BATCH_MARKET_CAP_DOC_URL,
+                fetched_at=fetched_at,
+            )
+            endpoint_record = _record_with_family_fields(endpoint_record, "fundamentals")
+            if endpoint_record.market_cap is None:
+                continue
+            endpoint_rows["market-capitalization"] += 1
+            existing = records_by_symbol.get(symbol)
+            records_by_symbol[symbol] = endpoint_record if existing is None else _merge_quote_records(existing, endpoint_record)
         for symbol in requested:
             for endpoint, source, source_url in (*_FMP_DEEP_ENDPOINTS, *_FMP_STATEMENT_ENDPOINTS):
+                existing = records_by_symbol.get(symbol)
+                if existing is not None and not _record_needs_fmp_endpoint(existing, endpoint):
+                    continue
                 try:
                     payload, endpoint_cache_hit, endpoint_calls, endpoint_returned = self._single_symbol_payload(endpoint, symbol, force_refresh=force_refresh)
                     cache_hits += int(endpoint_cache_hit)
@@ -626,9 +662,11 @@ class FmpQuoteFundamentalsProvider:
             warnings=warnings,
             skipped_limited=skipped_limited,
             extra_diagnostics={
+                "rows_enriched_by_fmp_market_cap": endpoint_rows["market-capitalization"],
                 "rows_enriched_by_fmp_key_metrics": endpoint_rows["key-metrics-ttm"],
                 "rows_enriched_by_fmp_ratios": endpoint_rows["ratios-ttm"],
                 "rows_enriched_by_fmp_income_growth": endpoint_rows["income-statement-growth"],
+                "rows_enriched_by_fmp_financial_growth": endpoint_rows["financial-growth"],
                 "rows_enriched_by_fmp_income_statement": endpoint_rows["income-statement"],
                 "rows_enriched_by_fmp_balance_sheet": endpoint_rows["balance-sheet-statement"],
                 "rows_enriched_by_fmp_cash_flow": endpoint_rows["cash-flow-statement"],
@@ -700,7 +738,10 @@ class FmpQuoteFundamentalsProvider:
         key_metrics_rows = 0
         ratios_rows = 0
         growth_rows = 0
+        financial_growth_rows = 0
         shares_float_rows = 0
+        market_cap_rows = 0
+        income_statement_rows = 0
         calls_attempted = 0
         provider_rows_returned = 0
 
@@ -744,13 +785,49 @@ class FmpQuoteFundamentalsProvider:
             records_by_symbol[symbol] = profile_record if existing is None else _merge_quote_records(existing, profile_record)
         fmp_blocked = quote_blocked or any(_is_fmp_limit_warning(warning) for warning in warnings)
         if not fmp_blocked:
+            market_cap_symbols = tuple(
+                symbol
+                for symbol in requested
+                if records_by_symbol.get(symbol) is None or records_by_symbol[symbol].market_cap is None
+            )
+            if market_cap_symbols:
+                try:
+                    market_cap_payloads, market_cap_cache_hits, market_cap_endpoint, market_cap_calls, market_cap_returned = self._market_cap_payloads(
+                        market_cap_symbols,
+                        force_refresh=force_refresh,
+                    )
+                    cache_hits += market_cap_cache_hits
+                    calls_attempted += market_cap_calls
+                    provider_rows_returned += market_cap_returned
+                except FmpProviderWarning as exc:
+                    warnings.append(str(exc))
+                    if _is_fmp_limit_warning(str(exc)):
+                        fmp_blocked = True
+                    market_cap_payloads = {}
+                    market_cap_endpoint = "market-capitalization"
+                for symbol, payload in market_cap_payloads.items():
+                    endpoint_record = self._record_from_payload(
+                        symbol,
+                        payload,
+                        source="FMP market cap",
+                        source_url=FMP_BATCH_MARKET_CAP_DOC_URL if market_cap_endpoint == "market-capitalization-batch" else FMP_MARKET_CAP_DOC_URL,
+                        fetched_at=fetched_at,
+                    )
+                    endpoint_record = _record_with_family_fields(endpoint_record, "fundamentals")
+                    if endpoint_record.market_cap is None:
+                        continue
+                    market_cap_rows += 1
+                    existing = records_by_symbol.get(symbol)
+                    records_by_symbol[symbol] = endpoint_record if existing is None else _merge_quote_records(existing, endpoint_record)
+
+        if not fmp_blocked:
             for symbol in requested:
                 existing = records_by_symbol.get(symbol)
                 if existing is not None and not _record_needs_deeper_fmp_fields(existing):
                     continue
-                for endpoint, source, source_url in _FMP_DEEP_ENDPOINTS:
+                for endpoint, source, source_url in (*_FMP_DEEP_ENDPOINTS, *_FMP_VISIBLE_STATEMENT_ENDPOINTS):
                     existing = records_by_symbol.get(symbol)
-                    if existing is not None and not _record_needs_fmp_endpoint(existing, endpoint):
+                    if existing is not None and not _record_needs_visible_fmp_endpoint(existing, endpoint):
                         continue
                     try:
                         payload, endpoint_cache_hit, _endpoint_calls, _endpoint_returned = self._single_symbol_payload(endpoint, symbol, force_refresh=force_refresh)
@@ -773,8 +850,12 @@ class FmpQuoteFundamentalsProvider:
                         ratios_rows += 1
                     elif endpoint == "income-statement-growth":
                         growth_rows += 1
+                    elif endpoint == "financial-growth":
+                        financial_growth_rows += 1
                     elif endpoint == "shares-float":
                         shares_float_rows += 1
+                    elif endpoint == "income-statement":
+                        income_statement_rows += 1
                     existing = records_by_symbol.get(symbol)
                     records_by_symbol[symbol] = endpoint_record if existing is None else _merge_quote_records(existing, endpoint_record)
                 if warnings and _is_fmp_limit_warning(warnings[-1]):
@@ -792,7 +873,8 @@ class FmpQuoteFundamentalsProvider:
         )
         message = (
             f"FMP enrichment: {len(records)} rows updated; quote rows {quote_rows}; profile rows {profile_rows}; "
-            f"key metrics {key_metrics_rows}; ratios {ratios_rows}; growth {growth_rows}; shares-float {shares_float_rows}; "
+            f"market cap {market_cap_rows}; key metrics {key_metrics_rows}; ratios {ratios_rows}; growth {growth_rows}; "
+            f"financial-growth {financial_growth_rows}; income statement {income_statement_rows}; shares-float {shares_float_rows}; "
             f"profile-by-CIK rows 0; quote endpoint {quote_endpoint}; cache used for {cache_hits}; {skipped_limited} skipped/limited; {no_usable_rows} no usable data. "
             f"FMP cap is {self.symbol_limit} symbol(s) via {FMP_MARKET_DATA_SYMBOL_LIMIT_ENV}; {paid_mode_text}."
         )
@@ -807,9 +889,12 @@ class FmpQuoteFundamentalsProvider:
             diagnostics={
                 "rows_enriched_by_fmp_quote": quote_rows,
                 "rows_enriched_by_fmp_profile": profile_rows,
+                "rows_enriched_by_fmp_market_cap": market_cap_rows,
                 "rows_enriched_by_fmp_key_metrics": key_metrics_rows,
                 "rows_enriched_by_fmp_ratios": ratios_rows,
                 "rows_enriched_by_fmp_income_growth": growth_rows,
+                "rows_enriched_by_fmp_financial_growth": financial_growth_rows,
+                "rows_enriched_by_fmp_income_statement": income_statement_rows,
                 "rows_enriched_by_fmp_shares_float": shares_float_rows,
                 "fmp_cache_hits": cache_hits,
                 "provider_rows_requested": len(requested),
@@ -1166,6 +1251,64 @@ class FmpQuoteFundamentalsProvider:
             raise FmpProviderWarning(_redact_fmp_secret(message, self.api_key)) from None
         return rows, fallback_endpoint, calls_attempted
 
+    def _market_cap_payloads(self, symbols: tuple[str, ...], *, force_refresh: bool) -> tuple[dict[str, Mapping[str, Any]], int, str, int, int]:
+        payloads: dict[str, Mapping[str, Any]] = {}
+        missing: list[str] = []
+        cache_hits = 0
+        calls_attempted = 0
+        rows_returned = 0
+        for symbol in symbols:
+            cached = self._cache_get("market-capitalization", symbol, force_refresh=force_refresh)
+            if cached is None:
+                missing.append(symbol)
+            else:
+                payloads[symbol] = cached
+                cache_hits += 1
+        if not missing:
+            return payloads, cache_hits, "cache", calls_attempted, rows_returned
+
+        endpoint = "market-capitalization-batch"
+        batch_warning: str | None = None
+        try:
+            calls_attempted += 1
+            payload = self._get_json(endpoint, {"symbols": ",".join(missing)})
+            if _fmp_payload_shape_is_unexpected(payload):
+                batch_warning = f"FMP {endpoint} returned a malformed payload."
+            else:
+                rows = _coerce_fmp_rows(payload)
+                rows_returned += len(rows)
+                for symbol, row in _fmp_quote_rows_by_symbol(rows, tuple(missing)).items():
+                    payloads[symbol] = row
+                    self._cache_set("market-capitalization", symbol, row)
+                missing = [symbol for symbol in missing if symbol not in payloads]
+        except FmpProviderWarning as exc:
+            if _is_fmp_limit_warning(str(exc)):
+                raise
+            batch_warning = str(exc)
+
+        if missing:
+            for symbol in tuple(missing):
+                try:
+                    selected, cache_hit, single_calls, single_returned = self._single_symbol_payload(
+                        "market-capitalization",
+                        symbol,
+                        force_refresh=force_refresh,
+                    )
+                    cache_hits += int(cache_hit)
+                    calls_attempted += single_calls
+                    rows_returned += single_returned
+                except FmpProviderWarning as exc:
+                    if _is_fmp_limit_warning(str(exc)):
+                        raise
+                    batch_warning = f"{batch_warning or f'FMP {endpoint} was unusable'} FMP market-capitalization fallback failed for {symbol}: {exc}"
+                    continue
+                if selected is not None:
+                    payloads[symbol] = selected
+
+        if not payloads and batch_warning:
+            raise FmpProviderWarning(_redact_fmp_secret(batch_warning, self.api_key)) from None
+        return payloads, cache_hits, endpoint if len(payloads) > 1 else "market-capitalization", calls_attempted, rows_returned
+
     def _profile_payload(self, symbol: str, *, force_refresh: bool) -> tuple[Mapping[str, Any] | None, bool, int, int]:
         cached = self._cache_get("profile", symbol, force_refresh=force_refresh)
         if cached is not None:
@@ -1519,7 +1662,12 @@ _FMP_DEEP_ENDPOINTS = (
     ("key-metrics-ttm", "FMP key metrics TTM", FMP_KEY_METRICS_TTM_DOC_URL),
     ("ratios-ttm", "FMP ratios TTM", FMP_RATIOS_TTM_DOC_URL),
     ("income-statement-growth", "FMP income growth", FMP_INCOME_GROWTH_DOC_URL),
+    ("financial-growth", "FMP financial growth", FMP_FINANCIAL_GROWTH_DOC_URL),
     ("shares-float", "FMP shares float", FMP_SHARES_FLOAT_DOC_URL),
+)
+
+_FMP_VISIBLE_STATEMENT_ENDPOINTS = (
+    ("income-statement", "FMP income statement", FMP_INCOME_STATEMENT_DOC_URL),
 )
 
 _FMP_STATEMENT_ENDPOINTS = (
@@ -1565,9 +1713,33 @@ def _record_needs_fmp_endpoint(record: MarketQuoteFundamentalsRecord, endpoint: 
         return record.pe_ratio is None
     if endpoint == "income-statement-growth":
         return record.revenue_growth is None
+    if endpoint == "financial-growth":
+        return record.revenue_growth is None
+    if endpoint == "income-statement":
+        return record.eps is None or record.revenue is None or record.net_income is None or record.operating_income is None
+    if endpoint == "market-capitalization":
+        return record.market_cap is None
+    if endpoint == "balance-sheet-statement":
+        return (
+            record.cash_and_equivalents is None
+            or record.total_assets is None
+            or record.total_liabilities is None
+            or record.total_debt is None
+            or record.cash_to_liabilities is None
+        )
+    if endpoint == "cash-flow-statement":
+        return record.operating_cash_flow is None or record.free_cash_flow is None
+    if endpoint == "cash-flow-statement-growth":
+        return record.operating_cash_flow_yoy is None or record.free_cash_flow_yoy is None
     if endpoint == "shares-float":
         return record.shares_float is None or record.shares_outstanding is None
     return _record_needs_deeper_fmp_fields(record)
+
+
+def _record_needs_visible_fmp_endpoint(record: MarketQuoteFundamentalsRecord, endpoint: str) -> bool:
+    if endpoint == "income-statement":
+        return record.eps is None
+    return _record_needs_fmp_endpoint(record, endpoint)
 
 
 def _record_with_family_fields(record: MarketQuoteFundamentalsRecord, family: str) -> MarketQuoteFundamentalsRecord:
@@ -1692,9 +1864,9 @@ def _normalized_fmp_payload_fields(payload: Mapping[str, Any]) -> dict[str, Any]
     normalized: dict[str, Any] = {}
     for target, keys in (
         ("company_name", ("companyName", "company_name", "name", "company")),
-        ("market_cap", ("marketCap", "marketCapTTM", "mktCap")),
+        ("market_cap", ("marketCap", "marketCapTTM", "mktCap", "marketCapitalization", "MarketCapitalization")),
         ("pe_ratio", ("pe", "peRatio", "peRatioTTM", "PERatio", "priceEarningsRatio", "priceEarningsRatioTTM", "priceToEarningsRatioTTM")),
-        ("eps", ("eps", "EPS", "epsTTM", "earningsPerShareTTM", "netIncomePerShareTTM")),
+        ("eps", ("eps", "EPS", "epsTTM", "earningsPerShareTTM", "netIncomePerShareTTM", "epsdiluted", "epsDiluted", "dilutedEPS", "epsdilutedTTM")),
         ("shares_float", ("sharesFloat", "floatShares", "freeFloat", "float")),
         ("shares_outstanding", ("sharesOutstanding", "outstandingShares", "weightedAverageShsOut", "weightedAverageShsOutTTM")),
         ("revenue", ("revenue", "totalRevenue", "revenueTTM")),
@@ -1966,6 +2138,47 @@ class CompositeMarketDataProvider:
             errors=tuple(errors),
             diagnostics=diagnostics,
         )
+
+    def filing_metadata(
+        self,
+        symbol: str,
+        *,
+        force_refresh: bool = False,
+        limit: int = 12,
+    ) -> tuple[dict[str, Any], ...]:
+        rows: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for provider in self.providers:
+            method = getattr(provider, "filing_metadata", None) or getattr(provider, "sec_filings", None)
+            if not callable(method):
+                continue
+            try:
+                provider_rows = method(symbol, force_refresh=force_refresh, limit=limit)
+            except TypeError:
+                provider_rows = method(symbol, limit=limit)
+            for row in provider_rows or ():
+                if not isinstance(row, Mapping):
+                    continue
+                key = (
+                    str(row.get("accessionNumber") or row.get("accession_number") or row.get("filingDate") or row.get("date") or ""),
+                    str(row.get("form") or row.get("type") or ""),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(dict(row))
+                if len(rows) >= limit:
+                    return tuple(rows)
+        return tuple(rows)
+
+    def sec_filings(
+        self,
+        symbol: str,
+        *,
+        force_refresh: bool = False,
+        limit: int = 12,
+    ) -> tuple[dict[str, Any], ...]:
+        return self.filing_metadata(symbol, force_refresh=force_refresh, limit=limit)
 
 
 def configured_market_data_provider(

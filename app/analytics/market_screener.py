@@ -18,7 +18,7 @@ from app.analytics.symbol_chat import (
     SYMBOL_CHAT_REQUEST_CHAR_LIMIT,
     redact_symbol_chat_secrets,
 )
-from app.data.earnings_calendar import AlphaVantageEarningsCalendarClient, UpcomingEarningsRecord
+from app.data.earnings_calendar import UpcomingEarningsRecord, configured_upcoming_earnings_provider
 from app.data.market_data_provider import (
     DEFAULT_MARKET_DATA_SYMBOL_LIMIT,
     MarketQuoteFundamentalsRecord,
@@ -401,10 +401,14 @@ class MarketScreenerCoverageDiagnostics:
     rows_enriched_by_fmp_quote: int = 0
     rows_enriched_by_fmp_profile: int = 0
     rows_enriched_by_fmp_profile_by_cik: int = 0
+    rows_enriched_by_fmp_market_cap: int = 0
     rows_enriched_by_fmp_key_metrics: int = 0
     rows_enriched_by_fmp_ratios: int = 0
     rows_enriched_by_fmp_income_growth: int = 0
+    rows_enriched_by_fmp_financial_growth: int = 0
+    rows_enriched_by_fmp_income_statement: int = 0
     rows_enriched_by_fmp_shares_float: int = 0
+    rows_enriched_by_fmp_sec_filings: int = 0
     rows_enriched_by_fallback_provider: int = 0
     fmp_cache_hits: int = 0
     databento_equities_symbols_attempted: int = 0
@@ -1046,6 +1050,16 @@ def fetch_market_screener_snapshot(
         market_data_symbol_limit,
         provider_diagnostics,
     )
+    fmp_filing_records = _load_provider_filing_metadata_records(
+        active_market_data_provider,
+        base_records,
+        statuses,
+        errors,
+        fetched_at,
+        force_refresh,
+        market_data_symbol_limit,
+        provider_diagnostics,
+    )
     cik_market_data = _load_market_data_records_by_cik(
         active_market_data_provider,
         statuses,
@@ -1074,7 +1088,7 @@ def fetch_market_screener_snapshot(
         universe_records,
         recent,
         upcoming,
-        supplemental_records=supplemental_with_sec_metadata,
+        supplemental_records=(*supplemental_with_sec_metadata, *fmp_filing_records),
         market_data_records=all_market_data,
         fetched_at=fetched_at,
     )
@@ -1587,7 +1601,13 @@ def market_screener_data_completeness(record: MarketScreenerRecord) -> dict[str,
         label = "Partial"
     else:
         label = "Low"
-    return {"score": score, "label": label, "present_fields": tuple(present), "missing_fields": tuple(missing)}
+    return {
+        "score": score,
+        "label": label,
+        "present_fields": tuple(present),
+        "missing_fields": tuple(missing),
+        "missing_source_families": _market_screener_missing_source_families(record),
+    }
 
 
 def market_screener_data_completeness_score(record: MarketScreenerRecord) -> int:
@@ -1597,6 +1617,21 @@ def market_screener_data_completeness_score(record: MarketScreenerRecord) -> int
 def market_screener_data_completeness_label(record: MarketScreenerRecord) -> str:
     completeness = market_screener_data_completeness(record)
     return f"{completeness['score']}% {str(completeness['label']).lower()}"
+
+
+def _market_screener_missing_source_families(record: MarketScreenerRecord) -> tuple[str, ...]:
+    families: list[str] = []
+    if _missing_named_fields(record, ("exchange", "sector", "industry")):
+        families.append("profile")
+    if _missing_named_fields(record, ("price", "volume", "change_percent", "avg_volume")):
+        families.append("quote/tape")
+    if _missing_named_fields(record, ("market_cap", "pe_ratio", "eps", "revenue_growth", "shares_float", "shares_outstanding")):
+        families.append("fundamentals")
+    if not record.next_earnings_date:
+        families.append("earnings calendar")
+    if not record.recent_filing_date:
+        families.append("SEC/FMP filings")
+    return tuple(families)
 
 
 def filter_market_screener_records(
@@ -3174,7 +3209,7 @@ def market_screener_record_missing_reason_lines(record: MarketScreenerRecord) ->
     fundamental_missing = _missing_named_fields(record, ("market_cap", "pe_ratio", "eps", "revenue_growth", "shares_float", "shares_outstanding"))
     if fundamental_missing:
         reasons.append(
-            f"missing FMP/profile fundamental fields: {', '.join(fundamental_missing)}; requires local seed data, parsed SEC filing rows, FMP quote/profile/key-metrics/ratios/income-growth/shares-float endpoints, or configured fallback profile data. "
+            f"missing FMP/profile fundamental fields: {', '.join(fundamental_missing)}; requires local seed data, parsed SEC filing rows, FMP quote/profile/market-cap/key-metrics/ratios/income-growth/financial-growth/income-statement/shares-float endpoints, or configured fallback profile data. "
             "Databento equities and CME context are unsupported for selected-equity fundamentals."
         )
     rank = market_screener_market_cap_rank(record)
@@ -3257,7 +3292,7 @@ def _load_upcoming_records(
         )
         return rows
 
-    client = provider or AlphaVantageEarningsCalendarClient()
+    client = provider or configured_upcoming_earnings_provider()
     try:
         try:
             rows = tuple(client.upcoming_earnings(horizon=horizon, symbols=symbols, force_refresh=force_refresh))
@@ -3496,6 +3531,81 @@ def _load_market_data_records(
     return tuple(snapshot.records)
 
 
+def _load_provider_filing_metadata_records(
+    provider: Any | None,
+    records: Iterable[MarketScreenerRecord],
+    statuses: list[MarketScreenerSourceStatus],
+    errors: list[str],
+    fetched_at: str,
+    force_refresh: bool,
+    max_symbols: int,
+    provider_diagnostics: dict[str, int],
+) -> tuple[MarketScreenerRecord, ...]:
+    if provider is None or max_symbols <= 0:
+        return ()
+    filing_method = getattr(provider, "sec_filings", None) or getattr(provider, "filing_metadata", None)
+    if not callable(filing_method):
+        return ()
+    candidate_rows = [record for record in records if not record.recent_filing_date]
+    requested = _market_data_candidate_symbols(candidate_rows, max_symbols)
+    if not requested:
+        statuses.append(
+            MarketScreenerSourceStatus(
+                "FMP SEC filings by symbol",
+                "empty",
+                fetched_at,
+                "No capped symbol-bearing rows needed FMP SEC filing metadata fallback.",
+            )
+        )
+        return ()
+
+    enriched: list[MarketScreenerRecord] = []
+    failures = 0
+    for symbol in requested:
+        try:
+            rows = filing_method(symbol, force_refresh=force_refresh, limit=1)
+        except TypeError:
+            rows = filing_method(symbol, limit=1)
+        except Exception as exc:
+            clean_error = _redact_market_screener_provider_error(str(exc))
+            errors.append(f"FMP SEC filings by symbol {symbol}: {clean_error}")
+            failures += 1
+            continue
+        first = next((row for row in rows if isinstance(row, Mapping)), None)
+        record = _record_from_provider_filing_metadata(symbol, first, fetched_at=fetched_at)
+        if record is not None:
+            enriched.append(record)
+    status = "available" if enriched else "empty"
+    if not enriched and failures:
+        status = "unavailable"
+    statuses.append(
+        MarketScreenerSourceStatus(
+            "FMP SEC filings by symbol",
+            status,
+            fetched_at,
+            (
+                f"Loaded FMP SEC filing metadata for {len(enriched)} of {len(requested)} capped symbol row(s); "
+                f"{failures} nonblocking failure(s)."
+            ),
+        )
+    )
+    provider_diagnostics["rows_enriched_by_fmp_sec_filings"] = provider_diagnostics.get("rows_enriched_by_fmp_sec_filings", 0) + len(enriched)
+    if failures:
+        provider_diagnostics["provider_warnings"] = provider_diagnostics.get("provider_warnings", 0) + failures
+    return tuple(enriched)
+
+
+def _redact_market_screener_provider_error(value: str) -> str:
+    text = redact_symbol_chat_secrets(str(value or ""))
+    for env_name in ("FMP_API_KEY", "DATABENTO_API_KEY", "ALPHA_VANTAGE_API_KEY", "OPENAI_API_KEY"):
+        secret = os.getenv(env_name, "").strip()
+        if secret:
+            text = text.replace(secret, "[REDACTED]")
+    text = re.sub(r"(?i)(apikey=)[^&\s]+", r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)(apikey['\"]?\s*[:=]\s*['\"]?)[^,'\"\s)}]+", r"\1[REDACTED]", text)
+    return text
+
+
 def _load_market_data_records_by_cik(
     provider: Any | None,
     statuses: list[MarketScreenerSourceStatus],
@@ -3654,15 +3764,19 @@ def market_screener_diagnostics_summary(diagnostics: MarketScreenerCoverageDiagn
         f"SEC submissions {diagnostics.rows_resolved_by_sec_submissions_metadata}",
         f"Schwab quotes {diagnostics.rows_enriched_by_schwab_quote}",
         f"FMP profiles {diagnostics.rows_enriched_by_fmp_profile + diagnostics.rows_enriched_by_fmp_profile_by_cik}",
+        f"FMP filings {diagnostics.rows_enriched_by_fmp_sec_filings}",
         f"trusted USD caps {diagnostics.rows_with_trusted_usd_market_cap}",
         f"untrusted caps {diagnostics.rows_with_untrusted_market_cap}",
         f"{diagnostics.rows_skipped_by_configured_symbol_cap} skipped by cap",
         f"{diagnostics.unresolved_rows} unresolved",
     ]
     fmp_deep = (
-        diagnostics.rows_enriched_by_fmp_key_metrics
+        diagnostics.rows_enriched_by_fmp_market_cap
+        + diagnostics.rows_enriched_by_fmp_key_metrics
         + diagnostics.rows_enriched_by_fmp_ratios
         + diagnostics.rows_enriched_by_fmp_income_growth
+        + diagnostics.rows_enriched_by_fmp_financial_growth
+        + diagnostics.rows_enriched_by_fmp_income_statement
         + diagnostics.rows_enriched_by_fmp_shares_float
     )
     if diagnostics.rows_enriched_by_local_file:
@@ -3707,10 +3821,14 @@ def market_screener_diagnostics_detail_lines(diagnostics: MarketScreenerCoverage
         ("Rows enriched by FMP quote", diagnostics.rows_enriched_by_fmp_quote),
         ("Rows enriched by FMP profile", diagnostics.rows_enriched_by_fmp_profile),
         ("Rows enriched by FMP profile-by-CIK", diagnostics.rows_enriched_by_fmp_profile_by_cik),
+        ("Rows enriched by FMP market cap", diagnostics.rows_enriched_by_fmp_market_cap),
         ("Rows enriched by FMP key metrics", diagnostics.rows_enriched_by_fmp_key_metrics),
         ("Rows enriched by FMP ratios", diagnostics.rows_enriched_by_fmp_ratios),
         ("Rows enriched by FMP income growth", diagnostics.rows_enriched_by_fmp_income_growth),
+        ("Rows enriched by FMP financial growth", diagnostics.rows_enriched_by_fmp_financial_growth),
+        ("Rows enriched by FMP income statement", diagnostics.rows_enriched_by_fmp_income_statement),
         ("Rows enriched by FMP shares float", diagnostics.rows_enriched_by_fmp_shares_float),
+        ("Rows enriched by FMP SEC filings", diagnostics.rows_enriched_by_fmp_sec_filings),
         ("Rows enriched by fallback provider", diagnostics.rows_enriched_by_fallback_provider),
         ("FMP cache hits", diagnostics.fmp_cache_hits),
         ("Databento US Equities symbols attempted", diagnostics.databento_equities_symbols_attempted),
@@ -3826,6 +3944,10 @@ def _build_market_screener_diagnostics(
             _counter(provider_diagnostics, "rows_enriched_by_fmp_profile_by_cik"),
             _count_rows_with_source(rows, "FMP profile-by-CIK"),
         ),
+        rows_enriched_by_fmp_market_cap=max(
+            _counter(provider_diagnostics, "rows_enriched_by_fmp_market_cap"),
+            _count_rows_with_source(rows, "FMP market cap"),
+        ),
         rows_enriched_by_fmp_key_metrics=max(
             _counter(provider_diagnostics, "rows_enriched_by_fmp_key_metrics"),
             _count_rows_with_source(rows, "FMP key metrics"),
@@ -3838,9 +3960,21 @@ def _build_market_screener_diagnostics(
             _counter(provider_diagnostics, "rows_enriched_by_fmp_income_growth"),
             _count_rows_with_source(rows, "FMP income growth"),
         ),
+        rows_enriched_by_fmp_financial_growth=max(
+            _counter(provider_diagnostics, "rows_enriched_by_fmp_financial_growth"),
+            _count_rows_with_source(rows, "FMP financial growth"),
+        ),
+        rows_enriched_by_fmp_income_statement=max(
+            _counter(provider_diagnostics, "rows_enriched_by_fmp_income_statement"),
+            _count_rows_with_source(rows, "FMP income statement"),
+        ),
         rows_enriched_by_fmp_shares_float=max(
             _counter(provider_diagnostics, "rows_enriched_by_fmp_shares_float"),
             _count_rows_with_source(rows, "FMP shares float"),
+        ),
+        rows_enriched_by_fmp_sec_filings=max(
+            _counter(provider_diagnostics, "rows_enriched_by_fmp_sec_filings"),
+            _count_rows_with_source(rows, "FMP filing metadata"),
         ),
         rows_enriched_by_fallback_provider=max(
             _counter(provider_diagnostics, "rows_enriched_by_fallback_provider"),
@@ -4205,6 +4339,51 @@ def _record_from_recent_earnings(record: RecentEarningsRecord, *, fetched_at: st
         fetched_at=fetched_at,
         source_excerpt=getattr(record, "source_excerpt", None),
         field_provenance=_provenance_for_values(values, source=source, source_link=record.filing_url, fetched_at=fetched_at),
+    )
+
+
+def _record_from_provider_filing_metadata(
+    symbol: str,
+    payload: Mapping[str, Any] | None,
+    *,
+    fetched_at: str,
+) -> MarketScreenerRecord | None:
+    if not payload:
+        return None
+    filing_date = _optional_text(
+        payload.get("filingDate")
+        or payload.get("fillingDate")
+        or payload.get("filedDate")
+        or payload.get("date")
+        or payload.get("acceptedDate")
+    )
+    form = _optional_text(payload.get("form") or payload.get("type") or payload.get("filingType") or payload.get("formType"))
+    if not filing_date or not form:
+        return None
+    filing_url = _optional_text(payload.get("finalLink") or payload.get("filing_url") or payload.get("filingUrl") or payload.get("link") or payload.get("url"))
+    clean_symbol = _normalize_symbol(payload.get("symbol") or payload.get("ticker") or symbol)
+    source = _optional_text(payload.get("source")) or "FMP filing metadata"
+    source_url = _optional_text(payload.get("source_url") or payload.get("sourceUrl")) or filing_url
+    values = {
+        "symbol": clean_symbol,
+        "company_name": _optional_text(payload.get("companyName") or payload.get("company_name") or payload.get("company") or payload.get("name")),
+        "cik": _normalize_cik(payload.get("cik") or payload.get("CIK") or payload.get("cik_str")) or None,
+        "recent_filing_date": filing_date[:10],
+        "recent_filing_type": form.upper(),
+        "signals": ("Recent SEC filing",),
+        "source_links": (filing_url,) if filing_url else (),
+    }
+    return MarketScreenerRecord(
+        symbol=values["symbol"],
+        company_name=values["company_name"],
+        cik=values["cik"],
+        recent_filing_date=values["recent_filing_date"],
+        recent_filing_type=values["recent_filing_type"],
+        signals=values["signals"],
+        sources=(source,),
+        source_links=values["source_links"],
+        fetched_at=fetched_at,
+        field_provenance=_provenance_for_values(values, source=source, source_link=source_url, fetched_at=fetched_at),
     )
 
 
@@ -4595,13 +4774,33 @@ def _normalize_currency_code(value: Any) -> str:
 
 
 def _market_cap_sort_key(record: MarketScreenerRecord, *, descending: bool) -> tuple[Any, ...]:
-    market_cap = _float_or_none(record.market_cap)
+    rank = market_screener_market_cap_rank(record)
+    market_cap = _float_or_none(rank.ranking_market_cap)
     has_market_cap = market_cap is not None and market_cap >= 0
+    if not has_market_cap:
+        source_rank = 2
+    elif rank.used_for_ranking or rank.trusted:
+        source_rank = 0
+    else:
+        source_rank = 1
     return (
-        0 if has_market_cap else 1,
+        source_rank,
         0.0 if not has_market_cap else (-market_cap if descending else market_cap),
+        _market_cap_category_sort_key(rank.category),
         *_market_cap_fallback_sort_key(record),
     )
+
+
+def _market_cap_category_sort_key(category: str) -> int:
+    return {
+        "us_primary_common": 0,
+        "trusted_non_primary": 1,
+        "untrusted_non_usd": 2,
+        "untrusted_non_primary": 3,
+        "untrusted_explicit": 4,
+        "untrusted_ambiguous": 5,
+        "missing_or_invalid": 9,
+    }.get(str(category or ""), 8)
 
 
 def _market_cap_fallback_sort_key(record: MarketScreenerRecord) -> tuple[Any, ...]:

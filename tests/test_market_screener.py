@@ -32,6 +32,7 @@ from app.analytics.market_screener import (
     fetch_market_screener_snapshot,
     filter_market_screener_records,
     market_screener_ai_request_payload,
+    market_screener_data_completeness,
     market_screener_data_completeness_score,
     market_screener_data_label,
     market_screener_diagnostics_summary,
@@ -277,6 +278,26 @@ class _FakeMarketDataProvider:
         )
 
 
+class _FakeFilingMarketDataProvider(_FakeMarketDataProvider):
+    def __init__(
+        self,
+        records_by_symbol: dict[str, MarketQuoteFundamentalsRecord],
+        filings_by_symbol: dict[str, tuple[dict[str, object], ...]],
+        filing_errors_by_symbol: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(records_by_symbol)
+        self.filings_by_symbol = filings_by_symbol
+        self.filing_errors_by_symbol = filing_errors_by_symbol or {}
+        self.filing_calls: list[tuple[str, bool, int]] = []
+
+    def sec_filings(self, symbol: str, *, force_refresh: bool = False, limit: int = 12):
+        self.filing_calls.append((symbol, force_refresh, limit))
+        error = self.filing_errors_by_symbol.get(symbol.upper())
+        if error:
+            raise RuntimeError(error)
+        return self.filings_by_symbol.get(symbol.upper(), ())
+
+
 class _FakeFmpResponse:
     def __init__(self, status_code: int, payload) -> None:
         self.status_code = status_code
@@ -404,6 +425,61 @@ def test_market_screener_initial_market_data_enrichment_respects_cap_and_reports
     assert status.status == "partial"
     assert "Market data: enriched 2 of 4 rows via Fake quote" in status.message
     assert "MARKET_SCREENER_MARKET_DATA_SYMBOL_LIMIT up to 100" in status.message
+
+
+def test_market_screener_sec_filings_by_symbol_fallback_merges_metadata_and_completeness(monkeypatch) -> None:
+    monkeypatch.setenv("FMP_API_KEY", "fmp-secret-filing-key")
+    universe = MarketUniverseSnapshot(
+        records=(
+            MarketUniverseEntry("ACME", "Acme Corp", exchange="NASDAQ", sector="Technology", industry="Software"),
+            MarketUniverseEntry("BETA", "Beta Corp", exchange="NYSE", sector="Industrials", industry="Machinery"),
+        ),
+        fetched_at="2026-06-14T10:00:00+00:00",
+        sources=("Fixture",),
+        statuses=(),
+    )
+    provider = _FakeFilingMarketDataProvider(
+        {"ACME": MarketQuoteFundamentalsRecord("ACME", price=10.0, volume=1000, source="Fake quote")},
+        {
+            "ACME": (
+                {
+                    "symbol": "ACME",
+                    "companyName": "Acme Corp",
+                    "cik": "1234567",
+                    "form": "10-Q",
+                    "filingDate": "2026-06-12",
+                    "finalLink": "https://www.sec.gov/Archives/edgar/data/1234567/acme-10q.htm",
+                    "source": "FMP filing metadata",
+                },
+            )
+        },
+        {"BETA": "FMP filing error with fmp-secret-filing-key and apikey=fmp-secret-filing-key"},
+    )
+
+    snapshot = fetch_market_screener_snapshot(
+        sec_client=_FakeSecIdentityClient(ticker_payload={}),
+        universe_snapshot=universe,
+        recent_records=(),
+        upcoming_records=(),
+        market_data_provider=provider,
+        market_data_symbol_limit=2,
+    )
+
+    record = next(row for row in snapshot.records if row.symbol == "ACME")
+    assert provider.filing_calls == [("ACME", False, 1), ("BETA", False, 1)]
+    assert record.recent_filing_date == "2026-06-12"
+    assert record.recent_filing_type == "10-Q"
+    assert "FMP filing metadata" in record.sources
+    assert snapshot.diagnostics.rows_enriched_by_fmp_sec_filings == 1
+    assert any(status.source == "FMP SEC filings by symbol" and status.status == "available" for status in snapshot.statuses)
+    provenance = {(row.field, row.source) for row in record.field_provenance}
+    assert ("recent_filing_date", "FMP filing metadata") in provenance
+    missing_families = market_screener_data_completeness(record)["missing_source_families"]
+    assert "SEC/FMP filings" not in missing_families
+    assert "fundamentals" in missing_families
+    combined_errors = " ".join(snapshot.errors)
+    assert "fmp-secret-filing-key" not in combined_errors
+    assert "[REDACTED]" in combined_errors
 
 
 def test_market_screener_startup_candidate_selection_uses_broad_universe_before_holdings() -> None:
@@ -1149,7 +1225,17 @@ def test_fmp_batch_quote_short_empty_response_is_nonblocking() -> None:
         if url.endswith("/batch-quote-short"):
             assert params["symbols"] == "ACME"
             return _FakeFmpResponse(200, [])
-        if url.endswith("/profile") or url.endswith("/key-metrics-ttm") or url.endswith("/ratios-ttm") or url.endswith("/income-statement-growth") or url.endswith("/shares-float"):
+        if (
+            url.endswith("/profile")
+            or url.endswith("/market-capitalization-batch")
+            or url.endswith("/market-capitalization")
+            or url.endswith("/key-metrics-ttm")
+            or url.endswith("/ratios-ttm")
+            or url.endswith("/income-statement-growth")
+            or url.endswith("/financial-growth")
+            or url.endswith("/income-statement")
+            or url.endswith("/shares-float")
+        ):
             return _FakeFmpResponse(200, [])
         raise AssertionError(url)
 
@@ -1189,7 +1275,17 @@ def test_fmp_batch_quote_short_malformed_payload_falls_back_to_batch_quote() -> 
             return _FakeFmpResponse(200, {"data": {"unexpected": "shape"}})
         if url.endswith("/batch-quote"):
             return _FakeFmpResponse(200, [{"symbol": "ACME", "price": 12.34, "changesPercentage": 1.2, "volume": 1234}])
-        if url.endswith("/profile") or url.endswith("/key-metrics-ttm") or url.endswith("/ratios-ttm") or url.endswith("/income-statement-growth") or url.endswith("/shares-float"):
+        if (
+            url.endswith("/profile")
+            or url.endswith("/market-capitalization-batch")
+            or url.endswith("/market-capitalization")
+            or url.endswith("/key-metrics-ttm")
+            or url.endswith("/ratios-ttm")
+            or url.endswith("/income-statement-growth")
+            or url.endswith("/financial-growth")
+            or url.endswith("/income-statement")
+            or url.endswith("/shares-float")
+        ):
             return _FakeFmpResponse(200, [])
         raise AssertionError(url)
 
@@ -1213,7 +1309,17 @@ def test_fmp_batch_quote_short_and_fallback_malformed_status_is_redacted() -> No
     def handler(url: str, _params: dict[str, object]) -> _FakeFmpResponse:
         if url.endswith("/batch-quote-short") or url.endswith("/batch-quote"):
             return _FakeFmpResponse(200, {"data": {"unexpected": api_key}})
-        if url.endswith("/profile") or url.endswith("/key-metrics-ttm") or url.endswith("/ratios-ttm") or url.endswith("/income-statement-growth") or url.endswith("/shares-float"):
+        if (
+            url.endswith("/profile")
+            or url.endswith("/market-capitalization-batch")
+            or url.endswith("/market-capitalization")
+            or url.endswith("/key-metrics-ttm")
+            or url.endswith("/ratios-ttm")
+            or url.endswith("/income-statement-growth")
+            or url.endswith("/financial-growth")
+            or url.endswith("/income-statement")
+            or url.endswith("/shares-float")
+        ):
             return _FakeFmpResponse(200, [])
         raise AssertionError(url)
 
@@ -1233,6 +1339,8 @@ def test_fmp_provider_deeper_endpoints_fill_remaining_fundamentals_and_cache() -
     def handler(url: str, params: dict[str, object]) -> _FakeFmpResponse:
         if url.endswith("/batch-quote-short"):
             return _FakeFmpResponse(200, [{"symbol": "ACME", "price": 12.34}])
+        if url.endswith("/market-capitalization-batch"):
+            return _FakeFmpResponse(200, [{"symbol": "ACME", "marketCap": 2_500_000_000}])
         symbol = params["symbol"]
         if url.endswith("/profile"):
             return _FakeFmpResponse(200, [{"symbol": symbol, "sector": "Technology", "industry": "Software"}])
@@ -1254,7 +1362,7 @@ def test_fmp_provider_deeper_endpoints_fill_remaining_fundamentals_and_cache() -
     second = provider.quote_fundamentals(["ACME"], max_symbols=5)
     third = provider.quote_fundamentals(["ACME"], max_symbols=5, force_refresh=True)
 
-    assert first_call_count == 6
+    assert first_call_count == 7
     assert len(session.calls) == first_call_count * 2
     record = first.records[0]
     assert record.market_cap == 2_500_000_000
@@ -1263,13 +1371,54 @@ def test_fmp_provider_deeper_endpoints_fill_remaining_fundamentals_and_cache() -
     assert record.revenue_growth == 12.4
     assert record.shares_float == 120_000_000
     assert record.shares_outstanding == 150_000_000
-    assert record.source == "FMP quote, FMP profile, FMP key metrics TTM, FMP ratios TTM, FMP income growth, FMP shares float"
+    assert record.source == "FMP quote, FMP profile, FMP market cap, FMP key metrics TTM, FMP ratios TTM, FMP income growth, FMP shares float"
+    assert first.diagnostics["rows_enriched_by_fmp_market_cap"] == 1
     assert first.diagnostics["rows_enriched_by_fmp_key_metrics"] == 1
     assert first.diagnostics["rows_enriched_by_fmp_ratios"] == 1
     assert first.diagnostics["rows_enriched_by_fmp_income_growth"] == 1
     assert first.diagnostics["rows_enriched_by_fmp_shares_float"] == 1
-    assert second.diagnostics["fmp_cache_hits"] == 6
+    assert second.diagnostics["fmp_cache_hits"] == 7
     assert third.diagnostics["fmp_cache_hits"] == 0
+
+
+def test_fmp_visible_endpoint_fallbacks_fill_financial_growth_and_statement_eps() -> None:
+    def handler(url: str, params: dict[str, object]) -> _FakeFmpResponse:
+        if url.endswith("/batch-quote-short"):
+            return _FakeFmpResponse(200, [{"symbol": "ACME", "price": 12.34}])
+        if url.endswith("/market-capitalization-batch"):
+            return _FakeFmpResponse(200, [])
+        if url.endswith("/market-capitalization"):
+            return _FakeFmpResponse(200, [])
+        symbol = params["symbol"]
+        if url.endswith("/profile"):
+            return _FakeFmpResponse(200, [{"symbol": symbol, "sector": "Technology"}])
+        if url.endswith("/key-metrics-ttm"):
+            return _FakeFmpResponse(200, [{"symbol": symbol, "marketCapTTM": 1_500_000_000}])
+        if url.endswith("/ratios-ttm"):
+            return _FakeFmpResponse(200, [{"symbol": symbol, "priceEarningsRatioTTM": 21.0}])
+        if url.endswith("/income-statement-growth"):
+            return _FakeFmpResponse(200, [])
+        if url.endswith("/financial-growth"):
+            return _FakeFmpResponse(200, [{"symbol": symbol, "growthRevenue": 0.085}])
+        if url.endswith("/shares-float"):
+            return _FakeFmpResponse(200, [{"symbol": symbol, "floatShares": 50_000_000, "outstandingShares": 60_000_000}])
+        if url.endswith("/income-statement"):
+            return _FakeFmpResponse(200, [{"symbol": symbol, "epsdiluted": 1.23}])
+        raise AssertionError(url)
+
+    provider = FmpQuoteFundamentalsProvider(api_key="secret", session=_FakeFmpSession(handler), symbol_limit=5)
+
+    snapshot = provider.quote_fundamentals(["ACME"], max_symbols=5)
+
+    record = snapshot.records[0]
+    assert record.market_cap == 1_500_000_000
+    assert record.pe_ratio == 21.0
+    assert record.revenue_growth == 8.5
+    assert record.eps == 1.23
+    assert "FMP financial growth" in record.source
+    assert "FMP income statement" in record.source
+    assert snapshot.diagnostics["rows_enriched_by_fmp_financial_growth"] == 1
+    assert snapshot.diagnostics["rows_enriched_by_fmp_income_statement"] == 1
 
 
 def test_fmp_staged_family_methods_batch_profile_filter_fields_and_report_cache() -> None:
@@ -1300,6 +1449,8 @@ def test_fmp_staged_family_methods_batch_profile_filter_fields_and_report_cache(
             )
         if url.endswith("/batch-quote-short"):
             return _FakeFmpResponse(200, [{"symbol": "ACME", "price": 12.5, "volume": 1000, "marketCap": 9_999}])
+        if url.endswith("/market-capitalization-batch"):
+            return _FakeFmpResponse(200, [{"symbol": "ACME", "marketCap": 2_500_000_000}])
         if url.endswith("/key-metrics-ttm"):
             return _FakeFmpResponse(200, [{"symbol": "ACME", "marketCapTTM": 2_500_000_000, "epsTTM": 0.67}])
         if url.endswith("/ratios-ttm"):
@@ -1364,7 +1515,8 @@ def test_fmp_staged_family_methods_batch_profile_filter_fields_and_report_cache(
     assert fundamentals_record.cash_to_liabilities == 25.0
     assert fundamentals_record.shares_float == 120_000_000
     assert fundamentals_record.price is None
-    assert fundamentals.diagnostics["provider_calls_attempted"] == 8
+    assert fundamentals.diagnostics["provider_calls_attempted"] == 9
+    assert fundamentals.diagnostics["rows_enriched_by_fmp_market_cap"] == 1
     assert fundamentals.diagnostics["rows_enriched_by_fmp_income_statement"] == 1
     assert fundamentals.diagnostics["rows_enriched_by_fmp_balance_sheet"] == 1
     assert fundamentals.diagnostics["rows_enriched_by_fmp_cash_flow"] == 1
@@ -1807,7 +1959,7 @@ def test_market_screener_filters_and_sorting_cover_events_risks_windows_and_move
     assert market_screener_data_label(beta) == "Universe only"
 
 
-def test_market_screener_market_cap_sort_is_strict_numeric_descending() -> None:
+def test_market_screener_market_cap_sort_uses_trusted_rank_descending() -> None:
     msft = MarketScreenerRecord("MSFT", "Microsoft Corp", exchange="NASDAQ", country="United States", market_cap=2_900_000_000_000, market_cap_currency="USD")
     sony = MarketScreenerRecord("SONY", "Sony Group Corp ADR", exchange="NYSE", country="Japan", market_cap=24_000_000_000_000, market_cap_currency="JPY", is_adr=True)
     honda = MarketScreenerRecord("HMC", "Honda Motor Co ADR", exchange="NYSE", country="Japan", market_cap=10_000_000_000_000, market_cap_currency="USD", is_adr=True)
@@ -1815,7 +1967,7 @@ def test_market_screener_market_cap_sort_is_strict_numeric_descending() -> None:
 
     ranked = sort_market_screener_records([sony, fund, honda, msft], "market_cap", descending=True)
 
-    assert [record.symbol for record in ranked] == ["SPY", "SONY", "HMC", "MSFT"]
+    assert [record.symbol for record in ranked] == ["SPY", "HMC", "MSFT", "SONY"]
     assert market_screener_market_cap_rank(msft).category == "us_primary_common"
     assert market_screener_market_cap_rank(sony).trusted is False
     assert "JPY" in market_screener_market_cap_rank(sony).reason
@@ -1834,7 +1986,7 @@ def test_market_screener_market_cap_sort_is_strict_numeric_ascending_with_missin
     assert [record.symbol for record in ranked] == ["ZERO", "MID", "MEGA", "MISS"]
 
 
-def test_market_screener_market_cap_sort_ignores_provider_rank_metadata() -> None:
+def test_market_screener_market_cap_sort_honors_provider_rank_metadata() -> None:
     msft = MarketScreenerRecord("MSFT", "Microsoft Corp", exchange="NASDAQ", country="United States", market_cap=2_900_000_000_000, market_cap_currency="USD")
     foreign = MarketScreenerRecord(
         "FORE",
@@ -1850,14 +2002,14 @@ def test_market_screener_market_cap_sort_ignores_provider_rank_metadata() -> Non
 
     ranked = sort_market_screener_records([foreign, msft], "market_cap", descending=True)
 
-    assert [record.symbol for record in ranked] == ["FORE", "MSFT"]
+    assert [record.symbol for record in ranked] == ["MSFT", "FORE"]
     rank = market_screener_market_cap_rank(foreign)
     assert rank.trusted is True
     assert rank.ranking_market_cap == 40_000_000_000
     assert rank.category == "trusted_non_primary"
 
 
-def test_market_screener_market_cap_sort_does_not_bucket_holdings_or_non_primary_rows() -> None:
+def test_market_screener_market_cap_sort_demotes_ambiguous_non_primary_rows() -> None:
     holding = MarketScreenerRecord(
         "HOLD",
         "Held Small Cap",
@@ -1873,7 +2025,7 @@ def test_market_screener_market_cap_sort_does_not_bucket_holdings_or_non_primary
 
     ranked = sort_market_screener_records([holding, primary, missing, foreign, etf], "market_cap", descending=True)
 
-    assert [record.symbol for record in ranked] == ["VXUS", "STX", "ACN", "HOLD", "MISS"]
+    assert [record.symbol for record in ranked] == ["ACN", "VXUS", "STX", "HOLD", "MISS"]
 
 
 def test_market_screener_position_rows_are_labels_only_for_market_cap_ordering() -> None:
