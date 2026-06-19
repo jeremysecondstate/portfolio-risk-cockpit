@@ -239,20 +239,22 @@ def fetch_census_releases(*, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> 
         return [], MacroSourceStatus("Census.gov", "disabled", now, CENSUS_MARTS_URL, f"Census macro source disabled by {MACRO_ENABLE_CENSUS_ENV}.")
     api_key = os.getenv(CENSUS_API_KEY_ENV, "").strip()
     if not api_key:
-        return [], MacroSourceStatus("Census.gov", "unavailable", now, CENSUS_MARTS_URL, f"No {CENSUS_API_KEY_ENV} is configured; Census EITS queries require a key.")
+        return [], MacroSourceStatus("Census.gov", "unavailable", now, CENSUS_MARTS_URL, f"missing {CENSUS_API_KEY_ENV}: Census EITS queries require a key.")
 
     releases: list[MacroRelease] = []
+    attempted_windows: list[str] = []
     for spec in _census_specs():
-        params = {
-            "get": "data_type_code,time_slot_id,seasonally_adj,category_code,cell_value,error_data",
-            "for": "us:*",
-            "time": str(datetime.now(timezone.utc).year),
-            "key": api_key,
-        }
-        response = requests.get(spec["url"], params=params, timeout=timeout_seconds)
-        response.raise_for_status()
-        releases.extend(
-            parse_census_eits_response(
+        for window in _census_time_windows():
+            attempted_windows.append(f"{spec['metric']}:{window}")
+            params = {
+                "get": "data_type_code,time_slot_id,seasonally_adj,category_code,cell_value,error_data",
+                "for": "us:*",
+                "time": window,
+                "key": api_key,
+            }
+            response = requests.get(spec["url"], params=params, timeout=timeout_seconds)
+            response.raise_for_status()
+            parsed = parse_census_eits_response(
                 response.json(),
                 metric=spec["metric"],
                 category=spec["category"],
@@ -260,9 +262,21 @@ def fetch_census_releases(*, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> 
                 fetched_at=now,
                 raw_source=spec["url"],
             )
-        )
+            if parsed:
+                releases.extend(parsed)
+                break
     status = "fresh" if releases else "unavailable"
-    return releases, MacroSourceStatus("Census.gov", status, now, CENSUS_MARTS_URL, f"{len(releases)} Census EITS series loaded.")
+    message = f"{len(releases)} Census EITS series loaded; attempted latest/prior windows: {', '.join(attempted_windows[:9])}."
+    return releases, MacroSourceStatus("Census.gov", status, now, CENSUS_MARTS_URL, message)
+
+
+def _census_time_windows() -> tuple[str, ...]:
+    year = _current_utc_year()
+    return tuple(str(value) for value in (year, year - 1, year - 2))
+
+
+def _current_utc_year() -> int:
+    return datetime.now(timezone.utc).year
 
 
 def parse_census_eits_response(
@@ -372,7 +386,7 @@ def fetch_eia_releases(*, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> tup
         return [], MacroSourceStatus("EIA.gov", "disabled", now, EIA_WEEKLY_PETROLEUM_URL, f"EIA macro source disabled by {MACRO_ENABLE_EIA_ENV}.")
     api_key = os.getenv(EIA_API_KEY_ENV, "").strip()
     if not api_key:
-        return [], MacroSourceStatus("EIA.gov", "unavailable", now, EIA_WEEKLY_PETROLEUM_URL, f"No {EIA_API_KEY_ENV} is configured; EIA petroleum inventory queries require a key.")
+        return [], MacroSourceStatus("EIA.gov", "unavailable", now, EIA_WEEKLY_PETROLEUM_URL, f"missing {EIA_API_KEY_ENV}: EIA petroleum inventory queries require a key.")
     response = requests.get(
         EIA_WEEKLY_PETROLEUM_URL,
         params={
@@ -383,7 +397,7 @@ def fetch_eia_releases(*, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> tup
             "sort[0][column]": "period",
             "sort[0][direction]": "desc",
             "offset": "0",
-            "length": "2",
+            "length": "8",
         },
         timeout=timeout_seconds,
     )

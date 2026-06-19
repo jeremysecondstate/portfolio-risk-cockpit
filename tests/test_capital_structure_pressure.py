@@ -6,8 +6,12 @@ from typing import Any
 
 from app.analytics.capital_structure_pressure import (
     CapitalStructureFilingText,
+    CapitalStructureLevel,
+    CapitalStructurePressureReport,
+    CapitalStructureTermsReport,
     analyze_capital_structure_pressure,
     capital_structure_technical_modifier,
+    classify_capital_structure_level_relevance,
     classify_capital_pressure_score,
     parse_capital_structure_terms,
     scan_capital_structure_filings,
@@ -392,6 +396,91 @@ class CapitalStructurePressureTests(unittest.TestCase):
 
         level = _scan("Warrants are exercisable at $7.25 per share.")
         self.assertTrue(any(item.level_type == "warrant_strike" and item.price == 7.25 for item in level.possible_supply_levels))
+
+    def test_far_away_filing_level_is_split_check_context_not_active_supply(self) -> None:
+        level = CapitalStructureLevel(
+            label="Possible offering price",
+            price=50.0,
+            source="S-3 filed 2024-01-05",
+            explanation="Source-backed offering price.",
+            level_type="offering_price",
+            source_form="S-3",
+            source_date="2024-01-05",
+        )
+
+        relevance = classify_capital_structure_level_relevance(level, current_price=362.0, atr_percent=2.0, as_of=AS_OF)
+
+        self.assertEqual(relevance.status, "split_adjustment_needed")
+        self.assertFalse(relevance.active_for_supply)
+        self.assertIn("not treated as active supply", relevance.reason)
+
+        pressure = CapitalStructurePressureReport(
+            symbol="GOOG",
+            company_name="Alphabet Inc.",
+            filings_analyzed=1,
+            read="Low",
+            supply_overhang_score=0,
+            dilution_sensitivity="Low",
+            breakout_quality_adjustment="Clean",
+            confidence="Medium",
+            signals=[],
+            warnings=[],
+            explanation_lines=[],
+            what_would_change=[],
+            possible_supply_levels=[level],
+            parsed_terms=CapitalStructureTermsReport(),
+        )
+        report = build_technical_command_center_report(
+            "GOOG",
+            {"daily_1y": _candles(90, start=350.0, step=0.1), "timing_5m": _candles(80, start=352.0, step=0.1)},
+            capital_structure_pressure=pressure,
+        )
+        indicator = report.capital_structure_indicator
+        self.assertIsNotNone(indicator)
+        assert indicator is not None
+        self.assertIsNone(indicator.nearest_supply_level)
+        self.assertEqual(indicator.warrant_conversion_proximity_score, 0)
+        self.assertEqual(indicator.technical_score, 100)
+        self.assertTrue(any("split/corporate-action" in line for line in indicator.explanation_lines))
+
+    def test_near_current_filing_level_still_drives_active_supply_context(self) -> None:
+        level = CapitalStructureLevel(
+            label="Possible warrant strike",
+            price=360.0,
+            source="8-K filed 2026-05-01",
+            explanation="Source-backed warrant strike.",
+            level_type="warrant_strike",
+            source_form="8-K",
+            source_date="2026-05-01",
+        )
+        pressure = CapitalStructurePressureReport(
+            symbol="TEST",
+            company_name="Test Corp",
+            filings_analyzed=1,
+            read="Low",
+            supply_overhang_score=0,
+            dilution_sensitivity="Low",
+            breakout_quality_adjustment="Clean",
+            confidence="Medium",
+            signals=[],
+            warnings=[],
+            explanation_lines=[],
+            what_would_change=[],
+            possible_supply_levels=[level],
+            parsed_terms=CapitalStructureTermsReport(),
+        )
+
+        report = build_technical_command_center_report(
+            "TEST",
+            {"daily_1y": _candles(90, start=350.0, step=0.1), "timing_5m": _candles(80, start=352.0, step=0.1)},
+            capital_structure_pressure=pressure,
+        )
+
+        indicator = report.capital_structure_indicator
+        self.assertIsNotNone(indicator)
+        assert indicator is not None
+        self.assertEqual(indicator.nearest_supply_level, 360.0)
+        self.assertGreater(indicator.warrant_conversion_proximity_score, 0)
 
     def test_analyzer_uses_fake_sec_client_without_network(self) -> None:
         report = analyze_capital_structure_pressure("TEST", client=FakeSecClient(), max_documents=1, as_of=AS_OF)

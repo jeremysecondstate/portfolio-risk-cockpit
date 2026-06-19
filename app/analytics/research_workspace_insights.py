@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 from app.analytics.research_scoring import BadgeReadout, direction_strength_label
 from app.analytics.stock_research import AdvancedIndicatorSnapshot, GeneratedStockPosition, PortfolioSymbolContext
-from app.macro.models import MacroRelease, MacroSnapshot
+from app.macro.models import MacroRelease, MacroSnapshot, MacroSourceStatus
 
 
 @dataclass(frozen=True)
@@ -66,12 +66,19 @@ class OptionCandidate:
     technical_fit_score: float = 0.0
     greek_score: float = 0.0
     risk_budget_score: float = 0.0
+    volatility_fit_score: float = 0.0
+    portfolio_fit_score: float = 0.0
+    event_risk_score: float = 0.0
+    capital_structure_fit_score: float = 0.0
     expected_move_required: float | None = None
     spread_pct: float | None = None
     open_interest: float | None = None
     volume: float | None = None
     delta: float | None = None
+    gamma: float | None = None
     theta: float | None = None
+    vega: float | None = None
+    rho: float | None = None
     iv: float | None = None
     dte_bucket: str = "Unknown"
     score_breakdown: tuple[str, ...] = ()
@@ -233,7 +240,7 @@ def build_macro_metric_cards(snapshot: MacroSnapshot | None, provider_context: A
             releases = [release for release in snapshot.releases if release.category in {"treasury", "rates"}]
         elif not releases:
             releases = [release for release in snapshot.releases if release.category in _group_categories(group)]
-        readouts.append(_macro_group_readout(group, releases[:3]))
+        readouts.append(_macro_group_readout(group, releases[:3], snapshot.source_statuses))
     readouts = _with_macro_provider_proxies(readouts, provider_context)
     readouts.append(_overall_macro_readout(readouts))
     return readouts
@@ -351,6 +358,7 @@ def suggest_option_candidates(
     earnings_text: str = "",
     risk_budget: float | None = None,
     stock_plan: GeneratedStockPosition | None = None,
+    capital_structure_indicator: Any | None = None,
 ) -> list[OptionCandidate]:
     if not chain_rows:
         return []
@@ -375,6 +383,7 @@ def suggest_option_candidates(
             context=context,
             risk_budget=risk_budget,
             stock_plan=stock_plan,
+            capital_structure_indicator=capital_structure_indicator,
         )
     )
 
@@ -403,6 +412,7 @@ def suggest_option_candidates(
                     context=context,
                     risk_budget=risk_budget,
                     stock_plan=stock_plan,
+                    capital_structure_indicator=capital_structure_indicator,
                     confidence="Speculative" if call_candidate.group == "Speculative" else None,
                 )
             )
@@ -419,6 +429,7 @@ def suggest_option_candidates(
                         context=context,
                         risk_budget=risk_budget,
                         stock_plan=stock_plan,
+                        capital_structure_indicator=capital_structure_indicator,
                     )
                 )
 
@@ -441,13 +452,14 @@ def suggest_option_candidates(
                     context=context,
                     risk_budget=risk_budget,
                     stock_plan=stock_plan,
+                    capital_structure_indicator=capital_structure_indicator,
                 )
             )
 
     if context.is_held:
         hedge = max((item for item in candidates if item.group == "Protective Put"), key=lambda item: item.score, default=None)
         covered = max((item for item in candidates if item.group == "Covered Call"), key=lambda item: item.score, default=None)
-        collar = _collar_candidate_from_pair(hedge, covered, context, underlying, indicators, macro_label)
+        collar = _collar_candidate_from_pair(hedge, covered, context, underlying, indicators, macro_label, capital_structure_indicator=capital_structure_indicator)
         if collar is not None:
             candidates.append(collar)
 
@@ -1170,9 +1182,9 @@ def build_risk_plan(
     )
 
 
-def _macro_group_readout(group: str, releases: list[MacroRelease]) -> MacroMetricReadout:
+def _macro_group_readout(group: str, releases: list[MacroRelease], source_statuses: list[MacroSourceStatus] | None = None) -> MacroMetricReadout:
     if not releases:
-        return MacroMetricReadout(group, "Unavailable", "--", "--", "--", "--", "--", "unavailable", "Unavailable", "info", "Official macro data unavailable. Historical comparison unavailable.")
+        return MacroMetricReadout(group, "Unavailable", "--", "--", "--", "--", "--", "unavailable", "Unavailable", "info", _macro_unavailable_interpretation(group, source_statuses or []))
     primary = releases[0]
     latest = _format_macro_value(primary.actual, primary.unit)
     prior = _format_macro_value(primary.prior, primary.unit)
@@ -1219,6 +1231,24 @@ def _overall_macro_readout(readouts: list[MacroMetricReadout]) -> MacroMetricRea
 def _is_macro_proxy_row(readout: MacroMetricReadout) -> bool:
     lower = f"{readout.source} {readout.freshness} {readout.metric}".lower()
     return "market proxy" in lower or "provider fallback" in lower or readout.simple_read == "Proxy Context"
+
+
+def _macro_unavailable_interpretation(group: str, source_statuses: list[MacroSourceStatus]) -> str:
+    source_names = {
+        "Growth / Consumer": ("Census.gov", "BEA.gov"),
+        "Energy": ("EIA.gov",),
+        "Rates / Treasury": ("Treasury.gov", "FederalReserve.gov"),
+        "Inflation": ("BLS.gov",),
+        "Labor": ("BLS.gov",),
+    }.get(group, ())
+    relevant = [status for status in source_statuses if status.source in source_names]
+    if not relevant:
+        return "Official macro data unavailable. Historical comparison unavailable."
+    details = "; ".join(
+        f"{status.source} {status.status}: {status.message or 'no source detail'}"
+        for status in relevant[:3]
+    )
+    return f"Official {group} data unavailable. Source diagnostics: {details}."
 
 
 def _with_macro_provider_proxies(readouts: list[MacroMetricReadout], provider_context: Any | None) -> list[MacroMetricReadout]:
@@ -1312,18 +1342,18 @@ def _macro_proxy_readout(
 
 def _databento_macro_proxy_group(symbol: str, payload: Mapping[str, Any]) -> str:
     haystack = f"{symbol} {_first_mapping_value(payload, 'symbol', 'name', 'description')}".upper()
-    if any(token in haystack for token in ("CL", "NG", "RB", "HO", "BZ", "WTI", "CRUDE", "NATGAS", "GASOLINE", "OIL")):
+    if any(token in haystack for token in ("CL", "MCL", "QM", "NG", "QG", "RB", "HO", "BZ", "WTI", "CRUDE", "NATGAS", "NATURAL GAS", "GASOLINE", "OIL", "ENERGY")):
         return "Energy"
     if any(token in haystack for token in ("ZN", "ZB", "ZT", "ZF", "SR3", "SOFR", "TREASURY", "FED", "RATE", "YIELD")):
         return "Rates / Treasury"
-    if any(token in haystack for token in ("ES", "NQ", "RTY", "YM", "E-MINI", "EQUITY")):
+    if any(token in haystack for token in ("ES", "MES", "NQ", "MNQ", "RTY", "M2K", "YM", "MYM", "SP", "NASDAQ", "RUSSELL", "DOW", "E-MINI", "EQUITY", "CONSUMER", "GROWTH")):
         return "Growth / Consumer"
     return ""
 
 
 def _fmp_macro_proxy_group(key: str, payload: Mapping[str, Any]) -> str:
     haystack = f"{key} {_first_mapping_value(payload, 'category', 'metric', 'name', 'label', 'symbol')}".lower()
-    if any(term in haystack for term in ("oil", "crude", "gasoline", "energy", "natural gas", "commodity")):
+    if any(term in haystack for term in ("oil", "crude", "gasoline", "energy", "natural gas", "natgas", "diesel", "heating oil", "commodity", "brent", "wti")):
         return "Energy"
     if any(term in haystack for term in ("cpi", "inflation", "ppi", "price index")):
         return "Inflation"
@@ -1331,7 +1361,7 @@ def _fmp_macro_proxy_group(key: str, payload: Mapping[str, Any]) -> str:
         return "Labor"
     if any(term in haystack for term in ("treasury", "rate", "yield", "fed", "sofr")):
         return "Rates / Treasury"
-    if any(term in haystack for term in ("gdp", "retail", "consumer", "pce", "growth")):
+    if any(term in haystack for term in ("gdp", "retail", "consumer", "pce", "personal consumption", "income", "spending", "sales", "growth", "confidence")):
         return "Growth / Consumer"
     return ""
 
@@ -1471,7 +1501,10 @@ def _candidate_from_row(row: dict[str, Any] | None, option_type: str, group: str
     open_interest = _first_number(contract, "openInterest", "open_interest", "openInterestLong")
     volume = _first_number(contract, "totalVolume", "volume")
     delta = _first_number(contract, "delta")
+    gamma = _first_number(contract, "gamma")
     theta = _first_number(contract, "theta")
+    vega = _first_number(contract, "vega")
+    rho = _first_number(contract, "rho")
     iv = _normalize_iv(_first_number(contract, "impliedVolatility", "iv", "volatility", "volatilityPercent"))
     dte = _to_int(row.get("dte"))
     return OptionCandidate(
@@ -1502,7 +1535,10 @@ def _candidate_from_row(row: dict[str, Any] | None, option_type: str, group: str
         open_interest=open_interest,
         volume=volume,
         delta=delta,
+        gamma=gamma,
         theta=theta,
+        vega=vega,
+        rho=rho,
         iv=iv,
         dte_bucket=_dte_bucket(dte),
         contract_count=contract_count,
@@ -1521,6 +1557,7 @@ def _with_candidate_reason(
     context: PortfolioSymbolContext | None = None,
     risk_budget: float | None = None,
     stock_plan: GeneratedStockPosition | None = None,
+    capital_structure_indicator: Any | None = None,
     confidence: str | None = None,
 ) -> OptionCandidate:
     warnings = []
@@ -1542,6 +1579,7 @@ def _with_candidate_reason(
         context=context,
         risk_budget=risk_budget,
         stock_plan=stock_plan,
+        capital_structure_indicator=capital_structure_indicator,
     )
     score = scoring["score"]
     fit = confidence or _fit_from_score(score)
@@ -1560,6 +1598,10 @@ def _with_candidate_reason(
             "technical_fit_score": scoring["technical_fit_score"],
             "greek_score": scoring["greek_score"],
             "risk_budget_score": scoring["risk_budget_score"],
+            "volatility_fit_score": scoring["volatility_fit_score"],
+            "portfolio_fit_score": scoring["portfolio_fit_score"],
+            "event_risk_score": scoring["event_risk_score"],
+            "capital_structure_fit_score": scoring["capital_structure_fit_score"],
             "score_breakdown": scoring["score_breakdown"],
             "avoid_reason": scoring["avoid_reason"],
             "better_than_stock": scoring["better_than_stock"],
@@ -1588,33 +1630,45 @@ def _option_candidate_scoring(
     context: PortfolioSymbolContext | None = None,
     risk_budget: float | None = None,
     stock_plan: GeneratedStockPosition | None = None,
+    capital_structure_indicator: Any | None = None,
 ) -> dict[str, Any]:
     if candidate.option_type not in {"call", "put"}:
-        return _wait_candidate_scoring(candidate, indicators, macro_label, earnings_soon=earnings_soon, context=context)
+        return _wait_candidate_scoring(candidate, indicators, macro_label, earnings_soon=earnings_soon, context=context, capital_structure_indicator=capital_structure_indicator)
 
     technical_score, technical_reason = _technical_fit_score(candidate, indicators, macro_label, context)
     liquidity_score, liquidity_reason = _liquidity_fit_score(candidate)
     greek_score, greek_reason = _greek_fit_score(candidate)
+    volatility_score, volatility_reason = _volatility_fit_score(candidate, indicators)
     risk_score, risk_reason = _risk_budget_fit_score(candidate, risk_budget)
-    move_adjust, move_reason = _required_move_adjustment(candidate, indicators)
     hedge_adjust, hedge_reason, hedge_warnings = _hedge_ratio_adjustment(candidate, context, stock_plan)
     stock_adjust, stock_note = _stock_comparison_adjustment(candidate, context, stock_plan, risk_budget)
+    portfolio_score, portfolio_reason = _portfolio_fit_score(candidate, context, stock_plan, risk_budget, hedge_adjust=hedge_adjust, stock_adjust=stock_adjust)
     high_iv_event = earnings_soon and candidate.iv is not None and candidate.iv >= 0.70 and not _is_covered_call(candidate)
-    event_adjust = -14.0 if high_iv_event else -7.0 if earnings_soon and not _is_covered_call(candidate) else -3.0 if earnings_soon else 0.0
-    event_reason = "earnings/event risk can distort premium" if earnings_soon else ""
-    if high_iv_event:
-        event_reason = "earnings/event risk plus high IV makes debit premium harder to justify"
+    event_score, event_reason = _event_risk_fit_score(candidate, earnings_soon=earnings_soon, high_iv_event=high_iv_event)
+    capital_score, capital_reason = _capital_structure_fit_score(candidate, capital_structure_indicator)
 
     score = (
-        technical_score * 0.34
-        + liquidity_score * 0.22
-        + greek_score * 0.18
-        + risk_score * 0.22
-        + move_adjust
-        + hedge_adjust
-        + stock_adjust
-        + event_adjust
+        technical_score * 0.24
+        + liquidity_score * 0.16
+        + greek_score * 0.12
+        + volatility_score * 0.12
+        + risk_score * 0.14
+        + portfolio_score * 0.10
+        + event_score * 0.06
+        + capital_score * 0.06
     )
+    if high_iv_event:
+        score -= 14.0
+    if risk_score < 30:
+        score -= 10.0
+    if volatility_score < 35:
+        score -= 6.0
+    if portfolio_score < 35:
+        score -= 8.0
+    if any("extreme over-hedge" in warning.lower() for warning in hedge_warnings):
+        score -= 16.0
+    elif any("over-hedged" in warning.lower() for warning in hedge_warnings):
+        score -= 6.0
     if candidate.dte is not None:
         if 14 <= candidate.dte <= 60:
             score += 3.0
@@ -1624,17 +1678,19 @@ def _option_candidate_scoring(
             score -= 3.0
 
     score = max(0.0, min(100.0, score))
-    reasons = [technical_reason, liquidity_reason, greek_reason, risk_reason, move_reason, hedge_reason, stock_note, event_reason]
+    reasons = [technical_reason, liquidity_reason, greek_reason, volatility_reason, risk_reason, portfolio_reason, event_reason, capital_reason]
     score_reason = "; ".join(reason for reason in reasons if reason) or "Balanced candidate score."
     practical_warnings = tuple(dict.fromkeys([*hedge_warnings, *(_event_warnings(candidate, earnings_soon))]))
     avoid_reason = _candidate_avoid_reason(candidate, technical_score, liquidity_score, greek_score, risk_score, practical_warnings)
     breakdown = (
         f"Technical fit {technical_score:.0f}/100: {technical_reason}",
-        f"Liquidity fit {liquidity_score:.0f}/100: {liquidity_reason}",
-        f"Greek fit {greek_score:.0f}/100: {greek_reason}",
+        f"Liquidity {liquidity_score:.0f}/100: {liquidity_reason}",
+        f"Greeks {greek_score:.0f}/100: {greek_reason}",
+        f"Volatility fit {volatility_score:.0f}/100: {volatility_reason}",
         f"Risk-budget fit {risk_score:.0f}/100: {risk_reason}",
-        f"Move to breakeven: {_move_required_label(candidate.expected_move_required)}. {move_reason}",
-        f"Position/contract fit: {hedge_reason or 'No hedge-ratio sizing issue for this candidate.'}",
+        f"Portfolio fit {portfolio_score:.0f}/100: {portfolio_reason}",
+        f"Event risk {event_score:.0f}/100: {event_reason}",
+        f"Capital-structure fit {capital_score:.0f}/100: {capital_reason}",
         f"Stock comparison: {stock_note or 'No model stock comparison was available.'}",
     )
     return {
@@ -1644,6 +1700,10 @@ def _option_candidate_scoring(
         "technical_fit_score": technical_score,
         "greek_score": greek_score,
         "risk_budget_score": risk_score,
+        "volatility_fit_score": volatility_score,
+        "portfolio_fit_score": portfolio_score,
+        "event_risk_score": event_score,
+        "capital_structure_fit_score": capital_score,
         "score_breakdown": breakdown,
         "avoid_reason": avoid_reason,
         "better_than_stock": stock_note,
@@ -1658,6 +1718,7 @@ def _wait_candidate_scoring(
     *,
     earnings_soon: bool,
     context: PortfolioSymbolContext | None,
+    capital_structure_indicator: Any | None = None,
 ) -> dict[str, Any]:
     agreement, _status, _why = indicator_agreement_classification(indicators, macro_label)
     score = 34.0
@@ -1676,12 +1737,14 @@ def _wait_candidate_scoring(
     score = max(0.0, min(100.0, score))
     reason = "Wait/no-trade ranks higher when confirmation is mixed, macro is a headwind, or premium risk is not justified."
     breakdown = (
-        f"Wait/no-trade action score {score:.0f}/100: {agreement.lower()} setup with macro {macro_label.lower()}.",
+        f"Technical fit {score:.0f}/100: wait/no-trade fits a {agreement.lower()} setup with macro {macro_label.lower()}.",
         "Liquidity fit not scored: no contract is selected, so wait/no-trade is not credited with perfect liquidity.",
-        "Greek fit not scored: no delta/theta/IV exposure is taken, but this is not a perfect option Greek score.",
+        "Greeks not scored: no delta/theta/gamma/vega/rho exposure is taken, but this is not a perfect option Greek score.",
+        "Volatility fit not scored: no option premium or implied-volatility exposure is selected.",
         "Risk-budget fit not scored: no capital is committed, but this is not a perfect option risk-budget score.",
-        "Move to breakeven: not applicable.",
-        "Stock comparison: waiting keeps the stock-plan optional instead of forcing an option trade.",
+        f"Portfolio fit not scored: waiting keeps current shares/cash unchanged for {getattr(context, 'symbol', candidate.underlying) if context is not None else candidate.underlying}.",
+        "Event risk not scored as a contract: waiting avoids taking fresh event premium exposure.",
+        f"Capital-structure fit not scored as a contract: {_capital_structure_fit_score(candidate, capital_structure_indicator)[1]}",
     )
     return {
         "score": score,
@@ -1690,6 +1753,10 @@ def _wait_candidate_scoring(
         "technical_fit_score": score,
         "greek_score": 0.0,
         "risk_budget_score": 0.0,
+        "volatility_fit_score": 0.0,
+        "portfolio_fit_score": 0.0,
+        "event_risk_score": 0.0,
+        "capital_structure_fit_score": 0.0,
         "score_breakdown": breakdown,
         "avoid_reason": "",
         "better_than_stock": "Waiting keeps the model stock plan optional until confirmation improves.",
@@ -1757,11 +1824,14 @@ def _raise_wait_when_options_are_weak(candidates: list[OptionCandidate]) -> list
             "confidence": "Watch",
             "score_reason": reason,
             "score_breakdown": (
-                f"Wait/no-trade action score {wait_score:.0f}/100: {reason}",
+                f"Technical fit {wait_score:.0f}/100: {reason}",
                 "Liquidity fit not scored: no contract is selected, so wait/no-trade is not credited with perfect liquidity.",
-                "Greek fit not scored: no delta/theta/IV exposure is taken, but this is not a perfect option Greek score.",
+                "Greeks not scored: no delta/theta/gamma/vega/rho exposure is taken, but this is not a perfect option Greek score.",
+                "Volatility fit not scored: no option premium or implied-volatility exposure is selected.",
                 "Risk-budget fit not scored: no capital is committed, but this is not a perfect option risk-budget score.",
-                "Move to breakeven: not applicable.",
+                "Portfolio fit not scored: waiting leaves current shares and cash unchanged.",
+                "Event risk not scored as a contract: waiting avoids taking fresh event premium exposure.",
+                "Capital-structure fit not scored as a contract: wait/no-trade does not add supply-sensitive option exposure.",
                 f"Stock comparison: best actionable candidate was {best_actionable.strategy} at {best_actionable.score:.0f}/100.",
             ),
             "better_than_stock": f"Waiting is cleaner than forcing {best_actionable.strategy} at {best_actionable.score:.0f}/100.",
@@ -1778,6 +1848,8 @@ def _collar_candidate_from_pair(
     underlying: float,
     indicators: AdvancedIndicatorSnapshot,
     macro_label: str,
+    *,
+    capital_structure_indicator: Any | None = None,
 ) -> OptionCandidate | None:
     if hedge is None or covered is None:
         return None
@@ -1788,15 +1860,23 @@ def _collar_candidate_from_pair(
     liquidity = min(hedge.liquidity_score, covered.liquidity_score)
     greek = (hedge.greek_score + covered.greek_score) / 2
     risk = (hedge.risk_budget_score + covered.risk_budget_score) / 2
+    volatility = (hedge.volatility_fit_score + covered.volatility_fit_score) / 2
+    portfolio = (hedge.portfolio_fit_score + covered.portfolio_fit_score) / 2
+    event = (hedge.event_risk_score + covered.event_risk_score) / 2
+    capital = (hedge.capital_structure_fit_score + covered.capital_structure_fit_score) / 2
+    capital_reason = _capital_structure_fit_score(hedge, capital_structure_indicator)[1]
     score_reason = (
         f"Combines {hedge.strategy} with {covered.strategy}; downside is partly hedged while covered-call credit offsets put cost."
     )
     breakdown = (
         f"Technical fit {technical:.0f}/100: collar fits held shares when risk needs definition more than upside leverage.",
-        f"Liquidity fit {liquidity:.0f}/100: uses the weaker liquidity score of the put/call legs.",
-        f"Greek fit {greek:.0f}/100: mixes put protection with short-call upside cap.",
+        f"Liquidity {liquidity:.0f}/100: uses the weaker liquidity score of the put/call legs.",
+        f"Greeks {greek:.0f}/100: mixes put protection with short-call upside cap.",
+        f"Volatility fit {volatility:.0f}/100: blends the volatility fit of both legs.",
         f"Risk-budget fit {risk:.0f}/100: estimated net debit {_money(max_loss)} before assignment/cap effects.",
-        "Move to breakeven: structure uses two legs; inspect both strikes.",
+        f"Portfolio fit {portfolio:.0f}/100: structure is built around held-share protection and covered upside.",
+        f"Event risk {event:.0f}/100: blends event-premium risk across both legs.",
+        f"Capital-structure fit {capital:.0f}/100: {capital_reason}",
         "Stock comparison: collar may be cleaner than stock-only when held shares need defined downside and capped upside is acceptable.",
     )
     return OptionCandidate(
@@ -1830,6 +1910,10 @@ def _collar_candidate_from_pair(
         technical_fit_score=technical,
         greek_score=greek,
         risk_budget_score=risk,
+        volatility_fit_score=volatility,
+        portfolio_fit_score=portfolio,
+        event_risk_score=event,
+        capital_structure_fit_score=capital,
         dte_bucket=hedge.dte_bucket,
         score_breakdown=breakdown,
         better_than_stock="Collar can be better than stock-only when the goal is held-share protection, not upside leverage.",
@@ -1969,13 +2053,19 @@ def _greek_fit_score(candidate: OptionCandidate) -> tuple[float, str]:
         else:
             score -= 10.0
             reasons.append(f"put delta {candidate.delta:.2f} is not ideal")
-    if candidate.iv is not None:
-        if candidate.iv >= 0.80:
-            score -= 13.0
-            reasons.append(f"IV is high at {candidate.iv:.1%}")
-        elif candidate.iv <= 0.45:
-            score += 5.0
-            reasons.append(f"IV is not extreme at {candidate.iv:.1%}")
+    if candidate.theta is not None and not _is_covered_call(candidate):
+        theta_cost = abs(candidate.theta)
+        if theta_cost >= 0.08:
+            score -= 8.0
+            reasons.append(f"theta decay {candidate.theta:.2f} is heavy")
+        elif theta_cost > 0:
+            reasons.append(f"theta {candidate.theta:.2f} is visible")
+    if candidate.gamma is not None:
+        reasons.append(f"gamma {candidate.gamma:.3f}")
+    if candidate.vega is not None:
+        reasons.append(f"vega {candidate.vega:.2f}")
+    if candidate.rho is not None:
+        reasons.append(f"rho {candidate.rho:.2f}")
     if candidate.dte is not None:
         if 14 <= candidate.dte <= 60:
             score += 8.0
@@ -1984,6 +2074,51 @@ def _greek_fit_score(candidate: OptionCandidate) -> tuple[float, str]:
             score -= 14.0
             reasons.append(f"{candidate.dte} DTE is too short")
     return max(0.0, min(100.0, score)), "; ".join(reasons) or "Greek data is limited."
+
+
+def _volatility_fit_score(candidate: OptionCandidate, indicators: AdvancedIndicatorSnapshot | None) -> tuple[float, str]:
+    score = 58.0
+    reasons: list[str] = []
+    if candidate.iv is None:
+        reasons.append("IV unavailable")
+    elif candidate.iv >= 0.90:
+        score -= 24.0
+        reasons.append(f"IV is very high at {candidate.iv:.1%}")
+    elif candidate.iv >= 0.70:
+        score -= 13.0
+        reasons.append(f"IV is high at {candidate.iv:.1%}")
+    elif candidate.iv <= 0.35:
+        score += 14.0
+        reasons.append(f"IV is modest at {candidate.iv:.1%}")
+    else:
+        score += 6.0
+        reasons.append(f"IV is usable at {candidate.iv:.1%}")
+
+    required = candidate.expected_move_required
+    implied = option_expected_move_pct(candidate)
+    if required is not None and implied is not None and not _is_covered_call(candidate):
+        if required <= implied * 0.75:
+            score += 12.0
+            reasons.append("breakeven sits inside the option-implied move")
+        elif required <= implied:
+            score += 5.0
+            reasons.append("breakeven is near the option-implied move")
+        else:
+            score -= 18.0
+            reasons.append("breakeven is beyond the option-implied move")
+    if indicators is not None and candidate.underlying_price:
+        atr = abs(indicators.atr_14 or 0.0)
+        if atr > 0:
+            atr_pct = atr / max(candidate.underlying_price, 0.01)
+            if required is not None and required > atr_pct * 2.0 and not _is_covered_call(candidate):
+                score -= 10.0
+                reasons.append("required move is beyond 2 ATR")
+            else:
+                reasons.append(f"1 ATR is {atr_pct:.1%}")
+        if indicators.volatility == "elevated" and not _is_covered_call(candidate):
+            score -= 6.0
+            reasons.append("underlying volatility is elevated")
+    return max(0.0, min(100.0, score)), "; ".join(reasons) or "Volatility comparison unavailable."
 
 
 def _risk_budget_fit_score(candidate: OptionCandidate, risk_budget: float | None) -> tuple[float, str]:
@@ -2014,6 +2149,88 @@ def _risk_budget_fit_score(candidate: OptionCandidate, risk_budget: float | None
             score = 28.0
         return score, f"premium is {premium_pct:.1%} of underlying price"
     return 48.0, "premium/risk budget comparison is unavailable"
+
+
+def _portfolio_fit_score(
+    candidate: OptionCandidate,
+    context: PortfolioSymbolContext | None,
+    stock_plan: GeneratedStockPosition | None,
+    risk_budget: float | None,
+    *,
+    hedge_adjust: float,
+    stock_adjust: float,
+) -> tuple[float, str]:
+    score = 58.0 + hedge_adjust + stock_adjust
+    current_shares = max(float(getattr(context, "quantity", 0.0) or 0.0), 0.0) if context is not None else 0.0
+    cash = float(getattr(context, "cash_available", 0.0) or 0.0) if context is not None else 0.0
+    controlled = max(int(candidate.controlled_shares or 0), 0)
+    reasons: list[str] = []
+    if _is_covered_call(candidate):
+        if current_shares >= controlled > 0:
+            score += 24.0
+            reasons.append(f"covered by {current_shares:g} current shares vs {controlled} controlled shares")
+        else:
+            score -= 32.0
+            reasons.append(f"not fully covered by current shares ({current_shares:g} vs {controlled})")
+    elif _is_protective_put(candidate):
+        effective_shares = max(current_shares, _model_share_quantity(stock_plan) or 0.0)
+        if effective_shares > 0 and controlled > 0:
+            ratio = controlled / effective_shares
+            reasons.append(f"hedge ratio {ratio:.0%} vs current/model shares")
+            if 0.75 <= ratio <= 1.25:
+                score += 18.0
+            elif ratio > 3.0:
+                score -= 30.0
+        else:
+            score -= 24.0
+            reasons.append("no current/model shares to hedge")
+    else:
+        max_loss = candidate.max_loss or 0.0
+        if context is not None and not context.is_held:
+            score += 6.0
+            reasons.append("starter option does not add to an existing stock concentration")
+        if risk_budget and max_loss <= risk_budget:
+            score += 8.0
+            reasons.append("max loss fits generated risk budget")
+        if cash > 0 and max_loss > cash * 0.10:
+            score -= 14.0
+            reasons.append("debit consumes more than 10% of cash")
+    return max(0.0, min(100.0, score)), "; ".join(reasons) or "Portfolio context is limited."
+
+
+def _event_risk_fit_score(candidate: OptionCandidate, *, earnings_soon: bool, high_iv_event: bool) -> tuple[float, str]:
+    if not earnings_soon:
+        return 76.0, "no near-term earnings/event premium flag in loaded text"
+    if high_iv_event:
+        return 22.0, "earnings/event risk plus high IV makes debit premium harder to justify"
+    if _is_covered_call(candidate):
+        return 54.0, "earnings/event risk can create assignment/gap risk around covered calls"
+    return 42.0, "earnings/event risk can distort premium and payoff timing"
+
+
+def _capital_structure_fit_score(candidate: OptionCandidate, indicator: Any | None) -> tuple[float, str]:
+    if indicator is None:
+        return 60.0, "capital-structure context unavailable"
+    read = str(getattr(indicator, "read", "") or "").lower()
+    technical_score = _to_float(getattr(indicator, "technical_score", None))
+    chase = _to_float(getattr(indicator, "chase_risk_score", None)) or 0.0
+    supply = _to_float(getattr(indicator, "supply_overhang_score", None)) or 0.0
+    score = 62.0
+    if technical_score is not None:
+        score = max(20.0, min(86.0, technical_score))
+    bullish_debit = candidate.option_type == "call" and not _is_covered_call(candidate)
+    hedge_or_put = candidate.option_type == "put"
+    if any(term in read for term in ("rally_fade", "offering_pressure", "dilution_sensitive", "supply")) or chase >= 55 or supply >= 45:
+        if bullish_debit:
+            score -= 24.0
+        elif hedge_or_put:
+            score += 10.0
+        elif _is_covered_call(candidate):
+            score += 4.0
+    if "clean" in read or (technical_score is not None and technical_score >= 72):
+        score += 8.0
+    reason = f"capital read {read or 'unknown'}; technical score {_number(technical_score)}; chase risk {_number(chase)}; supply {_number(supply)}"
+    return max(0.0, min(100.0, score)), reason
 
 
 def _required_move_adjustment(candidate: OptionCandidate, indicators: AdvancedIndicatorSnapshot | None = None) -> tuple[float, str]:

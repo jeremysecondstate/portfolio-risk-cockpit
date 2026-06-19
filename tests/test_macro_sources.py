@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from app.macro import sources
 from app.macro.models import MacroSourceStatus
 from app.macro.sources import (
@@ -30,6 +32,30 @@ def test_parse_census_eits_fixture_payload() -> None:
     assert releases[0].actual == 731200.0
     assert releases[0].prior == 725000.0
     assert releases[0].freshness_status == "fresh"
+
+
+def test_fetch_census_releases_uses_prior_year_fallback_window(monkeypatch) -> None:
+    header = ["time", "data_type_code", "time_slot_id", "seasonally_adj", "category_code", "cell_value", "error_data"]
+    calls: list[tuple[str, str]] = []
+
+    def fake_get(url, *, params, timeout):
+        calls.append((url, params["time"]))
+        payload = [header]
+        if params["time"] == "2025":
+            payload.append(["2025", "SM", "2025-12", "yes", "44X72", "731200", ""])
+            payload.append(["2025", "SM", "2025-11", "yes", "44X72", "725000", ""])
+        return SimpleNamespace(raise_for_status=lambda: None, json=lambda: payload)
+
+    monkeypatch.setenv("CENSUS_API_KEY", "test-key")
+    monkeypatch.setattr(sources, "_current_utc_year", lambda: 2026)
+    monkeypatch.setattr(sources.requests, "get", fake_get)
+
+    releases, status = sources.fetch_census_releases()
+
+    assert len(releases) == 3
+    assert status.status == "fresh"
+    assert any(window == "2025" for _url, window in calls)
+    assert "attempted latest/prior windows" in status.message
 
 
 def test_parse_federal_reserve_h15_fixture_csv() -> None:

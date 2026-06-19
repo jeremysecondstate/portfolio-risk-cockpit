@@ -171,7 +171,11 @@ def build_recommendation_engine_read(
     )
     confidence, confidence_score = _recommendation_confidence(components, data_confidence, evidence_vote)
     label = _recommendation_label(evidence_score, data_confidence, components, command_center_report, active_capital_indicator)
-    reward_risk = build_expected_reward_risk_summary(command_center_report, evidence_score=evidence_score)
+    reward_risk = build_expected_reward_risk_summary(
+        command_center_report,
+        evidence_score=evidence_score,
+        option_candidates=option_candidates,
+    )
     invalidation, confirmation = _trigger_lines(command_center_report)
     if empirical_read is not None:
         invalidation = _dedupe([*invalidation, *empirical_read.invalidation_lines])[:6]
@@ -369,6 +373,7 @@ def build_expected_reward_risk_summary(
     command_center_report: Any | None,
     *,
     evidence_score: float,
+    option_candidates: Sequence[Any] | Any | None = None,
 ) -> ExpectedRewardRiskSummary:
     ticket_check = _get(command_center_report, "ticket_check")
     ratio = _to_float(_get(ticket_check, "risk_reward_ratio"))
@@ -384,11 +389,33 @@ def build_expected_reward_risk_summary(
         summary = (
             f"{label}: {rr_line} Evidence-weighted planning probability is {probability:.0%}; "
             f"scenario EV is {ev_units:+.2f}R before fees/slippage. "
-            "This is research support and scenario math, not financial advice, a guarantee, or a forecast."
+            "Assumption: ticket entry/stop/target are populated and should be refreshed against current quote and source freshness."
         )
     else:
-        label = "Reward/risk not defined"
-        summary = "Reward/risk is not defined yet; add a coherent entry, invalidation line, and target before using sizing notes."
+        derived = _derived_reward_risk_model(command_center_report, option_candidates=option_candidates)
+        if derived is not None:
+            ratio = derived["ratio"]
+            target = derived["target"]
+            risk_read = "derived"
+            probability = _clamp(0.50 + ((evidence_score - 50.0) / 260.0), 0.35, 0.65)
+            ev_units = (probability * ratio) - ((1 - probability) * 1.0)
+            label = "Derived reward/risk"
+            rr_line = (
+                f"Derived reward/risk: {ratio:.2f}:1 using entry {_money(derived['entry'])}, "
+                f"invalidation {_money(derived['stop'])}, target {_money(target)}."
+            )
+            option_line = f" Option context: {derived['option_context']}." if derived.get("option_context") else ""
+            summary = (
+                f"Derived from current analysis: {derived['basis']} Evidence-weighted planning probability is {probability:.0%}; "
+                f"scenario EV is {ev_units:+.2f}R before fees/slippage.{option_line} "
+                "Next input: confirm the ticket entry, invalidation, and target before treating this as a sizing model."
+            )
+        else:
+            label = "Needs ticket confirmation"
+            summary = (
+                "Reward/risk needs a current quote plus either support/invalidation and resistance/target levels. "
+                "Next input: refresh technical levels or enter ticket entry, stop, and target."
+            )
     target_text = f"Target reference: {_money(target)}." if target is not None else "Target reference is unavailable."
     return ExpectedRewardRiskSummary(
         label=label,
@@ -399,6 +426,42 @@ def build_expected_reward_risk_summary(
         risk_line=target_text,
         summary=summary,
     )
+
+
+def _derived_reward_risk_model(command_center_report: Any | None, *, option_candidates: Sequence[Any] | Any | None = None) -> dict[str, Any] | None:
+    entry, entry_basis = _current_entry_reference(command_center_report)
+    if entry is None or entry <= 0:
+        return None
+    stop, stop_basis = _derived_invalidation_reference(command_center_report, entry)
+    if stop is None or stop <= 0 or stop >= entry:
+        return None
+    target, target_basis = _derived_target_reference(command_center_report, entry, stop)
+    if target is None or target <= entry:
+        return None
+    per_share_risk = entry - stop
+    if per_share_risk <= 0:
+        return None
+    ratio = (target - entry) / per_share_risk
+    if ratio <= 0:
+        return None
+    option_context = _best_option_reward_risk_context(option_candidates)
+    basis_parts = _clean_lines(
+        [
+            f"entry from {entry_basis}",
+            f"invalidation from {stop_basis}",
+            f"target from {target_basis}",
+            _prc_vwap_context(command_center_report),
+        ],
+        limit=5,
+    )
+    return {
+        "entry": entry,
+        "stop": stop,
+        "target": target,
+        "ratio": ratio,
+        "basis": "; ".join(basis_parts) + ".",
+        "option_context": option_context,
+    }
 
 
 def _chart_setup_component(report: Any | None) -> EvidenceComponent:
@@ -1054,6 +1117,107 @@ def _trigger_lines(report: Any | None) -> tuple[list[str], list[str]]:
     return _dedupe(invalidation)[:4], _dedupe(confirmation)[:4]
 
 
+def _current_entry_reference(report: Any | None) -> tuple[float | None, str]:
+    ticket_check = _get(report, "ticket_check")
+    ticket_entry = _to_float(_get(ticket_check, "entry_price"))
+    if ticket_entry is not None and ticket_entry > 0:
+        return ticket_entry, "ticket entry"
+    snapshot = _preferred_snapshot(report)
+    latest = _to_float(_get(snapshot, "latest_close"))
+    if latest is not None and latest > 0:
+        label = str(_get(snapshot, "label") or _get(snapshot, "key") or "preferred technical snapshot")
+        return latest, f"{label} latest close"
+    prc = _preferred_prc(report)
+    prc_anchor = _to_float(_get(prc, "index_price"))
+    if prc_anchor is not None and prc_anchor > 0:
+        return prc_anchor, "PRC Pressure Line anchor"
+    return None, "missing current quote"
+
+
+def _derived_invalidation_reference(report: Any | None, entry: float) -> tuple[float | None, str]:
+    classification = _get(report, "setup_classification")
+    level = _to_float(_get(classification, "invalidation_level"))
+    if level is not None and 0 < level < entry:
+        return level, "setup invalidation"
+    for trigger in _list(_get(report, "key_triggers")):
+        label = str(_get(trigger, "label") or "").lower()
+        price = _to_float(_get(trigger, "price"))
+        if price is not None and 0 < price < entry and ("invalid" in label or "risk" in label or "breakdown" in label):
+            return price, str(_get(trigger, "label") or "risk trigger")
+    snapshot = _preferred_snapshot(report)
+    support = _nearest_support_from_snapshot(snapshot)
+    support_price = _to_float(_get(support, "low")) or _to_float(_get(support, "center"))
+    if support_price is not None and 0 < support_price < entry:
+        return support_price, "nearest support"
+    atr = _to_float(_get(snapshot, "atr_14"))
+    if atr is not None and atr > 0:
+        return max(entry - atr, 0.01), "one ATR below current quote"
+    return None, "missing invalidation"
+
+
+def _derived_target_reference(report: Any | None, entry: float, stop: float) -> tuple[float | None, str]:
+    classification = _get(report, "setup_classification")
+    level = _to_float(_get(classification, "confirmation_level"))
+    if level is not None and level > entry:
+        return level, "setup confirmation"
+    for trigger in _list(_get(report, "key_triggers")):
+        label = str(_get(trigger, "label") or "").lower()
+        price = _to_float(_get(trigger, "price"))
+        if price is not None and price > entry and ("confirm" in label or "breakout" in label or "target" in label):
+            return price, str(_get(trigger, "label") or "confirmation trigger")
+    snapshot = _preferred_snapshot(report)
+    resistance = _nearest_resistance_from_snapshot(snapshot)
+    resistance_price = _to_float(_get(resistance, "high")) or _to_float(_get(resistance, "center"))
+    if resistance_price is not None and resistance_price > entry:
+        return resistance_price, "nearest resistance"
+    return entry + ((entry - stop) * 2.0), "2R fallback from derived risk"
+
+
+def _nearest_support_from_snapshot(snapshot: Any | None) -> Any | None:
+    zones = _list(_get(snapshot, "support_zones"))
+    return zones[0] if zones else None
+
+
+def _nearest_resistance_from_snapshot(snapshot: Any | None) -> Any | None:
+    zones = _list(_get(snapshot, "resistance_zones"))
+    return zones[0] if zones else None
+
+
+def _prc_vwap_context(report: Any | None) -> str:
+    snapshot = _preferred_snapshot(report)
+    prc = _preferred_prc(report)
+    parts: list[str] = []
+    prc_distance = _to_float(_get(prc, "index_distance_percent"))
+    if prc_distance is not None:
+        parts.append(f"PRC distance {_signed_percent(prc_distance)}")
+    vwap_distance = _to_float(_get(snapshot, "vwap_distance_percent"))
+    if vwap_distance is not None:
+        parts.append(f"VWAP distance {_signed_percent(vwap_distance)}")
+    atr = _to_float(_get(snapshot, "atr_14"))
+    if atr is not None:
+        parts.append(f"ATR {_money(atr)}")
+    return "; ".join(parts)
+
+
+def _best_option_reward_risk_context(option_candidates: Sequence[Any] | Any | None) -> str:
+    option = _best_option_candidate(_normalise_candidates(option_candidates))
+    if option is None:
+        return ""
+    pieces: list[str] = []
+    strategy = str(_get(option, "strategy") or _get(option, "group") or "option candidate")
+    max_loss = _to_float(_get(option, "max_loss"))
+    breakeven = _to_float(_get(option, "breakeven"))
+    score = _to_float(_get(option, "score"))
+    pieces.append(strategy)
+    if score is not None:
+        pieces.append(f"score {score:.0f}/100")
+    if max_loss is not None:
+        pieces.append(f"max loss {_money(max_loss)}")
+    if breakeven is not None:
+        pieces.append(f"breakeven {_money(breakeven)}")
+    return ", ".join(pieces)
+
+
 def _position_sizing_notes(
     *,
     portfolio_context: Any | None,
@@ -1061,20 +1225,37 @@ def _position_sizing_notes(
     option_candidates: Sequence[Any] | Any | None,
     stock_plan: Any | None,
 ) -> list[str]:
-    notes = ["Position sizing note: this readout is planning context only and does not alter broker/order behavior."]
+    notes = ["Sizing assumptions: derived from current analysis; confirm ticket entry and invalidation before use."]
+    entry, entry_basis = _current_entry_reference(command_center_report)
+    stop, stop_basis = _derived_invalidation_reference(command_center_report, entry) if entry is not None else (None, "missing current quote")
+    risk_budget, risk_budget_basis = _derived_risk_budget(portfolio_context=portfolio_context, stock_plan=stock_plan)
     if portfolio_context is None:
-        notes.append("Portfolio context is unavailable, so concentration and cash caps cannot be assessed.")
+        notes.append("Next input: portfolio context is unavailable, so concentration and cash caps cannot be assessed.")
     else:
         weight = _to_float(_get(portfolio_context, "portfolio_weight")) or 0.0
         cash = _to_float(_get(portfolio_context, "cash_available")) or 0.0
         value = _to_float(_get(portfolio_context, "portfolio_value")) or 0.0
-        notes.append(f"Current exposure is {_percent_value(abs(weight))} of portfolio; cash ratio {_percent_value(cash / value if value > 0 else None)}.")
+        quantity = _to_float(_get(portfolio_context, "quantity")) or 0.0
+        notes.append(f"Current exposure: {_number(quantity)} shares, {_percent_value(abs(weight))} of portfolio; cash ratio {_percent_value(cash / value if value > 0 else None)}.")
         if abs(weight) >= 0.10:
             notes.append("Concentration is elevated; new risk should be smaller or require stronger confirmation.")
         elif abs(weight) >= 0.05:
             notes.append("Position is meaningful; keep any add-on sized from a defined invalidation line.")
         elif bool(_get(portfolio_context, "is_held")):
             notes.append("Existing position is modest; sizing still depends on stop distance and event risk.")
+    if entry is not None and stop is not None and entry > stop and risk_budget is not None and risk_budget > 0:
+        per_share_risk = entry - stop
+        raw_shares = int(max(risk_budget / per_share_risk, 0.0))
+        cash = _to_float(_get(portfolio_context, "cash_available")) if portfolio_context is not None else None
+        cash_cap = int(max(cash / entry, 0.0)) if cash is not None and entry > 0 else None
+        suggested_shares = min(raw_shares, cash_cap) if cash_cap is not None else raw_shares
+        notes.append(
+            f"Derived stock size: up to {_number(suggested_shares)} shares from {_money(risk_budget)} risk budget ({risk_budget_basis}), entry {_money(entry)} from {entry_basis}, invalidation {_money(stop)} from {stop_basis}; per-share risk {_money(per_share_risk)}."
+        )
+        if cash_cap is not None and cash_cap < raw_shares:
+            notes.append(f"Cash cap binds the model at about {_number(cash_cap)} shares before any liquidity or execution constraints.")
+    else:
+        notes.append(f"Next input: sizing needs current entry and invalidation. Entry basis: {entry_basis}; invalidation basis: {stop_basis}.")
     ticket_check = _get(command_center_report, "ticket_check")
     risk_note = str(_get(ticket_check, "risk_note") or "")
     if risk_note:
@@ -1089,10 +1270,35 @@ def _position_sizing_notes(
     option = _best_option_candidate(_normalise_candidates(option_candidates))
     if option is not None:
         controlled = _to_float(_get(option, "controlled_shares"))
+        max_loss = _to_float(_get(option, "max_loss"))
+        breakeven = _to_float(_get(option, "breakeven"))
+        if max_loss is not None and risk_budget is not None and risk_budget > 0:
+            fit = "within" if max_loss <= risk_budget else "above"
+            notes.append(f"Best option candidate max loss {_money(max_loss)} is {fit} the derived risk budget {_money(risk_budget)}; breakeven {_money(breakeven)}.")
         quantity = _to_float(_get(portfolio_context, "quantity")) if portfolio_context is not None else None
         if controlled is not None and quantity is not None and quantity > 0 and controlled > quantity * 1.5:
             notes.append(f"Option contract exposure controls about {controlled:g} shares versus {quantity:g} current shares; avoid accidental oversizing.")
     return _dedupe(notes)[:7]
+
+
+def _derived_risk_budget(*, portfolio_context: Any | None, stock_plan: Any | None) -> tuple[float | None, str]:
+    plan_risk = _to_float(_get(stock_plan, "risk_dollars"))
+    if plan_risk is not None and plan_risk > 0:
+        return plan_risk, "generated stock plan"
+    value = _to_float(_get(portfolio_context, "portfolio_value")) if portfolio_context is not None else None
+    if value is None or value <= 0:
+        return None, "missing portfolio value"
+    weight = abs(_to_float(_get(portfolio_context, "portfolio_weight")) or 0.0)
+    cash = _to_float(_get(portfolio_context, "cash_available"))
+    risk_fraction = 0.005
+    if weight >= 0.10:
+        risk_fraction = 0.0025
+    elif weight >= 0.05:
+        risk_fraction = 0.0035
+    budget = value * risk_fraction
+    if cash is not None and cash > 0:
+        budget = min(budget, cash * 0.10)
+    return max(budget, 0.0), f"{risk_fraction:.2%} of portfolio with cash cap"
 
 
 def _what_would_change(

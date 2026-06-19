@@ -9,8 +9,10 @@ from typing import Any, Mapping
 from zoneinfo import ZoneInfo
 
 from app.analytics.capital_structure_pressure import (
+    CapitalStructureLevelRelevance,
     CapitalStructurePressureReport,
     capital_structure_technical_modifier,
+    classify_capital_structure_level_relevance,
     format_capital_structure_pressure_section,
 )
 from app.data.technical_source_routing import SourceDecision, TechnicalAnalysisDataPlan
@@ -2417,15 +2419,30 @@ def _capital_structure_supply_level_proximity(
     if latest is None or latest <= 0 or not report.possible_supply_levels:
         return 0.0, None, None, None, [], [], False
 
-    nearest = min(report.possible_supply_levels, key=lambda level: abs(level.price - latest) / latest)
-    distance = _percent(nearest.price - latest, latest)
+    relevance_reads = [
+        classify_capital_structure_level_relevance(
+            level,
+            current_price=latest,
+            atr_percent=snapshot.atr_percent if snapshot is not None else None,
+        )
+        for level in report.possible_supply_levels
+    ]
+    active_relevance = [read for read in relevance_reads if read.active_for_supply]
+    if not active_relevance:
+        context = _inactive_capital_level_context(relevance_reads)
+        return 0.0, None, None, None, context, [], False
+
+    nearest_relevance = min(active_relevance, key=lambda read: abs(read.distance_percent or 0.0))
+    nearest = nearest_relevance.level
+    distance = nearest_relevance.distance_percent
     absolute_distance = abs(distance) if distance is not None else None
     atr_band = max(1.0, min(6.0, (snapshot.atr_percent or 2.0) * 1.25)) if snapshot is not None else 2.5
     confirms = _volume_confirms_up(snapshot)
     distribution = _distribution_heavy(snapshot)
     score = 10.0
     lines = [
-        f"Nearest filing-derived supply level is {nearest.label} at {_money(nearest.price)}; distance {_fmt_percent(distance)} from latest price."
+        f"Nearest active/watchlist filing-derived supply level is {nearest.label} at {_money(nearest.price)}; distance {_fmt_percent(distance)} from latest price.",
+        nearest_relevance.reason,
     ]
     warnings: list[str] = []
     supply_absorption = False
@@ -2457,6 +2474,21 @@ def _capital_structure_supply_level_proximity(
             lines.append("The filing-derived supply level is close to the PRC Pressure Line reference.")
 
     return _clamp_score(score), nearest.price, nearest.label, distance, lines, warnings, supply_absorption
+
+
+def _inactive_capital_level_context(relevance_reads: list[CapitalStructureLevelRelevance]) -> list[str]:
+    if not relevance_reads:
+        return []
+    nearest = min(relevance_reads, key=lambda read: abs(read.distance_percent or 10_000.0))
+    historical = sum(1 for read in relevance_reads if not read.active_for_supply)
+    lines = [
+        f"No filing-derived price level passed active/watchlist relevance gates; {historical} parsed level(s) are historical, out-of-band, stale, or need split/corporate-action verification.",
+        nearest.reason,
+    ]
+    split_needed = [read for read in relevance_reads if read.status == "split_adjustment_needed"]
+    if split_needed:
+        lines.append("Split/corporate-action validation was not available in this command-center pass, so those levels stay out of active supply scoring.")
+    return _dedupe(lines)[:4]
 
 
 def _option_exposure_mismatch_read(ticket: TechnicalTicket | None) -> tuple[float, list[str], list[str]]:
