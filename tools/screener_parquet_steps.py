@@ -18,7 +18,6 @@ except Exception:
 
 from app.analytics.market_screener import MarketScreenerRecord, merge_market_data_records_into_screener_records
 from app.data.databento_provider import configured_databento_equities_provider
-from app.data.market_data_provider import MarketQuoteFundamentalsRecord
 from app.data.market_screener_parquet_store import MarketScreenerParquetStore
 
 
@@ -112,6 +111,10 @@ def percent_value(value: Any) -> float | None:
     return parsed * 100 if abs(parsed) <= 1 else parsed
 
 
+def row_has_values(row: Mapping[str, Any], fields: Iterable[str]) -> bool:
+    return all(row.get(field) not in (None, "", [], ()) for field in fields)
+
+
 def load_rows() -> dict[str, dict[str, Any]]:
     store = MarketScreenerParquetStore()
     if not store.current_exists():
@@ -175,6 +178,10 @@ def current_symbols(limit: int | None = None) -> tuple[str, ...]:
     return symbols[:limit] if limit else symbols
 
 
+def rows_to_records(rows: Mapping[str, Mapping[str, Any]]) -> list[MarketScreenerRecord]:
+    return [MarketScreenerRecord.from_dict(dict(row)) for row in rows.values() if clean_symbol(row.get("symbol"))]
+
+
 def step_00_init_universe(limit: int) -> None:
     print(f"Fetching FMP stock-list universe, limit={limit}...")
     payload = fmp_get("stock-list")
@@ -204,17 +211,13 @@ def step_01_profile(symbols: Iterable[str], context: StepContext) -> None:
     rows = load_rows()
     updated = 0
     processed = 0
+    profile_fields = ("company_name", "exchange", "sector", "industry")
 
     for batch_index, batch in enumerate(chunks(symbols, context.batch_size), start=1):
         needed = tuple(
             symbol
             for symbol in batch
-            if not (
-                rows.get(symbol, {}).get("company_name")
-                and rows.get(symbol, {}).get("exchange")
-                and rows.get(symbol, {}).get("sector")
-                and rows.get(symbol, {}).get("industry")
-            )
+            if context.force or not row_has_values(rows.get(symbol, {}), profile_fields)
         )
         if not needed:
             processed += len(batch)
@@ -274,11 +277,21 @@ def step_02_batch_quote(symbols: Iterable[str], context: StepContext) -> None:
     rows = load_rows()
     updated = 0
     processed = 0
+    quote_fields = ("price", "volume", "change_percent")
 
     for batch_index, batch in enumerate(chunks(symbols, context.batch_size), start=1):
-        print(f"[batch-quote] batch {batch_index}: {len(batch)} symbol(s)")
+        needed = tuple(
+            symbol
+            for symbol in batch
+            if context.force or not row_has_values(rows.get(symbol, {}), quote_fields)
+        )
+        if not needed:
+            processed += len(batch)
+            continue
+
+        print(f"[batch-quote] batch {batch_index}: {len(needed)} symbol(s)")
         try:
-            payload = fmp_get("batch-quote", {"symbols": ",".join(batch)})
+            payload = fmp_get("batch-quote", {"symbols": ",".join(needed)})
             items = rows_from_payload(payload)
             for item in items:
                 symbol = clean_symbol(item.get("symbol") or item.get("ticker"))
@@ -310,17 +323,21 @@ def step_02_quote(symbols: Iterable[str], context: StepContext) -> None:
     """One-symbol FMP quote fallback. Prefer batch_quote or databento_prices for production refreshes."""
     rows = load_rows()
     updated = 0
+    quote_fields = ("price", "volume", "change_percent")
 
     for index, symbol in enumerate(symbols, start=1):
         symbol = clean_symbol(symbol)
         if not symbol:
             continue
+        row = rows.setdefault(symbol, {"symbol": symbol})
+        if not context.force and row_has_values(row, quote_fields):
+            continue
+
         print(f"[quote] {index}: {symbol}")
         try:
             item = first_row(fmp_get("quote", {"symbol": symbol}))
             if not item:
                 continue
-            row = rows.setdefault(symbol, {"symbol": symbol})
             changed = False
             changed |= update_if_present(row, "price", optional_float(item.get("price")), "FMP quote")
             changed |= update_if_present(row, "volume", optional_float(item.get("volume")), "FMP quote")
@@ -344,13 +361,14 @@ def step_03_historical_eod(symbols: Iterable[str], context: StepContext) -> None
     """FMP historical EOD fallback for price, volume, avg volume, and change %."""
     rows = load_rows()
     updated = 0
+    historical_fields = ("price", "volume", "avg_volume", "change_percent")
 
     for index, symbol in enumerate(symbols, start=1):
         symbol = clean_symbol(symbol)
         if not symbol:
             continue
         row = rows.setdefault(symbol, {"symbol": symbol})
-        if row.get("avg_volume") and row.get("price") and row.get("volume") and row.get("change_percent"):
+        if not context.force and row_has_values(row, historical_fields):
             continue
 
         print(f"[historical-eod] {index}: {symbol}")
@@ -392,14 +410,17 @@ def step_04_market_cap(symbols: Iterable[str], context: StepContext) -> None:
 
     for index, symbol in enumerate(symbols, start=1):
         symbol = clean_symbol(symbol)
-        if not symbol or rows.get(symbol, {}).get("market_cap"):
+        if not symbol:
             continue
+        row = rows.setdefault(symbol, {"symbol": symbol})
+        if not context.force and row_has_values(row, ("market_cap",)):
+            continue
+
         print(f"[market-cap] {index}: {symbol}")
         try:
             item = first_row(fmp_get("market-capitalization", {"symbol": symbol}))
             if not item:
                 continue
-            row = rows.setdefault(symbol, {"symbol": symbol})
             if update_if_present(row, "market_cap", optional_float(item.get("marketCap") or item.get("market_cap")), "FMP market cap"):
                 updated += 1
         except Exception as exc:
@@ -414,17 +435,21 @@ def step_04_market_cap(symbols: Iterable[str], context: StepContext) -> None:
 def step_05_key_metrics(symbols: Iterable[str], context: StepContext) -> None:
     rows = load_rows()
     updated = 0
+    metrics_fields = ("pe_ratio", "market_cap")
 
     for index, symbol in enumerate(symbols, start=1):
         symbol = clean_symbol(symbol)
         if not symbol:
             continue
+        row = rows.setdefault(symbol, {"symbol": symbol})
+        if not context.force and row_has_values(row, metrics_fields):
+            continue
+
         print(f"[key-metrics] {index}: {symbol}")
         try:
             item = first_row(fmp_get("key-metrics", {"symbol": symbol}))
             if not item:
                 continue
-            row = rows.setdefault(symbol, {"symbol": symbol})
             changed = False
             changed |= update_if_present(row, "pe_ratio", optional_float(item.get("peRatio") or item.get("peRatioTTM")), "FMP key metrics")
             changed |= update_if_present(row, "market_cap", optional_float(item.get("marketCap") or item.get("marketCapTTM")), "FMP key metrics")
@@ -442,17 +467,21 @@ def step_05_key_metrics(symbols: Iterable[str], context: StepContext) -> None:
 def step_06_income_statement(symbols: Iterable[str], context: StepContext) -> None:
     rows = load_rows()
     updated = 0
+    income_fields = ("eps", "shares_outstanding")
 
     for index, symbol in enumerate(symbols, start=1):
         symbol = clean_symbol(symbol)
         if not symbol:
             continue
+        row = rows.setdefault(symbol, {"symbol": symbol})
+        if not context.force and row_has_values(row, income_fields):
+            continue
+
         print(f"[income-statement] {index}: {symbol}")
         try:
             item = first_row(fmp_get("income-statement", {"symbol": symbol}))
             if not item:
                 continue
-            row = rows.setdefault(symbol, {"symbol": symbol})
             changed = False
             changed |= update_if_present(row, "eps", optional_float(item.get("eps") or item.get("epsdiluted") or item.get("epsDiluted")), "FMP income statement")
             changed |= update_if_present(row, "shares_outstanding", optional_float(item.get("weightedAverageShsOut") or item.get("weightedAverageShsOutDil")), "FMP income statement")
@@ -475,12 +504,15 @@ def step_07_revenue_growth(symbols: Iterable[str], context: StepContext) -> None
         symbol = clean_symbol(symbol)
         if not symbol:
             continue
+        row = rows.setdefault(symbol, {"symbol": symbol})
+        if not context.force and row_has_values(row, ("revenue_growth",)):
+            continue
+
         print(f"[income-growth] {index}: {symbol}")
         try:
             item = first_row(fmp_get("income-statement-growth", {"symbol": symbol}))
             if not item:
                 continue
-            row = rows.setdefault(symbol, {"symbol": symbol})
             if update_if_present(row, "revenue_growth", percent_value(item.get("growthRevenue") or item.get("revenueGrowth")), "FMP income growth"):
                 updated += 1
         except Exception as exc:
@@ -495,17 +527,21 @@ def step_07_revenue_growth(symbols: Iterable[str], context: StepContext) -> None
 def step_08_shares_float(symbols: Iterable[str], context: StepContext) -> None:
     rows = load_rows()
     updated = 0
+    share_fields = ("shares_float", "shares_outstanding")
 
     for index, symbol in enumerate(symbols, start=1):
         symbol = clean_symbol(symbol)
         if not symbol:
             continue
+        row = rows.setdefault(symbol, {"symbol": symbol})
+        if not context.force and row_has_values(row, share_fields):
+            continue
+
         print(f"[shares-float] {index}: {symbol}")
         try:
             item = first_row(fmp_get("shares-float", {"symbol": symbol}))
             if not item:
                 continue
-            row = rows.setdefault(symbol, {"symbol": symbol})
             changed = False
             changed |= update_if_present(row, "shares_float", optional_float(item.get("floatShares") or item.get("sharesFloat") or item.get("float")), "FMP shares float")
             changed |= update_if_present(row, "shares_outstanding", optional_float(item.get("outstandingShares") or item.get("sharesOutstanding")), "FMP shares float")
@@ -525,11 +561,16 @@ def step_09_recent_filings(symbols: Iterable[str], context: StepContext) -> None
     updated = 0
     to_date = date.today()
     from_date = to_date - timedelta(days=180)
+    filing_fields = ("recent_filing_date", "recent_filing_type")
 
     for index, symbol in enumerate(symbols, start=1):
         symbol = clean_symbol(symbol)
         if not symbol:
             continue
+        row = rows.setdefault(symbol, {"symbol": symbol})
+        if not context.force and row_has_values(row, filing_fields):
+            continue
+
         print(f"[filings] {index}: {symbol}")
         try:
             item = first_row(
@@ -540,7 +581,6 @@ def step_09_recent_filings(symbols: Iterable[str], context: StepContext) -> None
             )
             if not item:
                 continue
-            row = rows.setdefault(symbol, {"symbol": symbol})
             filing_date = item.get("filingDate") or item.get("fillingDate") or item.get("acceptedDate") or item.get("date")
             filing_type = item.get("form") or item.get("type") or item.get("filingType")
             changed = False
@@ -563,6 +603,7 @@ def step_10_databento_prices(symbols: Iterable[str], context: StepContext) -> No
     rows = load_rows()
     updated = 0
     processed = 0
+    quote_fields = ("price", "volume", "change_percent")
     provider = configured_databento_equities_provider(
         symbol_limit=context.batch_size,
         cache_ttl_seconds=0 if context.force else None,
@@ -570,9 +611,18 @@ def step_10_databento_prices(symbols: Iterable[str], context: StepContext) -> No
     )
 
     for batch_index, batch in enumerate(chunks(symbols, context.batch_size), start=1):
-        print(f"[databento-prices] batch {batch_index}: {len(batch)} symbol(s)")
+        needed = tuple(
+            symbol
+            for symbol in batch
+            if context.force or not row_has_values(rows.get(symbol, {}), quote_fields)
+        )
+        if not needed:
+            processed += len(batch)
+            continue
+
+        print(f"[databento-prices] batch {batch_index}: {len(needed)} symbol(s)")
         try:
-            snapshot = provider.quote_tape(batch, force_refresh=context.force, max_symbols=len(batch))
+            snapshot = provider.quote_tape(needed, force_refresh=context.force, max_symbols=len(needed))
             for status in snapshot.statuses:
                 print(f"- {status.source}: {status.status} :: {status.message}")
             for error in tuple(snapshot.errors)[:8]:
@@ -596,10 +646,6 @@ def step_10_databento_prices(symbols: Iterable[str], context: StepContext) -> No
 
     save_rows(rows)
     print(f"[databento-prices] provider records merged: {updated}")
-
-
-def rows_to_records(rows: Mapping[str, Mapping[str, Any]]) -> list[MarketScreenerRecord]:
-    return [MarketScreenerRecord.from_dict(dict(row)) for row in rows.values() if clean_symbol(row.get("symbol"))]
 
 
 def step_11_local_quote_join(symbols: Iterable[str], context: StepContext) -> None:
