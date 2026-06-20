@@ -13,7 +13,8 @@ MARKET_SCREENER_PARQUET_ROOT_ENV = "MARKET_SCREENER_PARQUET_ROOT"
 MARKET_SCREENER_USE_PARQUET_SNAPSHOT_ENV = "MARKET_SCREENER_USE_PARQUET_SNAPSHOT"
 MARKET_SCREENER_PARQUET_HISTORY_ENABLED_ENV = "MARKET_SCREENER_PARQUET_HISTORY_ENABLED"
 DEFAULT_MARKET_SCREENER_PARQUET_ROOT = Path("data") / "market_screener"
-CURRENT_SNAPSHOT_RELATIVE_PATH = Path("current") / "fmpsec_filings_parquet"
+CURRENT_SNAPSHOT_RELATIVE_PATH = Path("current") / "fmpsec_filings_parquet.parquet"
+LEGACY_CURRENT_SNAPSHOT_RELATIVE_PATH = Path("current") / "fmpsec_filings_parquet"
 
 _JSON_COLUMNS = {"signals", "risk_flags", "sources", "source_links", "field_provenance"}
 _FLOAT_COLUMNS = {
@@ -90,24 +91,29 @@ class MarketScreenerParquetStore:
         configured_root = root or os.getenv(MARKET_SCREENER_PARQUET_ROOT_ENV, "")
         self.root = Path(configured_root) if configured_root else DEFAULT_MARKET_SCREENER_PARQUET_ROOT
         self.current_path = self.root / CURRENT_SNAPSHOT_RELATIVE_PATH
+        self.legacy_current_path = self.root / LEGACY_CURRENT_SNAPSHOT_RELATIVE_PATH
 
     def current_exists(self) -> bool:
-        return self.current_path.is_file()
+        return self.current_path.is_file() or self.legacy_current_path.is_file()
+
+    def _read_path(self) -> Path:
+        return self.current_path if self.current_path.is_file() else self.legacy_current_path
 
     def load_current(self) -> list[MarketScreenerRecord]:
         if not self.current_exists():
             return []
         _pa, pq = _require_pyarrow()
+        read_path = self._read_path()
         try:
-            table = pq.read_table(self.current_path)
+            table = pq.read_table(read_path)
         except Exception as exc:
-            raise MarketScreenerParquetStoreError(f"Could not read Market Screener snapshot {self.current_path}: {exc}") from exc
+            raise MarketScreenerParquetStoreError(f"Could not read Market Screener snapshot {read_path}: {exc}") from exc
         if "symbol" not in table.column_names:
-            raise MarketScreenerParquetStoreError(f"Malformed Market Screener snapshot {self.current_path}: missing symbol column.")
+            raise MarketScreenerParquetStoreError(f"Malformed Market Screener snapshot {read_path}: missing symbol column.")
         try:
             return [_record_from_row(row) for row in table.to_pylist() if _row_has_symbol(row)]
         except Exception as exc:
-            raise MarketScreenerParquetStoreError(f"Could not decode Market Screener snapshot {self.current_path}: {exc}") from exc
+            raise MarketScreenerParquetStoreError(f"Could not decode Market Screener snapshot {read_path}: {exc}") from exc
 
     def save_current(self, records: Iterable[MarketScreenerRecord]) -> None:
         pa, pq = _require_pyarrow()
@@ -222,20 +228,14 @@ def _json_safe(value: Any) -> Any:
 
 
 def _json_from_string(value: Any) -> Any:
+    if value in (None, ""):
+        return None
     if not isinstance(value, str):
         return value
-    text = value.strip()
-    if not text:
-        return ()
     try:
-        return json.loads(text)
+        return json.loads(value)
     except json.JSONDecodeError:
         return value
-
-
-def _optional_string(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None
 
 
 def _optional_float(value: Any) -> float | None:
@@ -248,20 +248,26 @@ def _optional_float(value: Any) -> float | None:
 
 
 def _optional_bool(value: Any) -> bool | None:
-    if isinstance(value, bool):
-        return value
     if value in (None, ""):
         return None
+    if isinstance(value, bool):
+        return value
     text = str(value).strip().lower()
-    if text in {"1", "true", "t", "yes", "y", "on"}:
+    if text in {"1", "true", "yes", "y"}:
         return True
-    if text in {"0", "false", "f", "no", "n", "off"}:
+    if text in {"0", "false", "no", "n"}:
         return False
     return None
 
 
-def _env_bool(name: str, *, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
+def _optional_string(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
         return default
-    return str(value).strip().lower() not in {"0", "false", "no", "n", "off"}
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
