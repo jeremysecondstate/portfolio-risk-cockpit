@@ -59,10 +59,13 @@ def fmp_get(endpoint: str, params: Mapping[str, Any] | None = None) -> Any:
     if not FMP_API_KEY:
         raise RuntimeError("Missing FMP_API_KEY")
 
+    request_params = dict(params or {})
+    request_params["apikey"] = FMP_API_KEY
+
     response = requests.get(
         f"{FMP_BASE_URL}/{endpoint.strip('/')}",
-        params=dict(params or {}),
-        headers={"apikey": FMP_API_KEY, "User-Agent": "portfolio-risk-cockpit/1.0"},
+        params=request_params,
+        headers={"User-Agent": "portfolio-risk-cockpit/1.0"},
         timeout=30,
     )
     if response.status_code != 200:
@@ -221,9 +224,21 @@ def step_01_profile(symbols: Iterable[str], context: StepContext) -> None:
         try:
             payload = fmp_get("profile", {"symbol": ",".join(needed)})
             items = rows_from_payload(payload)
-            if not items and len(needed) > 1:
-                items = []
-                for symbol in needed:
+
+            needed_set = {clean_symbol(symbol) for symbol in needed}
+            returned_symbols = {
+                clean_symbol(item.get("symbol") or item.get("ticker"))
+                for item in items
+                if clean_symbol(item.get("symbol") or item.get("ticker"))
+            }
+            missing_symbols = tuple(symbol for symbol in needed if clean_symbol(symbol) not in returned_symbols)
+
+            if missing_symbols and len(needed) > 1:
+                print(
+                    f"[profile] batch returned {len(returned_symbols)}/{len(needed_set)} symbol(s); "
+                    f"falling back for {len(missing_symbols)} missing symbol(s)"
+                )
+                for symbol in missing_symbols:
                     one = first_row(fmp_get("profile", {"symbol": symbol}))
                     if one:
                         items.append(one)
