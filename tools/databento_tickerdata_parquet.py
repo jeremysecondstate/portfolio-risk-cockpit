@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
+from app.data.symbol_normalization import normalize_symbol
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -13,13 +15,14 @@ except Exception:
     pass
 
 DEFAULT_DATASET = "EQUS.MINI"
-DEFAULT_SCHEMA = "ohlcv-1m"
+DEFAULT_SCHEMA = "ohlcv-1d"
 ROOT = Path("data") / "market_screener" / "current"
 DATABENTO_DEFINITIONS_PATH = ROOT / "databento_definitions_current.parquet"
 DATABENTO_DATA_PATH = ROOT / "databento_tickerdata_parquet.parquet"
 FMP_SEC_PATH = ROOT / "fmpsec_filings_parquet.parquet"
 LEGACY_FMP_SEC_PATH = ROOT / "fmpsec_filings_parquet"
 COMPARE_PATH = ROOT / "databento_vs_fmp_sec_compare.parquet"
+MERGED_PATH = ROOT / "databento_fmp_matched_symbols.parquet"
 
 
 def parse_time(value: str) -> datetime:
@@ -75,6 +78,12 @@ def first_col(frame, names: Iterable[str]) -> str | None:
     return None
 
 
+def with_symbol_norm(frame, symbol_col: str):
+    frame = frame.copy()
+    frame["symbol_norm"] = frame[symbol_col].map(normalize_symbol)
+    return frame[frame["symbol_norm"] != ""]
+
+
 def build_definitions(args: argparse.Namespace) -> None:
     dataset = args.dataset or os.getenv("DATABENTO_EQUITIES_DATASET", DEFAULT_DATASET)
     start, end = window(args, args.definition_lookback_minutes)
@@ -96,8 +105,8 @@ def databento_symbols(args: argparse.Namespace) -> list[str]:
         raise RuntimeError(f"No Databento symbol column found. Columns={list(frame.columns)}")
     symbols: list[str] = []
     seen: set[str] = set()
-    for raw in frame[col].dropna().astype(str):
-        sym = raw.strip().upper()
+    for raw in frame[col].dropna():
+        sym = normalize_symbol(raw)
         if sym and sym not in seen:
             symbols.append(sym)
             seen.add(sym)
@@ -127,19 +136,63 @@ def build_data(args: argparse.Namespace) -> None:
     write_parquet(to_frame(store), Path(args.databento_data_path))
 
 
-def compare(args: argparse.Namespace) -> None:
-    import pandas as pd
-    dbf = read_parquet(Path(args.databento_data_path))
+def resolve_fmp_path(args: argparse.Namespace) -> Path:
     fmp_path = Path(args.fmp_sec_path)
     if not fmp_path.exists() and Path(args.legacy_fmp_sec_path).exists():
         fmp_path = Path(args.legacy_fmp_sec_path)
-    fmp = read_parquet(fmp_path)
+    return fmp_path
+
+
+def latest_databento_by_symbol(frame):
+    db_col = first_col(frame, ("raw_symbol", "symbol", "ticker"))
+    if not db_col:
+        raise RuntimeError(f"No Databento symbol column found. Columns={list(frame.columns)}")
+
+    latest = with_symbol_norm(frame, db_col)
+    if latest.empty:
+        return latest
+
+    time_col = first_col(latest, ("ts_event", "ts_recv", "timestamp", "datetime", "date"))
+    if time_col:
+        import pandas as pd
+
+        latest = latest.copy()
+        latest["_sort_time"] = latest[time_col]
+        try:
+            latest["_sort_time"] = pd.to_datetime(latest["_sort_time"], errors="coerce", utc=True)
+        except Exception:
+            pass
+        latest = latest.sort_values(["symbol_norm", "_sort_time"])
+        latest = latest.drop(columns=["_sort_time"])
+    latest = latest.groupby("symbol_norm", as_index=False, sort=False).tail(1)
+
+    if db_col in latest.columns:
+        latest = latest.rename(columns={db_col: "databento_symbol"})
+    return latest
+
+
+def fmp_by_symbol(frame):
+    fmp_col = first_col(frame, ("symbol",))
+    if not fmp_col:
+        raise RuntimeError(f"No FMP/SEC symbol column found. Columns={list(frame.columns)}")
+    fmp = with_symbol_norm(frame, fmp_col)
+    if fmp_col in fmp.columns:
+        fmp = fmp.rename(columns={fmp_col: "fmp_symbol"})
+    return fmp.drop_duplicates(subset=["symbol_norm"], keep="last")
+
+
+def compare(args: argparse.Namespace) -> None:
+    import pandas as pd
+    dbf = read_parquet(Path(args.databento_data_path))
+    fmp = read_parquet(resolve_fmp_path(args))
     db_col = first_col(dbf, ("raw_symbol", "symbol", "ticker"))
     fmp_col = first_col(fmp, ("symbol",))
     if not db_col or not fmp_col:
         raise RuntimeError(f"Missing symbol columns. databento={list(dbf.columns)} fmp_sec={list(fmp.columns)}")
-    db_symbols = set(dbf[db_col].dropna().astype(str).str.upper())
-    fmp_symbols = set(fmp[fmp_col].dropna().astype(str).str.upper())
+    db_symbols = set(dbf[db_col].map(normalize_symbol).dropna())
+    fmp_symbols = set(fmp[fmp_col].map(normalize_symbol).dropna())
+    db_symbols.discard("")
+    fmp_symbols.discard("")
     out = pd.DataFrame([
         {"metric": "databento_rows", "value": len(dbf)},
         {"metric": "databento_symbols", "value": len(db_symbols)},
@@ -153,9 +206,26 @@ def compare(args: argparse.Namespace) -> None:
     print(out.to_string(index=False))
 
 
+def merge(args: argparse.Namespace) -> None:
+    dbf = latest_databento_by_symbol(read_parquet(Path(args.databento_data_path)))
+    fmp = fmp_by_symbol(read_parquet(resolve_fmp_path(args)))
+    merged = dbf.merge(
+        fmp,
+        on="symbol_norm",
+        how="inner",
+        suffixes=("_databento", "_fmp"),
+    )
+    if "symbol" in merged.columns:
+        merged = merged.drop(columns=["symbol"])
+    merged.insert(0, "symbol", merged["symbol_norm"])
+    merged.insert(1, "source_priority", "databento")
+    write_parquet(merged, Path(args.merged_path))
+    print(f"Matched {merged['symbol'].nunique()} symbol(s) using Databento as the source universe.")
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build Databento-native parquet, then compare to FMP/SEC parquet.")
-    parser.add_argument("command", choices=("definitions", "data", "build", "compare"))
+    parser = argparse.ArgumentParser(description="Build Databento-native parquet, then compare or merge it with FMP/SEC parquet.")
+    parser.add_argument("command", choices=("definitions", "data", "build", "compare", "merge"))
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--schema", default=None)
     parser.add_argument("--start", default=None)
@@ -170,6 +240,7 @@ def main() -> None:
     parser.add_argument("--fmp-sec-path", default=str(FMP_SEC_PATH))
     parser.add_argument("--legacy-fmp-sec-path", default=str(LEGACY_FMP_SEC_PATH))
     parser.add_argument("--compare-path", default=str(COMPARE_PATH))
+    parser.add_argument("--merged-path", default=str(MERGED_PATH))
     args = parser.parse_args()
     if args.command in {"definitions", "build"}:
         build_definitions(args)
@@ -177,6 +248,8 @@ def main() -> None:
         build_data(args)
     if args.command == "compare":
         compare(args)
+    if args.command == "merge":
+        merge(args)
 
 
 if __name__ == "__main__":
