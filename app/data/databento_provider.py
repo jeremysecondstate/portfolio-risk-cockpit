@@ -936,7 +936,19 @@ def _call_databento_rows(
     timeseries = getattr(client, "timeseries", None)
     get_range = getattr(timeseries, "get_range", None)
     if callable(get_range):
-        end = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+
+        # EQUS.MINI historical availability can lag current UTC time.
+        # Use the latest completed UTC day by default so we do not query past
+        # Databento's available_end and trigger data_start_after_available_end.
+        configured_end = os.getenv("DATABENTO_EQUITIES_QUERY_END_UTC", "").strip()
+        if configured_end:
+            end = datetime.fromisoformat(configured_end.replace("Z", "+00:00"))
+            if end.tzinfo is None:
+                end = end.replace(tzinfo=timezone.utc)
+        else:
+            end = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
         start = end - timedelta(minutes=max(1, lookback_minutes))
         row_limit = max(1, len(symbols) * min(max(lookback_minutes, 10), 10_000))
         try:
