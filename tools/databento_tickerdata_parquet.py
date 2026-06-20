@@ -16,9 +16,9 @@ DEFAULT_DATASET = "EQUS.MINI"
 DEFAULT_SCHEMA = "ohlcv-1m"
 ROOT = Path("data") / "market_screener" / "current"
 DATABENTO_DEFINITIONS_PATH = ROOT / "databento_definitions_current.parquet"
-DATABENTO_DATA_PATH = ROOT / "databento_current.parquet"
-FMP_SEC_PATH = ROOT / "fmp_sec_current.parquet"
-LEGACY_FMP_SEC_PATH = ROOT / "screener_current.parquet"
+DATABENTO_DATA_PATH = ROOT / "databento_tickerdata_parquet.parquet"
+FMP_SEC_PATH = ROOT / "fmpsec_filings_parquet.parquet"
+LEGACY_FMP_SEC_PATH = ROOT / "fmpsec_filings_parquet"
 COMPARE_PATH = ROOT / "databento_vs_fmp_sec_compare.parquet"
 
 

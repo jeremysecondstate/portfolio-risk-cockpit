@@ -296,7 +296,7 @@ def test_full_rebuild_job_reconstructs_snapshot_from_fetch_inputs() -> None:
 
 def test_parquet_save_failure_warns_and_keeps_provider_result_in_memory(monkeypatch) -> None:
     class _FailingStore:
-        current_path = "memory://screener_current.parquet"
+        current_path = "memory://fmpsec_filings_parquet"
 
         def save_current(self, _records) -> None:
             raise MarketScreenerParquetStoreError("disk full")

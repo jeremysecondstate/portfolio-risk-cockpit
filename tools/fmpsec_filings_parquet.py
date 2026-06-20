@@ -686,7 +686,7 @@ def main() -> None:
 
     symbols = current_symbols(args.limit)
     if not symbols:
-        raise SystemExit("No symbols in Parquet yet. Run: python tools\\screener_parquet_steps.py init --limit 500")
+        raise SystemExit("No symbols in Parquet yet. Run: python tools\\fmpsec_filings_parquet.py init --limit 500")
 
     context = StepContext(
         sleep_seconds=max(0.0, args.sleep),
