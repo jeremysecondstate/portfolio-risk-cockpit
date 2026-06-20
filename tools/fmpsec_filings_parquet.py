@@ -16,9 +16,9 @@ try:
 except Exception:
     pass
 
-from app.analytics.market_screener import MarketScreenerRecord, merge_market_data_records_into_screener_records
-from app.data.databento_provider import configured_databento_equities_provider
+from app.analytics.market_screener import MarketScreenerRecord
 from app.data.market_screener_parquet_store import MarketScreenerParquetStore
+from app.data.symbol_normalization import normalize_symbol
 
 
 FMP_BASE_URL = os.getenv("FMP_BASE_URL", "https://financialmodelingprep.com/stable").rstrip("/")
@@ -37,7 +37,7 @@ class StepContext:
 
 
 def clean_symbol(value: object) -> str:
-    return str(value or "").strip().upper().replace("/", ".")
+    return normalize_symbol(value)
 
 
 def chunks(items: Iterable[str], size: int) -> Iterable[tuple[str, ...]]:
@@ -178,10 +178,6 @@ def current_symbols(limit: int | None = None) -> tuple[str, ...]:
     return symbols[:limit] if limit else symbols
 
 
-def rows_to_records(rows: Mapping[str, Mapping[str, Any]]) -> list[MarketScreenerRecord]:
-    return [MarketScreenerRecord.from_dict(dict(row)) for row in rows.values() if clean_symbol(row.get("symbol"))]
-
-
 def step_00_init_universe(limit: int) -> None:
     print(f"Fetching FMP stock-list universe, limit={limit}...")
     payload = fmp_get("stock-list")
@@ -320,7 +316,7 @@ def step_02_batch_quote(symbols: Iterable[str], context: StepContext) -> None:
 
 
 def step_02_quote(symbols: Iterable[str], context: StepContext) -> None:
-    """One-symbol FMP quote fallback. Prefer batch_quote or databento_prices for production refreshes."""
+    """One-symbol FMP quote fallback. Prefer batch_quote for production refreshes."""
     rows = load_rows()
     updated = 0
     quote_fields = ("price", "volume", "change_percent")
@@ -598,60 +594,44 @@ def step_09_recent_filings(symbols: Iterable[str], context: StepContext) -> None
     print(f"[filings] updated rows: {updated}")
 
 
-def step_10_databento_prices(symbols: Iterable[str], context: StepContext) -> None:
-    """Databento tape refresh for price, volume, avg volume, and change % using the configured equities dataset/schema."""
+def step_10_next_earnings(symbols: Iterable[str], context: StepContext) -> None:
+    """FMP earnings fallback for next earnings date."""
     rows = load_rows()
     updated = 0
-    processed = 0
-    quote_fields = ("price", "volume", "change_percent")
-    provider = configured_databento_equities_provider(
-        symbol_limit=context.batch_size,
-        cache_ttl_seconds=0 if context.force else None,
-        batch_size=context.batch_size,
-    )
+    today_text = date.today().isoformat()
 
-    for batch_index, batch in enumerate(chunks(symbols, context.batch_size), start=1):
-        needed = tuple(
-            symbol
-            for symbol in batch
-            if context.force or not row_has_values(rows.get(symbol, {}), quote_fields)
-        )
-        if not needed:
-            processed += len(batch)
+    for index, symbol in enumerate(symbols, start=1):
+        symbol = clean_symbol(symbol)
+        if not symbol:
+            continue
+        row = rows.setdefault(symbol, {"symbol": symbol})
+        if not context.force and row_has_values(row, ("next_earnings_date",)):
             continue
 
-        print(f"[databento-prices] batch {batch_index}: {len(needed)} symbol(s)")
+        print(f"[earnings] {index}: {symbol}")
         try:
-            snapshot = provider.quote_tape(needed, force_refresh=context.force, max_symbols=len(needed))
-            for status in snapshot.statuses:
-                print(f"- {status.source}: {status.status} :: {status.message}")
-            for error in tuple(snapshot.errors)[:8]:
-                print(f"! {error}")
-
-            before = rows_to_records(rows)
-            after = merge_market_data_records_into_screener_records(
-                before,
-                snapshot.records,
-                fetched_at=snapshot.fetched_at,
-                family="quote_tape",
-            )
-            rows = {clean_symbol(record.symbol): record.to_dict() for record in after if clean_symbol(record.symbol)}
-            updated += len(snapshot.records)
+            items = rows_from_payload(fmp_get("earnings", {"symbol": symbol}))
+            dated_items = []
+            for item in items:
+                raw_date = item.get("date") or item.get("epsDate") or item.get("fiscalDateEnding") or item.get("acceptedDate")
+                text = str(raw_date or "")[:10]
+                if text:
+                    dated_items.append((text, item))
+            future_items = [(text, item) for text, item in dated_items if text >= today_text]
+            candidates = sorted(future_items or dated_items, key=lambda pair: pair[0])
+            if not candidates:
+                continue
+            earnings_date, item = candidates[0]
+            if update_if_present(row, "next_earnings_date", earnings_date, "FMP earnings"):
+                add_source_link(row, item.get("link") or item.get("url"))
+                updated += 1
         except Exception as exc:
-            print(f"! databento-prices batch {batch_index}: {exc}")
-
-        processed += len(batch)
-        save_checkpoint(rows, processed, context)
+            print(f"! earnings {symbol}: {exc}")
+        save_checkpoint(rows, index, context)
         time.sleep(context.sleep_seconds)
 
     save_rows(rows)
-    print(f"[databento-prices] provider records merged: {updated}")
-
-
-def step_11_local_quote_join(symbols: Iterable[str], context: StepContext) -> None:
-    """No-op helper slot for future dedicated local quote snapshot joins."""
-    del symbols, context
-    print("local_quote_join is reserved for a future separate price snapshot parquet join.")
+    print(f"[earnings] updated rows: {updated}")
 
 
 STEPS: dict[str, Callable[[Iterable[str], StepContext], None]] = {
@@ -665,13 +645,12 @@ STEPS: dict[str, Callable[[Iterable[str], StepContext], None]] = {
     "revenue_growth": step_07_revenue_growth,
     "shares_float": step_08_shares_float,
     "filings": step_09_recent_filings,
-    "databento_prices": step_10_databento_prices,
-    "local_quote_join": step_11_local_quote_join,
+    "earnings": step_10_next_earnings,
 }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Stepwise Market Screener Parquet builder.")
+    parser = argparse.ArgumentParser(description="Stepwise FMP/SEC-only Market Screener Parquet builder.")
     parser.add_argument("step", choices=("init", *STEPS.keys()))
     parser.add_argument("--limit", type=int, default=500)
     parser.add_argument("--sleep", type=float, default=DEFAULT_SLEEP_SECONDS)
@@ -686,7 +665,7 @@ def main() -> None:
 
     symbols = current_symbols(args.limit)
     if not symbols:
-        raise SystemExit("No symbols in Parquet yet. Run: python tools\\fmpsec_filings_parquet.py init --limit 500")
+        raise SystemExit("No FMP/SEC Parquet yet. Run: python tools\\fmpsec_filings_parquet.py init --limit 500")
 
     context = StepContext(
         sleep_seconds=max(0.0, args.sleep),
