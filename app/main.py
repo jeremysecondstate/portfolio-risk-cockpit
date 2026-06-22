@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.data.sec_cache_layout import install_sec_cache_layout
+from app.ui.databento_technical_analysis_extension import install_databento_technical_analysis_extension
 from app.ui.registry import install_ui_extensions
 from app.ui.trading_cockpit import SchwabTradingCockpitApp
 
@@ -8,6 +9,7 @@ from app.ui.trading_cockpit import SchwabTradingCockpitApp
 def main() -> None:
     install_sec_cache_layout()
     install_ui_extensions(SchwabTradingCockpitApp)
+    install_databento_technical_analysis_extension(SchwabTradingCockpitApp)
     app = SchwabTradingCockpitApp()
     app.mainloop()
 
