@@ -52,7 +52,6 @@ def install_schwab_trading_tab(app_cls: Type[tk.Tk]) -> None:
     app_cls.refresh_schwab_recent_orders_tab = _refresh_schwab_recent_orders_tab  # type: ignore[attr-defined]
     app_cls.open_selected_schwab_order_editor = _open_selected_schwab_order_editor  # type: ignore[attr-defined]
     app_cls.cancel_selected_schwab_open_order = _cancel_selected_schwab_open_order  # type: ignore[attr-defined]
-    app_cls.open_schwab_symbol_chat = _open_schwab_symbol_chat  # type: ignore[attr-defined]
 
 
 def _build_layout_without_account_strip(self: tk.Tk) -> None:
@@ -604,19 +603,6 @@ def _build_schwab_action_grid(self: tk.Tk, ticket: ttk.LabelFrame) -> None:
 
     _add_action_button(actions, row=2, column=2, text="Cancel Order", command=schwab_action("cancel_selected_order", "show_cancel_order_placeholder"), style="Danger.TButton")
     _add_action_button(actions, row=2, column=3, text="LIVE Submit", command=lambda app=self: _submit_schwab_live_order(app), style="Danger.TButton")
-
-
-def _resolve_open_symbol_chat_symbol(self: tk.Tk) -> str:
-    for candidate in (
-        _selected_schwab_position_symbol(self),
-        _get_string_var(self, "symbol_var"),
-        _get_string_var(self, "options_symbol_var"),
-        _get_string_var(self, "options_underlying_symbol_var"),
-    ):
-        symbol = _clean_symbol_chat_symbol(candidate)
-        if symbol:
-            return symbol
-    return ""
 
 
 def _selected_schwab_position_symbol(self: tk.Tk) -> str:

@@ -21,7 +21,6 @@ from app.ui.hyperliquid_submit_flow import install_hyperliquid_submit_flow
 from app.ui.hyperliquid_symbol_alias_extension import install_hyperliquid_symbol_alias_extension
 from app.ui.hyperliquid_trading_extension import install_hyperliquid_trading_extension
 from app.ui.hyperliquid_workspace_layout_guard import install_hyperliquid_workspace_layout_guard
-from app.ui.earnings_radar_extension import install_earnings_radar_extension
 from app.ui.ipo_pipeline_extension import install_ipo_pipeline_extension
 from app.ui.options_candidate_actionability_extension import install_options_candidate_actionability_extension
 from app.ui.options_core_math_extension import install_options_core_math_extension
@@ -41,7 +40,6 @@ from app.ui.schwab_option_order_payload_extension import install_schwab_option_o
 from app.ui.schwab_options_what_if_scenario_extension import install_schwab_options_what_if_scenario_extension
 from app.ui.schwab_output_popout_extension import install_schwab_output_popout_extension
 from app.ui.schwab_research_workspace_extension import install_schwab_research_workspace_extension
-from app.analytics.earnings_visual_patch import install_schwab_earnings_visual_extension
 from app.ui.schwab_sync_report_extension import install_schwab_sync_report_extension
 from app.ui.schwab_trade_memory_extension import install_schwab_trade_memory_extension
 from app.ui.schwab_workspace_sync_extension import install_schwab_workspace_sync_extension
@@ -98,11 +96,9 @@ def install_ui_extensions(app_cls: Type[tk.Tk]) -> None:
     install_hyperliquid_assessment_extension(app_cls)
     install_company_reports_extension(app_cls)
     install_ipo_pipeline_extension(app_cls)
-    install_earnings_radar_extension(app_cls)
     install_unified_trade_thesis_extension(app_cls)
     install_unified_trade_thesis_next_checks_extension(app_cls)
     install_schwab_research_workspace_extension(app_cls)
-    install_schwab_earnings_visual_extension(app_cls)
     install_hyperliquid_research_workspace_extension(app_cls)
     install_options_candidate_actionability_extension(app_cls)
     install_schwab_option_order_payload_extension(app_cls)
