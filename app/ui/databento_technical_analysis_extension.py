@@ -40,6 +40,7 @@ def _show_databento_technical_analysis(self: tk.Tk) -> None:
 
     if getattr(self, "_databento_technical_analysis_running", False):
         self.schwab_status_var.set("Technical Analysis: already running")
+        _open_or_refresh_schwab_output(self)
         return
 
     ticket = _technical_ticket_from_ui(self)
@@ -51,6 +52,7 @@ def _show_databento_technical_analysis(self: tk.Tk) -> None:
         f"Symbol: {symbol}\n"
         "Fetching Databento candles and building the report. The UI should remain responsive."
     )
+    _open_or_refresh_schwab_output(self)
 
     worker = threading.Thread(
         target=_run_databento_technical_analysis_worker,
@@ -126,12 +128,31 @@ def _finish_databento_technical_analysis_success(app: tk.Tk, report: TechnicalCo
     app._databento_technical_analysis_running = False
     app.schwab_status_var.set("Technical Analysis: Databento candles")
     app._set_preview_text(app.format_technical_analysis_report(report))
+    _open_or_refresh_schwab_output(app)
 
 
 def _finish_databento_technical_analysis_error(app: tk.Tk, message: str) -> None:
     app._databento_technical_analysis_running = False
     app.schwab_status_var.set("Technical Analysis: failed")
+    _open_or_refresh_schwab_output(app)
     messagebox.showerror("Technical analysis failed", message)
+
+
+def _open_or_refresh_schwab_output(app: tk.Tk) -> None:
+    opener = getattr(app, "open_schwab_output_popout", None)
+    if callable(opener):
+        try:
+            opener()
+            return
+        except Exception:
+            pass
+
+    refresher = getattr(app, "refresh_schwab_output_popout", None)
+    if callable(refresher):
+        try:
+            refresher(force=True)
+        except Exception:
+            pass
 
 
 def _has_databento_technical_candles(external_intelligence: Any | None) -> bool:
